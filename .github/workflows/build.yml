@@ -5,6 +5,9 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  # 解决 Node.js 20 弃用警告
+
 jobs:
   # 1. 单独构建前端，只执行一次
   build-frontend:
@@ -36,9 +39,7 @@ jobs:
 
       - name: Clean up embedded webui
         run: |
-          # 删除 source map 文件，减小体积
           find webui/dist -type f -name "*.map" -delete
-          # 移除无关文件
           find webui/dist -type f \( -name ".gitkeep" -o -name ".gitignore" \) -delete
 
       - name: Upload webui artifact
@@ -52,6 +53,7 @@ jobs:
     needs: build-frontend
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false  # 即使单个平台编译失败，其他平台也会继续
       matrix:
         include:
           # Linux
@@ -67,11 +69,6 @@ jobs:
             goos: linux
             goarch: arm64
             ext: ""
-          - os: linux
-            goos: linux
-            goarch: arm
-            goarm: 7
-            ext: ""
           # Windows
           - os: windows
             goos: windows
@@ -85,11 +82,6 @@ jobs:
             goos: windows
             goarch: arm64
             ext: ".exe"
-          - os: windows
-            goos: windows
-            goarch: arm
-            goarm: 7
-            ext: ".exe"
 
     steps:
       - name: Checkout code
@@ -98,7 +90,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'   # 升级到 Go 1.23
+          go-version: '1.23'
 
       - name: Download webui artifact
         uses: actions/download-artifact@v4
@@ -113,7 +105,6 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          GOARM: ${{ matrix.goarm }}
         run: |
           go build -trimpath -ldflags="-s -w" -v -o gensokyo-${{ matrix.os }}-${{ matrix.goarch }}${{ matrix.ext }} .
 
