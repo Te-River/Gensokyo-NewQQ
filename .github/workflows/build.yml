@@ -5,9 +5,6 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  # 解决 Node.js 20 弃用警告
-
 jobs:
   # 1. 单独构建前端，只执行一次
   build-frontend:
@@ -53,7 +50,7 @@ jobs:
     needs: build-frontend
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false  # 即使单个平台编译失败，其他平台也会继续
+      fail-fast: false
       matrix:
         include:
           # Linux
@@ -77,10 +74,6 @@ jobs:
           - os: windows
             goos: windows
             goarch: 386
-            ext: ".exe"
-          - os: windows
-            goos: windows
-            goarch: arm64
             ext: ".exe"
 
     steps:
