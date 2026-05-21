@@ -58,7 +58,13 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
-          go build -v -o gensokyo-${{ matrix.os }}${{ matrix.ext }} .
+          go build -ldflags="-s -w" -v -o gensokyo-${{ matrix.os }}${{ matrix.ext }} .
+
+      - name: Install UPX
+        run: sudo apt-get install -y upx-ucl
+
+      - name: Compress binary with UPX
+        run: upx --best gensokyo-${{ matrix.os }}${{ matrix.ext }}
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
