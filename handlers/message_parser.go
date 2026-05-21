@@ -1472,7 +1472,7 @@ func ConvertToSegmentedMessage(data interface{}) []map[string]interface{} {
 	// 将msg.Content里的BotID替换成AppID
 	msg.Content = strings.ReplaceAll(msg.Content, BotID, AppID)
 	// 使用正则表达式查找所有的[@数字]格式
-	r := regexp.MustCompile(`<@!(\d+)>`)
+	r := regexp.MustCompile(`<@!?([0-9A-Fa-f]+)>`)
 	atMatches := r.FindAllStringSubmatch(msg.Content, -1)
 	for _, match := range atMatches {
 		userID := match[1]
