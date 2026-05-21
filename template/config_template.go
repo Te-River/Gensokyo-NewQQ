@@ -32,6 +32,7 @@ settings:
     # - "CreateMessageHandler"                       # 频道不at信息 私域机器人需要开启 公域机器人开启会连接失败
     # - "InteractionHandler"                         # 添加频道互动回应 卡片按钮data回调事件
     # - "GroupATMessageEventHandler"                 # 群at信息 仅频道机器人时候需要注释
+    # - "GroupMessageEventHandler"                   # 普通群消息（无需@机器人）
     # - "C2CMessageEventHandler"                     # 群私聊 仅频道机器人时候需要注释
     # - "ThreadEventHandler"                         # 频道发帖事件 仅频道私域机器人可用
     # - "FriendAddEventHandler"                      # 用户添加机器人(成为好友)
