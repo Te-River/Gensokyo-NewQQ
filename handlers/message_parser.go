@@ -1119,13 +1119,13 @@ func RevertTransformedText(data interface{}, msgtype string, api openapi.OpenAPI
 				if config.GetRemoveAt() {
 					return ""
 				}
-				return "[CQ:at,qq=" + BotID + "]"
+				return "[CQ:at,qq=" + BotID + "]"   // 必须有 CQ:
 			}
 			// 正常用户，映射成虚拟 ID
 			userID64, err := idmap.StoreIDv2(userID)
 			if err != nil {
 				mylog.Printf("Error storing ID: %v", err)
-				// 映射失败时，仍用原始 ID（避免丢信息）
+				// 映射失败时，仍用原始 ID（避免丢信息），格式必须是 CQ 码
 				return "[CQ:at,qq=" + userID + "]"
 			}
 			return "[CQ:at,qq=" + strconv.FormatInt(userID64, 10) + "]"
@@ -1471,7 +1471,8 @@ func ConvertToSegmentedMessage(data interface{}) []map[string]interface{} {
 	}
 	// 将msg.Content里的BotID替换成AppID
 	msg.Content = strings.ReplaceAll(msg.Content, BotID, AppID)
-	// 使用正则表达式查找所有的[@数字]格式
+
+	// 匹配所有可能的 at 格式（包括 OpenID）
 	r := regexp.MustCompile(`<@!?([0-9A-Fa-f]+)>`)
 	atMatches := r.FindAllStringSubmatch(msg.Content, -1)
 	for _, match := range atMatches {
@@ -1479,13 +1480,12 @@ func ConvertToSegmentedMessage(data interface{}) []map[string]interface{} {
 
 		if userID == AppID {
 			if config.GetRemoveAt() {
-				// 根据配置移除
+				// 根据配置移除 at 文本
 				msg.Content = strings.Replace(msg.Content, match[0], "", 1)
-				continue // 跳过当前循环迭代
+				continue
 			} else {
-				//将其转换为AppID
+				// 保留为 AppID 形式
 				userID = AppID
-				// 构建at部分的映射并加入到messageSegments
 				atSegment := map[string]interface{}{
 					"type": "at",
 					"data": map[string]interface{}{
@@ -1493,37 +1493,41 @@ func ConvertToSegmentedMessage(data interface{}) []map[string]interface{} {
 					},
 				}
 				messageSegments = append(messageSegments, atSegment)
-				// 从原始内容中移除at部分
 				msg.Content = strings.Replace(msg.Content, match[0], "", 1)
-				continue // 跳过当前循环迭代
+				continue
 			}
 		}
-		// 不是 AppID，进行正常处理
+
+		// 非 AppID，映射成虚拟 ID
 		userID64, err := idmap.StoreIDv2(userID)
 		if err != nil {
-			// 如果存储失败，记录错误并继续使用原始 userID
 			mylog.Printf("Error storing ID: %v", err)
+			// 映射失败时使用原始 ID
+			// 但仍然生成 at 段，避免丢信息
+			atSegment := map[string]interface{}{
+				"type": "at",
+				"data": map[string]interface{}{
+					"qq": userID,   // 使用原始 OpenID
+				},
+			}
+			messageSegments = append(messageSegments, atSegment)
 		} else {
-			// 类型转换成功，使用新的 userID
-			userID = strconv.FormatInt(userID64, 10)
+			// 映射成功，使用虚拟 ID
+			atSegment := map[string]interface{}{
+				"type": "at",
+				"data": map[string]interface{}{
+					"qq": strconv.FormatInt(userID64, 10),
+				},
+			}
+			messageSegments = append(messageSegments, atSegment)
 		}
 
-		// 构建at部分的映射并加入到messageSegments
-		atSegment := map[string]interface{}{
-			"type": "at",
-			"data": map[string]interface{}{
-				"qq": userID,
-			},
-		}
-		messageSegments = append(messageSegments, atSegment)
-
-		// 从原始内容中移除at部分
+		// 从原始内容中移除这个 at 文本
 		msg.Content = strings.Replace(msg.Content, match[0], "", 1)
 	}
-	//结构 <@!>空格/内容
-	//如果移除了前部at,信息就会以空格开头,因为只移去了最前面的at,但at后紧跟随一个空格
+
+	// 移除 at 后，如果内容以空格开头，可选去除
 	if config.GetRemoveAt() {
-		//再次去前后空
 		if !menumsg {
 			msg.Content = strings.TrimSpace(msg.Content)
 		}
