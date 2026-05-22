@@ -47,7 +47,7 @@ _✨ 使用DeepseekV4 跟进了QQ官方API与事件订阅 ✨_
 
 ## 引用
 - [`tencent-connect/botgo`](https://github.com/tencent-connect/botgo): 本项目引用了此项目,并做了一些改动.
-- 本项目为Gensokyo的复刻，是基于Gensokyo的二次修改版，该修改版旨在先于Gensokyo更新QQ相关的api与推送事件
+- 本项目为Gensokyo的复刻，是基于Gensokyo的二次修改版，该修改版旨在先于Gensokyo更新QQ相关的api与推送事件，大体上兼容从官版无损迁移至该改版
 
 ## 介绍
 gensokyo兼容 [OneBot-v11](https://github.com/botuniverse/onebot-11) ，并在其基础上做了一些扩展，详情请看 OneBot 的文档。
