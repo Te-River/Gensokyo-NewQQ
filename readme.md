@@ -239,7 +239,7 @@ todo,正在施工中
 
 
 <details>
-<summary>已实现的 Intent</summary>
+<summary>已实现 Intent</summary>
 
 #### 允许向后端推送的事件类型
 > 相较于原版新增了 **GroupMessageEventhandler** 事件
