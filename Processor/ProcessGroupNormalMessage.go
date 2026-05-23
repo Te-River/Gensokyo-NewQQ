@@ -3,7 +3,6 @@ package Processor
 import (
 	"fmt"
 	"log"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -76,9 +75,7 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 		}
 	}
 
-	// 前置兼容：始终将 <@xxx> 转换为 OneBot V11 标准 CQ 码
-	messageText := preprocessCQCode(data.Content)
-
+	messageText := data.Content
 	GetDisableErrorChan := config.GetDisableErrorChan()
 
 	if !GetDisableErrorChan {
@@ -286,36 +283,4 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 		go p.BroadcastMessageToAllFAF(groupMsgMap, p.Apiv2, data)
 	}
 	return nil
-}
-
-// preprocessCQCode 前置兼容：将 Content 中的 <@xxx> 转换为 OneBot V11 标准 CQ 码
-// 确保在 GetDisableErrorChan 启用时也能生成正确的 CQ:at 格式
-func preprocessCQCode(content string) string {
-	// 将BotID替换成AppID（与 RevertTransformedText 保持一致）
-	content = strings.ReplaceAll(content, handlers.BotID, handlers.AppID)
-
-	// 匹配 <@!数字>、<@!OpenID>、<@数字>、<@OpenID>
-	re := regexp.MustCompile(`<@!?([0-9A-Fa-f]+)>`)
-	content = re.ReplaceAllStringFunc(content, func(m string) string {
-		submatches := re.FindStringSubmatch(m)
-		if len(submatches) > 1 {
-			userID := submatches[1]
-			// 如果是机器人自己，按 remove_at 配置决定移除或保留
-			if userID == handlers.AppID {
-				if config.GetRemoveAt() {
-					return ""
-				}
-				return "[CQ:at,qq=" + handlers.AppID + "]"
-			}
-			// 其他用户，映射成虚拟 ID
-			userID64, err := idmap.StoreIDv2(userID)
-			if err != nil {
-				mylog.Printf("Error storing ID: %v", err)
-				return "[CQ:at,qq=" + userID + "]"
-			}
-			return "[CQ:at,qq=" + strconv.FormatInt(userID64, 10) + "]"
-		}
-		return m
-	})
-	return content
 }
