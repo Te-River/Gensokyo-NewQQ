@@ -1008,6 +1008,7 @@ func UnionFanout(base gin.HandlerFunc) gin.HandlerFunc {
 // GroupMessageEventHandler 实现处理 普通群消息（无需@） 的回调
 func GroupMessageEventHandler() event.GroupMessageEventHandler {
 	return func(event *dto.WSPayload, data *dto.WSGroupMessageData) error {
+		mylog.Printf("[GroupMessageEventHandler] 收到非@群消息 ID=%v from=%v content=%v", data.ID, data.Author.ID, data.Content)
 		if config.GetEnableChangeWord() {
 			data.Content = acnode.CheckWordIN(data.Content)
 			if data.Author.Username != "" {

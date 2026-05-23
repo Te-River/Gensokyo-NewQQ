@@ -236,13 +236,16 @@ func (c *Client) listenMessageAndHandle() {
 			continue
 		}
 
-		// 性能不够 报错也没用 就扬了
-		go event.ParseAndHandle(payload)
-
-		// // 解析具体事件，并投递给业务注册的 handler
-		// if err := event.ParseAndHandle(payload); err != nil {
-		// 	log.Errorf("%s parseAndHandle failed, %v", c.session, err)
-		// }
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Errorf("%s ParseAndHandle panic: %v", c.session, r)
+				}
+			}()
+			if err := event.ParseAndHandle(payload); err != nil {
+				log.Errorf("%s parseAndHandle failed, %v", c.session, err)
+			}
+		}()
 	}
 	log.Infof("%s message queue is closed", c.session)
 }
