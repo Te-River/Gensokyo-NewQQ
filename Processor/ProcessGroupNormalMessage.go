@@ -75,10 +75,12 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 		}
 	}
 
-	// 前置兼容：从 data.Content 中移除 bot 自己的 <@BotID>，避免 RevertTransformedText
+	// 前置兼容：从 data.Content 中移除 bot 自己的 @，避免 RevertTransformedText
 	// 中 BotID→AppID 替换后导致 userID==BotID 判断失效，误将 bot 自身 @ 当作普通用户映射。
-	// 其他用户的 <@xxx> 保留，由 RevertTransformedText 统一转换为 CQ 码。
+	// QQ平台在 GROUP_MESSAGE_CREATE 的 Content 中使用 AppID 数字格式 <@AppID>，
+	// 而 handlers.BotID 为 OpenID 格式，需要同时处理两种格式。
 	data.Content = strings.ReplaceAll(data.Content, "<@"+handlers.BotID+">", "")
+	data.Content = strings.ReplaceAll(data.Content, "<@"+AppIDString+">", "")
 	data.Content = strings.TrimSpace(data.Content)
 
 	messageText := data.Content
