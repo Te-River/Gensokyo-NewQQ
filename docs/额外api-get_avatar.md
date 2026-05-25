@@ -1,4 +1,3 @@
-```markdown
 # API: get_avatar
 
 获取用户头像。
@@ -23,5 +22,3 @@ type GetAvatarResponse struct {
 
 CQ头像码格式.支持message segment式传参,将at segment类比修改为avatar即可.
 [CQ:avatar,qq=123456]
-
-```
