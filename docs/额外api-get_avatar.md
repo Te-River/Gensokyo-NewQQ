@@ -8,7 +8,7 @@
 {
     "data": {
         "message": "https://q.qlogo.cn/qqapp/102848039/[QQ官方虚拟ID]/640",
-        "user_id": 1234567890
+        "user_id": 1234567890  #此处的1234567890为Gsk向后端输出的虚拟用户ID
     },
     "message": "",
     "retcode": 0,
