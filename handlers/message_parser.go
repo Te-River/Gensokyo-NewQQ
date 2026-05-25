@@ -1782,6 +1782,11 @@ func ResolvePlaceholderUserIDs(kb *keyboard.MessageKeyboard, realUserOpenID stri
 					btn.Action.Permission.SpecifyUserIDs[i] = realUserOpenID
 				}
 			}
+			// C2C 单聊场景下 QQ 不支持 permission.type=0（指定用户），
+			// 将 specify_user_ids 有值且 permission.type=0 改为 type=2（所有人）
+			if len(btn.Action.Permission.SpecifyUserIDs) > 0 && btn.Action.Permission.Type == 0 {
+				btn.Action.Permission.Type = 2
+			}
 		}
 	}
 }
