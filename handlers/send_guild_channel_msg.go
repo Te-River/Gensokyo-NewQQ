@@ -509,6 +509,25 @@ func GenerateReplyMessage(id string, foundItems map[string][]string, messageText
 			MsgType:  2,
 		}
 		return msgtocreate, false
+	} else if embedContent, ok := foundItems["embed"]; ok && len(embedContent) > 0 {
+		// 解码base64 embed数据
+		embedData, err := base64.StdEncoding.DecodeString(embedContent[0])
+		if err != nil {
+			mylog.Printf("failed to decode base64 embed: %v", err)
+			return nil, false
+		}
+		embed, err := parseEmbedData(embedData)
+		if err != nil {
+			mylog.Printf("failed to parse embed data: %v", err)
+			return nil, false
+		}
+		msgtocreate := &dto.MessageToCreate{
+			MsgID:   id,
+			MsgSeq:  msgseq,
+			Embed:   embed,
+			MsgType: 4,
+		}
+		return msgtocreate, false
 	} else {
 		// 发文本信息
 		reply = dto.MessageToCreate{

@@ -1293,6 +1293,26 @@ func generateGroupMessage(id string, eventid string, foundItems map[string][]str
 			Keyboard: keyboard,
 			MsgType:  2,
 		}
+	} else if embedContent, ok := foundItems["embed"]; ok && len(embedContent) > 0 {
+		// 解码base64 embed数据
+		embedData, err := base64.StdEncoding.DecodeString(embedContent[0])
+		if err != nil {
+			mylog.Printf("failed to decode base64 embed: %v", err)
+			return nil
+		}
+		embed, err := parseEmbedData(embedData)
+		if err != nil {
+			mylog.Printf("failed to parse embed data: %v", err)
+			return nil
+		}
+		return &dto.MessageToCreate{
+			Content: "embed",
+			MsgID:   id,
+			EventID: eventid,
+			MsgSeq:  msgseq,
+			Embed:   embed,
+			MsgType: 4,
+		}
 	} else if qqmusic, ok := foundItems["qqmusic"]; ok && len(qqmusic) > 0 {
 		// 转换qq音乐id到一个md
 		music_id := qqmusic[0]
@@ -1903,6 +1923,26 @@ func generatePrivateMessage(id string, eventid string, foundItems map[string][]s
 			Markdown: markdown,
 			Keyboard: keyboard,
 			MsgType:  2,
+		}
+	} else if embedContent, ok := foundItems["embed"]; ok && len(embedContent) > 0 {
+		// 解码base64 embed数据
+		embedData, err := base64.StdEncoding.DecodeString(embedContent[0])
+		if err != nil {
+			mylog.Printf("failed to decode base64 embed: %v", err)
+			return nil
+		}
+		embed, err := parseEmbedData(embedData)
+		if err != nil {
+			mylog.Printf("failed to parse embed data: %v", err)
+			return nil
+		}
+		return &dto.MessageToCreate{
+			Content: "embed",
+			MsgID:   id,
+			EventID: eventid,
+			MsgSeq:  msgseq,
+			Embed:   embed,
+			MsgType: 4,
 		}
 	} else if qqmusic, ok := foundItems["qqmusic"]; ok && len(qqmusic) > 0 {
 		// 转换qq音乐id到一个md

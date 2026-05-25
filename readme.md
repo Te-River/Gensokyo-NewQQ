@@ -31,7 +31,7 @@ _✨ 基于 [OneBot](https://github.com/howmanybots/onebot/blob/master/README.md
 </p>
 
 <p align="center">
-  <a href="https://github.com/howmanybots/onebot/blob/master/README.md">文档</a>
+  <a href="/docs/更多文档.md">文档</a>
   ·
   <a href="https://github.com/hoshinonyaruko/gensokyo/releases">下载</a>
   ·
@@ -67,9 +67,7 @@ Gensokyo文档(施工中):[起步](/docs/起步-注册QQ开放平台&启动genso
 
 欢迎测试,询问任何有关使用的问题,有问必答,有难必帮~
 
-[Gensokyo临时文档](https://www.yuque.com/km57bt/hlhnxg/mw7gm8dlpccd324e)展开左侧折叠栏,临时文档包含markdown定义、额外api文档等内容
-
-后续会将文档独立，因为语雀文档公开查看无需登录需要vip，故暂时放在我的机器人文档中。临时文档也包含了Gensokyo的完整编译教程。
+[Gensokyo文档](/docs/更多文档.md) — 包含 markdown 定义、Embed 消息、额外 API 等全部文档
 
 ## 特别鸣谢
 
@@ -85,7 +83,7 @@ Gensokyo文档(施工中):[起步](/docs/起步-注册QQ开放平台&启动genso
 
 ### 拓展支持
 
-> 拓展 API 可前往 [文档](docs/cqhttp.md) 查看
+> 拓展 API 可前往 [文档](/docs/api介绍.md) 查看
 
 - [x] 连接多个ws地址
 - [x] 将频道虚拟成群事件
@@ -102,7 +100,7 @@ Gensokyo文档(施工中):[起步](/docs/起步-注册QQ开放平台&启动genso
 - [x] 提前于官方支持群列表 群成员 api
 - [x] 完善的重连,健壮的连接能力.
 - [x] 支持[CQ:markdown,data=] Markdown发送
-- [x] [`markdown文档`](https://www.yuque.com/km57bt/hlhnxg/ddkv4a2lgcswitei)
+- [x] [`markdown文档`](/docs/文档-markdown定义.md)
 - [x] 持续更新~
 
 

@@ -165,3 +165,8 @@
 
 详细文档请参考：[发消息含有消息按钮组件的消息](https://bot.q.qq.com/wiki/develop/api/openapi/message/post_keyboard_messages.html#%E5%8F%91%E9%80%81%E5%90%AB%E6%9C%89%E6%B6%88%E6%81%AF%E6%8C%89%E9%92%AE%E7%BB%84%E4%BB%B6%E7%9A%84%E6%B6%88%E6%81%AF)
 ```
+
+---
+
+> **📌 相关内容**
+> - [Embed 消息定义](./文档-embed消息定义.md) — 结构化卡片消息（msg_type=4）

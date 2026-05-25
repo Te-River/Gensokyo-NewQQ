@@ -700,6 +700,30 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 					mylog.Printf("Error: markdown segment data is nil.")
 				}
 
+			case "embed":
+				embedContent, ok := segmentMap["data"].(map[string]interface{})["data"]
+				if ok {
+					var embedDataBytes []byte
+					if embedContentMap, isMap := embedContent.(map[string]interface{}); isMap {
+						embedDataBytes, err = json.Marshal(embedContentMap)
+						if err != nil {
+							mylog.Printf("Error marshaling embed data: %v", err)
+							continue
+						}
+					} else if embedContentStr, isString := embedContent.(string); isString {
+						if strings.HasPrefix(embedContentStr, "base64://") {
+							embedContentStr = strings.TrimPrefix(embedContentStr, "base64://")
+						}
+						embedDataBytes = []byte(embedContentStr)
+					} else {
+						mylog.Printf("Error: embed data wrong type.")
+						continue
+					}
+					foundItems["embed"] = append(foundItems["embed"], base64.StdEncoding.EncodeToString(embedDataBytes))
+				} else {
+					mylog.Printf("Error: embed segment data is nil.")
+				}
+
 			default:
 				mylog.Printf("Unhandled segment type: %s", segmentType)
 			}
@@ -827,6 +851,28 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 				mylog.Printf("Error: markdown segment data is nil.")
 			}
 
+		case "embed":
+			embedContent, ok := message["data"].(map[string]interface{})["data"]
+			if ok {
+				var embedDataBytes []byte
+				if embedContentMap, isMap := embedContent.(map[string]interface{}); isMap {
+					embedDataBytes, err = json.Marshal(embedContentMap)
+					if err != nil {
+						mylog.Printf("Error marshaling embed data: %v", err)
+					}
+				} else if embedContentStr, isString := embedContent.(string); isString {
+					if strings.HasPrefix(embedContentStr, "base64://") {
+						embedContentStr = strings.TrimPrefix(embedContentStr, "base64://")
+					}
+					embedDataBytes = []byte(embedContentStr)
+				} else {
+					mylog.Printf("Error: embed data wrong type.")
+				}
+				foundItems["embed"] = append(foundItems["embed"], base64.StdEncoding.EncodeToString(embedDataBytes))
+			} else {
+				mylog.Printf("Error: embed segment data is nil.")
+			}
+
 		default:
 			mylog.Printf("Unhandled message type: %s", messageType)
 		}
@@ -867,6 +913,7 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 		httpUrlVideoPattern := regexp.MustCompile(`\[CQ:video,file=http://(.+?)\]`)
 		httpsUrlVideoPattern := regexp.MustCompile(`\[CQ:video,file=https://(.+?)\]`)
 		mdPattern := regexp.MustCompile(`\[CQ:markdown,data=base64://(.+?)\]`)
+		embedPattern := regexp.MustCompile(`\[CQ:embed,data=base64://(.+?)\]`)
 		qqMusicPattern := regexp.MustCompile(`\[CQ:music,type=qq,id=(\d+)\]`)
 
 		patterns := []struct {
@@ -882,6 +929,7 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 			{"url_record", httpUrlRecordPattern},
 			{"url_records", httpsUrlRecordPattern},
 			{"markdown", mdPattern},
+			{"embed", embedPattern},
 			{"qqmusic", qqMusicPattern},
 			{"url_video", httpUrlVideoPattern},
 			{"url_videos", httpsUrlVideoPattern},
@@ -1949,6 +1997,15 @@ func FetchTrackInfo(trackMid string) (string, error) {
 	}
 
 	return string(body), nil
+}
+
+// parseEmbedData 解析 base64 编码的 Embed JSON 数据
+func parseEmbedData(embedData []byte) (*dto.Embed, error) {
+	var embed dto.Embed
+	if err := json.Unmarshal(embedData, &embed); err != nil {
+		return nil, err
+	}
+	return &embed, nil
 }
 
 // FetchSongDetail 发送请求到QQ音乐API并获取歌曲详情
