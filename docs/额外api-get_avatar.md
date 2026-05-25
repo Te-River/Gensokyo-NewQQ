@@ -4,14 +4,23 @@
 
 ## 返回值
 
-```go
-type GetAvatarResponse struct {
-    Message string      `json:"message"`
-    RetCode int         `json:"retcode"`
-    Echo    interface{} `json:"echo"`
-    UserID  int64       `json:"user_id"`
+```json
+{
+    "data": {
+        "message": "https://q.qlogo.cn/qqapp/102848039/D8FB64288B16F160289247BA495B7233/640",
+        "user_id": 3429630094
+    },
+    "message": "",
+    "retcode": 0,
+    "status": "ok",
+    "echo": null
 }
 ```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `data.message` | string | 头像直链 URL |
+| `data.user_id` | int64 | 虚拟用户 ID |
 
 ## 所需字段
 
