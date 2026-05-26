@@ -92,6 +92,7 @@ type OnebotGroupMessage struct {
 	MessageSeq      int         `json:"message_seq"`
 	Font            int         `json:"font"`
 	UserID          int64       `json:"user_id"`
+	ToMe            bool        `json:"to_me,omitempty"`              //消息是否@了机器人
 	RealMessageType string      `json:"real_message_type,omitempty"`  //当前信息的真实类型 group group_private guild guild_private
 	RealUserID      string      `json:"real_user_id,omitempty"`       //当前真实uid
 	RealGroupID     string      `json:"real_group_id,omitempty"`      //当前真实gid
@@ -115,6 +116,7 @@ type OnebotGroupMessageS struct {
 	MessageSeq      int         `json:"message_seq"`
 	Font            int         `json:"font"`
 	UserID          string      `json:"user_id"`
+	ToMe            bool        `json:"to_me,omitempty"`              //消息是否@了机器人
 	RealMessageType string      `json:"real_message_type,omitempty"`  //当前信息的真实类型 group group_private guild guild_private
 	RealUserID      string      `json:"real_user_id,omitempty"`       //当前真实uid
 	RealGroupID     string      `json:"real_group_id,omitempty"`      //当前真实gid

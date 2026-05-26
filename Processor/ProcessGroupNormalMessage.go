@@ -79,8 +79,10 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 	// 前置兼容：遍历 Mentions 数组，移除 bot 自己的 <@OpenID> / <@!OpenID>
 	// QQ 平台在 GROUP_MESSAGE_CREATE 中使用 OpenID 格式标识被 @ 的用户，
 	// 与 handlers.BotID（来自 Ready 事件）不同，必须从 Mentions 中获取真实 ID。
+	toMe := false
 	for _, mention := range data.Mentions {
 		if mention.IsYou {
+			toMe = true
 			reMention := regexp.MustCompile(`<@!?` + regexp.QuoteMeta(mention.ID) + `>`)
 			data.Content = reMention.ReplaceAllString(data.Content, "")
 			break
@@ -182,6 +184,7 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 			SubType: "normal",
 			// ------ 修改 end ------
 			Time:    time.Now().Unix(),
+			ToMe:    toMe,
 		}
 		if !config.GetNativeOb11() {
 			groupMsg.RealMessageType = "group"
@@ -254,6 +257,7 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 			SubType:  "normal",
 			// ------ 修改 end ------
 			Time:     time.Now().Unix(),
+			ToMe:     toMe,
 			Platform: platform,
 		}
 		if !config.GetNativeOb11() {

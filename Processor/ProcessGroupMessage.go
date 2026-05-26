@@ -36,6 +36,8 @@ func (p *Processors) ProcessGroupMessage(data *dto.WSGroupATMessageData) error {
 	var userid64 int64
 	var GroupID64 int64
 	var err error
+	// GROUP_AT_MESSAGE_CREATE 必然是 @ 机器人的消息
+	toMe := true
 
 	if data.Author.ID == "" {
 		mylog.Printf("出现ID为空未知错误.%v\n", data)
@@ -205,6 +207,7 @@ func (p *Processors) ProcessGroupMessage(data *dto.WSGroupATMessageData) error {
 			},
 			SubType: "normal",
 			Time:    time.Now().Unix(),
+			ToMe:    toMe,
 		}
 		//增强配置
 		if !config.GetNativeOb11() {
@@ -298,6 +301,7 @@ func (p *Processors) ProcessGroupMessage(data *dto.WSGroupATMessageData) error {
 			},
 			SubType:  "normal",
 			Time:     time.Now().Unix(),
+			ToMe:     toMe,
 			Platform: platform,
 		}
 		// 增强配置
