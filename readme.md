@@ -49,7 +49,7 @@ _✨ 基于 [OneBot](https://github.com/howmanybots/onebot/blob/master/README.md
 ## 介绍
 gensokyo兼容 [OneBot-v11](https://github.com/botuniverse/onebot-11) ，并在其基础上做了一些扩展，详情请看 OneBot 的文档。
 
-Gensokyo文档(施工中):[起步](/docs/起步-注册QQ开放平台&启动gensokyo.md)
+Gensokyo文档:[开始使用](/docs/开始使用.md)
 
 可将官方的websocket和api转换至onebotv11标准,
 
@@ -100,7 +100,7 @@ Gensokyo文档(施工中):[起步](/docs/起步-注册QQ开放平台&启动genso
 - [x] 提前于官方支持群列表 群成员 api
 - [x] 完善的重连,健壮的连接能力.
 - [x] 支持[CQ:markdown,data=] Markdown发送
-- [x] [`markdown文档`](/docs/文档-markdown定义.md)
+- [x] [`markdown文档`](/docs/文档-markdown消息.md)
 - [x] 持续更新~
 
 
