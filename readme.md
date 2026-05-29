@@ -62,6 +62,12 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 ## 功能亮点
 
 - ✅ 兼容 OneBot V11 — HTTP API、反向 HTTP POST、正向 WebSocket、反向 WebSocket
+- ✅ 群聊非@消息支持（GroupMessageEventHandler）
+- ✅ 群聊消息自动剔除 @机器人字段
+- ✅ 按钮权限中虚拟数字 ID 自动转化为 QQ 官方 OpenID
+- ✅ 扩展 API：`get_avatar`（获取头像直链）
+- ✅ 全场景 event_id 存储，支持被动消息
+- ✅ 消息事件新增 `to_me` 字段，标识是否 @ 了机器人
 - ✅ 多 WS 地址连接
 - ✅ 频道虚拟成群事件、私信虚拟成群/频道事件
 - ✅ WebUI 管理界面
@@ -75,6 +81,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 
 - [开始使用](/docs/开始使用.md) — 注册机器人、配置、启动
 - [API 介绍](/docs/api介绍.md) — 支持的 API 列表与扩展
+- [额外 API - get_avatar](/docs/额外api-get_avatar.md) — 获取用户头像直链
 - [Markdown 消息](/docs/文档-markdown消息.md) — Markdown 卡片消息说明
 - [更多文档](/docs/更多文档.md) — 完整文档索引
 
@@ -206,6 +213,8 @@ todo,正在施工中
 | 通知事件 | [群内戳一戳]     |
 | 通知事件 | [群成员名片更新] |
 | 通知事件 | [接收到离线文件] |
+| 通知事件 | [C2C 消息推送关闭] |
+| 通知事件 | [C2C 消息推送开启] |
 
 </details>
 
@@ -214,7 +223,7 @@ todo,正在施工中
 <summary>已实现 Intent</summary>
 
 #### 允许向后端推送的事件类型
-> 新增了 **GroupMessageEventhandler** 事件
+> 新增了 **GroupMessageEventHandler**（非@群消息）事件
 
 | 事件名称                   | 代表含义                         |
 | --------------------------- | ------------------------------- |
@@ -228,7 +237,7 @@ todo,正在施工中
 | CreateMessageHandler       | [频道不at消息]                     |
 | InteractionHandler         | [频道卡片按钮data回调事件] |
 | GroupATMessageEventHandler | [群at消息]                         |
-| GroupMessageEventhandler   | [群普通消息]                       |
+| GroupMessageEventHandler  | [群普通消息]                       |
 | C2CMessageEventHandler     | [群私聊]                           |
 | ThreadEventHandler         | [频道发帖事件]                     |
 | FriendAddEventHandler      | [被添加好友]                       |
