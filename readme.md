@@ -130,7 +130,7 @@ todo,正在施工中
 <details>
 <summary>已实现 API</summary>
 
-> 新增了如下 **API**
+> 新增了如下 **API**</br>
 > **get_avatar**（头像直链）
 > **get_robot_share_link**（分享链接）
 > **send_private_msg_wakeup**（被动唤醒）
@@ -194,7 +194,7 @@ todo,正在施工中
 <details>
 <summary>已实现 Event</summary>
 
-> 新增了如下 **Event**
+> 新增了如下 **Event**</br>
 > **friend_decrease**（好友删除）
 > **group_reject/group_receive**（群推送开关）
 > **interaction**（按钮回调）
@@ -243,7 +243,7 @@ todo,正在施工中
 <summary>已实现 Intent</summary>
 
 #### 允许向后端推送的事件类型
-> 新增了
+> 新增了如下 **Intent**</br>
 > **GroupMessageEventHandler**（非@群消息）事件
 
 | 事件名称                   | 代表含义                         |
