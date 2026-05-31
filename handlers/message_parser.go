@@ -941,10 +941,10 @@ func transformMessageTextAt(messageText string, groupid string) string {
 			if err != nil {
 				// 如果出错，也替换成相应的格式，但使用原始QQ号
 				mylog.Printf("Error retrieving user ID: %v", err)
-				return "<@" + submatches[1] + ">"
+				return "<qqbot-at-user id=\"" + submatches[1] + "\" />"
 			}
 
-			return "<@" + realUserID + ">"
+			return "<qqbot-at-user id=\"" + realUserID + "\" />"
 		}
 		return m
 	})
@@ -985,10 +985,10 @@ func transformMessageTextAtNoGroupID(messageText string) string {
 			if err != nil {
 				// 如果出错，也替换成相应的格式，但使用原始QQ号
 				mylog.Printf("Error retrieving user ID: %v", err)
-				return "<@" + submatches[1] + ">"
+				return "<qqbot-at-user id=\"" + submatches[1] + "\" />"
 			}
 
-			return "<@" + realUserID + ">"
+			return "<qqbot-at-user id=\"" + realUserID + "\" />"
 		}
 		return m
 	})
