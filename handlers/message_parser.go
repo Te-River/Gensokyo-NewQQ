@@ -941,14 +941,14 @@ func transformMessageTextAt(messageText string, groupid string) string {
 			if err != nil {
 				// 如果出错，也替换成相应的格式，但使用原始QQ号
 				mylog.Printf("Error retrieving user ID: %v", err)
-				return "<@!" + submatches[1] + ">"
+				return "<@" + submatches[1] + ">"
 			}
 
-			return "<@!" + realUserID + ">"
+			return "<@" + realUserID + ">"
 		}
 		return m
 	})
-	// 如果全部 at 被移除后内容为空，说明消息仅包含 at 自身，退回原始 at 文本
+	// 如果全部 at 被移除后内容为空，退回原始 at 文本
 	if strings.TrimSpace(messageText) == "" {
 		messageText = originalText
 	}
@@ -985,10 +985,10 @@ func transformMessageTextAtNoGroupID(messageText string) string {
 			if err != nil {
 				// 如果出错，也替换成相应的格式，但使用原始QQ号
 				mylog.Printf("Error retrieving user ID: %v", err)
-				return "<@!" + submatches[1] + ">"
+				return "<@" + submatches[1] + ">"
 			}
 
-			return "<@!" + realUserID + ">"
+			return "<@" + realUserID + ">"
 		}
 		return m
 	})
