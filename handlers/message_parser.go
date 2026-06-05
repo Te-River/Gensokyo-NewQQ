@@ -948,8 +948,8 @@ func transformMessageTextAt(messageText string, groupid string) string {
 		}
 		return m
 	})
-	// 如果全部 at 被移除后内容为空，退回原始 at 文本
-	if strings.TrimSpace(messageText) == "" {
+	// 如果内容为空且原始内容仅含 at（不含 reply），退回原始 at 文本
+	if strings.TrimSpace(messageText) == "" && strings.Contains(originalText, "[CQ:at") {
 		messageText = originalText
 	}
 	return messageText
@@ -992,8 +992,8 @@ func transformMessageTextAtNoGroupID(messageText string) string {
 		}
 		return m
 	})
-	// 如果全部 at 被移除后内容为空，退回原始 at 文本
-	if strings.TrimSpace(messageText) == "" {
+	// 如果内容为空且原始内容包含 at，退回原始 at 文本
+	if strings.TrimSpace(messageText) == "" && strings.Contains(originalText, "[CQ:at") {
 		messageText = originalText
 	}
 	return messageText
