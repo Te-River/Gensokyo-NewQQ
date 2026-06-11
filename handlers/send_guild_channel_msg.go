@@ -504,6 +504,7 @@ func GenerateReplyMessage(id string, foundItems map[string][]string, messageText
 		// 将 markdown 内容中的 CQ at 码转换为 QQ @ 语法
 		if markdown != nil && markdown.Content != "" {
 			markdown.Content = ResolveMarkdownAtMentions(markdown.Content)
+			markdown.Content = ResolveMarkdownImages(markdown.Content, apiv2)
 		}
 		msgtocreate := &dto.MessageToCreate{
 			MsgID:    id,

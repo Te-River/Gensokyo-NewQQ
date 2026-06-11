@@ -1824,6 +1824,41 @@ func ResolveMarkdownAtMentions(content string) string {
 	})
 }
 
+// ResolveMarkdownImages 处理 Markdown 内容中的 ![](path) 图片
+// - 本地文件路径（file:// 或绝对路径）→ 上传到 QQ CDN，替换为 CDN URL
+// - HTTP(S) URL → 直接保留
+func ResolveMarkdownImages(content string, apiv2 openapi.OpenAPI) string {
+	re := regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+)\)`)
+	return re.ReplaceAllStringFunc(content, func(m string) string {
+		parts := re.FindStringSubmatch(m)
+		if len(parts) < 3 {
+			return m
+		}
+		altText := parts[1]
+		imgPath := parts[2]
+
+		// HTTP(S) URL 直接保留
+		if strings.HasPrefix(imgPath, "http://") || strings.HasPrefix(imgPath, "https://") {
+			return m
+		}
+
+		// 本地文件：去除 file:// 前缀后读取
+		localPath := strings.TrimPrefix(imgPath, "file://")
+		imageData, err := os.ReadFile(localPath)
+		if err != nil {
+			mylog.Printf("Error reading local image for markdown: %v", err)
+			return m
+		}
+		base64Encoded := base64.StdEncoding.EncodeToString(imageData)
+		cdnURL, _, _, err := images.UploadBase64ImageToServer(base64Encoded, apiv2)
+		if err != nil {
+			mylog.Printf("Error uploading image for markdown: %v", err)
+			return m
+		}
+		return "![" + altText + "](" + cdnURL + ")"
+	})
+}
+
 func parseQQMuiscMDData(musicid string) (*dto.Markdown, *keyboard.MessageKeyboard, error) {
 	info, err := QQMusicSongInfo(musicid)
 	if err != nil {
