@@ -272,7 +272,7 @@ func HandleSendGuildChannelMsg(client callapi.Client, api openapi.OpenAPI, apiv2
 				singleItem[key] = []string{url} // 创建一个只有一个 URL 的 singleItem
 				msgseq := echo.GetMappingSeq(messageID)
 				echo.AddMappingSeq(messageID, msgseq+1)
-				reply, isBase64Image := GenerateReplyMessage(messageID, singleItem, "", msgseq+1)
+reply, isBase64Image := GenerateReplyMessage(messageID, singleItem, "", msgseq+1, nil)
 
 				if isBase64Image {
 					// 将base64内容从reply的Content转换回字节
@@ -358,7 +358,7 @@ func HandleSendGuildChannelMsg(client callapi.Client, api openapi.OpenAPI, apiv2
 }
 
 // 组合发频道信息需要的MessageToCreate 支持base64
-func GenerateReplyMessage(id string, foundItems map[string][]string, messageText string, msgseq int) (*dto.MessageToCreate, bool) {
+func GenerateReplyMessage(id string, foundItems map[string][]string, messageText string, msgseq int, api2 openapi.OpenAPI) (*dto.MessageToCreate, bool) {
 	var reply dto.MessageToCreate
 	var isBase64 bool
 
@@ -504,7 +504,7 @@ func GenerateReplyMessage(id string, foundItems map[string][]string, messageText
 		// 将 markdown 内容中的 CQ at 码转换为 QQ @ 语法
 		if markdown != nil && markdown.Content != "" {
 			markdown.Content = ResolveMarkdownAtMentions(markdown.Content)
-			markdown.Content = ResolveMarkdownImages(markdown.Content, apiv2)
+			markdown.Content = ResolveMarkdownImages(markdown.Content, api2)
 		}
 		msgtocreate := &dto.MessageToCreate{
 			MsgID:    id,

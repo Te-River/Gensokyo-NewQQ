@@ -201,7 +201,7 @@ func HandleSendGuildChannelPrivateMsg(client callapi.Client, api openapi.OpenAPI
 	if messageText != "" {
 		msgseq := echo.GetMappingSeq(messageID)
 		echo.AddMappingSeq(messageID, msgseq+1)
-		textMsg, _ := GenerateReplyMessage(messageID, nil, messageText, msgseq+1)
+		textMsg, _ := GenerateReplyMessage(messageID, nil, messageText, msgseq+1, nil)
 		if resp, err = apiv2.PostDirectMessage(context.TODO(), dm, textMsg); err != nil {
 			mylog.Printf("发送文本信息失败: %v", err)
 		}
@@ -216,7 +216,7 @@ func HandleSendGuildChannelPrivateMsg(client callapi.Client, api openapi.OpenAPI
 			singleItem[key] = []string{url} // 创建一个只包含单个 URL 的 singleItem
 			msgseq := echo.GetMappingSeq(messageID)
 			echo.AddMappingSeq(messageID, msgseq+1)
-			reply, isBase64Image := GenerateReplyMessage(messageID, singleItem, "", msgseq+1)
+			reply, isBase64Image := GenerateReplyMessage(messageID, singleItem, "", msgseq+1, nil)
 
 			if isBase64Image {
 				// 处理 Base64 图片的逻辑
