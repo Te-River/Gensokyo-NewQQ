@@ -21,6 +21,8 @@ type Settings struct {
 	ShardCount   int    `yaml:"shard_count"`
 	ShardID      int    `yaml:"shard_id"`
 	UseUin       bool   `yaml:"use_uin"`
+	IdmapIsolation     bool   `yaml:"idmap_isolation"`
+	IdmapLegacyCompat  bool   `yaml:"idmap_legacy_compat"`
 	ShardNum     int    `yaml:"shard_num"`
 	//事件订阅类
 	TextIntent []string `yaml:"text_intent"`

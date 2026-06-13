@@ -249,6 +249,44 @@ func GenerateRowID(id string, length int) (int64, error) {
 	return rowID, nil
 }
 
+// uinPrefix 返回 UIN 前缀，多 Bot 隔离时用
+func uinPrefix() string {
+	if config.GetIdmapIsolation() {
+		uin := config.GetUinStr()
+		if uin != "" {
+			return uin + ":"
+		}
+	}
+	return ""
+}
+
+// uinKey 给 OpenID 加上 UIN 前缀（隔离时），旧格式返回原样
+func uinKey(raw string) string {
+	prefix := uinPrefix()
+	if prefix == "" {
+		return raw
+	}
+	return prefix + raw
+}
+
+// uinRowKey 给反向 key 加上 UIN 前缀
+func uinRowKey(rowID string) string {
+	prefix := uinPrefix()
+	if prefix == "" {
+		return "row-" + rowID
+	}
+	return "row-" + prefix + rowID
+}
+
+// stripUinPrefix 去掉返回值中的 UIN 前缀
+func stripUinPrefix(val string) string {
+	prefix := uinPrefix()
+	if prefix == "" || !strings.HasPrefix(val, prefix) {
+		return val
+	}
+	return strings.TrimPrefix(val, prefix)
+}
+
 // 检查id和value是否是转换关系
 func CheckValue(id string, value int64) bool {
 	// 计算int64值的长度
@@ -278,12 +316,14 @@ func CheckValuev2(value int64) bool {
 // 根据a储存b
 func StoreID(id string) (int64, error) {
 	var newRow int64
+	key := uinKey(id)           // 隔离时加 UIN 前缀
+	revKey := uinRowKey("")     // "row-" 或 "row-{UIN}:"
 
 	err := db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(BucketName))
 
-		// 检查ID是否已经存在
-		existingRowBytes := b.Get([]byte(id))
+		// 检查ID是否已经存在（用带前缀的 key）
+		existingRowBytes := b.Get([]byte(key))
 		if existingRowBytes != nil {
 			newRow = int64(binary.BigEndian.Uint64(existingRowBytes))
 			return nil
@@ -326,11 +366,16 @@ func StoreID(id string) (int64, error) {
 		if !config.GetHashIDValue() {
 			b.Put([]byte(CounterKey), rowBytes)
 		}
-		//真实对应虚拟 用来直接判断是否存在,并快速返回
-		b.Put([]byte(id), rowBytes)
+		// 写入新格式：带 UIN 前缀的前向 key
+		b.Put([]byte(key), rowBytes)
+		// 新格式反向 key：row-{UIN}:{虚拟ID}
+		b.Put([]byte(revKey+strconv.FormatInt(newRow, 10)), []byte(key))
 
-		reverseKey := fmt.Sprintf("row-%d", newRow)
-		b.Put([]byte(reverseKey), []byte(id))
+		// 兼容模式：同时写旧格式
+		if config.GetIdmapIsolation() && config.GetIdmapLegacyCompat() {
+			b.Put([]byte(id), rowBytes)            // 旧前向
+			// 反向不双写，避免多 Bot 冲突
+		}
 
 		return nil
 	})
@@ -341,19 +386,18 @@ func StoreID(id string) (int64, error) {
 // 根据a储存b
 func StoreCache(id string) (int64, error) {
 	var newRow int64
+	key := uinKey(id)
+	revPrefix := uinRowKey("")
 
 	err := db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(CacheBucketName))
 
-		// 检查ID是否已经存在
-		existingRowBytes := b.Get([]byte(id))
+		existingRowBytes := b.Get([]byte(key))
 		if existingRowBytes != nil {
 			newRow = int64(binary.BigEndian.Uint64(existingRowBytes))
 			return nil
 		}
-		//写入虚拟值
 		if !config.GetHashIDValue() {
-			// 如果ID不存在，则为它分配一个新的行号 数字递增
 			currentRowBytes := b.Get([]byte(CounterKey))
 			if currentRowBytes == nil {
 				newRow = 1
@@ -362,21 +406,17 @@ func StoreCache(id string) (int64, error) {
 				newRow = int64(currentRow) + 1
 			}
 		} else {
-			// 生成新的行号
 			var err error
-			maxDigits := 18 // int64的位数上限-1
+			maxDigits := 18
 			for digits := 9; digits <= maxDigits; digits++ {
 				newRow, err = GenerateRowID(id, digits)
 				if err != nil {
 					return err
 				}
-				// 检查新生成的行号是否重复
 				rowKey := fmt.Sprintf("row-%d", newRow)
 				if b.Get([]byte(rowKey)) == nil {
-					// 找到了一个唯一的行号，可以跳出循环
 					break
 				}
-				// 如果到达了最大尝试次数还没有找到唯一的行号，则返回错误
 				if digits == maxDigits {
 					return fmt.Errorf("unable to find a unique row ID after %d attempts", maxDigits-8)
 				}
@@ -385,16 +425,15 @@ func StoreCache(id string) (int64, error) {
 
 		rowBytes := make([]byte, 8)
 		binary.BigEndian.PutUint64(rowBytes, uint64(newRow))
-		//写入递增值
 		if !config.GetHashIDValue() {
 			b.Put([]byte(CounterKey), rowBytes)
 		}
-		//真实对应虚拟 用来直接判断是否存在,并快速返回
-		b.Put([]byte(id), rowBytes)
+		b.Put([]byte(key), rowBytes)
+		b.Put([]byte(revPrefix+strconv.FormatInt(newRow, 10)), []byte(key))
 
-		reverseKey := fmt.Sprintf("row-%d", newRow)
-		b.Put([]byte(reverseKey), []byte(id))
-
+		if config.GetIdmapIsolation() && config.GetIdmapLegacyCompat() {
+			b.Put([]byte(id), rowBytes)
+		}
 		return nil
 	})
 
@@ -407,30 +446,32 @@ func SimplifiedStoreID(id string) (int64, error) {
 	err := db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(BucketName))
 
-		// 生成新的行号
 		var err error
-		newRow, err = GenerateRowID(id, 9)
+		newRow, err = GenerateRowID(uinKey(id), 9)
 		if err != nil {
 			return err
 		}
 
-		// 检查新生成的行号是否重复
-		rowKey := fmt.Sprintf("row-%d", newRow)
+		rowKey := uinRowKey(strconv.FormatInt(newRow, 10))
 		if b.Get([]byte(rowKey)) != nil {
-			// 如果行号重复，使用10位数字生成行号
-			newRow, err = GenerateRowID(id, 10)
+			newRow, err = GenerateRowID(uinKey(id), 10)
 			if err != nil {
 				return err
 			}
-			rowKey = fmt.Sprintf("row-%d", newRow)
-			// 再次检查重复性，如果还是重复，则返回错误
+			rowKey = uinRowKey(strconv.FormatInt(newRow, 10))
 			if b.Get([]byte(rowKey)) != nil {
 				return fmt.Errorf("unable to find a unique row ID 195")
 			}
 		}
 
-		// 只写入反向键
-		b.Put([]byte(rowKey), []byte(id))
+		b.Put([]byte(rowKey), []byte(uinKey(id)))
+
+		if config.GetIdmapIsolation() && config.GetIdmapLegacyCompat() {
+			oldRowKey := fmt.Sprintf("row-%d", newRow)
+			if b.Get([]byte(oldRowKey)) == nil {
+				b.Put([]byte(oldRowKey), []byte(id))
+			}
+		}
 
 		return nil
 	})
@@ -494,40 +535,47 @@ func StoreIDPro(id string, subid string) (int64, int64, error) {
 	var newRowID, newSubRowID int64
 	var err error
 
+	// 构造带 UIN 前缀的 key
+	keyID := uinKey(id)
+	keySubID := uinKey(subid)
+	forwardKey := fmt.Sprintf("%s:%s", keyID, keySubID)
+	reverseValue := fmt.Sprintf("%s:%s", keyID, keySubID)
+
 	err = db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(BucketName))
 
-		// 生成正向键
-		forwardKey := fmt.Sprintf("%s:%s", id, subid)
-
-		// 检查正向键是否已经存在
 		existingForwardValue := b.Get([]byte(forwardKey))
 		if existingForwardValue != nil {
-			// 解析已存在的值
 			fmt.Sscanf(string(existingForwardValue), "%d:%d", &newRowID, &newSubRowID)
 			return nil
 		}
 
-		// 生成新的ID和SubID
-		newRowID, err = GenerateRowID(id, 9) // 使用GenerateRowID来生成
+		newRowID, err = GenerateRowID(keyID, 9)
 		if err != nil {
 			return err
 		}
 
-		newSubRowID, err = GenerateRowID(subid, 9) // 同样的方法生成SubID
+		newSubRowID, err = GenerateRowID(keySubID, 9)
 		if err != nil {
 			return err
 		}
-		//反向键
-		reverseKey := fmt.Sprintf("%d:%d", newRowID, newSubRowID)
-		//正向值
+		reverseKey := fmt.Sprintf("%s:%s", uinKey(strconv.FormatInt(newRowID, 10)), uinKey(strconv.FormatInt(newSubRowID, 10)))
 		forwardValue := fmt.Sprintf("%d:%d", newRowID, newSubRowID)
-		//反向值
-		reverseValue := fmt.Sprintf("%s:%s", id, subid)
 
-		// 存储正向键和反向键
 		b.Put([]byte(forwardKey), []byte(forwardValue))
 		b.Put([]byte(reverseKey), []byte(reverseValue))
+
+		// 兼容模式：双写旧格式
+		if config.GetIdmapIsolation() && config.GetIdmapLegacyCompat() {
+			oldForwardKey := fmt.Sprintf("%s:%s", id, subid)
+			oldReverseKey := fmt.Sprintf("%d:%d", newRowID, newSubRowID)
+			if b.Get([]byte(oldForwardKey)) == nil {
+				b.Put([]byte(oldForwardKey), []byte(forwardValue))
+			}
+			if b.Get([]byte(oldReverseKey)) == nil {
+				b.Put([]byte(oldReverseKey), []byte(reverseValue))
+			}
+		}
 
 		return nil
 	})
@@ -697,13 +745,19 @@ func RetrieveRowByID(rowid string) (string, error) {
 	err := db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(BucketName))
 
-		// 根据行号检索ID
-		idBytes := b.Get([]byte("row-" + rowid))
+		// 先查新格式 reverse key（带 UIN 前缀）
+		newKey := uinRowKey(rowid)
+		idBytes := b.Get([]byte(newKey))
+		if idBytes != nil {
+			id = stripUinPrefix(string(idBytes))
+			return nil
+		}
+		// 再查旧格式 reverse key（无前缀，兼容旧数据）
+		idBytes = b.Get([]byte("row-" + rowid))
 		if idBytes == nil {
 			return ErrKeyNotFound
 		}
 		id = string(idBytes)
-
 		return nil
 	})
 
@@ -716,13 +770,17 @@ func RetrieveRowByCache(rowid string) (string, error) {
 	err := db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(CacheBucketName))
 
-		// 根据行号检索ID
-		idBytes := b.Get([]byte("row-" + rowid))
+		newKey := uinRowKey(rowid)
+		idBytes := b.Get([]byte(newKey))
+		if idBytes != nil {
+			id = stripUinPrefix(string(idBytes))
+			return nil
+		}
+		idBytes = b.Get([]byte("row-" + rowid))
 		if idBytes == nil {
 			return ErrKeyNotFound
 		}
 		id = string(idBytes)
-
 		return nil
 	})
 
@@ -791,9 +849,14 @@ func RetrieveRowByIDPro(newRowID, newSubRowID string) (string, string, error) {
 	err := db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(BucketName))
 
-		// 根据新的行号和子行号检索ID和SubID
-		reverseKey := fmt.Sprintf("%s:%s", newRowID, newSubRowID)
-		reverseValueBytes := b.Get([]byte(reverseKey))
+		// 先查新格式反向 key（带 UIN 前缀）
+		newReverseKey := fmt.Sprintf("%s:%s", uinKey(newRowID), uinKey(newSubRowID))
+		reverseValueBytes := b.Get([]byte(newReverseKey))
+		if reverseValueBytes == nil {
+			// 再查旧格式（兼容）
+			oldReverseKey := fmt.Sprintf("%s:%s", newRowID, newSubRowID)
+			reverseValueBytes = b.Get([]byte(oldReverseKey))
+		}
 		if reverseValueBytes == nil {
 			return ErrKeyNotFound
 		}
@@ -804,7 +867,8 @@ func RetrieveRowByIDPro(newRowID, newSubRowID string) (string, string, error) {
 			return fmt.Errorf("invalid format for reverse key value")
 		}
 
-		id, subid = parts[0], parts[1]
+		id = stripUinPrefix(parts[0])
+		subid = stripUinPrefix(parts[1])
 
 		return nil
 	})
@@ -1175,13 +1239,18 @@ func RetrieveRealValue(virtualValue int64) (string, string, error) {
 	err := db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(BucketName))
 
-		// 构造键，根据虚拟值查找
-		virtualKey := fmt.Sprintf("row-%d", virtualValue)
+		// 先查新格式反向 key
+		virtualKey := uinRowKey(strconv.FormatInt(virtualValue, 10))
 		realValueBytes := b.Get([]byte(virtualKey))
+		if realValueBytes == nil {
+			// 再查旧格式
+			virtualKey = fmt.Sprintf("row-%d", virtualValue)
+			realValueBytes = b.Get([]byte(virtualKey))
+		}
 		if realValueBytes == nil {
 			return fmt.Errorf("no real value found for virtual value: %d", virtualValue)
 		}
-		realValue = string(realValueBytes)
+		realValue = stripUinPrefix(string(realValueBytes))
 
 		return nil
 	})
@@ -1190,7 +1259,6 @@ func RetrieveRealValue(virtualValue int64) (string, string, error) {
 		return "", "", err
 	}
 
-	// 返回虚拟值和对应的真实值
 	return fmt.Sprintf("%d", virtualValue), realValue, nil
 }
 
@@ -1200,8 +1268,13 @@ func RetrieveVirtualValue(realValue string) (string, string, error) {
 	err := db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(BucketName))
 
-		// 根据真实值查找虚拟值
-		virtualValueBytes := b.Get([]byte(realValue))
+		// 先查带 UIN 前缀的新格式
+		key := uinKey(realValue)
+		virtualValueBytes := b.Get([]byte(key))
+		if virtualValueBytes == nil {
+			// 再查无前缀的旧格式
+			virtualValueBytes = b.Get([]byte(realValue))
+		}
 		if virtualValueBytes == nil {
 			return fmt.Errorf("no virtual value found for real value: %s", realValue)
 		}
@@ -1214,7 +1287,6 @@ func RetrieveVirtualValue(realValue string) (string, string, error) {
 		return "", "", err
 	}
 
-	// 返回真实值和对应的虚拟值
 	return realValue, fmt.Sprintf("%d", virtualValue), nil
 }
 
@@ -1419,11 +1491,14 @@ func RetrieveVirtualValuePro(realValue string, realValueSub string) (string, str
 	err := db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(BucketName))
 
-		// 构建正向键
-		forwardKey := fmt.Sprintf("%s:%s", realValue, realValueSub)
-
-		// 从数据库检索正向键对应的值
+		// 先查新格式（带 UIN 前缀）
+		forwardKey := fmt.Sprintf("%s:%s", uinKey(realValue), uinKey(realValueSub))
 		forwardValueBytes := b.Get([]byte(forwardKey))
+		if forwardValueBytes == nil {
+			// 再查旧格式
+			forwardKey = fmt.Sprintf("%s:%s", realValue, realValueSub)
+			forwardValueBytes = b.Get([]byte(forwardKey))
+		}
 		if forwardValueBytes == nil {
 			return ErrKeyNotFound
 		}

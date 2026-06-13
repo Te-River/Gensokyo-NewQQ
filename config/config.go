@@ -1519,6 +1519,28 @@ func GetUseUin() bool {
 	return instance.Settings.UseUin
 }
 
+func GetIdmapIsolation() bool {
+	mu.RLock()
+	defer mu.RUnlock()
+
+	if instance == nil {
+		fmt.Println("Warning: instance is nil when trying to IdmapIsolation value.")
+		return false
+	}
+	return instance.Settings.IdmapIsolation
+}
+
+func GetIdmapLegacyCompat() bool {
+	mu.RLock()
+	defer mu.RUnlock()
+
+	if instance == nil {
+		fmt.Println("Warning: instance is nil when trying to IdmapLegacyCompat value.")
+		return false
+	}
+	return instance.Settings.IdmapLegacyCompat
+}
+
 // 获取GetQrSize的值
 func GetQrSize() int {
 	mu.RLock()

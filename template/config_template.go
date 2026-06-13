@@ -14,6 +14,8 @@ settings:
   app_id: 12345                                      # 你的应用ID
   uin : 0                                            # 你的机器人QQ号,点击机器人资料卡查看  
   use_uin : false                                    # false=使用appid作为机器人id,true=使用机器人QQ号,需设置正确的uin
+  idmap_isolation : false                            # 数据库key加UIN前缀隔离多个Bot（多个Bot连同一数据库时开启）
+  idmap_legacy_compat : false                        # 同时写入旧格式key兼容官方Gensokyo（开启idmap_isolation时有效）
   token: "<YOUR_APP_TOKEN>"                          # 你的应用令牌
   client_secret: "<YOUR_CLIENT_SECRET>"              # 你的客户端密钥
   shard_count: 1                    #分片数量 默认1
