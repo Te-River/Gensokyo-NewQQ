@@ -4,12 +4,14 @@ Gensokyo 对 OneBot V11 的扩展语法汇总。
 
 ## CQ 码（扩展）
 
-| CQ 码 | 格式 | 说明 |
-|-------|------|------|
-| Markdown | `[CQ:markdown,data=base64]` | Markdown 卡片消息 |
-| 头像 | `[CQ:avatar,qq=数字]` | 在消息中嵌入用户头像图片 |
-| QQ 音乐 | `[CQ:music,type=qq,id=数字]` | 分享 QQ 音乐（自动转为 Markdown 卡片） |
-| 回复 | `[CQ:reply,id=数字]` | 引用回复标记。发送时从文本中自动剥离。**仅频道端可渲染**，群聊端 API 接受但不显示；**Markdown 消息**不支持 |
+| CQ 码 | 格式 | 适用范围 | 说明 |
+|-------|------|:--------:|------|
+| Markdown | `[CQ:markdown,data=base64]` | 🌐 全场景 | Markdown 卡片消息 |
+| 头像 | `[CQ:avatar,qq=数字]` | 🌐 全场景 | 在消息中嵌入用户头像图片 |
+| QQ 音乐 | `[CQ:music,type=qq,id=数字]` | 🌐 全场景 | 分享 QQ 音乐（自动转为 Markdown 卡片） |
+| 回复 | `[CQ:reply,id=数字]` | 📡 仅频道 | 引用回复标记。**频道端**渲染引用样式，群聊端 API 接受但不显示；**Markdown 消息**不支持 |
+
+> 图例: 🌐 全场景 | 🏷️ 群聊 | 📡 频道 | 💬 C2C
 
 ## Message Segment 类型
 
