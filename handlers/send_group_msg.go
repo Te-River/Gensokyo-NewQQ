@@ -421,12 +421,19 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				return "", nil // 或其他错误处理
 			}
 
-			// 处理 [CQ:reply,id=数字] → message_reference（仅当消息实际有内容时才设置）
+			// 处理 [CQ:reply,id=数字] → message_reference
 			if replyIDs, ok := foundItems["reply_msg_id"]; ok && len(replyIDs) > 0 {
-				if messageID != "" && messageText != "" {
-					groupMessage.MessageReference = &dto.MessageReference{
-						MessageID:             messageID,
-						IgnoreGetMessageError: true,
+				if messageText != "" {
+					// 虚拟 reply ID → 真实 QQ API message_id
+					realReplyID, err := idmap.RetrieveRowByCachev2(replyIDs[0])
+					if err == nil && realReplyID != "" {
+						// echo 缓存中的 ID 格式为 "GroupID MessageID"，取后半段
+						parts := strings.Split(realReplyID, " ")
+						refID := parts[len(parts)-1]
+						groupMessage.MessageReference = &dto.MessageReference{
+							MessageID:             refID,
+							IgnoreGetMessageError: true,
+						}
 					}
 				}
 			}
