@@ -13,7 +13,6 @@
 | `send_group_msg_raw` | send_group_msg_raw.go | 发送原始群消息（不做预处理） |
 | `send_private_msg` | send_private_msg.go | 发送私聊消息 |
 | `send_private_msg_async` | send_private_msg_async.go | 异步发私聊消息 |
-| `send_private_msg_sse` | send_private_msg_sse.go | SSE 私聊消息 |
 | `delete_msg` | delete_msg.go | 撤回消息（见下方说明） |
 | `get_login_info` | get_login_info.go | 获取登录号信息 |
 
@@ -35,6 +34,7 @@
 | `get_status` | get_status.go | 获取运行状态 |
 | `get_version_info` | get_version_info.go | 获取版本信息 |
 | `get_online_clients` | get_online_clients.go | 获取在线客户端 |
+| `send_group_forward_msg` | send_group_forward_msg.go | 发送合并转发消息 |
 | `set_group_ban` | set_group_ban.go | 群组单人禁言 |
 | `set_group_whole_ban` | set_group_whole_ban.go | 群组全员禁言 |
 | `.handle_quick_operation` | handle_quick_operation.go | 快速操作 |
@@ -47,7 +47,7 @@
 |--------|------|------|
 | `send_guild_channel_msg` | send_guild_channel_msg.go | 发送频道消息 |
 | `send_guild_channel_forum` | send_guild_channel_forum.go | 发送频道帖子 |
-| `send_guild_private_msg` | send_guild_private_msg.go | 发送频道私信 |
+| ~~`send_guild_private_msg`~~ | ~~send_guild_private_msg.go~~ | ~~发送频道私信~~（已废弃，请使用 `send_private_msg` 代替） |
 | `get_guild_list` | get_guild_list.go | 获取频道列表 |
 | `get_guild_channel_list` | get_guild_channel_list.go | 获取频道子频道列表 |
 | `get_guild_service_profile` | get_guild_service_profile.go | 获取频道服务信息 |
@@ -57,9 +57,10 @@
 | Action | 文件 | 说明 |
 |--------|------|------|
 | [`get_avatar`](./额外api-get_avatar.md) | get_avatar.go | 获取用户头像直链 |
-| `get_robot_share_link` | get_robot_share_link.go | 获取机器人分享链接 |
-| `put_interaction` | put_interaction.go | 处理按钮交互回调 |
-| `send_private_msg_wakeup` | send_private_msg_wakeup.go | 发送被动唤醒私聊消息 |
+| `get_robot_share_link` | [get_robot_share_link.go](./扩展api-get_robot_share_link.md) | 获取机器人分享链接 |
+| `put_interaction` | [put_interaction.go](./扩展api-put_interaction.md) | 处理按钮交互回调 |
+| `send_private_msg_wakeup` | [send_private_msg_wakeup.go](./扩展api-send_private_msg_wakeup.md) | 发送被动唤醒私聊消息 |
+| `send_private_msg_sse` | send_private_msg_sse.go | SSE 私聊消息 |
 | `get_group_ban` | set_group_ban.go | 群组单人禁言（等同于 `set_group_ban`） |
 | `get_group_whole_ban` | set_group_whole_ban.go | 群组全员禁言（等同于 `set_group_whole_ban`） |
 | `send_to_group` | send_group_msg.go | `send_group_msg` 别名 |
