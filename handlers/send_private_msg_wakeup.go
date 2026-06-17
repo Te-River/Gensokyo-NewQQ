@@ -218,7 +218,7 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 				groupMessage := &dto.MessageToCreate{
 					Content:  " ", // 媒体消息通常带个空格
 					MsgType:  7,   // 富媒体
-					Media:    media,
+					Media:    &media,
 					IsWakeup: true, // [重点]
 					MsgID:    "",
 					EventID:  "",

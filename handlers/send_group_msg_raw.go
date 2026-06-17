@@ -420,7 +420,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 						MsgID:   messageID,
 						MsgSeq:  msgseq,
 						MsgType: 7, // 默认文本类型
-						Media:   media,
+						Media:   &media,
 					}
 					groupMessage.Timestamp = time.Now().Unix() // 设置时间戳
 					//重新为err赋值
