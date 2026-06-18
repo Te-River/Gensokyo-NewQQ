@@ -206,6 +206,10 @@ type Settings struct {
 	AliyunAccessKeySecret string `yaml:"a_OSS_AccessKeySecret"`
 	AliyunBucketName      string `yaml:"a_OSS_BucketName"`
 	AliyunAudit           bool   `yaml:"a_audit"`
+	// 额外 intent 位探测（用于发现未文档化的事件位）
+	ExtraIntents []int `yaml:"extra_intents"`
+	// 发现未知事件开关——自动订阅所有未使用的 intent 位
+	DiscoverUnknownEvents bool `yaml:"discover_unknown_events"`
 }
 
 type VisualPrefixConfig struct {

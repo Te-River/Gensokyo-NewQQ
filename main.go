@@ -282,6 +282,15 @@ func main() {
 				intent |= websocket.RegisterHandlers(handler)
 			}
 
+			// 发现未知事件模式：订阅所有未使用的 intent 位
+			if config.GetDiscoverUnknownEvents() {
+				unknownBits := []int{6, 7, 8, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 31}
+				for _, bit := range unknownBits {
+					intent |= dto.Intent(1 << bit)
+				}
+				log.Printf("发现未知事件模式已启用，额外订阅的 intent 位: %v", unknownBits)
+			}
+
 			log.Printf("注册 intents: %v\n", intent)
 
 			// 确保p包含conf

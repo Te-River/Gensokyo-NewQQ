@@ -1822,6 +1822,16 @@ func GetAliyunAudit() bool {
 	return instance.Settings.AliyunAudit
 }
 
+// GetDiscoverUnknownEvents 获取是否订阅所有未知 intent 位
+func GetDiscoverUnknownEvents() bool {
+	mu.RLock()
+	defer mu.RUnlock()
+	if instance == nil {
+		return false
+	}
+	return instance.Settings.DiscoverUnknownEvents
+}
+
 // 获取Alias的值
 func GetAlias() []string {
 	mu.RLock()
