@@ -2089,7 +2089,7 @@ func ProcessCQMemberOutbound(text string, eventID *string, groupID string, apiv2
 	re := regexp.MustCompile(`\[CQ:member,([^\]]*)\]`)
 	return re.ReplaceAllStringFunc(text, func(match string) string {
 		inner := match[1 : len(match)-1]
-		var memberType, userIDStr string
+		var memberType string
 		if idx := strings.Index(inner, ","); idx >= 0 {
 			paramsStr := inner[idx+1:]
 			for _, part := range strings.Split(paramsStr, ",") {
@@ -2099,7 +2099,7 @@ func ProcessCQMemberOutbound(text string, eventID *string, groupID string, apiv2
 					case "type":
 						memberType = strings.TrimSpace(kv[1])
 					case "user_id":
-						userIDStr = strings.TrimSpace(kv[1])
+						_ = strings.TrimSpace(kv[1]) // 保留以备后续使用
 					}
 				}
 			}
