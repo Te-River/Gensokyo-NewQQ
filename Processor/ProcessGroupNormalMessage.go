@@ -229,7 +229,9 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 				break
 			}
 		}
-		if isMaster {
+		if data.Author != nil && data.Author.MemberRole != "" {
+			groupMsg.Sender.Role = data.Author.MemberRole
+		} else if isMaster {
 			groupMsg.Sender.Role = "owner"
 		} else {
 			groupMsg.Sender.Role = "member"
@@ -300,7 +302,9 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 				break
 			}
 		}
-		if isMaster {
+		if data.Author != nil && data.Author.MemberRole != "" {
+			groupMsgS.Sender.Role = data.Author.MemberRole
+		} else if isMaster {
 			groupMsgS.Sender.Role = "owner"
 		} else {
 			groupMsgS.Sender.Role = "member"
