@@ -427,9 +427,16 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			var md *dto.Markdown
 			if mdItems, ok := foundItems["markdown"]; ok && len(mdItems) > 0 {
 				md = parseMarkdownFromMessage(mdItems[0])
-				// 从 messageText 中移除 [CQ:markdown,...] 部分
+				// 提取 messageText 中的 @ 标签（<qqbot-at-user .../>），合并到 markdown 内容
+				atRe := regexp.MustCompile(`<qqbot-at-user\s+[^>]*/>`)
+				atTag := atRe.FindString(messageText)
+				if atTag != "" {
+					md.Content = atTag + "\n" + md.Content
+				}
+				// 从 messageText 中移除 [CQ:markdown,...] 和 <qqbot-at-user> 部分
 				mdRe := regexp.MustCompile(`\[CQ:markdown,[^\]]*\]`)
 				messageText = mdRe.ReplaceAllString(messageText, "")
+				messageText = atRe.ReplaceAllString(messageText, "")
 			}
 
 			// message.Params.GroupID 已在前面转换为真实 OpenID，直接使用
