@@ -696,28 +696,42 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 						if strings.HasPrefix(mdContentStr, "base64://") {
 							mdContentEncoded = strings.TrimPrefix(mdContentStr, "base64://")
 						} else {
-							mdContentStr = strings.ReplaceAll(mdContentStr, "&amp;", "&")
-							mdContentStr = strings.ReplaceAll(mdContentStr, "&#91;", "[")
-							mdContentStr = strings.ReplaceAll(mdContentStr, "&#93;", "]")
-							mdContentStr = strings.ReplaceAll(mdContentStr, "&#44;", ",")
-
-							var jsonMap map[string]interface{}
-							if err := json.Unmarshal([]byte(mdContentStr), &jsonMap); err != nil {
-								mylog.Printf("Error unmarshaling string to JSON:%v", err)
-								continue
+							// 段格式中 data 为原始 base64（无 base64:// 前缀）
+							decoded, decErr := base64.StdEncoding.DecodeString(mdContentStr)
+							if decErr == nil {
+								var jsonMap map[string]interface{}
+								if json.Unmarshal(decoded, &jsonMap) == nil {
+									// 有效 base64 JSON，直接使用
+									mdContentEncoded = mdContentStr
+								} else {
+									mylog.Printf("Error: markdown data is base64 but not valid JSON")
+									continue
+								}
+							} else {
+								// 非 base64，尝试作为 JSON 字符串处理（兼容旧格式）
+								mdContentStr = strings.ReplaceAll(mdContentStr, "&amp;", "&")
+								mdContentStr = strings.ReplaceAll(mdContentStr, "&#91;", "[")
+								mdContentStr = strings.ReplaceAll(mdContentStr, "&#93;", "]")
+								mdContentStr = strings.ReplaceAll(mdContentStr, "&#44;", ",")
+								var jsonMap map[string]interface{}
+								if err := json.Unmarshal([]byte(mdContentStr), &jsonMap); err != nil {
+									mylog.Printf("Error unmarshaling string to JSON:%v", err)
+									continue
+								}
+								mdContentBytes, err := json.Marshal(jsonMap)
+								if err != nil {
+									mylog.Printf("Error marshaling jsonMap to JSON:%v", err)
+									continue
+								}
+								mdContentEncoded = base64.StdEncoding.EncodeToString(mdContentBytes)
 							}
-							mdContentBytes, err := json.Marshal(jsonMap)
-							if err != nil {
-								mylog.Printf("Error marshaling jsonMap to JSON:%v", err)
-								continue
-							}
-							mdContentEncoded = base64.StdEncoding.EncodeToString(mdContentBytes)
 						}
 					} else {
 						mylog.Printf("Error marshaling markdown segment wrong type.")
 						continue
 					}
 					foundItems["markdown"] = append(foundItems["markdown"], mdContentEncoded)
+					messageText += "[CQ:markdown,data=base64://" + mdContentEncoded + "]"
 				} else {
 					mylog.Printf("Error: markdown segment data is nil.")
 				}
@@ -2191,4 +2205,27 @@ func ProcessCQMemberOutbound(text string, eventID *string, groupID string, apiv2
 	})
 
 	return result, cqGroupID, cqUserID
+}
+
+// parseMarkdownFromMessage 从 base64 编码的 markdown JSON 数据中解析 dto.Markdown
+// 输入格式: 原始 base64 字符串（无 base64:// 前缀）
+// JSON 结构: {"markdown": {"content": "..."}}
+func parseMarkdownFromMessage(b64Data string) *dto.Markdown {
+	decoded, err := base64.StdEncoding.DecodeString(b64Data)
+	if err != nil {
+		mylog.Printf("[CQ:markdown] base64 解码失败: %v", err)
+		return nil
+	}
+	var wrapper struct {
+		Markdown struct {
+			Content string `json:"content"`
+		} `json:"markdown"`
+	}
+	if err := json.Unmarshal(decoded, &wrapper); err != nil {
+		mylog.Printf("[CQ:markdown] JSON 解析失败: %v", err)
+		return nil
+	}
+	return &dto.Markdown{
+		Content: wrapper.Markdown.Content,
+	}
 }

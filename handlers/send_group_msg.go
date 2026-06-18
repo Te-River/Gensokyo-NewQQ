@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -422,6 +424,15 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				mylog.Printf("[CQ:member] 从 CQ 码中解析到 group_id=%s", cqGroupID)
 			}
 
+			// 检查是否有 markdown 内容（来自 [CQ:markdown] CQ 码）
+			var md *dto.Markdown
+			if mdItems, ok := foundItems["markdown"]; ok && len(mdItems) > 0 {
+				md = parseMarkdownFromMessage(mdItems[0])
+				// 从 messageText 中移除 [CQ:markdown,...] 部分
+				mdRe := regexp.MustCompile(`\[CQ:markdown,[^\]]*\]`)
+				messageText = mdRe.ReplaceAllString(messageText, "")
+			}
+
 			// message.Params.GroupID 已在前面转换为真实 OpenID，直接使用
 			targetGroupID := message.Params.GroupID.(string)
 
@@ -434,6 +445,13 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			if !ok {
 				mylog.Println("Error: Expected MessageToCreate type.")
 				return "", nil // 或其他错误处理
+			}
+
+			// 如果有 markdown，改为 markdown 消息
+			if md != nil {
+				groupMessage.Markdown = md
+				groupMessage.MsgType = 2
+				mylog.Printf("[CQ:markdown] 将消息类型切换为 markdown")
 			}
 
 			// 处理 [CQ:reply,id=数字] → message_reference
