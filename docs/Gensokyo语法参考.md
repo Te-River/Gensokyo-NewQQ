@@ -10,6 +10,7 @@ Gensokyo 对 OneBot V11 的扩展语法汇总。
 | 头像 | `[CQ:avatar,qq=数字]` | 🌐 全场景 | 在消息中嵌入用户头像图片 |
 | QQ 音乐 | `[CQ:music,type=qq,id=数字]` | 🌐 全场景 | 分享 QQ 音乐（自动转为 Markdown 卡片） |
 | 回复 | `[CQ:reply,id=数字]` | 📡 仅频道 | 引用回复标记。**频道端**渲染引用样式，群聊端 API 接受但不显示；**Markdown 消息**不支持 |
+| 成员变动 | `[CQ:member,type=add/remove,user_id=数字]` | 🏷️ 群聊 | 群成员入群/退群的 CQ 码标记。**入站**（通知中 `message` 字段）用于告知后端事件类型；**出站**（后端回复时）Gensokyo 自动识别并：`type=add`→被动回复，`type=remove`→主动推送 |
 
 > 图例: 🌐 全场景 | 🏷️ 群聊 | 📡 频道 | 💬 C2C
 
