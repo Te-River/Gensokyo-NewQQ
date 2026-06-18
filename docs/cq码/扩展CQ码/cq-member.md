@@ -23,10 +23,10 @@
 ### type=add（成员入群）
 
 ```
-① Gsk 捕获事件 → 推送普通 notice，message 为 CQ 码
-   [notice.group_increase.member]: [CQ:member,type=add,group_id=821404315,user_id=3607918353]
+① Gsk 捕获事件 → 推送普通消息事件，message 为 CQ 码
+   [message.group.normal]: [CQ:member,type=add,group_id=821404315,user_id=3607918353]
 
-② 后端收到 notice，解析 CQ 码 → 用普通 send_group_msg 回复
+② 后端收到消息事件，解析 CQ 码 → 用普通 send_group_msg 回复
    send_group_msg(group_id=821404315, message="[CQ:member,type=add,group_id=821404315,user_id=3607918353]欢迎入群！")
 
 ③ Gsk 收到消息 → 解析 CQ 码，group_id 转 GroupOpenID 确定目标群
@@ -36,10 +36,10 @@
 ### type=remove（成员退群）
 
 ```
-① Gsk 捕获事件 → 推送普通 notice，message 为 CQ 码
-   [notice.group_decrease.member]: [CQ:member,type=remove,group_id=821404315,user_id=3607918353]
+① Gsk 捕获事件 → 推送普通消息事件，message 为 CQ 码
+   [message.group.normal]: [CQ:member,type=remove,group_id=821404315,user_id=3607918353]
 
-② 后端收到 notice → 用普通 send_group_msg 回复
+② 后端收到消息事件 → 用普通 send_group_msg 回复
    send_group_msg(group_id=821404315, message="[CQ:member,type=remove,group_id=821404315,user_id=3607918353]离开了呢")
 
 ③ Gsk 收到消息 → 解析 CQ 码，group_id 转 GroupOpenID 确定目标群
@@ -49,23 +49,17 @@
 ## 后端示例（nonebot2）
 
 ```python
-from nonebot.adapters.onebot.v11 import GroupIncreaseNoticeEvent, GroupDecreaseNoticeEvent
-from nonebot.adapters.onebot.v11 import Message
+from nonebot.adapters.onebot.v11 import GroupMessageEvent, Bot, Message
 
-@on_notice().handle()
-async def handle_group_increase(bot: Bot, event: GroupIncreaseNoticeEvent):
-    cq = event.message  # "[CQ:member,type=add,group_id=821404315,user_id=3607918353]"
+@on_message().handle()
+async def handle_group_member_cq(bot: Bot, event: GroupMessageEvent):
+    # 判断是否为 [CQ:member] 消息
+    if not event.raw_message.startswith("[CQ:member"):
+        return
+    # event.raw_message 为 "[CQ:member,type=add,group_id=821404315,user_id=3607918353]"
     await bot.send_group_msg(
         group_id=event.group_id,
-        message=Message(f"{cq}欢迎新成员！")
-    )
-
-@on_notice().handle()
-async def handle_group_decrease(bot: Bot, event: GroupDecreaseNoticeEvent):
-    cq = event.message
-    await bot.send_group_msg(
-        group_id=event.group_id,
-        message=Message(f"{cq}离开了我们")
+        message=Message(f"{event.raw_message}欢迎新成员！")
     )
 ```
 

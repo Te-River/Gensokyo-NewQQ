@@ -71,37 +71,45 @@ func (p *Processors) ProcessGroupMember(data *dto.GroupMemberEvent, eventType st
 
 	switch eventType {
 	case "GROUP_MEMBER_ADD":
-		notice := GroupNoticeEvent{
+		groupMsg := OnebotGroupMessage{
 			GroupID:     groupID,
-			NoticeType:  "group_increase",
-			PostType:    "notice",
+			MessageType: "group",
+			PostType:    "message",
 			SelfID:      selfID,
-			SubType:     "member",
+			SubType:     "normal",
 			Time:        timestamp,
 			UserID:      userID,
+			RawMessage:  memberCQ,
 			Message:     memberCQ,
 			RealUserID:  data.MemberOpenID,
 			RealGroupID: data.GroupOpenID,
-			EventID:     data.EventID,
+			Sender: Sender{
+				UserID: userID,
+			},
 		}
-		outputMap := structToMap(notice)
+		outputMap := structToMap(groupMsg)
+		outputMap["event_id"] = data.EventID // 保留 event_id 供 Gsk 内部使用
 		mylog.Printf("群成员加入: group=%s, user=%s", data.GroupOpenID, data.MemberOpenID)
 		p.BroadcastMessageToAll(outputMap, p.Apiv2, data)
 
 	case "GROUP_MEMBER_REMOVE":
-		notice := GroupNoticeEvent{
+		groupMsg := OnebotGroupMessage{
 			GroupID:     groupID,
-			NoticeType:  "group_decrease",
-			PostType:    "notice",
+			MessageType: "group",
+			PostType:    "message",
 			SelfID:      selfID,
-			SubType:     "member",
+			SubType:     "normal",
 			Time:        timestamp,
 			UserID:      userID,
+			RawMessage:  memberCQ,
 			Message:     memberCQ,
 			RealUserID:  data.MemberOpenID,
 			RealGroupID: data.GroupOpenID,
+			Sender: Sender{
+				UserID: userID,
+			},
 		}
-		outputMap := structToMap(notice)
+		outputMap := structToMap(groupMsg)
 		mylog.Printf("群成员离开: group=%s, user=%s", data.GroupOpenID, data.MemberOpenID)
 		p.BroadcastMessageToAll(outputMap, p.Apiv2, data)
 
