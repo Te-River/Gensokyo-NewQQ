@@ -450,6 +450,9 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			if md != nil {
 				groupMessage.Markdown = md
 				groupMessage.MsgType = 2
+				groupMessage.Content = "" // markdown 消息无需 content 字段
+				// 从 foundItems 中移除 markdown，避免下方循环重复发送
+				delete(foundItems, "markdown")
 				mylog.Printf("[CQ:markdown] 将消息类型切换为 markdown")
 			}
 
