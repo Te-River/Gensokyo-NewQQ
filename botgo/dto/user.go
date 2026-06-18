@@ -9,4 +9,5 @@ type User struct {
 	UnionOpenID      string `json:"union_openid"`       // 特殊关联应用的 openid
 	UnionUserAccount string `json:"union_user_account"` // 机器人关联的用户信息，与union_openid关联的应用是同一个
 	IsYou            bool   `json:"is_you,omitempty"`   // 是否 @ 当前机器人
+	MemberRole       string `json:"member_role,omitempty"` // 群成员身份: owner/member/admin
 }

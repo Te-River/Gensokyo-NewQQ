@@ -244,8 +244,10 @@ func (p *Processors) ProcessGroupMessage(data *dto.WSGroupATMessageData) error {
 			}
 		}
 
-		// 根据isMaster的值为groupMsg的Sender赋值role字段
-		if isMaster {
+		// 优先使用 QQ API 返回的 member_role，兼容 OneBot V11
+		if data.Author != nil && data.Author.MemberRole != "" {
+			groupMsg.Sender.Role = data.Author.MemberRole
+		} else if isMaster {
 			groupMsg.Sender.Role = "owner"
 		} else {
 			groupMsg.Sender.Role = "member"
@@ -336,8 +338,10 @@ func (p *Processors) ProcessGroupMessage(data *dto.WSGroupATMessageData) error {
 				break
 			}
 		}
-		// 根据isMaster的值为groupMsg的Sender赋值role字段
-		if isMaster {
+		// 优先使用 QQ API 返回的 member_role，兼容 OneBot V11
+		if data.Author != nil && data.Author.MemberRole != "" {
+			groupMsgS.Sender.Role = data.Author.MemberRole
+		} else if isMaster {
 			groupMsgS.Sender.Role = "owner"
 		} else {
 			groupMsgS.Sender.Role = "member"
