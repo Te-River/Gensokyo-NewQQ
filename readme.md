@@ -82,7 +82,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 
 - [开始使用](/docs/开始使用.md) — 注册机器人、配置、启动
 - [API 介绍](/docs/api介绍.md) — 支持的 API 列表与扩展
-- [额外 API - get_avatar](/docs/扩展api-get_avatar.md) — 获取用户头像直链
+- [额外 API - get_avatar](/docs/expand_api/扩展api-get_avatar.md) — 获取用户头像直链
 - [Markdown 消息](/docs/文档-markdown消息.md) — Markdown 卡片消息说明
 - [更多文档](/docs/更多文档.md) — 完整文档索引
 
