@@ -416,8 +416,8 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		// 优先发送文本信息
 		if messageText != "" {
 			// 处理出站 [CQ:member] → 自动转换 user_id 并设置 eventID/主动模式
-			var cqGroupID, cqUserID string
-			messageText, cqGroupID, cqUserID = ProcessCQMemberOutbound(messageText, &eventID, message.Params.GroupID.(string), apiv2)
+			var cqGroupID string
+			messageText, cqGroupID, _ = ProcessCQMemberOutbound(messageText, &eventID, message.Params.GroupID.(string), apiv2)
 
 			// 如果 CQ 码中携带了 group_id，用它作为目标群
 			targetGroupID := message.Params.GroupID.(string)
