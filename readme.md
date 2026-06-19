@@ -208,8 +208,8 @@ todo,正在施工...
 
 | 事件类型 | Event            |
 | -------- | ---------------- |
-| 消息事件 | [私聊信息] | | 💬 |
-| 消息事件 | [群消息] | | 🏷️ |
+| 消息事件 | [私聊信息] |
+| 消息事件 | [群消息] |
 | 通知事件 | [群文件上传]     |
 | 通知事件 | [群管理员变动]   |
 | 通知事件 | [群成员减少]     |
@@ -263,11 +263,17 @@ todo,正在施工...
 | CreateMessageHandler       | [频道不at消息]                     |
 | InteractionHandler         | [频道卡片按钮data回调事件] |
 | GroupATMessageEventHandler | [群at消息]                         |
-| GroupMessageEventHandler  | [群普通消息]                       |
+| GroupMessageEventHandler   | [群普通消息]                       |
 | C2CMessageEventHandler     | [群私聊]                           |
 | ThreadEventHandler         | [频道发帖事件]                     |
 | FriendAddEventHandler      | [被添加好友]                       |
-| FriendDelEventHandler      | [被删除好友]                       |                 
+| FriendDelEventHandler      | [被删除好友]                       |
+| GroupAddRobotEventHandler  | [群机器人新增]                     |
+| GroupDelRobotEventHandler  | [群机器人删除]                     |
+| GroupMsgRejectHandler      | [群请求关闭推送]                   |
+| GroupMsgReceiveHandler     | [群请求开启推送]                   |
+| GroupMemberAddEventHandler | [群成员新增]                       |
+| GroupMemberRemoveEventHandler | [群成员移除]                    |
 | C2CMsgRejectHandler        | [用户拒绝(C2C)消息推送]             |
 | C2CMsgReceiveHandler       | [用户同意(C2C)消息推送]             |
 
