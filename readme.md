@@ -95,7 +95,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 
 > 新增了如下 **CQ码**</br>
 > -------
-> **[CQ:avatar]** 头像获取
+> - **[CQ:avatar]** 头像获取
 
 #### 符合 OneBot 标准的 CQ 码
 
@@ -134,10 +134,11 @@ todo,正在施工...
 
 > 新增了如下 **API**</br>
 > -------
-> **get_avatar**（头像直链）  
-> **get_robot_share_link**（分享链接）  
-> **send_private_msg_wakeup**（被动唤醒）  
-> **put_interaction**（按钮回调）  
+> - **get_avatar**（头像直链）
+> - **get_robot_share_link**（分享链接）
+> - **send_private_msg_wakeup**（被动唤醒）
+> - **put_interaction**（按钮回调）
+
 
 #### 符合 OneBot 标准的 API
 
@@ -199,13 +200,13 @@ todo,正在施工...
 
 > 新增了如下 **Event**</br>
 > -------
-> **friend_decrease**（好友删除）
-> **friend_increase**（好友新增）
-> **group_reject**（群推送关闭）
-> **group_receive**（群推送开启）
-> **interaction**（按钮回调）
-> **group_member_add**（群成员新增）
-> **group_member_remove**（群成员移除）
+> - **friend_decrease**（好友删除）
+> - **friend_increase**（好友新增）
+> - **group_reject**（群推送关闭）
+> - **group_receive**（群推送开启）
+> - **interaction**（按钮回调）
+> - **group_member_add**（群成员新增）
+> - **group_member_remove**（群成员移除）
 
 #### 符合 OneBot 标准的 Event（部分 Event 比 OneBot 标准多上报几个字段，不影响使用）
 
@@ -252,13 +253,13 @@ todo,正在施工...
 #### 允许向后端推送的事件类型
 > 新增了如下 **Intent**</br>
 > -------
-> **GroupMessageEventHandler**（非@群消息）事件
-> **GroupAddRobotEventHandler**（群机器人新增）
-> **GroupDelRobotEventHandler**（群机器人删除）
-> **GroupMsgRejectHandler**（群推送关闭）
-> **GroupMsgReceiveHandler**（群推送开启）
-> **GroupMemberAddEventHandler**（群成员新增）
-> **GroupMemberRemoveEventHandler**（群成员移除）
+> - **GroupMessageEventHandler**（非@群消息）事件
+> - **GroupAddRobotEventHandler**（群机器人新增）
+> - **GroupDelRobotEventHandler**（群机器人删除）
+> - **GroupMsgRejectHandler**（群推送关闭）
+> - **GroupMsgReceiveHandler**（群推送开启）
+> - **GroupMemberAddEventHandler**（群成员新增）
+> - **GroupMemberRemoveEventHandler**（群成员移除）
 
 | 事件名称                   | 代表含义                         |
 | --------------------------- | ------------------------------- |
