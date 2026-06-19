@@ -82,8 +82,9 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 
 - [开始使用](/docs/开始使用.md) — 注册机器人、配置、启动
 - [API 介绍](/docs/api/api介绍.md) — 支持的 API 列表与扩展
-- [额外 API - get_avatar](/docs/扩展api/扩展api-get_avatar.md) — 获取用户头像直链
+- [扩展 API](/docs/api/扩展API文档.md) — 扩展 API 文档索引
 - [Markdown 消息](/docs/文档-markdown消息.md) — Markdown 卡片消息说明
+- [扩展 CQ 码](/docs/cq码/扩展CQ码汇总.md) — 本 Fork 新增 CQ 码
 - [更多文档](/docs/更多文档.md) — 完整文档索引
 
 ## CQ 码与 API 支持
@@ -125,6 +126,8 @@ todo,正在施工...
 | [CQ:node]      | [合并转发消息节点]                |
 | [CQ:markdown]  | [markdown卡片收发] |
 | [CQ:avatar]    | [头像获取] |
+| [CQ:member]    | [群成员变动] |
+| [CQ:active]    | [主动推送标记] |
 | [CQ:tts]       | [文本转语音]                      |
 
 
