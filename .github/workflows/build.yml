@@ -1,6 +1,6 @@
 name: Build Gensokyo (Multi-Platform)
 
-run-name: Build Gensokyo-${{ github.sha }}-upx-${{ inputs.upx_level || '7' }}
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Build Gensokyo-{0}-upx-{1}', github.sha, inputs.upx_level) || '' }}
 
 on:
   push:
