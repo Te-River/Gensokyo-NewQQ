@@ -85,7 +85,6 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 - [扩展 API](/docs/api/扩展API文档.md) — 扩展 API 文档索引
 - [Markdown 消息](/docs/文档-markdown消息.md) — Markdown 卡片消息说明
 - [扩展 CQ 码](/docs/cq码/扩展CQ码汇总.md) — 本 Fork 新增 CQ 码
-- [\[CQ:member\] 群成员变动](/docs/cq码/扩展CQ码/扩展cq码-cq-member.md) — 入群/退群双向流程
 - [更多文档](/docs/更多文档.md) — 完整文档索引
 
 ## CQ 码与 API 支持
