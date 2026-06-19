@@ -445,7 +445,6 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			}
 
 			// message.Params.GroupID 已在前面转换为真实 OpenID，直接使用
-			targetGroupID := message.Params.GroupID.(string)
 
 			msgseq := echo.GetMappingSeq(messageID)
 			echo.AddMappingSeq(messageID, msgseq+1)
