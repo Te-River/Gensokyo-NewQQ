@@ -53,7 +53,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 
 交流群：**196173384**
 
-## 快速开�?
+## 快速开始
 
 1. 前往 [Releases](https://github.com/hoshinonyaruko/gensokyo/releases) 下载对应系统的二进制文件
 2. 参考[开始使用](/docs/开始使用.md) 创建机器人并配置
@@ -99,7 +99,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 
 #### 符合 OneBot 标准的 CQ 码
 
-| CQ �?       | 功能                        |
+| CQ 码 | 功能 |
 | ------------ | --------------------------- |
 | [CQ:face]    | [QQ 表情]                   |
 | [CQ:record]  | [语音]                      |
@@ -115,7 +115,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 
 todo,正在施工...
 
-#### 拓展 CQ 码及�?OneBot 标准有略微差异的 CQ �?
+#### 拓展 CQ 码及与 OneBot 标准有略微差异的 CQ 码
 
 | 拓展 CQ 码 | 功能 |
 | -------------- | --------------------------------- |
@@ -189,7 +189,7 @@ todo,正在施工...
 | /get_group_root_files       | [获取群根目录文件列表] |
 | /get_group_files_by_folder  | [获取群子目录文件列表] |
 | /get_group_file_url         | [获取群文件资源链接]   |
-| /get_status�?                | [获取状态]             |
+| /get_status | [获取状态] |
 
 
 </details>
@@ -204,12 +204,12 @@ todo,正在施工...
 > **interaction**（按钮回调）
 > **c2c_msg_reject/c2c_msg_receive**（C2C推送开关）
 
-#### 符合 OneBot 标准�?Event（部�?Event �?OneBot 标准多上报几个字段，不影响使用）
+#### 符合 OneBot 标准的 Event（部分 Event 比 OneBot 标准多上报几个字段，不影响使用）
 
 | 事件类型 | Event            |
 | -------- | ---------------- |
-| 消息事件 | [私聊信息]�?      |
-| 消息事件 | [群消息]�?        |
+| 消息事件 | [私聊信息] | | 💬 |
+| 消息事件 | [群消息] | | 🏷️ |
 | 通知事件 | [群文件上传]     |
 | 通知事件 | [群管理员变动]   |
 | 通知事件 | [群成员减少]     |
@@ -244,10 +244,10 @@ todo,正在施工...
 
 
 <details>
-<summary>已实�?Intent</summary>
+<summary>已实现 Intent</summary>
 
 #### 允许向后端推送的事件类型
-> 新增了如�?**Intent**</br>
+> 新增了如下 **Intent**</br>
 > -------
 > **GroupMessageEventHandler**（非@群消息）事件
 
@@ -278,23 +278,23 @@ todo,正在施工...
 
 以下 ISSUE 会被直接关闭
 
-- 提交 BUG 不使�?Template
+- 提交 BUG 不使用 Template
 - 询问已知问题
-- 提问找不到重�?
+- 提问找不到重点
 - 重复提问
 
-> 请注�? 开发者并没有义务回复您的问题. 您应该具备基本的提问技巧�? 
+> 请注意：开发者并没有义务回复您的问题。您应该具备基本的提问技巧。 
 > 有关如何提问，请阅读[《提问的智慧》](https://github.com/ryanhanwu/How-To-Ask-Questions-The-Smart-Way/blob/main/README-zh_CN.md)
 
 ## 性能
 
-10mb内存占用 端口错开可多开 稳定运行无报�?
+10mb内存占用 端口错开可多开 稳定运行无报错
 
 ## 特别鸣谢
 
-- [`mnixry/nonebot-plugin-gocqhttp`](https://github.com/mnixry/nonebot-plugin-gocqhttp/): 本项目采用了mnixry编写的前�?并实现了与它对应�?基于qq官方api的后端api.
-- 特别鸣谢[`dk 盾`](https://www.dkdun.cn/),友情赞助服务器资�?
+- [`mnixry/nonebot-plugin-gocqhttp`](https://github.com/mnixry/nonebot-plugin-gocqhttp/): 本项目采用了mnixry编写的前端并实现了与它对应的基于qq官方api的后端api.
+- 特别鸣谢[`dk 盾`](https://www.dkdun.cn/),友情赞助服务器资源
 
 ## 引用
 
-- [`tencent-connect/botgo`](https://github.com/tencent-connect/botgo): 本项目引用了此项�?并做了一些改�?
+- [`tencent-connect/botgo`](https://github.com/tencent-connect/botgo): 本项目引用了此项目并做了一些改动
