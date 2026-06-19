@@ -61,22 +61,22 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 
 ## 功能亮点
 
-- ✨ 兼容 OneBot V11 的 HTTP API、反向 HTTP POST、正向 WebSocket、反向 WebSocket
-- ✨ 群聊非@消息支持（GroupMessageEventHandler）
-- ✨ 群聊消息自动剔除 @机器人字符
-- ✨ 非自身 @ 自动转为 `[CQ:at,qq=虚拟ID]` 格式
-- ✨ 按钮权限中虚拟数字 ID 自动转化为 QQ 官方 OpenID
-- ✨ 扩展 API：`get_avatar`（获取头像直链）
-- ✨ 全场景 event_id 存储，支持被动消息
-- ✨ 消息事件新增 `to_me` 字段，标识是否 @ 了机器人
-- ✨ 多 WS 地址连接
-- ✨ 频道虚拟成群事件、私信虚拟成频道事件
-- ✨ WebUI 管理界面
-- ✨ 指令黑白名单、URL 自动转换
-- ✨ 可自定义图片压缩/图床服务
-- ✨ 支持文字、图片、语音、视频、Markdown 等多种消息类型
-- ✨ 主动信息失败自动转被动
-- ✨ 完善的重连机制
+-  兼容 OneBot V11 的 HTTP API、反向 HTTP POST、正向 WebSocket、反向 WebSocket
+-  群聊非@消息支持（GroupMessageEventHandler）
+-  群聊消息自动剔除 @机器人字符
+-  非自身 @ 自动转为 `[CQ:at,qq=虚拟ID]` 格式
+-  按钮权限中虚拟数字 ID 自动转化为 QQ 官方 OpenID
+-  扩展 API：`get_avatar`（获取头像直链）
+-  全场景 event_id 存储，支持被动消息
+-  消息事件新增 `to_me` 字段，标识是否 @ 了机器人
+-  多 WS 地址连接
+-  频道虚拟成群事件、私信虚拟成频道事件
+-  WebUI 管理界面
+-  指令黑白名单、URL 自动转换
+-  可自定义图片压缩/图床服务
+-  支持文字、图片、语音、视频、Markdown 等多种消息类型
+-  主动信息失败自动转被动
+-  完善的重连机制
 
 ## 文档
 
