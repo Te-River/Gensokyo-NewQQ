@@ -409,3 +409,43 @@ func newDBLookup(virtualID string) (string, bool) {
 	}
 	return "", false
 }
+
+// newDBMsgStore 由旧 StoreCachev2 调用，双写到新 msg DB
+func newDBMsgStore(realMsgID string, virtualID int64) {
+	initNewDBs()
+	key := uinKey(realMsgID)
+	revPrefix := uinRowKey("")
+
+	_ = msgDB.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(MsgBucketName))
+		rowBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(rowBytes, uint64(virtualID))
+		if b.Get([]byte(key)) == nil {
+			b.Put([]byte(key), rowBytes)
+			b.Put([]byte(revPrefix+strconv.FormatInt(virtualID, 10)), []byte(key))
+		}
+		return nil
+	})
+}
+
+// newDBMsgLookup 由旧 RetrieveRowByCachev2 调用，优先查新 msg DB
+func newDBMsgLookup(virtualID string) (string, bool) {
+	initNewDBs()
+	revKey := uinRowKey(virtualID)
+	var result string
+
+	err := msgDB.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(MsgBucketName))
+		v := b.Get([]byte(revKey))
+		if v == nil {
+			return ErrKeyNotFound
+		}
+		result = stripUinPrefix(string(v))
+		return nil
+	})
+
+	if err == nil && result != "" {
+		return result, true
+	}
+	return "", false
+}

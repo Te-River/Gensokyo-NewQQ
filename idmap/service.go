@@ -685,7 +685,11 @@ func StoreCachev2(id string) (int64, error) {
 	}
 
 	// 如果lotus为假,就保持原来的store的方法
-	return StoreCache(id)
+	result, err := StoreCache(id)
+	if err == nil {
+		newDBMsgStore(id, result)
+	}
+	return result, err
 }
 
 // 群号 然后 用户号
@@ -979,6 +983,10 @@ func RetrieveRowByCachev2(rowid string) (string, error) {
 	}
 
 	// 如果lotus为假,就保持原来的RetrieveRowByIDv2的方法
+	// 惰性迁移：优先查新 msg DB
+	if id, ok := newDBMsgLookup(rowid); ok {
+		return id, nil
+	}
 	return RetrieveRowByCache(rowid)
 }
 
