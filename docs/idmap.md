@@ -2,51 +2,123 @@
 
 ## 架构
 
-三库分离设计，避免单个 DB 膨胀导致全部映射丢失。
+三库分离设计，各自独立的事务和文件锁，互不干扰。
 
-| 文件 | 用途 | 特性 |
+| 文件 | 用途 | 特点 |
 |------|------|------|
-| `idmap-identity.db` | OpenID ↔ 虚拟数字 ID | **永久数据**，不会膨胀 |
+| `idmap-identity.db` | OpenID ↔ 虚拟数字 ID | **永久数据**，固定大小，不膨胀 |
 | `idmap-msg.db` | 真实 message_id ↔ 虚拟 message_id | **临时缓存**，可安全删除 |
-| `idmap.db`（旧） | 旧版单库（只读） | 惰性迁移，数据搬完可删除 |
+| `idmap.db`（旧） | 旧版单库 | 迁移源，只读，迁移完成后可删除 |
 
-## 新 API
+## 核心逻辑
 
-### 身份映射（identity DB）
+### 存储引擎：bbolt（嵌入式 KV）
 
-```go
-idmap.StoreGroupID(groupOpenID string) (int64, error)
-idmap.StoreUserID(userOpenID string) (int64, error)
-idmap.RetrieveGroupID(virtualID string) (string, error)
-idmap.RetrieveUserID(virtualID string) (string, error)
-```
+- 每个 `db.Update()` 是一个**原子事务**，要么全部写入，要么全部回滚
+- 写入使用 Write-Ahead Log（WAL），断电后自动恢复
+- 读取使用 MVCC 快照，读不会阻塞写，写不会阻塞读
+- 三个 DB 各有独立的文件锁，互不影响
 
-### 消息缓存（msg DB）
+### 写入路径
 
 ```go
-idmap.StoreMsgID(realMsgID string) (int64, error)
-idmap.RetrieveMsgID(virtualID string) (string, error)
-idmap.CleanMsgDB() error  // 清空消息缓存
+// 新数据（双写）
+StoreIDv2("OpenID") → 123
+  ├── 旧库: ids 桶写入 key=OpenID, value=123 ✅
+  └── 新库: identity DB 写入 key=OpenID, value=123 ✅
+
+// 后续使用专用函数
+StoreGroupID("GroupOpenID") → 123     // 仅写 identity DB
+StoreUserID("UserOpenID")   → 456     // 仅写 identity DB
+StoreMsgID("realMsgID")     → 789     // 仅写 msg DB
 ```
 
-### 旧 API 兼容
+> **关键保证**：同一条映射**一旦创建就不会修改**。同一个 OpenID 永远对应同一个虚拟 ID。因此不存在"双写冲突"。
 
-`StoreIDv2` / `RetrieveRowByIDv2` / `StoreCachev2` / `RetrieveRowByCachev2` 仍然可用，内部自动**双写新库 + 惰性迁移**。
-
-## 惰性迁移
+### 读取路径
 
 ```
-启动时检测到旧 idmap.db？
-  ├── 写入操作 → 同时写旧库和新库
-  ├── 读取操作 → 优先查新库
-  │     ├── 新库有 → 直接返回
-  │     └── 新库无 → 查旧库 → 写回新库 → 返回
-  └── 旧库数据全部搬完后，可直接删除 idmap.db
+读取 "123" 对应的 OpenID
+  ├── 优先查新 identity DB → 有则直接返回（微秒级）
+  └── 新库没有 → 回退查旧 idmap.db（不写回，不阻塞）
+```
+
+读取路径**没有任何写操作**，绝不会修改任何数据库。
+
+## 后台静默迁移
+
+### 迁移流程
+
+```
+启动 Gensokyo
+  ├── 检测到旧 idmap.db 存在？
+  │     ├── 检查新 identity DB 有无 _migration_complete_v1 标记
+  │     │     ├── 有 → 跳过迁移（断点续传）
+  │     │     └── 无 → 启动后台迁移协程
+  │     └── 无旧库 → 正常使用新库
+  │
+  ├── 后台迁移开始（不影响热路径请求处理）
+  │     ├── 分批扫描旧 ids 桶（每批 100 条）
+  │     │     ├── 跳过已存在于新库的条目（不覆盖）
+  │     │     └── 不存在的条目写入新库
+  │     ├── 分批扫描旧 cache 桶（同上）
+  │     └── 每批之间暂停 10ms，避免 CPU 争抢
+  │
+  ├── 迁移完成后 → 数据校验
+  │     ├── 逐条对比旧库 vs 新库（key 和 value 完全一致）
+  │     ├── 校验通过 → 写入完成标记 → 日志提示安全删除旧库
+  │     └── 校验失败 → 自动修复
+  │           ├── 扫描旧库所有条目
+  │           ├── 对新库中缺失或不一致的条目用旧库覆盖
+  │           └── 修复后再次校验 → 通过则标记完成
+  │
+  └── 正常使用（新旧库并行）
+```
+
+### 断电安全
+
+| 断电时间点 | 影响 | 恢复 |
+|-----------|------|------|
+| 旧库 `StoreID` 成功，新库 `newDBStore` 未执行 | 新库缺一条映射 | 热路径回退读旧库，不影响功能 |
+| 旧库 `StoreID` 成功，新库 `newDBStore` 执行中 | bbolt WAL 原子性，要么全写要么全不写 | 同上 |
+| 后台迁移批次写入中 | 该批次未提交，不丢失不损坏 | 重启后跳过已迁移条目，继续 |
+| 校验完成，marker 写入中 | 标记未写入，重启后重新校验 | 校验通过后再次写标记 |
+| 新 DB 写入完成，旧 DB 未写入 | 不存在此场景（新 DB 写入在旧 DB 之后） | — |
+
+### 关键设计原则
+
+1. **映射不可变**：`OpenID → 123` 一旦建立，永远不变。新库旧库保证一致。
+2. **热路径只读**：读取操作从不写入任何数据库，不会因为迁移而变慢。
+3. **新库优先**：读先查新库，新库没有再查旧库。新库始终是权威来源。
+4. **写入不覆盖**：`newDBStore` 检查 `b.Get(key) == nil` 才写入，已存在的绝不覆盖。
+5. **旧库只读不写**：迁移完成后不再写入旧库，旧库仅作为迁移源和回退读的来源。
+
+### 迁移与 HTTP 操作的关系
+
+```
+迁移期间通过 HTTP API 修改数据：
+  HTTP → StoreIDv2 → 双写新旧库 → 新库已有该 key
+  后台迁移扫到该 key → 新库已有 → 跳过（不覆盖）
+  → HTTP 的改动被保留 ✅
+
+迁移完成后：
+  不会再有校验和修复，所有操作直接作用在新库
+  → 对旧库的操作无效（旧库不再被读取）
 ```
 
 ## 故障恢复
 
-| 故障 | 恢复方式 |
-|------|---------|
-| `idmap-msg.db` 损坏/膨胀 | 直接删除，重启自动重建 |
-| `idmap-identity.db` 损坏 | 停止后删除，保留 `idmap.db` 重启，惰性迁移自动恢复 |
+| 故障 | 影响 | 恢复方式 |
+|------|------|---------|
+| `idmap-msg.db` 损坏/膨胀 | 消息 ID 回执数字可能重复 | 停止 → 删除文件 → 重启（自动重建） |
+| `idmap-identity.db` 损坏 | 群/用户映射丢失 | 停止 → 删除文件 → 保留 `idmap.db` → 重启（后台迁移自动恢复）|
+| 两个新库都坏了 | 全部映射丢失 | 停止 → 删除两个新库 → 保留 `idmap.db` → 重启（完整迁移）|
+| 旧 `idmap.db` 丢失 | 迁移中断，新库中已有数据 | 不影响，已迁移的数据继续可用 |
+
+> **建议**：定期备份 `idmap-identity.db`，这是永久数据，丢失后即使有旧库也要重新迁移。
+
+## 参考
+
+- 实现文件：`idmap/service.go`、`idmap/new_service.go`
+- 旧 API → 新 API 映射：`StoreIDv2` → `StoreGroupID`/`StoreUserID`，`StoreCachev2` → `StoreMsgID`
+
