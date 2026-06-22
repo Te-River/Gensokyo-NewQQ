@@ -42,19 +42,11 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "编译成功: $output" -ForegroundColor Green
 
-# UPX 压缩
+# UPX 压缩（固定等级 7）
 Write-Host "[3/3] UPX 压缩..." -ForegroundColor Yellow
 $upx = Get-Command "upx" -ErrorAction SilentlyContinue
 if ($upx) {
-    if ($upxLevel -eq "0") {
-        Write-Host "跳过 UPX 压缩" -ForegroundColor Gray
-    } elseif ($upxLevel -eq "ultra-brute") {
-        & $upx.Source --ultra-brute $output
-    } elseif ($upxLevel -eq "best-lzma") {
-        & $upx.Source --best --lzma $output
-    } else {
-        & $upx.Source "-$upxLevel" $output
-    }
+    & $upx.Source "-7" $output
     Write-Host "UPX 完成" -ForegroundColor Green
 } else {
     Write-Host "UPX 未安装，跳过压缩。安装: winget install upx" -ForegroundColor Gray

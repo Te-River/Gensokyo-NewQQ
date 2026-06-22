@@ -1,7 +1,5 @@
 name: Build Gensokyo (Multi-Platform)
 
-run-name: ${{ github.event_name == 'workflow_dispatch' && format('Build Gensokyo-{0}-upx-{1}', github.sha, inputs.upx_level) || '' }}
-
 on:
   push:
     branches: [ "main" ]
@@ -13,24 +11,6 @@ on:
       - 'config.yml'
       - '.github/workflows/build.yml'
   workflow_dispatch:
-    inputs:
-      upx_level:
-        description: 'UPX compression level'
-        type: choice
-        options:
-          - '0'
-          - '1'
-          - '2'
-          - '3'
-          - '4'
-          - '5'
-          - '6'
-          - '7'
-          - '8'
-          - '9'
-          - best-lzma
-          - ultra-brute
-        default: '7'
 
 
 jobs:
@@ -136,16 +116,7 @@ jobs:
 
       - name: Compress with UPX
         run: |
-          UPX_LVL="${{ github.event.inputs.upx_level || '7' }}"
-          if [ "$UPX_LVL" = "0" ]; then
-            echo "UPX compression disabled (level=0)"
-          elif [ "$UPX_LVL" = "ultra-brute" ]; then
-            upx --ultra-brute gensokyo-${{ matrix.os }}-${{ matrix.goarch }}${{ matrix.ext }}
-          elif [ "$UPX_LVL" = "best-lzma" ]; then
-            upx --best --lzma gensokyo-${{ matrix.os }}-${{ matrix.goarch }}${{ matrix.ext }}
-          else
-            upx -"$UPX_LVL" gensokyo-${{ matrix.os }}-${{ matrix.goarch }}${{ matrix.ext }}
-          fi
+          upx -7 gensokyo-${{ matrix.os }}-${{ matrix.goarch }}${{ matrix.ext }}
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
