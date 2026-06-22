@@ -296,6 +296,10 @@ func main() {
 			// 确保p包含conf
 			p = Processor.NewProcessorV2(api, apiV2, &conf.Settings)
 
+			// 同步旧库计数器到新库（阻塞），保证后续 storeIdentity 不会分配冲突的虚拟 ID
+			// 计数器就绪后才连接 QQ 后端
+			idmap.StartMigration()
+
 			// 启动session manager以管理websocket连接
 			// 指定需要启动的分片数为 2 的话可以手动修改 wsInfo
 			if conf.Settings.ShardCount == 1 {
@@ -325,7 +329,7 @@ func main() {
 				log.Printf("使用%d个分片,当前是第%d个分片,比如：[0,4]，代表分为四个片，当前链接是第 0 个片,业务稍后应该继续多开gensokyo,可在不同的服务器和ip地址 shard 为[1,4],[2,4],[3,4]的链接，才能完整接收和处理事件。\n", conf.Settings.ShardCount, conf.Settings.ShardID)
 			}
 
-			// 启动多个WebSocket客户端的逻辑
+			// 启动多个WebSocket客户端的逻辑（OnebotV11 反向 WS 适配器）
 			if !allEmpty(conf.Settings.WsAddress) {
 				wsClientChan := make(chan *wsclient.WebSocketClient, len(conf.Settings.WsAddress))
 				errorChan := make(chan error, len(conf.Settings.WsAddress))

@@ -348,7 +348,7 @@ func StoreID(id string) (int64, error) {
 					return err
 				}
 				// 检查新生成的行号是否重复
-				rowKey := fmt.Sprintf("row-%d", newRow)
+				rowKey := uinRowKey(strconv.FormatInt(newRow, 10))
 				if b.Get([]byte(rowKey)) == nil {
 					// 找到了一个唯一的行号，可以跳出循环
 					break
@@ -413,7 +413,7 @@ func StoreCache(id string) (int64, error) {
 				if err != nil {
 					return err
 				}
-				rowKey := fmt.Sprintf("row-%d", newRow)
+				rowKey := uinRowKey(strconv.FormatInt(newRow, 10))
 				if b.Get([]byte(rowKey)) == nil {
 					break
 				}
@@ -630,7 +630,11 @@ func StoreIDv2(id string) (int64, error) {
 		return int64(rowValue), nil
 	}
 
-	// 如果lotus为假,就保持原来的store的方法
+	// 迁移完成后直接走新库，不再写旧库
+	if isMigrationComplete() {
+		return storeIdentity(id)
+	}
+	// 迁移未完成：保持双写
 	result, err := StoreID(id)
 	if err == nil && len(id) == 32 {
 		newDBStore(id, result)
@@ -684,7 +688,11 @@ func StoreCachev2(id string) (int64, error) {
 		return int64(rowValue), nil
 	}
 
-	// 如果lotus为假,就保持原来的store的方法
+	// 迁移完成后直接走新库，不再写旧库
+	if isMigrationComplete() {
+		return StoreMsgID(id)
+	}
+	// 迁移未完成：保持双写
 	result, err := StoreCache(id)
 	if err == nil {
 		newDBMsgStore(id, result)
@@ -990,8 +998,8 @@ func RetrieveRowByCachev2(rowid string) (string, error) {
 
 // 根据a 以b为类别 储存c
 func WriteConfig(sectionName, keyName, value string) error {
-	return db.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(ConfigBucket)) // 直接获取bucket
+	return configAndUserInfoDB().Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(ConfigBucket))
 		if b == nil {
 			mylog.Printf("Bucket %s not found", ConfigBucket)
 			return fmt.Errorf("bucket %s not found", ConfigBucket)
@@ -1003,7 +1011,6 @@ func WriteConfig(sectionName, keyName, value string) error {
 			mylog.Printf("Error putting data into bucket with key %s: %v", key, err)
 			return fmt.Errorf("failed to put data into bucket with key %s: %w", key, err)
 		}
-		//log.Printf("Data saved successfully with key %s, value %s", key, value)
 		return nil
 	})
 }
@@ -1059,7 +1066,7 @@ func WriteConfigv2(sectionName, keyName, value string) error {
 // 根据a和b取出c
 func ReadConfig(sectionName, keyName string) (string, error) {
 	var result string
-	err := db.View(func(tx *bbolt.Tx) error {
+	err := configAndUserInfoDB().View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(ConfigBucket))
 		if b == nil {
 			return fmt.Errorf("bucket not found")
@@ -1080,7 +1087,7 @@ func ReadConfig(sectionName, keyName string) (string, error) {
 
 // DeleteConfig根据sectionName和keyName删除指定的键值对
 func DeleteConfig(sectionName, keyName string) error {
-	return db.Update(func(tx *bbolt.Tx) error {
+	return configAndUserInfoDB().Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(ConfigBucket))
 		if b == nil {
 			return fmt.Errorf("bucket %s does not exist", ConfigBucket)
@@ -1728,7 +1735,7 @@ func UpdateVirtualValuev2Pro(oldVirtualValue1, newVirtualValue1, oldVirtualValue
 func FindKeysBySubAndType(sub string, typeSuffix string) ([]string, error) {
 	var ids []string
 
-	err := db.View(func(tx *bbolt.Tx) error {
+	err := configAndUserInfoDB().View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(ConfigBucket))
 		if b == nil {
 			return fmt.Errorf("bucket %s not found", ConfigBucket)
@@ -1905,7 +1912,7 @@ func UpdateKeysWithNewID(id, newID string) error {
 
 // StoreUserInfo 存储用户信息
 func StoreUserInfo(rawID string, userInfo structs.FriendData) error {
-	return db.Update(func(tx *bbolt.Tx) error {
+	return configAndUserInfoDB().Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(UserInfoBucket))
 		key := fmt.Sprintf("%s:%s", rawID, userInfo.UserID) // 创建复合键
 		if v := b.Get([]byte(key)); v != nil {
@@ -1929,7 +1936,7 @@ func StoreUserInfo(rawID string, userInfo structs.FriendData) error {
 // ListAllUsers 返回数据库中所有用户的信息
 func ListAllUsers() ([]structs.FriendData, error) {
 	var users []structs.FriendData
-	err := db.View(func(tx *bbolt.Tx) error {
+	err := configAndUserInfoDB().View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(UserInfoBucket))
 		if b == nil {
 			return fmt.Errorf("bucket %s not found", UserInfoBucket)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hoshinonyaruko/gensokyo/config"
@@ -56,6 +57,8 @@ func initNewDBs() {
 			bucket string
 		}{
 			{identityDB, IdentityDBName, IdentityBucketName},
+			{identityDB, IdentityDBName, ConfigBucket},
+			{identityDB, IdentityDBName, UserInfoBucket},
 			{msgDB, MsgDBName, MsgBucketName},
 		} {
 			err = d.db.Update(func(tx *bbolt.Tx) error {
@@ -69,12 +72,64 @@ func initNewDBs() {
 
 		mylog.Printf("新 idmap 数据库已就绪: %s, %s", IdentityDBName, MsgDBName)
 
-		// 检测旧 DB，启动后台惰性迁移
-		if hasOldDB() {
-			mylog.Printf("检测到旧 idmap.db，启动后台静默迁移")
-			go backgroundMigration()
-		}
+		// 不在此处启动后台迁移（由 StartMigration 统一管理）
 	})
+}
+
+// StartMigration 显式启动后台数据库迁移
+// 先同步计数器（阻塞），再启动后台数据迁移（非阻塞）
+// 调用返回后计数器已就绪，可安全连接 QQ 后端
+func StartMigration() {
+	initNewDBs()
+	if hasOldDB() {
+		mylog.Printf("========== idmap 数据库迁移 ==========")
+		mylog.Printf("检测到旧 idmap.db，将自动迁移数据到新库:")
+		mylog.Printf("  ├─ %s  ── 永久身份映射（群/用户 OpenID ↔ 虚拟 ID）", IdentityDBName)
+		mylog.Printf("  └─ %s  ── 临时消息 ID 缓存", MsgDBName)
+		mylog.Printf("=======================================")
+		syncMigrationCounters()
+		go backgroundMigration()
+	}
+}
+
+// syncMigrationCounters 同步复制旧库计数器到新库（阻塞）
+// 必须在连接 QQ 后端之前完成，防止 storeIdentity 分配的虚拟 ID 与迁移条目冲突
+func syncMigrationCounters() {
+	for _, spec := range []struct {
+		oldBucket  string
+		newBucket  string
+		newDB      *bbolt.DB
+		counterKey string
+		label      string
+	}{
+		{BucketName, IdentityBucketName, identityDB, IdentityCounterKey, "identity"},
+		{CacheBucketName, MsgBucketName, msgDB, MsgCounterKey, "msg"},
+	} {
+		var counterVal []byte
+		_ = db.View(func(tx *bbolt.Tx) error {
+			b := tx.Bucket([]byte(spec.oldBucket))
+			if b != nil {
+				v := b.Get([]byte(spec.counterKey))
+				if v != nil {
+					counterVal = make([]byte, len(v))
+					copy(counterVal, v)
+				}
+			}
+			return nil
+		})
+		if counterVal == nil {
+			mylog.Printf("[idmap] %s 旧库无计数器，跳过", spec.label)
+			continue
+		}
+		_ = spec.newDB.Update(func(tx *bbolt.Tx) error {
+			b := tx.Bucket([]byte(spec.newBucket))
+			if b.Get([]byte(spec.counterKey)) == nil {
+				b.Put([]byte(spec.counterKey), counterVal)
+				mylog.Printf("[idmap] %s 计数器同步完成: %d", spec.label, binary.BigEndian.Uint64(counterVal))
+			}
+			return nil
+		})
+	}
 }
 
 // hasOldDB 检查旧 idmap.db 是否存在
@@ -123,7 +178,7 @@ func storeIdentity(openID string) (int64, error) {
 				if err != nil {
 					return err
 				}
-				rowKey := fmt.Sprintf("row-%d", newRow)
+				rowKey := uinRowKey(strconv.FormatInt(newRow, 10))
 				if b.Get([]byte(rowKey)) == nil {
 					break
 				}
@@ -224,13 +279,13 @@ func writeBackIdentity(virtualID string, openID string) {
 	})
 }
 
-// dualWriteToOldDB 双写到旧库（兼容期）
+// dualWriteToOldDB 双写到旧库（兼容期，迁移完成后跳过）
 func dualWriteToOldDB(key, openID string, rowID int64) {
-	if !hasOldDB() {
+	if !hasOldDB() || isMigrationComplete() {
 		return
 	}
 
-	revKey := "row-" + strconv.FormatInt(rowID, 10)
+	revKey := uinRowKey(strconv.FormatInt(rowID, 10))
 	rowBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(rowBytes, uint64(rowID))
 
@@ -252,14 +307,13 @@ func dualWriteToOldDB(key, openID string, rowID int64) {
 // 后台静默迁移
 // ---------------------------------------------------------------------------
 
-var migrationStarted bool
+var migrationStarted int32 // atomic: 0=未启动, 1=已启动
 
 // backgroundMigration 后台扫描旧库，将数据分批搬入新库
 func backgroundMigration() {
-	if migrationStarted {
+	if !atomic.CompareAndSwapInt32(&migrationStarted, 0, 1) {
 		return
 	}
-	migrationStarted = true
 
 	go func() {
 		// 检查是否已全部迁移完成
@@ -268,21 +322,35 @@ func backgroundMigration() {
 			return
 		}
 
+		mylog.Printf("[idmap] ──── 第一阶段：迁移身份映射（群/用户） ────")
 		// 先迁移 identity（ids 桶）
 		migrateBucket(BucketName, IdentityBucketName, identityDB, "identity")
+
+		mylog.Printf("[idmap] ──── 第二阶段：迁移消息缓存 ────")
 		// 再迁移消息缓存（cache 桶）
 		migrateBucket(CacheBucketName, MsgBucketName, msgDB, "msg")
 
+		mylog.Printf("[idmap] ──── 第三阶段：迁移配置与应用数据 ────")
+		migrateBucket(ConfigBucket, ConfigBucket, identityDB, "config")
+		migrateBucket(UserInfoBucket, UserInfoBucket, identityDB, "UserInfo")
+
+		mylog.Printf("[idmap] ──── 第四阶段：数据完整性校验 ────")
 		// 校验
 		if verifyMigration() {
-			mylog.Printf("[idmap] 数据校验通过，旧 idmap.db 数据已全部安全迁移")
+			mylog.Printf("[idmap] ✅ 数据校验通过，旧 idmap.db 数据已全部安全迁移")
 			markMigrationComplete()
 			finalizeOldDB()
 		} else {
-			mylog.Printf("[idmap] 数据校验失败，自动修复中...")
+			mylog.Printf("[idmap] ❌ 数据校验失败，自动修复中...")
 			repairMigration()
 		}
 	}()
+}
+
+// entry 表示旧库中一条待迁移的键值对
+type entry struct {
+	key   string
+	value string
 }
 
 // migrateBucket 将旧库一个桶中的数据逐条搬入新库
@@ -291,20 +359,70 @@ func migrateBucket(oldBucket, newBucket string, newDB *bbolt.DB, label string) {
 		return
 	}
 
-	type entry struct {
-		key   string
-		value string
+	mylog.Printf("[idmap] 开始迁移 %s ...", label)
+
+	// === 第零步：先同步计数器，防止 storeIdentity 与迁移条目 ID 碰撞 ===
+	// 迁移期间新写入可能并发发生，如果新库 counter 为 0 而迁移条目 ID 已有 1~N，
+	// storeIdentity 会分配冲突的虚拟 ID，导致反向映射被覆盖丢失。
+	var oldCounterVal []byte
+	_ = db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(oldBucket))
+		if b != nil {
+			counterKey := IdentityCounterKey
+			if oldBucket == CacheBucketName {
+				counterKey = MsgCounterKey
+			}
+			v := b.Get([]byte(counterKey))
+			if v != nil {
+				oldCounterVal = make([]byte, len(v))
+				copy(oldCounterVal, v)
+			}
+		}
+		return nil
+	})
+	if oldCounterVal != nil {
+		_ = newDB.Update(func(tx *bbolt.Tx) error {
+			b := tx.Bucket([]byte(newBucket))
+			counterKey := IdentityCounterKey
+			if newBucket == MsgBucketName {
+				counterKey = MsgCounterKey
+			}
+			// 只在没有计数器时才写入（幂等）
+			if b.Get([]byte(counterKey)) == nil {
+				b.Put([]byte(counterKey), oldCounterVal)
+				mylog.Printf("[idmap] %s 计数器已同步: %d", label, binary.BigEndian.Uint64(oldCounterVal))
+			}
+			return nil
+		})
 	}
 
 	batchSize := 100
 	total := 0
+	lastLog := time.Now()
+	var cursorKey []byte // 局部游标，每个桶独立
+
+	// 先统计旧库总条数（粗略估算）
+	var estimatedTotal int
+	_ = db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(oldBucket))
+		if b != nil {
+			stats := b.Stats()
+			estimatedTotal = stats.KeyN
+		}
+		return nil
+	})
+	if estimatedTotal > 0 {
+		mylog.Printf("[idmap] %s 旧库约 %d 条数据，开始分批迁移（每批 %d 条）", label, estimatedTotal, batchSize)
+	} else {
+		mylog.Printf("[idmap] %s 旧库数据统计中...", label)
+	}
 
 	for {
-		// 从旧库读一批
-		batch, done, err := readOldDBBatch(oldBucket, batchSize)
+		// 从旧库读一批（传入局部游标指针）
+		batch, done, err := readOldDBBatch(oldBucket, &cursorKey, batchSize)
 		if err != nil || len(batch) == 0 {
 			if done {
-				mylog.Printf("[idmap] 迁移 %s 完成，共 %d 条", label, total)
+				mylog.Printf("[idmap] ✅ %s 迁移完成，共 %d 条", label, total)
 			}
 			return
 		}
@@ -314,22 +432,31 @@ func migrateBucket(oldBucket, newBucket string, newDB *bbolt.DB, label string) {
 		total += written
 
 		if done {
-			mylog.Printf("[idmap] 迁移 %s 完成，共 %d 条", label, total)
+			mylog.Printf("[idmap] ✅ %s 迁移完成，共 %d 条", label, total)
 			return
 		}
 
-		// 每批之间稍作暂停，避免 CPU 争抢
-		if total%(batchSize*10) == 0 {
-			mylog.Printf("[idmap] 迁移 %s 进度: %d 条", label, total)
+		// 每 2 秒或每 500 条打印一次进度
+		if time.Since(lastLog) > 2*time.Second || total%(batchSize*5) == 0 {
+			pct := ""
+			if estimatedTotal > 0 {
+				p := total * 100 / estimatedTotal
+				if p > 100 {
+					p = 100
+				}
+				pct = fmt.Sprintf(" (%d%%)", p)
+			}
+			mylog.Printf("[idmap] ⏳ %s 迁移进度: %d 条%s", label, total, pct)
+			lastLog = time.Now()
 		}
+
+		// 每批之间稍作暂停，避免 CPU 争抢
 		time.Sleep(10 * time.Millisecond)
 	}
 }
 
 // readOldDBBatch 从旧库中读取一批尚未迁移的条目
-var oldCursorKey []byte // 批次游标
-
-func readOldDBBatch(bucketName string, limit int) ([]entry, bool, error) {
+func readOldDBBatch(bucketName string, cursorKey *[]byte, limit int) ([]entry, bool, error) {
 	var entries []entry
 	done := false
 
@@ -341,27 +468,30 @@ func readOldDBBatch(bucketName string, limit int) ([]entry, bool, error) {
 		}
 
 		c := b.Cursor()
-		k, v := c.Seek(oldCursorKey)
+		k, v := c.Seek(*cursorKey)
 		if k == nil {
 			done = true
 			return nil
 		}
 
-		// 跳过计数器 key
-		for i := 0; i < limit && k != nil; i++ {
+		// 跳过计数器 key（不消耗批次额度）
+		count := 0
+		for count < limit && k != nil {
 			keyStr := string(k)
 			if keyStr == IdentityCounterKey || keyStr == MsgCounterKey {
 				k, v = c.Next()
-				continue
+				continue // 不消耗 limit，继续下一条
 			}
 			entries = append(entries, entry{key: keyStr, value: string(v)})
+			count++
 			k, v = c.Next()
 		}
 
 		if k == nil {
 			done = true
 		} else {
-			oldCursorKey = k
+			*cursorKey = make([]byte, len(k))
+			copy(*cursorKey, k)
 		}
 		return nil
 	})
@@ -369,8 +499,8 @@ func readOldDBBatch(bucketName string, limit int) ([]entry, bool, error) {
 	if err != nil {
 		return nil, true, err
 	}
-	if len(entries) == 0 {
-		done = true
+	if len(entries) == 0 && done {
+		return entries, true, nil
 	}
 	return entries, done, nil
 }
@@ -389,12 +519,6 @@ func writeBatchToNewDB(newDB *bbolt.DB, bucketName string, entries []entry) int 
 		return nil
 	})
 	return written
-}
-
-// ResetMigrationCursor 重置迁移游标（重新扫描全部）
-func ResetMigrationCursor() {
-	oldCursorKey = nil
-	migrationStarted = false
 }
 
 // ---------------------------------------------------------------------------
@@ -430,71 +554,60 @@ func verifyMigration() bool {
 		return true
 	}
 
+	mylog.Printf("[idmap] 正在逐条校验数据完整性...")
 	ok := true
 
-	// 校验 identity 桶
 	ok = verifyBucket(BucketName, IdentityBucketName, identityDB, "identity") && ok
-	// 校验 msg 桶
 	ok = verifyBucket(CacheBucketName, MsgBucketName, msgDB, "msg") && ok
+	ok = verifyBucket(ConfigBucket, ConfigBucket, identityDB, "config") && ok
+	ok = verifyBucket(UserInfoBucket, UserInfoBucket, identityDB, "UserInfo") && ok
 
 	return ok
 }
 
-// verifyBucket 校验单个桶的迁移完整性（逐条对比）
+// verifyBucket 校验单个桶的迁移完整性（游标流式对比，避免大库 OOM）
 func verifyBucket(oldBucket, newBucket string, newDB *bbolt.DB, label string) bool {
-	var oldCount, newCount int
-	var mismatch int
+	var oldCount, mismatch int
 
-	// 读旧库全部 key
-	oldKeys := make(map[string]string)
-	_ = db.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(oldBucket))
-		if b == nil {
+	_ = newDB.View(func(newTx *bbolt.Tx) error {
+		newB := newTx.Bucket([]byte(newBucket))
+		if newB == nil {
+			mismatch = 1
+			mylog.Printf("[idmap] 校验 %s: 新库桶 %s 不存在", label, newBucket)
 			return nil
 		}
-		return b.ForEach(func(k, v []byte) error {
-			key := string(k)
-			if key == IdentityCounterKey || key == MsgCounterKey {
+
+		return db.View(func(oldTx *bbolt.Tx) error {
+			oldB := oldTx.Bucket([]byte(oldBucket))
+			if oldB == nil {
+				// 旧桶不存在 = 没有数据需要迁移，校验通过
 				return nil
 			}
-			oldKeys[key] = string(v)
-			oldCount++
+
+			c := oldB.Cursor()
+			for k, v := c.First(); k != nil; k, v = c.Next() {
+				key := string(k)
+				if key == IdentityCounterKey || key == MsgCounterKey {
+					continue
+				}
+				oldCount++
+
+				nv := newB.Get(k)
+				if nv == nil {
+					mismatch++
+					if mismatch <= 5 {
+						mylog.Printf("[idmap] 校验 %s: 丢失 key=%s", label, key)
+					}
+				} else if string(nv) != string(v) {
+					mismatch++
+					if mismatch <= 5 {
+						mylog.Printf("[idmap] 校验 %s: 值不匹配 key=%s (old=%s new=%s)", label, key, string(v), string(nv))
+					}
+				}
+			}
 			return nil
 		})
 	})
-
-	// 读新库全部 key
-	newKeys := make(map[string]string)
-	_ = newDB.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(newBucket))
-		if b == nil {
-			return nil
-		}
-		return b.ForEach(func(k, v []byte) error {
-			key := string(k)
-			if key == IdentityCounterKey || key == MsgCounterKey {
-				return nil
-			}
-			newKeys[key] = string(v)
-			newCount++
-			return nil
-		})
-	})
-
-	// 对比
-	for k, v := range oldKeys {
-		if nv, exists := newKeys[k]; !exists {
-			mismatch++
-			if mismatch <= 3 {
-				mylog.Printf("[idmap] 校验 %s: 丢失 key=%s", label, k)
-			}
-		} else if nv != v {
-			mismatch++
-			if mismatch <= 3 {
-				mylog.Printf("[idmap] 校验 %s: 值不匹配 key=%s (old=%s new=%s)", label, k, v, nv)
-			}
-		}
-	}
 
 	if mismatch > 0 {
 		mylog.Printf("[idmap] 校验 %s: %d 条丢失/不匹配 (共 %d 条)", label, mismatch, oldCount)
@@ -518,8 +631,10 @@ func repairMigration() {
 
 	r1 := repairBucket(BucketName, IdentityBucketName, identityDB, "identity")
 	r2 := repairBucket(CacheBucketName, MsgBucketName, msgDB, "msg")
+	r3 := repairBucket(ConfigBucket, ConfigBucket, identityDB, "config")
+	r4 := repairBucket(UserInfoBucket, UserInfoBucket, identityDB, "UserInfo")
 
-	if r1+r2 > 0 {
+	if r1+r2+r3+r4 > 0 {
 		mylog.Printf("[idmap] 修复完成，共修复 %d 条", r1+r2)
 	} else {
 		mylog.Printf("[idmap] 未发现需修复的条目")
@@ -530,7 +645,8 @@ func repairMigration() {
 		markMigrationComplete()
 		finalizeOldDB()
 	} else {
-		mylog.Printf("[idmap] 修复后校验仍失败，保留旧库，请手动检查")
+		mylog.Printf("[idmap] ❌ 修复后校验仍失败，保留旧库，请手动检查")
+		mylog.Printf("[idmap] 手动修复: 删除 %s 和 %s，重启 Gensokyo 重新迁移", IdentityDBName, MsgDBName)
 	}
 }
 
@@ -570,9 +686,16 @@ func finalizeOldDB() {
 		return
 	}
 
-	// 运行时只打日志标记，不关闭旧库（避免影响运行中的热路径回退读）
-	mylog.Printf("[idmap] 旧 idmap.db 数据已全部迁移完毕，下次重启前可安全删除")
-	mylog.Printf("[idmap] 安全删除方法: 停止 Gensokyo → 删除 idmap.db → 重启")
+	mylog.Printf("[idmap] ======== 迁移全部完成 ========")
+	mylog.Printf("[idmap]   ✓ %s/ids       ── 永久身份映射", IdentityDBName)
+	mylog.Printf("[idmap]   ✓ %s/cache     ── 消息 ID 缓存", MsgDBName)
+	mylog.Printf("[idmap]   ✓ %s/config    ── 运行时配置", IdentityDBName)
+	mylog.Printf("[idmap]   ✓ %s/UserInfo  ── 用户信息缓存", IdentityDBName)
+	mylog.Printf("[idmap]")
+	mylog.Printf("[idmap]   ◉ idmap.db     ── 旧库（所有数据已迁出，可安全删除）")
+	mylog.Printf("[idmap]")
+	mylog.Printf("[idmap] 旧库安全删除方法: 停止 Gensokyo → 删除 idmap.db → 重启")
+	mylog.Printf("[idmap] =================================")
 }
 
 // StoreGroupID 存储群 OpenID → 虚拟群 ID
@@ -625,8 +748,8 @@ func StoreMsgID(realMsgID string) (int64, error) {
 		b.Put([]byte(key), rowBytes)
 		b.Put([]byte(revPrefix+strconv.FormatInt(newRow, 10)), []byte(key))
 
-		// 惰性迁移：同时写旧 cache 桶
-		if hasOldDB() {
+		// 惰性迁移期：同时写旧 cache 桶（迁移完成后跳过）
+		if hasOldDB() && !isMigrationComplete() {
 			_ = db.Update(func(tx2 *bbolt.Tx) error {
 				b2 := tx2.Bucket([]byte(CacheBucketName))
 				if b2.Get([]byte(key)) == nil {
@@ -773,4 +896,14 @@ func newDBMsgLookup(virtualID string) (string, bool) {
 		return result, true
 	}
 	return "", false
+}
+
+// configAndUserInfoDB 返回 config/UserInfo 桶当前应使用的 DB
+// 迁移完成后返回 identityDB，否则返回旧 db（兼容期）
+func configAndUserInfoDB() *bbolt.DB {
+	if isMigrationComplete() {
+		initNewDBs()
+		return identityDB
+	}
+	return db
 }
