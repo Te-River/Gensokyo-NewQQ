@@ -186,15 +186,20 @@ func StartMigration() {
 ## 参考
 
 - 实现文件：`idmap/service.go`、`idmap/new_service.go`
-- 旧 API → 新 API 映射：
 
-| 旧函数 | 迁移完成后切换至 | 用途 |
-|--------|-----------------|------|
-| `StoreIDv2` | `storeIdentity` | 身份映射写入 |
-| `StoreCachev2` | `StoreMsgID` | 消息 ID 缓存写入（带 6min 自动过期） |
-| `RetrieveRowByIDv2` | `newDBLookup` → 旧库回退 | 身份映射读取 |
-| `RetrieveRowByCachev2` | `newDBMsgLookup` → 旧库回退 | 消息 ID 查询 |
-| `WriteConfig` / `ReadConfig` | `configAndUserInfoDB()` 路由 | 运行时配置 |
-| `StoreUserInfo` / `ListAllUsers` | `configAndUserInfoDB()` 路由 | 用户信息 |
+### API 兼容性说明
+
+所有外部调用的 API 签名**完全不变**，迁移只是在内部修改了数据路由：
+
+| 外部函数（不变） | 内部路由逻辑 | 说明 |
+|-----------------|-------------|------|
+| `StoreIDv2(id)` | 迁移未完成 → `StoreID` + `newDBStore`（双写）<br>迁移完成后 → `storeIdentity`（纯新库） | 对外接口一致 |
+| `StoreCachev2(id)` | 迁移未完成 → `StoreCache` + `newDBMsgStore`（双写）<br>迁移完成后 → `StoreMsgID`（纯新库，带 6min 自动过期） | 对外接口一致 |
+| `RetrieveRowByIDv2(rowid)` | 始终 → `newDBLookup`（新库优先）→ 旧库回退 | 对外接口一致 |
+| `RetrieveRowByCachev2(rowid)` | 始终 → `newDBMsgLookup`（新库优先）→ 旧库回退 | 对外接口一致 |
+| `WriteConfig` / `ReadConfig` | 始终 → `configAndUserInfoDB()` 自动路由 | 对外接口一致 |
+| `StoreUserInfo` / `ListAllUsers` | 始终 → `configAndUserInfoDB()` 自动路由 | 对外接口一致 |
+
+> 迁移对后端开发者**完全透明**。不需要修改任何调用代码，重启 Gensokyo 后迁移自动在后台完成。
 
 
