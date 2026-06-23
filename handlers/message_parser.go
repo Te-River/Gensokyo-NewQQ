@@ -731,7 +731,7 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 						continue
 					}
 					foundItems["markdown"] = append(foundItems["markdown"], mdContentEncoded)
-					messageText += "[CQ:markdown,data=base64://" + mdContentEncoded + "]"
+					// [CQ:markdown] 不在 messageText 中留痕，避免重复发送
 				} else {
 					mylog.Printf("Error: markdown segment data is nil.")
 				}

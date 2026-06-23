@@ -311,7 +311,9 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 			messageText = ""
 		}
 
-		// 优先发送文本信息
+		// 优先发送文本信息（跳过纯 markdown 消息，由下方 foundItems 循环处理）
+		mdRe := regexp.MustCompile(`\[CQ:markdown,[^\]]*\]`)
+		messageText = mdRe.ReplaceAllString(messageText, "")
 		if messageText != "" {
 			msgseq := echo.GetMappingSeq(messageID)
 			echo.AddMappingSeq(messageID, msgseq+1)
