@@ -430,8 +430,9 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				targetGroupID = realGroupID
 			}
 			var md *dto.Markdown
+			var kb *keyboard.MessageKeyboard
 			if mdItems, ok := foundItems["markdown"]; ok && len(mdItems) > 0 {
-				md = parseMarkdownFromMessage(mdItems[0])
+				md, kb = parseMarkdownFromMessage(mdItems[0])
 				// 提取 messageText 中的 @ 标签（<qqbot-at-user .../>），合并到 markdown 内容
 				atRe := regexp.MustCompile(`<qqbot-at-user\s+[^>]*/>`)
 				atTag := atRe.FindString(messageText)
@@ -460,8 +461,9 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			// 如果有 markdown，改为 markdown 消息
 			if md != nil {
 				groupMessage.Markdown = md
+				groupMessage.Keyboard = kb // 携带按钮
 				groupMessage.MsgType = 2
-				groupMessage.Content = "" // markdown 消息无需 content 字段
+				groupMessage.Content = ""
 				// 从 foundItems 中移除 markdown，避免下方循环重复发送
 				delete(foundItems, "markdown")
 				mylog.Printf("[CQ:markdown] 将消息类型切换为 markdown")

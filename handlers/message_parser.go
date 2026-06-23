@@ -1779,6 +1779,7 @@ func parseMDData(mdData []byte) (*dto.Markdown, *keyboard.MessageKeyboard, error
 		Keyboard struct {
 			ID      string                   `json:"id,omitempty"`
 			Content *keyboard.CustomKeyboard `json:"content,omitempty"`
+			Rows    []*keyboard.Row          `json:"rows,omitempty"`
 		} `json:"keyboard,omitempty"`
 		Rows []*keyboard.Row `json:"rows,omitempty"`
 	}
@@ -1812,6 +1813,11 @@ func parseMDData(mdData []byte) (*dto.Markdown, *keyboard.MessageKeyboard, error
 			ID:      temp.Keyboard.ID,
 			Content: temp.Keyboard.Content,
 		}
+	} else if len(temp.Keyboard.Rows) > 0 {
+		// 处理 keyboard.rows 格式
+		kb = &keyboard.MessageKeyboard{
+			Content: &keyboard.CustomKeyboard{Rows: temp.Keyboard.Rows},
+		}
 	} else if len(temp.Rows) > 0 {
 		// 处理顶层的 Rows
 		kb = &keyboard.MessageKeyboard{
@@ -1826,6 +1832,7 @@ func parseMDData(mdData []byte) (*dto.Markdown, *keyboard.MessageKeyboard, error
 
 	// 自动转换 keyboard 中的虚拟ID为QQ官方OpenID
 	if kb != nil {
+		// 自动转换 keyboard 中的虚拟ID为QQ官方OpenID
 		ResolveKeyboardVirtualIDs(kb)
 	}
 
@@ -2213,25 +2220,18 @@ func ProcessCQMemberOutbound(text string, eventID *string, groupID string, apiv2
 	return result, realTargetGroupID, cqUserID
 }
 
-// parseMarkdownFromMessage 从 base64 编码的 markdown JSON 数据中解析 dto.Markdown
+// parseMarkdownFromMessage 从 base64 编码的 markdown JSON 数据中解析 dto.Markdown + keyboard
 // 输入格式: 原始 base64 字符串（无 base64:// 前缀）
-// JSON 结构: {"markdown": {"content": "..."}}
-func parseMarkdownFromMessage(b64Data string) *dto.Markdown {
+func parseMarkdownFromMessage(b64Data string) (*dto.Markdown, *keyboard.MessageKeyboard) {
 	decoded, err := base64.StdEncoding.DecodeString(b64Data)
 	if err != nil {
 		mylog.Printf("[CQ:markdown] base64 解码失败: %v", err)
-		return nil
+		return nil, nil
 	}
-	var wrapper struct {
-		Markdown struct {
-			Content string `json:"content"`
-		} `json:"markdown"`
+	md, kb, err := parseMDData(decoded)
+	if err != nil {
+		mylog.Printf("[CQ:markdown] 解析失败: %v", err)
+		return nil, nil
 	}
-	if err := json.Unmarshal(decoded, &wrapper); err != nil {
-		mylog.Printf("[CQ:markdown] JSON 解析失败: %v", err)
-		return nil
-	}
-	return &dto.Markdown{
-		Content: wrapper.Markdown.Content,
-	}
+	return md, kb
 }
