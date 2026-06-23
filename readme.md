@@ -81,6 +81,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 ## 文档
 
 - [开始使用](/docs/开始使用.md) — 注册机器人、配置、启动
+- [本版新增功能](/docs/本版新增功能.md) — 本版新增功能
 - [API 介绍](/docs/api/api介绍.md) — 支持的 API 列表与扩展
 - [扩展 API](/docs/api/扩展API文档.md) — 扩展 API 文档索引
 - [Markdown 消息](/docs/文档-markdown消息.md) — Markdown 卡片消息说明
