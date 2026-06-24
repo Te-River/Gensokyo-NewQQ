@@ -294,6 +294,16 @@ func main() {
 
 			log.Printf("注册 intents: %v\n", intent)
 
+			// 自动订阅：开启 global_group_msg_rre_to_message 时自动注册两个群推送开关事件
+			if config.GetGlobalGroupMsgRejectReciveEventToMessage() {
+				for _, name := range []string{"GroupMsgRejectHandler", "GroupMsgReceiveHandler"} {
+					if handler, ok := getHandlerByName(name); ok {
+						intent |= websocket.RegisterHandlers(handler)
+						log.Printf("自动订阅 intent: %s（global_group_msg_rre_to_message 开启）", name)
+					}
+				}
+			}
+
 			// 确保p包含conf
 			p = Processor.NewProcessorV2(api, apiV2, &conf.Settings)
 

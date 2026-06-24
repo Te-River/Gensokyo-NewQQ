@@ -49,8 +49,8 @@ settings:
   global_forum_to_channel: false                     # 是否将频道帖子信息转化为频道 子频道信息 如果开启global_channel_to_group会进一步转换为群信息
   global_interaction_to_message : false              # 是否将按钮和表态回调转化为消息 仅在设置了按钮回调中的message时有效
   global_group_msg_rre_to_message : false            # 是否将用户开关机器人资料页的机器人推送开关 产生的事件转换为文本信息并发送给应用端.false将使用onebotv11的notice类型上报.
-  global_group_msg_reject_message : "机器人主动消息被关闭"  # 当开启 global_group_msg_rre_to_message 时,机器人主动信息被关闭将上报的信息. 自行添加intent - GroupMsgRejectHandler
-  global_group_msg_receive_message : "机器人主动消息被开启" # 建议设置为无规则复杂随机内容,避免用户指令内容碰撞. 自行添加 intent - GroupMsgReceiveHandler
+  global_group_msg_reject_message : "机器人主动消息被关闭"  # 开启 global_group_msg_rre_to_message 时自动订阅，无需手动添加 intent
+  global_group_msg_receive_message : "机器人主动消息被开启" # 同上，开启后自动订阅
 
   global_c2c_msg_switch_to_message: false          # 是否将用户(C2C)开关机器人资料页的机器人推送开关 产生的事件转换为文本信息. false将使用自定义notice类型上报.
   global_c2c_msg_reject_message: "机器人C2C推送被关闭" # 当开启 global_c2c_msg_switch_to_message 时, C2C主动信息被关闭将上报的信息.
