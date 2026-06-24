@@ -214,8 +214,8 @@ todo,正在施工...
 > - **group_reject**（群推送关闭）
 > - **group_receive**（群推送开启）
 > - **interaction**（按钮回调）
-> - **group_member_add**（群成员新增）
-> - **group_member_remove**（群成员移除）
+> - **group_increase**（群成员新增，标准 OneBot V11 notice）
+> - **group_decrease**（群成员移除，标准 OneBot V11 notice）
 
 #### 符合 OneBot 标准的 Event（部分 Event 比 OneBot 标准多上报几个字段，不影响使用）
 
@@ -226,7 +226,7 @@ todo,正在施工...
 | 通知事件 | [群文件上传]     |
 | 通知事件 | [群管理员变动]   |
 | 通知事件 | [群成员减少]     |
-| 通知事件 | [群成员增加]     |
+| 通知事件 | [群成员增加]（标准 notice.group_increase）     |
 | 通知事件 | [群禁言]         |
 | 通知事件 | [好友添加]       |
 | 通知事件 | [好友删除]       |

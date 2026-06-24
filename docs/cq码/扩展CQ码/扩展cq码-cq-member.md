@@ -4,7 +4,7 @@
 
 用于标记群成员入群/退群事件的 CQ 码。`group_id` 和 `user_id` 均为 Gensokyo 对 OpenID 转换后的虚拟 ID。
 
-整个流程对后端完全透明——入站是普通 `message.group.normal` 事件，出站是普通 `send_group_msg`，后端无需特殊处理。
+入站事件使用标准 OneBot V11 通知格式（`notice.group_increase` / `notice.group_decrease`），`message` 字段中附带 CQ 码供后端解析。出站仍为普通 `send_group_msg`。
 
 ## 格式
 
@@ -23,10 +23,10 @@
 ### type=add（成员入群）
 
 ```
-① Gsk 捕获事件 → 推送普通消息事件，message 为 CQ 码
-   [message.group.normal]: [CQ:member,type=add,group_id=821404315,user_id=3607918353]
+① Gsk 捕获 GROUP_MEMBER_ADD → 推送 notice 通知
+   [notice.group_increase.approve]: {"message":"[CQ:member,type=add,group_id=821404315,user_id=3607918353]",...}
 
-② 后端收到消息事件，解析 CQ 码 → 用普通 send_group_msg 回复
+② 后端收到通知 → 用 send_group_msg 回复
    send_group_msg(group_id=821404315, message="[CQ:member,type=add,group_id=821404315,user_id=3607918353]欢迎入群！")
 
 ③ Gsk 收到消息 → 解析 CQ 码，group_id 转 GroupOpenID 确定目标群
@@ -36,10 +36,10 @@
 ### type=remove（成员退群）
 
 ```
-① Gsk 捕获事件 → 推送普通消息事件，message 为 CQ 码
-   [message.group.normal]: [CQ:member,type=remove,group_id=821404315,user_id=3607918353]
+① Gsk 捕获 GROUP_MEMBER_REMOVE → 推送 notice 通知
+   [notice.group_decrease.leave]: {"message":"[CQ:member,type=remove,group_id=821404315,user_id=3607918353]",...}
 
-② 后端收到消息事件 → 用普通 send_group_msg 回复
+② 后端收到通知 → 用 send_group_msg 回复
    send_group_msg(group_id=821404315, message="[CQ:member,type=remove,group_id=821404315,user_id=3607918353]离开了呢")
 
 ③ Gsk 收到消息 → 解析 CQ 码，group_id 转 GroupOpenID 确定目标群
@@ -49,34 +49,25 @@
 ## 后端示例（nonebot2）
 
 ```python
-from nonebot import on_message
-from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message
+from nonebot import on_notice
+from nonebot.adapters.onebot.v11 import GroupIncreaseNoticeEvent, GroupDecreaseNoticeEvent, Bot, Message
 
-@on_message().handle()
-async def handle_member_cq(bot: Bot, event: GroupMessageEvent):
-    # 判断是否为 [CQ:member] 消息
-    if not event.raw_message.startswith("[CQ:member"):
-        return
+# 入群事件
+@on_notice().handle()
+async def handle_group_increase(bot: Bot, event: GroupIncreaseNoticeEvent):
+    cq_code = getattr(event, "message", "")
+    reply_msg = Message(
+        f"{cq_code}"
+        f"[CQ:at,qq={event.user_id}]"
+        f"[CQ:markdown,data=<base64>]"  # 替换为实际 markdown
+    )
+    await bot.send_group_msg(group_id=event.group_id, message=reply_msg)
 
-    # 解析 CQ 码
-    import re
-    match = re.search(r'type=(\w+)', event.raw_message)
-    cq_type = match.group(1)  # 'add' 或 'remove'
-
-    if cq_type == "add":
-        # 入群欢迎： [CQ:member] + [CQ:at] + [CQ:markdown] 或文本
-        # [CQ:at] 在 markdown 消息下自动合并到内容（详见 [CQ:at] Markdown 文档）
-        reply_msg = Message(
-            f"{event.raw_message}"
-            f"[CQ:at,qq={event.user_id}]"
-            f"[CQ:markdown,data=<base64>]"  # 替换为实际 markdown
-        )
-    elif cq_type == "remove":
-        # 退群通知： [CQ:member] + 文本
-        reply_msg = Message(f"{event.raw_message}离开了我们")
-    else:
-        return
-
+# 退群事件
+@on_notice().handle()
+async def handle_group_decrease(bot: Bot, event: GroupDecreaseNoticeEvent):
+    cq_code = getattr(event, "message", "")
+    reply_msg = Message(f"{cq_code}离开了我们")
     await bot.send_group_msg(group_id=event.group_id, message=reply_msg)
 ```
 
