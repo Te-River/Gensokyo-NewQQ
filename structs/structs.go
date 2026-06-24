@@ -80,10 +80,15 @@ type Settings struct {
 	ForceSSL         bool     `yaml:"force_ssl"`
 	HttpPortAfterSSL string   `yaml:"http_port_after_ssl"`
 	//日志类
-	DeveloperLog     bool `yaml:"developer_log"`
-	LogLevel         int  `yaml:"log_level"`
-	SaveLogs         bool `yaml:"save_logs"`
-	LogSuffixPerMins int  `yaml:"log_suffix_per_mins"`
+	DeveloperLog            bool `yaml:"developer_log"`
+	LogLevel                int  `yaml:"log_level"`
+	SaveLogs                bool `yaml:"save_logs"`
+	LogSuffixPerMins        int  `yaml:"log_suffix_per_mins"`
+	LogColorEnabled         bool `yaml:"log_color_enabled"`
+	LogJsonOutput           bool `yaml:"log_json_output"`
+	LogMaxAgeDays           int  `yaml:"log_max_age_days"`
+	LogMaxSizeMB            int  `yaml:"log_max_size_mb"`
+	LogSlowEventThresholdMS int  `yaml:"log_slow_event_threshold_ms"`
 	//webui相关
 	DisableWebui bool   `yaml:"disable_webui"`
 	Username     string `yaml:"server_user_name"`

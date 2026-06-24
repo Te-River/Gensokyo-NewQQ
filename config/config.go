@@ -2581,3 +2581,62 @@ func GetGlobalC2CMsgReceiveMessage() string {
 	}
 	return ""
 }
+
+// GetLogColorEnabled 获取是否开启日志彩色
+func GetLogColorEnabled() bool {
+	mu.RLock()
+	defer mu.RUnlock()
+	if instance == nil {
+		return true // 默认开启
+	}
+	return instance.Settings.LogColorEnabled
+}
+
+// GetLogJsonOutput 获取是否开启 JSON 输出
+func GetLogJsonOutput() bool {
+	mu.RLock()
+	defer mu.RUnlock()
+	if instance == nil {
+		return false
+	}
+	return instance.Settings.LogJsonOutput
+}
+
+// GetLogMaxAgeDays 获取日志最大保存天数
+func GetLogMaxAgeDays() int {
+	mu.RLock()
+	defer mu.RUnlock()
+	if instance == nil {
+		return 30
+	}
+	if instance.Settings.LogMaxAgeDays <= 0 {
+		return 30
+	}
+	return instance.Settings.LogMaxAgeDays
+}
+
+// GetLogMaxSizeMB 获取日志单文件最大大小
+func GetLogMaxSizeMB() int {
+	mu.RLock()
+	defer mu.RUnlock()
+	if instance == nil {
+		return 100
+	}
+	if instance.Settings.LogMaxSizeMB <= 0 {
+		return 100
+	}
+	return instance.Settings.LogMaxSizeMB
+}
+
+// GetLogSlowEventThresholdMS 获取慢事件阈值
+func GetLogSlowEventThresholdMS() int {
+	mu.RLock()
+	defer mu.RUnlock()
+	if instance == nil {
+		return 500
+	}
+	if instance.Settings.LogSlowEventThresholdMS <= 0 {
+		return 500
+	}
+	return instance.Settings.LogSlowEventThresholdMS
+}

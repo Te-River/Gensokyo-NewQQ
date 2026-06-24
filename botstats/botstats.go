@@ -41,10 +41,12 @@ const (
 )
 
 func RecordMessageReceived() {
+	mylog.IncrementMsgReceived()
 	recordStats(1, 0)
 }
 
 func RecordMessageSent() {
+	mylog.IncrementMsgSent()
 	recordStats(0, 1)
 }
 

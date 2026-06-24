@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"sync/atomic"
 	"time"
 
 	// _ "net/http/pprof"
@@ -468,6 +469,7 @@ func main() {
 	go webhookHandler.ListenAndProcessMessages()
 
 	r.GET("/updateport", server.HandleIpupdate)
+	r.GET("/metrics", MetricsHandler)
 	r.POST("/uploadpic", server.UploadBase64ImageHandler(rateLimiter))
 	r.POST("/uploadpicv2", server.UploadBase64ImageHandlerV2(rateLimiter, apiV2))
 	r.POST("/uploadpicv3", server.UploadBase64ImageHandlerV3(rateLimiter, api))
@@ -498,6 +500,7 @@ func main() {
 		mylog.Println("正向http api启动成功,监听" + http_api_address + "若有需要,请对外放通端口...")
 		HttpApiGroup := hr.Group("/")
 		{
+			HttpApiGroup.GET("/metrics", MetricsHandler)
 			HttpApiGroup.GET("/*filepath", httpapi.CombinedMiddleware(api, apiV2))
 			HttpApiGroup.POST("/*filepath", httpapi.CombinedMiddleware(api, apiV2))
 			HttpApiGroup.PUT("/*filepath", httpapi.CombinedMiddleware(api, apiV2))
@@ -669,6 +672,19 @@ func main() {
 	}
 }
 
+func runWithTimer(eventName string, fn func()) {
+	go func() {
+		start := time.Now()
+		fn()
+		elapsed := time.Since(start)
+		threshold := time.Duration(config.GetLogSlowEventThresholdMS()) * time.Millisecond
+		if elapsed > threshold {
+			mylog.IncrementSlowEvents()
+			mylog.Warnf("[SLOW] Event %s took %v (threshold: %v)", eventName, elapsed, threshold)
+		}
+	}()
+}
+
 // ReadyHandler 自定义 ReadyHandler 感知连接成功事件
 func ReadyHandler() event.ReadyHandler {
 	return func(event *dto.WSPayload, data *dto.WSReadyData) {
@@ -694,7 +710,9 @@ func ATMessageEventHandler() event.ATMessageEventHandler {
 			}
 		}
 
-		go p.ProcessGuildATMessage(data)
+		runWithTimer("ATMessage", func() {
+			p.ProcessGuildATMessage(data)
+		})
 		return nil
 	}
 }
@@ -733,7 +751,9 @@ func DirectMessageHandler() event.DirectMessageEventHandler {
 				data.Author.Username = acnode.CheckWordIN(data.Author.Username)
 			}
 		}
-		go p.ProcessChannelDirectMessage(data)
+		runWithTimer("DirectMessage", func() {
+			p.ProcessChannelDirectMessage(data)
+		})
 		return nil
 	}
 }
@@ -748,7 +768,9 @@ func CreateMessageHandler() event.MessageEventHandler {
 				data.Author.Username = acnode.CheckWordIN(data.Author.Username)
 			}
 		}
-		go p.ProcessGuildNormalMessage(data)
+		runWithTimer("CreateMessage", func() {
+			p.ProcessGuildNormalMessage(data)
+		})
 		return nil
 	}
 }
@@ -774,7 +796,9 @@ func ThreadEventHandler() event.ThreadEventHandler {
 // GroupATMessageEventHandler 实现处理 群at 消息的回调
 func GroupATMessageEventHandler() event.GroupATMessageEventHandler {
 	return func(event *dto.WSPayload, data *dto.WSGroupATMessageData) error {
-		go p.ProcessGroupMessage(data)
+		runWithTimer("GroupATMessage", func() {
+			p.ProcessGroupMessage(data)
+		})
 
 		if !config.GetDisableErrorChan() {
 			botstats.RecordMessageReceived()
@@ -794,7 +818,9 @@ func GroupATMessageEventHandler() event.GroupATMessageEventHandler {
 // C2CMessageEventHandler 实现处理 群私聊 消息的回调
 func C2CMessageEventHandler() event.C2CMessageEventHandler {
 	return func(event *dto.WSPayload, data *dto.WSC2CMessageData) error {
-		go p.ProcessC2CMessage(data)
+		runWithTimer("C2CMessage", func() {
+			p.ProcessC2CMessage(data)
+		})
 
 		if !config.GetDisableErrorChan() {
 			botstats.RecordMessageReceived()
@@ -1049,10 +1075,50 @@ func GroupMessageEventHandler() event.GroupMessageEventHandler {
 				data.Author.Username = acnode.CheckWordIN(data.Author.Username)
 			}
 		}
-		go p.ProcessGroupNormalMessage(data)
+		runWithTimer("GroupMessage", func() {
+			p.ProcessGroupNormalMessage(data)
+		})
 		if !config.GetDisableErrorChan() {
 			botstats.RecordMessageReceived()
 		}
 		return nil
 	}
+}
+
+func MetricsHandler(c *gin.Context) {
+	c.Header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+
+	msgRecv := atomic.LoadUint64(&mylog.MetricMsgReceived)
+	msgSent := atomic.LoadUint64(&mylog.MetricMsgSent)
+	errCount := atomic.LoadUint64(&mylog.MetricErrorCount)
+	slowEvents := atomic.LoadUint64(&mylog.MetricSlowEvents)
+
+	uptime := time.Since(mylog.StartTime).Seconds()
+
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	memAlloc := m.Alloc
+
+	output := fmt.Sprintf(
+		"# HELP gensokyo_uptime_seconds Uptime of the bot in seconds.\n"+
+			"# TYPE gensokyo_uptime_seconds gauge\n"+
+			"gensokyo_uptime_seconds %.2f\n"+
+			"# HELP gensokyo_messages_received_total Total number of received messages.\n"+
+			"# TYPE gensokyo_messages_received_total counter\n"+
+			"gensokyo_messages_received_total %d\n"+
+			"# HELP gensokyo_messages_sent_total Total number of sent messages.\n"+
+			"# TYPE gensokyo_messages_sent_total counter\n"+
+			"gensokyo_messages_sent_total %d\n"+
+			"# HELP gensokyo_errors_total Total number of log errors.\n"+
+			"# TYPE gensokyo_errors_total counter\n"+
+			"gensokyo_errors_total %d\n"+
+			"# HELP gensokyo_slow_events_total Total number of slow processing events.\n"+
+			"# TYPE gensokyo_slow_events_total counter\n"+
+			"gensokyo_slow_events_total %d\n"+
+			"# HELP gensokyo_memory_allocated_bytes Memory currently allocated in bytes.\n"+
+			"# TYPE gensokyo_memory_allocated_bytes gauge\n"+
+			"gensokyo_memory_allocated_bytes %d\n",
+		uptime, msgRecv, msgSent, errCount, slowEvents, memAlloc,
+	)
+	c.String(http.StatusOK, output)
 }

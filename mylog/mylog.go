@@ -1,14 +1,20 @@
 package mylog
 
 import (
+	"compress/gzip"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/fatih/color"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/hoshinonyaruko/gensokyo/config"
@@ -52,6 +58,40 @@ func GetLogLevelFromConfig(logLevel int) LogLevel {
 }
 
 var logPath string
+var logMutex sync.Mutex
+var StartTime = time.Now()
+
+// 全局指标计数器
+var (
+	MetricMsgReceived uint64
+	MetricMsgSent     uint64
+	MetricErrorCount  uint64
+	MetricSlowEvents  uint64
+)
+
+func IncrementMsgReceived() {
+	atomic.AddUint64(&MetricMsgReceived, 1)
+}
+
+func IncrementMsgSent() {
+	atomic.AddUint64(&MetricMsgSent, 1)
+}
+
+func IncrementErrorCount() {
+	atomic.AddUint64(&MetricErrorCount, 1)
+}
+
+func IncrementSlowEvents() {
+	atomic.AddUint64(&MetricSlowEvents, 1)
+}
+
+var (
+	colorBlue   = color.New(color.FgBlue).SprintFunc()
+	colorGreen  = color.New(color.FgGreen).SprintFunc()
+	colorYellow = color.New(color.FgYellow).SprintFunc()
+	colorRed    = color.New(color.FgRed).SprintFunc()
+	colorFatal  = color.New(color.FgRed, color.Bold).SprintFunc()
+)
 
 func init() {
 	exePath, err := os.Executable()
@@ -61,6 +101,15 @@ func init() {
 
 	exeDir := filepath.Dir(exePath)
 	logPath = filepath.Join(exeDir, "log")
+
+	// 启动日志清理后台循环
+	go func() {
+		for {
+			maxAge := config.GetLogMaxAgeDays()
+			CleanLogs(logPath, maxAge)
+			time.Sleep(24 * time.Hour)
+		}
+	}()
 }
 
 // 全局变量，用于存储日志启用状态
@@ -76,7 +125,7 @@ func NewMyLogAdapter(level LogLevel, enableFileLog bool) *MyLogAdapter {
 	if enableFileLog {
 		SetEnableFileLog(true)
 		if _, err := os.Stat(logPath); os.IsNotExist(err) {
-			err := os.Mkdir(logPath, 0755)
+			err := os.MkdirAll(logPath, 0755)
 			if err != nil {
 				panic(err)
 			}
@@ -90,22 +139,153 @@ func NewMyLogAdapter(level LogLevel, enableFileLog bool) *MyLogAdapter {
 	}
 }
 
-// 获取当前日志文件名
-func getCurrentLogFilename() string {
-	suffixMins := config.GetLogSuffixPerMins()
-	baseFilename := time.Now().Format("2006-01-02")
-	if suffixMins == 0 {
-		return baseFilename + ".log"
+// 独立的日志清除和压缩逻辑
+func CleanLogs(logDir string, maxAgeDays int) {
+	if logDir == "" {
+		return
+	}
+	files, err := os.ReadDir(logDir)
+	if err != nil {
+		return
 	}
 
-	currentTime := time.Now()
-	currentMinutes := currentTime.Hour()*60 + currentTime.Minute()   // 当前时间的总分钟数
-	windowStartMinutes := (currentMinutes / suffixMins) * suffixMins // 计算当前时间窗口的起始分钟数
-	windowStartHour := windowStartMinutes / 60
-	windowStartMinute := windowStartMinutes % 60
+	now := time.Now()
+	for _, f := range files {
+		if !f.IsDir() {
+			continue
+		}
 
-	suffix := fmt.Sprintf("%02d-%02d", windowStartHour, windowStartMinute) // 格式化时间窗口后缀
-	return fmt.Sprintf("%s-%s.log", baseFilename, suffix)
+		dirName := f.Name()
+		dirTime, err := time.Parse("2006-01-02", dirName)
+		if err != nil {
+			continue // 不是日期文件夹
+		}
+
+		dirPath := filepath.Join(logDir, dirName)
+
+		// 检查是否超过最大保留天数
+		ageLimit := now.AddDate(0, 0, -maxAgeDays)
+		if dirTime.Before(ageLimit) {
+			os.RemoveAll(dirPath)
+			continue
+		}
+
+		// 检查子文件并对超过 7 天的文件进行 gzip 压缩
+		subFiles, err := os.ReadDir(dirPath)
+		if err != nil {
+			continue
+		}
+
+		sevenDaysAgo := now.AddDate(0, 0, -7)
+		for _, sf := range subFiles {
+			if sf.IsDir() {
+				continue
+			}
+			sfName := sf.Name()
+			if strings.HasSuffix(sfName, ".gz") {
+				continue // 已经是压缩文件
+			}
+
+			sfPath := filepath.Join(dirPath, sfName)
+			info, err := os.Stat(sfPath)
+			if err != nil {
+				continue
+			}
+
+			if info.ModTime().Before(sevenDaysAgo) {
+				gzPath := sfPath + ".gz"
+				if err := gzipFile(sfPath, gzPath); err == nil {
+					os.Remove(sfPath)
+				}
+			}
+		}
+	}
+}
+
+func gzipFile(src, dst string) error {
+	f, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	gf, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer gf.Close()
+
+	gw := gzip.NewWriter(gf)
+	defer gw.Close()
+
+	_, err = io.Copy(gw, f)
+	return err
+}
+
+// 统一的文件日志写入逻辑（支持按级分割、按天建目录、大小轮转及 JSON/Text 格式）
+func writeLogToFile(baseDir string, level string, message string) {
+	logMutex.Lock()
+	defer logMutex.Unlock()
+
+	todayStr := time.Now().Format("2006-01-02")
+	dir := filepath.Join(baseDir, todayStr)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		fmt.Println("Error creating log directory:", err)
+		return
+	}
+
+	fileName := strings.ToLower(level) + ".log"
+	filePath := filepath.Join(dir, fileName)
+
+	// 大小限制检测与轮转
+	maxSizeMB := config.GetLogMaxSizeMB()
+	maxSizeBytes := int64(maxSizeMB) * 1024 * 1024
+
+	if stat, err := os.Stat(filePath); err == nil {
+		if stat.Size() >= maxSizeBytes {
+			var index = 1
+			var rotPath string
+			for {
+				rotPath = filepath.Join(dir, fmt.Sprintf("%s.%d.log", strings.ToLower(level), index))
+				if _, err := os.Stat(rotPath); os.IsNotExist(err) {
+					break
+				}
+				index++
+			}
+			if err := os.Rename(filePath, rotPath); err != nil {
+				fmt.Println("Error rotating log file:", err)
+			}
+		}
+	}
+
+	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Println("Error opening log file:", err)
+		return
+	}
+	defer file.Close()
+
+	var logEntry string
+	timeStr := time.Now().Format("2006-01-02T15:04:05")
+	if config.GetLogJsonOutput() {
+		entryStruct := EnhancedLogEntry{
+			Time:    timeStr,
+			Level:   level,
+			Message: message,
+		}
+		data, err := json.Marshal(entryStruct)
+		if err == nil {
+			logEntry = string(data) + "\n"
+		} else {
+			logEntry = fmt.Sprintf(`{"time":"%s","level":"%s","message":%q}`+"\n", timeStr, level, message)
+		}
+	} else {
+		logEntry = fmt.Sprintf("[%s] %s: %s\n", timeStr, level, message)
+	}
+
+	if _, err := file.WriteString(logEntry); err != nil {
+		fmt.Println("Error writing to log file:", err)
+	}
 }
 
 // 文件日志记录函数
@@ -113,20 +293,7 @@ func (adapter *MyLogAdapter) logToFile(level, message string) {
 	if !adapter.EnableFileLog {
 		return
 	}
-	filename := getCurrentLogFilename()
-	filepath := adapter.FileLogPath + "/" + filename
-
-	file, err := os.OpenFile(filepath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		fmt.Println("Error opening log file:", err)
-		return
-	}
-	defer file.Close()
-
-	logEntry := fmt.Sprintf("[%s] %s: %s\n", time.Now().Format("2006-01-02T15:04:05"), level, message)
-	if _, err := file.WriteString(logEntry); err != nil {
-		fmt.Println("Error writing to log file:", err)
-	}
+	writeLogToFile(adapter.FileLogPath, level, message)
 }
 
 // 独立的文件日志记录函数
@@ -134,19 +301,30 @@ func LogToFile(level, message string) {
 	if !enableFileLogGlobal {
 		return
 	}
-	filename := getCurrentLogFilename()
-	filepath := logPath + "/" + filename
+	writeLogToFile(logPath, level, message)
+}
 
-	file, err := os.OpenFile(filepath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		fmt.Println("Error opening log file:", err)
-		return
-	}
-	defer file.Close()
-
-	logEntry := fmt.Sprintf("[%s] %s: %s\n", time.Now().Format("2006-01-02T15:04:05"), level, message)
-	if _, err := file.WriteString(logEntry); err != nil {
-		fmt.Println("Error writing to log file:", err)
+// 统一的控制台彩色输出逻辑
+func printConsole(level string, message string) {
+	if config.GetLogColorEnabled() {
+		var coloredLevel string
+		switch level {
+		case "DEBUG":
+			coloredLevel = colorBlue("[" + level + "]")
+		case "INFO":
+			coloredLevel = colorGreen("[" + level + "]")
+		case "WARN":
+			coloredLevel = colorYellow("[" + level + "]")
+		case "ERROR":
+			coloredLevel = colorRed("[" + level + "]")
+		case "FATAL":
+			coloredLevel = colorFatal("[" + level + "]")
+		default:
+			coloredLevel = "[" + level + "]"
+		}
+		log.Printf("%s %s", coloredLevel, message)
+	} else {
+		log.Printf("[%s] %s", level, message)
 	}
 }
 
@@ -154,7 +332,7 @@ func LogToFile(level, message string) {
 func (adapter *MyLogAdapter) Debug(v ...interface{}) {
 	if adapter.Level <= LogLevelDebug {
 		message := fmt.Sprint(v...)
-		Println(v...)
+		printConsole("DEBUG", message)
 		adapter.logToFile("DEBUG", message)
 		emitLog("DEBUG", message)
 	}
@@ -164,7 +342,7 @@ func (adapter *MyLogAdapter) Debug(v ...interface{}) {
 func (adapter *MyLogAdapter) Info(v ...interface{}) {
 	if adapter.Level <= LogLevelInfo {
 		message := fmt.Sprint(v...)
-		Println(v...)
+		printConsole("INFO", message)
 		adapter.logToFile("INFO", message)
 		emitLog("INFO", message)
 	}
@@ -174,7 +352,7 @@ func (adapter *MyLogAdapter) Info(v ...interface{}) {
 func (adapter *MyLogAdapter) Warn(v ...interface{}) {
 	if adapter.Level <= LogLevelWarn {
 		message := fmt.Sprint(v...)
-		Printf("WARN: %v\n", v...)
+		printConsole("WARN", message)
 		adapter.logToFile("WARN", message)
 		emitLog("WARN", message)
 	}
@@ -184,7 +362,7 @@ func (adapter *MyLogAdapter) Warn(v ...interface{}) {
 func (adapter *MyLogAdapter) Error(v ...interface{}) {
 	if adapter.Level <= LogLevelError {
 		message := fmt.Sprint(v...)
-		Printf("ERROR: %v\n", v...)
+		printConsole("ERROR", message)
 		adapter.logToFile("ERROR", message)
 		emitLog("ERROR", message)
 	}
@@ -194,7 +372,7 @@ func (adapter *MyLogAdapter) Error(v ...interface{}) {
 func (adapter *MyLogAdapter) Debugf(format string, v ...interface{}) {
 	if adapter.Level <= LogLevelDebug {
 		message := fmt.Sprintf(format, v...)
-		Printf("DEBUG: "+format, v...)
+		printConsole("DEBUG", message)
 		adapter.logToFile("DEBUG", message)
 		emitLog("DEBUG", message)
 	}
@@ -204,7 +382,7 @@ func (adapter *MyLogAdapter) Debugf(format string, v ...interface{}) {
 func (adapter *MyLogAdapter) Infof(format string, v ...interface{}) {
 	if adapter.Level <= LogLevelInfo {
 		message := fmt.Sprintf(format, v...)
-		Printf("INFO: "+format, v...)
+		printConsole("INFO", message)
 		adapter.logToFile("INFO", message)
 		emitLog("INFO", message)
 	}
@@ -214,7 +392,7 @@ func (adapter *MyLogAdapter) Infof(format string, v ...interface{}) {
 func (adapter *MyLogAdapter) Warnf(format string, v ...interface{}) {
 	if adapter.Level <= LogLevelWarn {
 		message := fmt.Sprintf(format, v...)
-		Printf("WARN: "+format, v...)
+		printConsole("WARN", message)
 		adapter.logToFile("WARN", message)
 		emitLog("WARN", message)
 	}
@@ -224,7 +402,7 @@ func (adapter *MyLogAdapter) Warnf(format string, v ...interface{}) {
 func (adapter *MyLogAdapter) Errorf(format string, v ...interface{}) {
 	if adapter.Level <= LogLevelError {
 		message := fmt.Sprintf(format, v...)
-		Printf("ERROR: "+format, v...)
+		printConsole("ERROR", message)
 		adapter.logToFile("ERROR", message)
 		emitLog("ERROR", message)
 	}
@@ -232,9 +410,6 @@ func (adapter *MyLogAdapter) Errorf(format string, v ...interface{}) {
 
 // Sync 实现 Botgo SDK 的 Sync 方法
 func (adapter *MyLogAdapter) Sync() error {
-	// 如果日志系统有需要执行的同步操作，在这里添加相应的代码
-	// 例如，可能需要刷新或关闭文件，或执行其他清理操作
-	// 如果没有特别的同步需求，可以直接返回 nil
 	return nil
 }
 
@@ -261,8 +436,8 @@ func SetLogLevel(level LogLevel) {
 
 func Println(v ...interface{}) {
 	if currentLevel <= LogLevelInfo {
-		log.Println(v...)
 		message := fmt.Sprint(v...)
+		printConsole("INFO", message)
 		emitLog("INFO", message)
 		LogToFile("INFO", message)
 	}
@@ -270,8 +445,8 @@ func Println(v ...interface{}) {
 
 func Printf(format string, v ...interface{}) {
 	if currentLevel <= LogLevelInfo {
-		log.Printf(format, v...)
 		message := fmt.Sprintf(format, v...)
+		printConsole("INFO", message)
 		emitLog("INFO", message)
 		LogToFile("INFO", message)
 	}
@@ -279,8 +454,8 @@ func Printf(format string, v ...interface{}) {
 
 func Warnf(format string, v ...interface{}) {
 	if currentLevel <= LogLevelWarn {
-		log.Printf(format, v...)
 		message := fmt.Sprintf(format, v...)
+		printConsole("WARN", message)
 		emitLog("WARN", message)
 		LogToFile("WARN", message)
 	}
@@ -288,19 +463,19 @@ func Warnf(format string, v ...interface{}) {
 
 func Errorf(format string, v ...interface{}) {
 	if currentLevel <= LogLevelError {
-		log.Printf(format, v...)
 		message := fmt.Sprintf(format, v...)
+		printConsole("ERROR", message)
 		emitLog("ERROR", message)
 		LogToFile("ERROR", message)
 	}
 }
 
 func Fatalf(format string, v ...interface{}) {
-	log.Printf(format, v...)
 	message := fmt.Sprintf(format, v...)
+	printConsole("FATAL", message)
 	emitLog("FATAL", message)
 	LogToFile("FATAL", message)
-	os.Exit(1) // Fatal logs usually terminate the program
+	os.Exit(1)
 }
 
 func emitLog(level, message string) {
