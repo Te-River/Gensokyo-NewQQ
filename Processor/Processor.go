@@ -511,6 +511,8 @@ func (p *Processors) HandleFrameworkCommand(messageText string, data interface{}
 	switch v := data.(type) {
 	case *dto.WSGroupATMessageData:
 		realid = v.Author.ID
+	case *dto.WSGroupMessageData:
+		realid = v.Author.ID
 	case *dto.WSATMessageData:
 		realid = v.Author.ID
 		guildid = v.GuildID
@@ -527,6 +529,8 @@ func (p *Processors) HandleFrameworkCommand(messageText string, data interface{}
 
 	switch v := data.(type) {
 	case *dto.WSGroupATMessageData:
+		realid2 = v.GroupID
+	case *dto.WSGroupMessageData:
 		realid2 = v.GroupID
 	case *dto.WSATMessageData:
 		realid2 = v.ChannelID
@@ -666,22 +670,24 @@ func (p *Processors) HandleFrameworkCommand(messageText string, data interface{}
 		// 生成临时指令
 		tempCmd := handleNoPermission()
 		mylog.Printf("您没有权限,使用临时指令：%s 忽略权限检查,或将masterid设置为空数组", tempCmd)
-		SendMessage("您没有权限,请配置config.yml或查看日志,使用临时指令", data, Type, p.Api, p.Apiv2)
+		return SendMessage("您没有权限,请配置config.yml或查看日志,使用临时指令", data, Type, p.Api, p.Apiv2)
 	}
 
 	// status 指令
-	if (realValueIncluded || virtualValueIncluded) && commandMatch(cleanedMessage, config.GetStatusPrefix()) {
-		SendMessage(buildStatusText(), data, Type, p.Api, p.Apiv2)
-		return nil
+	if commandMatch(cleanedMessage, config.GetStatusPrefix()) {
+		return SendMessage(buildStatusText(), data, Type, p.Api, p.Apiv2)
 	}
 
 	// broadcast 指令
-	if (realValueIncluded || virtualValueIncluded) && commandMatch(cleanedMessage, config.GetBroadcastPrefix()) {
+	broadcastMatched := commandMatch(cleanedMessage, config.GetBroadcastPrefix())
+	if broadcastMatched && !(realValueIncluded || virtualValueIncluded) {
+		return SendMessage("您没有权限执行广播指令，请在 config.yml 的 master_id 中配置当前用户。", data, Type, p.Api, p.Apiv2)
+	}
+	if broadcastMatched {
 		broadcastPrefix := strings.TrimSpace(config.GetBroadcastPrefix())
 		broadcastMsg := strings.TrimSpace(strings.TrimPrefix(cleanedMessage, broadcastPrefix))
 		if broadcastMsg == "" {
-			SendMessage("广播内容不能为空。用法: "+broadcastPrefix+" <内容>", data, Type, p.Api, p.Apiv2)
-			return nil
+			return SendMessage("广播内容不能为空。用法: "+broadcastPrefix+" <内容>", data, Type, p.Api, p.Apiv2)
 		}
 
 		// 获取虚拟群组 (channel)
@@ -724,8 +730,7 @@ func (p *Processors) HandleFrameworkCommand(messageText string, data interface{}
 			}(grpID)
 		}
 
-		SendMessage(fmt.Sprintf("已向 %d 个频道和 %d 个群聊提交广播请求。", len(channelIDs), len(groupIDs)), data, Type, p.Api, p.Apiv2)
-		return nil
+		return SendMessage(fmt.Sprintf("已向 %d 个频道和 %d 个群聊提交广播请求。", len(channelIDs), len(groupIDs)), data, Type, p.Api, p.Apiv2)
 	}
 
 	//link指令
@@ -977,6 +982,8 @@ func SendMessage(messageText string, data interface{}, messageType string, api o
 	switch v := data.(type) {
 	case *dto.WSGroupATMessageData:
 		msg = (*dto.Message)(v)
+	case *dto.WSGroupMessageData:
+		msg = (*dto.Message)(v)
 	case *dto.WSATMessageData:
 		msg = (*dto.Message)(v)
 	case *dto.WSMessageData:
@@ -986,7 +993,7 @@ func SendMessage(messageText string, data interface{}, messageType string, api o
 	case *dto.WSC2CMessageData:
 		msg = (*dto.Message)(v)
 	default:
-		return nil
+		return fmt.Errorf("不支持的消息事件类型 %T", data)
 	}
 	switch messageType {
 	case "guild":
@@ -1052,6 +1059,8 @@ func SendMessageMd(md *dto.Markdown, kb *keyboard.MessageKeyboard, data interfac
 	switch v := data.(type) {
 	case *dto.WSGroupATMessageData:
 		msg = (*dto.Message)(v)
+	case *dto.WSGroupMessageData:
+		msg = (*dto.Message)(v)
 	case *dto.WSATMessageData:
 		msg = (*dto.Message)(v)
 	case *dto.WSMessageData:
@@ -1061,7 +1070,7 @@ func SendMessageMd(md *dto.Markdown, kb *keyboard.MessageKeyboard, data interfac
 	case *dto.WSC2CMessageData:
 		msg = (*dto.Message)(v)
 	default:
-		return nil
+		return fmt.Errorf("不支持的消息事件类型 %T", data)
 	}
 	switch messageType {
 	case "guild":
@@ -1185,6 +1194,10 @@ func (p *Processors) Autobind(data interface{}) error {
 	// 群at
 	switch v := data.(type) {
 	case *dto.WSGroupATMessageData:
+		realID = v.Author.ID
+		groupID = v.GroupID
+		attachmentURL = v.Attachments[0].URL
+	case *dto.WSGroupMessageData:
 		realID = v.Author.ID
 		groupID = v.GroupID
 		attachmentURL = v.Attachments[0].URL

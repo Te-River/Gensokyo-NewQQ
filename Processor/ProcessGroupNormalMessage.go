@@ -30,6 +30,10 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 	var userid64, GroupID64 int64
 	var err error
 
+	if _, err := idmap.RecordQQGroupMessageReception(data.GroupID, data.ID, true); err != nil {
+		mylog.Errorf("[idmap] 更新QQ群全量消息接收标志失败: group=%s message=%s event=GROUP_MESSAGE_CREATE error=%v", data.GroupID, data.ID, err)
+	}
+
 	if data.Author.ID == "" {
 		mylog.Printf("出现ID为空未知错误.%v\n", data)
 		return nil
@@ -102,7 +106,9 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 			mylog.Printf("信息被自定义黑白名单拦截")
 			return nil
 		}
-		p.HandleFrameworkCommand(messageText, data, "group")
+		if err := p.HandleFrameworkCommand(messageText, data, "group"); err != nil {
+			mylog.Errorf("处理 GROUP_MESSAGE_CREATE 框架指令失败: %v", err)
+		}
 	} else {
 		messageText = strings.TrimSpace(messageText)
 		if messageText == "/ " || messageText == " /" {
@@ -133,6 +139,8 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 		messageID = int(messageID64)
 		mylog.Printf("[message] group msg_id mapped: raw_msg=%s vMsg=%d", data.ID, messageID64)
 	}
+	// 记录该群该用户最新一条消息的 real msg_id（用于 [CQ:remove] 撤回）
+	idmap.StoreLatestMsgID(data.GroupID, data.Author.ID, data.ID)
 
 	if config.GetAutoBind() {
 		if len(data.Attachments) > 0 && data.Attachments[0].URL != "" {

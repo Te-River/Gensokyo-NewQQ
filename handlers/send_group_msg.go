@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
@@ -422,6 +423,58 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			messageText, realGroupID, _ = ProcessCQMemberOutbound(messageText, &eventID, message.Params.GroupID.(string), apiv2)
 			if realGroupID != "" {
 				mylog.Printf("[CQ:member] CQ 码 group_id 已转为 OpenID=%s", realGroupID)
+			}
+
+			// 处理出站 [CQ:remove,user_id=用户ID,message_id=消息ID]。
+			// message_id 省略时撤回目标用户在该群的最后一条消息。
+			if strings.Contains(messageText, "[CQ:remove,") {
+				var recallOK bool
+				messageText, targetUserOpenID, realMsgID := ProcessCQRemoveOutbound(messageText)
+				if targetUserOpenID != "" {
+					// 将群 ID 转为真实 OpenID
+					groupID := message.Params.GroupID.(string)
+					groupOpenID := idmap.ResolveOriginalID(groupID)
+					if groupOpenID == groupID && regexp.MustCompile(`^\d+$`).MatchString(groupID) {
+						mylog.Printf("[CQ:remove] group_id=%s 自动解析 OpenID 失败", groupID)
+						groupOpenID = ""
+					}
+					if groupOpenID != "" {
+						if realMsgID == "" {
+							var err error
+							realMsgID, err = idmap.GetLatestMsgID(groupOpenID, targetUserOpenID)
+							if err != nil {
+								mylog.Printf("[CQ:remove] 未找到目标用户最后一条消息: group=%s user=%s error=%v", groupOpenID, targetUserOpenID, err)
+							}
+						}
+						if realMsgID != "" {
+							mylog.Printf("[CQ:remove] 撤回消息: group=%s user=%s message_id=%s", groupOpenID, targetUserOpenID, realMsgID)
+							err := apiv2.RetractGroupMessage(context.TODO(), groupOpenID, realMsgID, openapi.RetractMessageOptionHidetip)
+							if err != nil {
+								mylog.Printf("[CQ:remove] 撤回失败: %v", err)
+							} else {
+								recallOK = true
+							}
+						}
+					}
+				}
+				// 剥离后消息为空 → 给客户端回执，不发送到频道
+				if messageText == "" {
+					mylog.Printf("[CQ:remove] 消息仅含 CQ 码，已剥离，跳过发送")
+					response := map[string]interface{}{
+						"status":  "ok",
+						"retcode": 0,
+						"data":    nil,
+						"message": "",
+					}
+					if recallOK {
+						response["message"] = "recall ok"
+					}
+					response["echo"] = message.Echo
+					outputMap := response
+					client.SendMessage(outputMap)
+					result, _ := json.Marshal(response)
+					return string(result), nil
+				}
 			}
 
 			// 如果 CQ 码中携带了 group_id，优先使用它作为目标群（支持跨群路由）
