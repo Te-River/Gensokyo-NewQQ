@@ -746,7 +746,28 @@ func RetrieveRowByID(rowid string) (string, error) {
 			id = string(idBytes)
 			return nil
 		})
-		return id, err
+		if err == nil {
+			return id, nil
+		}
+	}
+
+	// 逆向映射找不到，通过正向条目兜底扫描
+	virtualID, parseErr := strconv.ParseInt(rowid, 10, 64)
+	if parseErr == nil {
+		_ = identityDB.View(func(tx *bbolt.Tx) error {
+			b := tx.Bucket([]byte(IdentityBucketName))
+			c := b.Cursor()
+			for k, v := c.First(); k != nil; k, v = c.Next() {
+				if len(v) == 8 && binary.BigEndian.Uint64(v) == uint64(virtualID) {
+					id = stripUinPrefix(string(k))
+					break
+				}
+			}
+			return nil
+		})
+		if id != "" {
+			return id, nil
+		}
 	}
 
 	return "", ErrKeyNotFound
@@ -920,6 +941,28 @@ func RetrieveRowByIDv2(rowid string) (string, error) {
 	if id, ok := newDBLookup(rowid); ok {
 		return id, nil
 	}
+
+	// 逆向映射查不到时，通过正向条目兜底：查找值等于 rowid 的键
+	virtualID, err := strconv.ParseInt(rowid, 10, 64)
+	if err == nil {
+		initNewDBs()
+		var id string
+		_ = identityDB.View(func(tx *bbolt.Tx) error {
+			b := tx.Bucket([]byte(IdentityBucketName))
+			c := b.Cursor()
+			for k, v := c.First(); k != nil; k, v = c.Next() {
+				if len(v) == 8 && binary.BigEndian.Uint64(v) == uint64(virtualID) {
+					id = stripUinPrefix(string(k))
+					break
+				}
+			}
+			return nil
+		})
+		if id != "" {
+			return id, nil
+		}
+	}
+
 	return "", ErrKeyNotFound
 }
 
@@ -1268,6 +1311,22 @@ func UpdateVirtualValue(oldRowValue, newRowValue int64) error {
 			return nil
 		})
 	}
+	// 逆向映射查不到时，通过正向条目兜底：查找值等于 oldRowValue 的键
+	if id == "" {
+		oldRowBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(oldRowBytes, uint64(oldRowValue))
+		_ = identityDB.View(func(tx *bbolt.Tx) error {
+			b := tx.Bucket([]byte(IdentityBucketName))
+			c := b.Cursor()
+			for k, v := c.First(); k != nil; k, v = c.Next() {
+				if len(v) == 8 && binary.BigEndian.Uint64(v) == uint64(oldRowValue) {
+					id = stripUinPrefix(string(k))
+					break
+				}
+			}
+			return nil
+		})
+	}
 	if id == "" {
 		return fmt.Errorf("不存在:%v", oldRowValue)
 	}
@@ -1300,16 +1359,20 @@ func UpdateVirtualValue(oldRowValue, newRowValue int64) error {
 
 	// === 非隔离模式 ===
 	// 检查新虚拟值是否已存在（查新库）
-	newRevKey := uinRowKey(strconv.FormatInt(newRowValue, 10))
-	_ = identityDB.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(IdentityBucketName))
-		if b.Get([]byte(newRevKey)) != nil {
-			id = "__EXISTS__"
+	// 注意：newRowValue=0 表示解绑操作，uin:row-0 几乎一定存在（其他被解绑用户也有它）
+	// 此时跳过检查，否则解绑 API 永远返回 "已存在"
+	if newRowValue != 0 {
+		newRevKey := uinRowKey(strconv.FormatInt(newRowValue, 10))
+		_ = identityDB.View(func(tx *bbolt.Tx) error {
+			b := tx.Bucket([]byte(IdentityBucketName))
+			if b.Get([]byte(newRevKey)) != nil {
+				id = "__EXISTS__"
+			}
+			return nil
+		})
+		if id == "__EXISTS__" {
+			return fmt.Errorf("%v :已存在", newRowValue)
 		}
-		return nil
-	})
-	if id == "__EXISTS__" {
-		return fmt.Errorf("%v :已存在", newRowValue)
 	}
 
 	newRowBytes := make([]byte, 8)
@@ -1322,8 +1385,11 @@ func UpdateVirtualValue(oldRowValue, newRowValue int64) error {
 		b := tx.Bucket([]byte(IdentityBucketName))
 		oldRevKey := revPrefix + strconv.FormatInt(oldRowValue, 10)
 		b.Delete([]byte(oldRevKey))
-		b.Put([]byte(key), newRowBytes)
-		b.Put([]byte(revPrefix+strconv.FormatInt(newRowValue, 10)), []byte(key))
+		if newRowValue != 0 {
+			b.Put([]byte(key), newRowBytes)
+			b.Put([]byte(revPrefix+strconv.FormatInt(newRowValue, 10)), []byte(key))
+		}
+		// newRowValue == 0：只删旧逆向映射以释放占位，不修改正向映射也不创建 row-0
 		return nil
 	})
 
@@ -1333,8 +1399,10 @@ func UpdateVirtualValue(oldRowValue, newRowValue int64) error {
 			b := tx.Bucket([]byte(BucketName))
 			oldRowKey := fmt.Sprintf("row-%d", oldRowValue)
 			b.Delete([]byte(oldRowKey))
-			b.Put([]byte(id), newRowBytes)
-			b.Put([]byte(fmt.Sprintf("row-%d", newRowValue)), []byte(id))
+			if newRowValue != 0 {
+				b.Put([]byte(id), newRowBytes)
+				b.Put([]byte(fmt.Sprintf("row-%d", newRowValue)), []byte(id))
+			}
 			return nil
 		})
 	}
@@ -1352,9 +1420,10 @@ func RetrieveRealValue(virtualValue int64) (string, string, error) {
 		return virtualIDStr, id, nil
 	}
 
+	var realValue string
+
 	// 迁移期间回退旧库
 	if hasOldDB() && !isMigrationComplete() {
-		var realValue string
 		err := db.View(func(tx *bbolt.Tx) error {
 			b := tx.Bucket([]byte(BucketName))
 
@@ -1370,9 +1439,24 @@ func RetrieveRealValue(virtualValue int64) (string, string, error) {
 			realValue = stripUinPrefix(string(realValueBytes))
 			return nil
 		})
-		if err != nil {
-			return "", "", err
+		if err == nil {
+			return virtualIDStr, realValue, nil
 		}
+	}
+
+	// 逆向映射找不到，通过正向条目兜底扫描
+	_ = identityDB.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(IdentityBucketName))
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			if len(v) == 8 && binary.BigEndian.Uint64(v) == uint64(virtualValue) {
+				realValue = stripUinPrefix(string(k))
+				break
+			}
+		}
+		return nil
+	})
+	if realValue != "" {
 		return virtualIDStr, realValue, nil
 	}
 
@@ -2077,24 +2161,40 @@ func ListAllUsers() ([]structs.FriendData, error) {
 // ResolveOriginalID 将一个可能是虚拟ID的字符串解析为原始QQ官方OpenID。
 // 如果 idStr 是纯数字（虚拟ID），则通过反向查询获取原始 OpenID；
 // 如果不是数字或查询失败，则原样返回。
-// 场景：QQ按钮 action.data 中可能嵌入了数字虚拟ID，点击后客户端输入该ID，
-// 需要反向解析为QQ官方OpenID才能正常调用QQ API。
+// 场景：QQ按钮 keyboard 中 specify_user_ids 可能使用了虚拟ID，
+// 需要反向解析为QQ官方OpenID才能正常设置按钮权限。
 func ResolveOriginalID(idStr string) string {
 	// 尝试解析为 int64（判断是否为数字虚拟ID）
 	virtualID, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		// 不是数字，直接返回原始字符串（可能是原始OpenID或其他文本）
 		return idStr
 	}
 
-	// 尝试反向查询
+	// 优先通过逆向映射查询
 	_, realID, err := RetrieveRealValuev2(virtualID)
-	if err != nil || realID == "" {
-		// 反向查询失败，原样返回
-		return idStr
+	if err == nil && realID != "" {
+		return realID
 	}
 
-	return realID
+	// 逆向映射找不到时，遍历 identityDB 的正向条目兜底：
+	// 查找值等于 virtualID 的键（键格式为 uin:{OpenID}），此 OpenID 即为答案
+	initNewDBs()
+	_ = identityDB.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(IdentityBucketName))
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			if len(v) == 8 && binary.BigEndian.Uint64(v) == uint64(virtualID) {
+				realID = stripUinPrefix(string(k))
+				break
+			}
+		}
+		return nil
+	})
+	if realID != "" {
+		return realID
+	}
+
+	return idStr
 }
 
 // ResolveOriginalIDs 批量解析虚拟ID列表，将每个可能的虚拟ID替换为原始OpenID。

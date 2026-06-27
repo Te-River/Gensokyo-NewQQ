@@ -167,11 +167,15 @@ func storeIdentity(openID string) (int64, error) {
 	err := identityDB.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(IdentityBucketName))
 
-		// 已存在直接返回
+		// 已存在直接返回（虚拟 ID=0 的除外，那是解绑残留，需重新分配新 ID）
 		existing := b.Get([]byte(key))
 		if existing != nil {
 			newRow = int64(binary.BigEndian.Uint64(existing))
-			return nil
+			if newRow != 0 {
+				return nil
+			}
+			// 虚拟 ID=0：先清理旧逆向映射 row-0，再分配新 ID
+			b.Delete([]byte(revPrefix + "0"))
 		}
 
 		// 分配虚拟 ID
@@ -303,13 +307,14 @@ func dualWriteToOldDB(key, openID string, rowID int64) {
 
 	_ = db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(BucketName))
-		// 仅在旧库没有该条目时才写入
-		if b.Get([]byte(key)) == nil {
-			b.Put([]byte(key), rowBytes)
-			b.Put([]byte(revKey), []byte(key))
-			if config.GetIdmapIsolation() && config.GetIdmapLegacyCompat() {
-				b.Put([]byte(openID), rowBytes)
-			}
+		// 先清理旧的 row-0 逆向映射（解绑残留）
+		b.Delete([]byte(uinRowKey("0")))
+		b.Delete([]byte("row-0"))
+		// 写入新映射
+		b.Put([]byte(key), rowBytes)
+		b.Put([]byte(revKey), []byte(key))
+		if config.GetIdmapIsolation() && config.GetIdmapLegacyCompat() {
+			b.Put([]byte(openID), rowBytes)
 		}
 		return nil
 	})
