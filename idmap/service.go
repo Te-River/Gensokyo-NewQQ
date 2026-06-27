@@ -314,71 +314,84 @@ func CheckValuev2(value int64) bool {
 }
 
 // 根据a储存b
+// 优先 idmap-identity.db（新库），迁移期间双写到旧 idmap.db
 func StoreID(id string) (int64, error) {
+	initNewDBs()
+
+	// 迁移完成后直接走新库，不再写旧库
+	if isMigrationComplete() {
+		return storeIdentity(id)
+	}
+
+	// 先检查新库是否已有该映射
+	existing, err := retrieveIdentity(id)
+	if err == nil {
+		vID, _ := strconv.ParseInt(existing, 10, 64)
+		return vID, nil
+	}
+
+	// 迁移期间：走旧库逻辑 + 双写到新库
 	var newRow int64
-	key := uinKey(id)           // 隔离时加 UIN 前缀
-	revKey := uinRowKey("")     // "row-" 或 "row-{UIN}:"
+	key := uinKey(id)
+	revKey := uinRowKey("")
 
-	err := db.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(BucketName))
+	if hasOldDB() {
+		err = db.Update(func(tx *bbolt.Tx) error {
+			b := tx.Bucket([]byte(BucketName))
 
-		// 检查ID是否已经存在（用带前缀的 key）
-		existingRowBytes := b.Get([]byte(key))
-		if existingRowBytes != nil {
-			newRow = int64(binary.BigEndian.Uint64(existingRowBytes))
-			return nil
-		}
-		//写入虚拟值
-		if !config.GetHashIDValue() {
-			// 如果ID不存在，则为它分配一个新的行号 数字递增
-			currentRowBytes := b.Get([]byte(CounterKey))
-			if currentRowBytes == nil {
-				newRow = 1
+			existingRowBytes := b.Get([]byte(key))
+			if existingRowBytes != nil {
+				newRow = int64(binary.BigEndian.Uint64(existingRowBytes))
+				return nil
+			}
+			if !config.GetHashIDValue() {
+				currentRowBytes := b.Get([]byte(CounterKey))
+				if currentRowBytes == nil {
+					newRow = 1
+				} else {
+					currentRow := binary.BigEndian.Uint64(currentRowBytes)
+					newRow = int64(currentRow) + 1
+				}
 			} else {
-				currentRow := binary.BigEndian.Uint64(currentRowBytes)
-				newRow = int64(currentRow) + 1
-			}
-		} else {
-			// 生成新的行号
-			var err error
-			maxDigits := 18 // int64的位数上限-1
-			for digits := 9; digits <= maxDigits; digits++ {
-				newRow, err = GenerateRowID(id, digits)
-				if err != nil {
-					return err
-				}
-				// 检查新生成的行号是否重复
-				rowKey := uinRowKey(strconv.FormatInt(newRow, 10))
-				if b.Get([]byte(rowKey)) == nil {
-					// 找到了一个唯一的行号，可以跳出循环
-					break
-				}
-				// 如果到达了最大尝试次数还没有找到唯一的行号，则返回错误
-				if digits == maxDigits {
-					return fmt.Errorf("unable to find a unique row ID after %d attempts", maxDigits-8)
+				var err error
+				maxDigits := 18
+				for digits := 9; digits <= maxDigits; digits++ {
+					newRow, err = GenerateRowID(id, digits)
+					if err != nil {
+						return err
+					}
+					rowKey := uinRowKey(strconv.FormatInt(newRow, 10))
+					if b.Get([]byte(rowKey)) == nil {
+						break
+					}
+					if digits == maxDigits {
+						return fmt.Errorf("unable to find a unique row ID after %d attempts", maxDigits-8)
+					}
 				}
 			}
-		}
 
-		rowBytes := make([]byte, 8)
-		binary.BigEndian.PutUint64(rowBytes, uint64(newRow))
-		//写入递增值
-		if !config.GetHashIDValue() {
-			b.Put([]byte(CounterKey), rowBytes)
-		}
-		// 写入新格式：带 UIN 前缀的前向 key
-		b.Put([]byte(key), rowBytes)
-		// 新格式反向 key：row-{UIN}:{虚拟ID}
-		b.Put([]byte(revKey+strconv.FormatInt(newRow, 10)), []byte(key))
+			rowBytes := make([]byte, 8)
+			binary.BigEndian.PutUint64(rowBytes, uint64(newRow))
+			if !config.GetHashIDValue() {
+				b.Put([]byte(CounterKey), rowBytes)
+			}
+			b.Put([]byte(key), rowBytes)
+			b.Put([]byte(revKey+strconv.FormatInt(newRow, 10)), []byte(key))
 
-		// 兼容模式：同时写旧格式
-		if config.GetIdmapIsolation() && config.GetIdmapLegacyCompat() {
-			b.Put([]byte(id), rowBytes)            // 旧前向
-			// 反向不双写，避免多 Bot 冲突
-		}
+			if config.GetIdmapIsolation() && config.GetIdmapLegacyCompat() {
+				b.Put([]byte(id), rowBytes)
+			}
+			return nil
+		})
+	} else {
+		// 没有旧库，直接走新库
+		return storeIdentity(id)
+	}
 
-		return nil
-	})
+	// 双写到新库
+	if err == nil && len(id) == 32 {
+		newDBStore(id, newRow)
+	}
 
 	return newRow, err
 }
@@ -757,27 +770,36 @@ func StoreIDv2Pro(id string, subid string) (int64, int64, error) {
 
 // 根据b得到a
 func RetrieveRowByID(rowid string) (string, error) {
+	initNewDBs()
+
+	// 热路径：新库优先，查不到回退旧库
+	if id, ok := newDBLookup(rowid); ok {
+		return id, nil
+	}
+
+	// 旧库兜底
 	var id string
-	err := db.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(BucketName))
+	if hasOldDB() {
+		err := db.View(func(tx *bbolt.Tx) error {
+			b := tx.Bucket([]byte(BucketName))
 
-		// 先查新格式 reverse key（带 UIN 前缀）
-		newKey := uinRowKey(rowid)
-		idBytes := b.Get([]byte(newKey))
-		if idBytes != nil {
-			id = stripUinPrefix(string(idBytes))
+			newKey := uinRowKey(rowid)
+			idBytes := b.Get([]byte(newKey))
+			if idBytes != nil {
+				id = stripUinPrefix(string(idBytes))
+				return nil
+			}
+			idBytes = b.Get([]byte("row-" + rowid))
+			if idBytes == nil {
+				return ErrKeyNotFound
+			}
+			id = string(idBytes)
 			return nil
-		}
-		// 再查旧格式 reverse key（无前缀，兼容旧数据）
-		idBytes = b.Get([]byte("row-" + rowid))
-		if idBytes == nil {
-			return ErrKeyNotFound
-		}
-		id = string(idBytes)
-		return nil
-	})
+		})
+		return id, err
+	}
 
-	return id, err
+	return "", ErrKeyNotFound
 }
 
 // 根据b得到a
@@ -998,21 +1020,39 @@ func RetrieveRowByCachev2(rowid string) (string, error) {
 
 // 根据a 以b为类别 储存c
 func WriteConfig(sectionName, keyName, value string) error {
-	return configAndUserInfoDB().Update(func(tx *bbolt.Tx) error {
+	initNewDBs()
+	key := joinSectionAndKey(sectionName, keyName)
+
+	// 写新库（主库）
+	err := identityDB.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(ConfigBucket))
 		if b == nil {
-			mylog.Printf("Bucket %s not found", ConfigBucket)
-			return fmt.Errorf("bucket %s not found", ConfigBucket)
+			mylog.Printf("Bucket %s not found in identityDB", ConfigBucket)
+			return fmt.Errorf("bucket %s not found in identityDB", ConfigBucket)
 		}
-
-		key := joinSectionAndKey(sectionName, keyName)
 		err := b.Put(key, []byte(value))
 		if err != nil {
-			mylog.Printf("Error putting data into bucket with key %s: %v", key, err)
-			return fmt.Errorf("failed to put data into bucket with key %s: %w", key, err)
+			mylog.Printf("Error putting data into identityDB with key %s: %v", key, err)
+			return fmt.Errorf("failed to put data into identityDB with key %s: %w", key, err)
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	// 迁移期间写旧库
+	if hasOldDB() && !isMigrationComplete() {
+		_ = configAndUserInfoDB().Update(func(tx *bbolt.Tx) error {
+			b := tx.Bucket([]byte(ConfigBucket))
+			if b == nil {
+				return nil
+			}
+			return b.Put(key, []byte(value))
+		})
+	}
+
+	return nil
 }
 
 // WriteConfigv2 根据a以b为类别储存c
@@ -1065,24 +1105,45 @@ func WriteConfigv2(sectionName, keyName, value string) error {
 
 // 根据a和b取出c
 func ReadConfig(sectionName, keyName string) (string, error) {
+	initNewDBs()
+	key := joinSectionAndKey(sectionName, keyName)
+
+	// 新库优先
 	var result string
-	err := configAndUserInfoDB().View(func(tx *bbolt.Tx) error {
+	err := identityDB.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(ConfigBucket))
 		if b == nil {
-			return fmt.Errorf("bucket not found")
+			return fmt.Errorf("bucket not found in identityDB")
 		}
-
-		key := joinSectionAndKey(sectionName, keyName)
 		v := b.Get(key)
 		if v == nil {
 			return fmt.Errorf("key '%s' in section '%s' does not exist", keyName, sectionName)
 		}
-
 		result = string(v)
 		return nil
 	})
+	if err == nil {
+		return result, nil
+	}
 
-	return result, err
+	// 迁移期间回退旧库
+	if hasOldDB() && !isMigrationComplete() {
+		err = configAndUserInfoDB().View(func(tx *bbolt.Tx) error {
+			b := tx.Bucket([]byte(ConfigBucket))
+			if b == nil {
+				return fmt.Errorf("bucket not found")
+			}
+			v := b.Get(key)
+			if v == nil {
+				return fmt.Errorf("key '%s' in section '%s' does not exist", keyName, sectionName)
+			}
+			result = string(v)
+			return nil
+		})
+		return result, err
+	}
+
+	return "", err
 }
 
 // DeleteConfig根据sectionName和keyName删除指定的键值对
@@ -1217,117 +1278,192 @@ func joinSectionAndKey(sectionName, keyName string) []byte {
 }
 
 // UpdateVirtualValue 更新旧的虚拟值到新的虚拟值的映射
-// 隔离模式下：不迁移，而是新增一条 alias 映射（{UIN}:{newRowValue} → 旧虚拟值）
+// 优先 idmap-identity.db（新库），迁移期间同时写旧库 idmap.db
+// 隔离模式下：不迁移，在新旧库各新增一条 alias 映射
 func UpdateVirtualValue(oldRowValue, newRowValue int64) error {
-	return db.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(BucketName))
+	initNewDBs()
 
-		// 查反向 key 得到 OpenID
-		oldRowKey := uinRowKey(strconv.FormatInt(oldRowValue, 10))
-		idBytes := b.Get([]byte(oldRowKey))
-		if idBytes == nil {
-			oldRowKey = fmt.Sprintf("row-%d", oldRowValue)
-			idBytes = b.Get([]byte(oldRowKey))
-		}
-		if idBytes == nil {
-			return fmt.Errorf("不存在:%v", oldRowValue)
-		}
-		id := stripUinPrefix(string(idBytes))
-
-		if config.GetIdmapIsolation() {
-			// === 隔离模式：新增 alias，不迁移 ===
-			// 写一条新前向 key: "{UIN}:{newRowValue}" → oldRowValue（原虚拟 ID 不变）
-			aliasKey := uinKey(strconv.FormatInt(newRowValue, 10))
-			oldRowBytes := make([]byte, 8)
-			binary.BigEndian.PutUint64(oldRowBytes, uint64(oldRowValue))
-			if err := b.Put([]byte(aliasKey), oldRowBytes); err != nil {
-				return err
+	// 从旧库查 OpenID（新旧库一致，旧库确保能找到第一次映射）
+	var id string
+	if hasOldDB() {
+		_ = db.View(func(tx *bbolt.Tx) error {
+			b := tx.Bucket([]byte(BucketName))
+			oldRowKey := uinRowKey(strconv.FormatInt(oldRowValue, 10))
+			idBytes := b.Get([]byte(oldRowKey))
+			if idBytes == nil {
+				idBytes = b.Get([]byte(fmt.Sprintf("row-%d", oldRowValue)))
 			}
-			if config.GetIdmapLegacyCompat() {
-				b.Put([]byte(strconv.FormatInt(newRowValue, 10)), oldRowBytes)
+			if idBytes != nil {
+				id = stripUinPrefix(string(idBytes))
 			}
 			return nil
-		}
+		})
+	}
+	// 旧库查不到则查新库
+	if id == "" {
+		revKey := uinRowKey(strconv.FormatInt(oldRowValue, 10))
+		_ = identityDB.View(func(tx *bbolt.Tx) error {
+			b := tx.Bucket([]byte(IdentityBucketName))
+			idBytes := b.Get([]byte(revKey))
+			if idBytes != nil {
+				id = stripUinPrefix(string(idBytes))
+			}
+			return nil
+		})
+	}
+	if id == "" {
+		return fmt.Errorf("不存在:%v", oldRowValue)
+	}
 
-		// === 非隔离模式：原迁移逻辑 ===
-		// 检查新虚拟值是否已存在
-		newRowKey := fmt.Sprintf("row-%d", newRowValue)
-		if b.Get([]byte(newRowKey)) != nil {
-			return fmt.Errorf("%v :已存在", newRowValue)
-		}
+	if config.GetIdmapIsolation() {
+		// === 隔离模式：新增 alias ===
+		aliasKey := uinKey(strconv.FormatInt(newRowValue, 10))
+		oldRowBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(oldRowBytes, uint64(oldRowValue))
 
-		// 更新前向映射
-		newRowBytes := make([]byte, 8)
-		binary.BigEndian.PutUint64(newRowBytes, uint64(newRowValue))
-		if err := b.Put([]byte(id), newRowBytes); err != nil {
-			return err
+		// 写新库
+		_ = identityDB.Update(func(tx *bbolt.Tx) error {
+			b := tx.Bucket([]byte(IdentityBucketName))
+			b.Put([]byte(aliasKey), oldRowBytes)
+			return nil
+		})
+		// 迁移期间写旧库
+		if hasOldDB() && !isMigrationComplete() {
+			_ = db.Update(func(tx *bbolt.Tx) error {
+				b := tx.Bucket([]byte(BucketName))
+				b.Put([]byte(aliasKey), oldRowBytes)
+				if config.GetIdmapLegacyCompat() {
+					b.Put([]byte(strconv.FormatInt(newRowValue, 10)), oldRowBytes)
+				}
+				return nil
+			})
 		}
+		return nil
+	}
 
-		// 删除旧反向、写入新反向
-		_ = b.Delete([]byte(fmt.Sprintf("row-%d", oldRowValue)))
-		if err := b.Put([]byte(newRowKey), []byte(id)); err != nil {
-			return err
+	// === 非隔离模式 ===
+	// 检查新虚拟值是否已存在（查新库）
+	newRevKey := uinRowKey(strconv.FormatInt(newRowValue, 10))
+	_ = identityDB.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(IdentityBucketName))
+		if b.Get([]byte(newRevKey)) != nil {
+			id = "__EXISTS__"
 		}
-
 		return nil
 	})
+	if id == "__EXISTS__" {
+		return fmt.Errorf("%v :已存在", newRowValue)
+	}
+
+	newRowBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(newRowBytes, uint64(newRowValue))
+	key := uinKey(id)
+	revPrefix := uinRowKey("")
+
+	// 写新库（主库）
+	_ = identityDB.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(IdentityBucketName))
+		oldRevKey := revPrefix + strconv.FormatInt(oldRowValue, 10)
+		b.Delete([]byte(oldRevKey))
+		b.Put([]byte(key), newRowBytes)
+		b.Put([]byte(revPrefix+strconv.FormatInt(newRowValue, 10)), []byte(key))
+		return nil
+	})
+
+	// 迁移期间写旧库
+	if hasOldDB() && !isMigrationComplete() {
+		_ = db.Update(func(tx *bbolt.Tx) error {
+			b := tx.Bucket([]byte(BucketName))
+			oldRowKey := fmt.Sprintf("row-%d", oldRowValue)
+			b.Delete([]byte(oldRowKey))
+			b.Put([]byte(id), newRowBytes)
+			b.Put([]byte(fmt.Sprintf("row-%d", newRowValue)), []byte(id))
+			return nil
+		})
+	}
+
+	return nil
 }
 
 // RetrieveRealValue 根据虚拟值获取真实值，并返回虚拟值及其对应的真实值
 func RetrieveRealValue(virtualValue int64) (string, string, error) {
-	var realValue string
-	err := db.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(BucketName))
+	initNewDBs()
+	virtualIDStr := strconv.FormatInt(virtualValue, 10)
 
-		// 先查新格式反向 key
-		virtualKey := uinRowKey(strconv.FormatInt(virtualValue, 10))
-		realValueBytes := b.Get([]byte(virtualKey))
-		if realValueBytes == nil {
-			// 再查旧格式
-			virtualKey = fmt.Sprintf("row-%d", virtualValue)
-			realValueBytes = b.Get([]byte(virtualKey))
-		}
-		if realValueBytes == nil {
-			return fmt.Errorf("no real value found for virtual value: %d", virtualValue)
-		}
-		realValue = stripUinPrefix(string(realValueBytes))
-
-		return nil
-	})
-
-	if err != nil {
-		return "", "", err
+	// 新库优先
+	if id, ok := newDBLookup(virtualIDStr); ok {
+		return virtualIDStr, id, nil
 	}
 
-	return fmt.Sprintf("%d", virtualValue), realValue, nil
+	// 迁移期间回退旧库
+	if hasOldDB() && !isMigrationComplete() {
+		var realValue string
+		err := db.View(func(tx *bbolt.Tx) error {
+			b := tx.Bucket([]byte(BucketName))
+
+			virtualKey := uinRowKey(virtualIDStr)
+			realValueBytes := b.Get([]byte(virtualKey))
+			if realValueBytes == nil {
+				virtualKey = fmt.Sprintf("row-%d", virtualValue)
+				realValueBytes = b.Get([]byte(virtualKey))
+			}
+			if realValueBytes == nil {
+				return fmt.Errorf("no real value found for virtual value: %d", virtualValue)
+			}
+			realValue = stripUinPrefix(string(realValueBytes))
+			return nil
+		})
+		if err != nil {
+			return "", "", err
+		}
+		return virtualIDStr, realValue, nil
+	}
+
+	return "", "", fmt.Errorf("no real value found for virtual value: %d", virtualValue)
 }
 
 // RetrieveVirtualValue 根据真实值获取虚拟值，并返回真实值及其对应的虚拟值
 func RetrieveVirtualValue(realValue string) (string, string, error) {
-	var virtualValue int64
-	err := db.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(BucketName))
+	initNewDBs()
+	key := uinKey(realValue)
 
-		// 先查带 UIN 前缀的新格式
-		key := uinKey(realValue)
-		virtualValueBytes := b.Get([]byte(key))
-		if virtualValueBytes == nil {
-			// 再查无前缀的旧格式
-			virtualValueBytes = b.Get([]byte(realValue))
-		}
-		if virtualValueBytes == nil {
+	// 新库优先
+	var virtualValue int64
+	err := identityDB.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(IdentityBucketName))
+		v := b.Get([]byte(key))
+		if v == nil {
 			return fmt.Errorf("no virtual value found for real value: %s", realValue)
 		}
-		virtualValue = int64(binary.BigEndian.Uint64(virtualValueBytes))
-
+		virtualValue = int64(binary.BigEndian.Uint64(v))
 		return nil
 	})
-
-	if err != nil {
-		return "", "", err
+	if err == nil {
+		return realValue, fmt.Sprintf("%d", virtualValue), nil
 	}
 
-	return realValue, fmt.Sprintf("%d", virtualValue), nil
+	// 迁移期间回退旧库
+	if hasOldDB() && !isMigrationComplete() {
+		err = db.View(func(tx *bbolt.Tx) error {
+			b := tx.Bucket([]byte(BucketName))
+
+			virtualValueBytes := b.Get([]byte(key))
+			if virtualValueBytes == nil {
+				virtualValueBytes = b.Get([]byte(realValue))
+			}
+			if virtualValueBytes == nil {
+				return fmt.Errorf("no virtual value found for real value: %s", realValue)
+			}
+			virtualValue = int64(binary.BigEndian.Uint64(virtualValueBytes))
+			return nil
+		})
+		if err != nil {
+			return "", "", err
+		}
+		return realValue, fmt.Sprintf("%d", virtualValue), nil
+	}
+
+	return "", "", fmt.Errorf("no virtual value found for real value: %s", realValue)
 }
 
 // 更新真实值对应的虚拟值

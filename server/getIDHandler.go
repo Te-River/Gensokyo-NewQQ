@@ -20,7 +20,7 @@ func GetIDHandler(c *gin.Context) {
 
 	switch typeVal {
 	case 1:
-		newRow, err := idmap.StoreIDv2(idOrRow)
+		newRow, err := idmap.StoreID(idOrRow)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -28,7 +28,7 @@ func GetIDHandler(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"row": newRow})
 
 	case 2:
-		id, err := idmap.RetrieveRowByIDv2(idOrRow)
+		id, err := idmap.RetrieveRowByID(idOrRow)
 		if err == idmap.ErrKeyNotFound {
 			c.JSON(http.StatusNotFound, gin.H{"error": "ID not found"})
 			return
@@ -43,7 +43,7 @@ func GetIDHandler(c *gin.Context) {
 		section := c.Query("id")
 		subtype := c.Query("subtype")
 		value := c.Query("value")
-		err := idmap.WriteConfigv2(section, subtype, value)
+		err := idmap.WriteConfig(section, subtype, value)
 		if err != nil {
 			mylog.Printf(err.Error())
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -55,7 +55,7 @@ func GetIDHandler(c *gin.Context) {
 		// 获取值
 		section := c.Query("id")
 		subtype := c.Query("subtype")
-		value, err := idmap.ReadConfigv2(section, subtype)
+		value, err := idmap.ReadConfig(section, subtype)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -75,7 +75,7 @@ func GetIDHandler(c *gin.Context) {
 			return
 		}
 
-		err = idmap.UpdateVirtualValuev2(oldRowValue, newRowValue)
+		err = idmap.UpdateVirtualValue(oldRowValue, newRowValue)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -89,7 +89,7 @@ func GetIDHandler(c *gin.Context) {
 			return
 		}
 
-		virtual, real, err := idmap.RetrieveRealValuev2(virtualValue)
+		virtual, real, err := idmap.RetrieveRealValue(virtualValue)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -102,7 +102,7 @@ func GetIDHandler(c *gin.Context) {
 			return
 		}
 
-		_, virtualValue, err := idmap.RetrieveVirtualValuev2(realValue)
+		_, virtualValue, err := idmap.RetrieveVirtualValue(realValue)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
