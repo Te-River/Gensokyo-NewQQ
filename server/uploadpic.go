@@ -13,7 +13,9 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"net/http"
+	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -359,4 +361,40 @@ func HandleIpupdate(c *gin.Context) {
 	reqParam := c.Query("addr")
 	idmap.WriteConfigv2("stun", "addr", reqParam)
 	c.JSON(http.StatusOK, gin.H{"addr": reqParam})
+}
+
+// 闭包,用于删除图片
+func DeleteImageHandler(rateLimiter *RateLimiter) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		targetfile := c.PostForm("target_file") // 获取要删除的图片文件名
+		if targetfile == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "lack of param target_file"})
+			return
+		}
+		targetfile, _ = url.PathUnescape(targetfile)
+		targetfile = url.PathEscape(targetfile)
+		targetfile, _ = url.PathUnescape(targetfile)
+		match, _ := regexp.MatchString(`\A(\/|\.\/|\.\.\/)`, targetfile)
+		if match {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "operation not permitted"})
+			return
+		}
+		for strings.Contains(targetfile, "..") {
+			targetfile = strings.Replace(targetfile, "..", ".", -1)
+		}
+		directoryPath := "./channel_temp/"
+		filePath := directoryPath + targetfile
+		// 检查文件是否存在
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "file does not exist"})
+			return
+		}
+		// 删除文件
+		err := os.Remove(filePath)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete file"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "file deleted successfully", "file": targetfile})
+	}
 }

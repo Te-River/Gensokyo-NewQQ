@@ -39,6 +39,10 @@ func (p *Processors) ProcessGroupMessage(data *dto.WSGroupATMessageData) error {
 	// GROUP_AT_MESSAGE_CREATE 必然是 @ 机器人的消息
 	toMe := true
 
+	if _, err := idmap.RecordQQGroupMessageReception(data.GroupID, data.ID, false); err != nil {
+		mylog.Errorf("[idmap] 更新QQ群全量消息接收标志失败: group=%s message=%s event=GROUP_AT_MESSAGE_CREATE error=%v", data.GroupID, data.ID, err)
+	}
+
 	if data.Author.ID == "" {
 		mylog.Printf("出现ID为空未知错误.%v\n", data)
 		return nil
@@ -105,7 +109,9 @@ func (p *Processors) ProcessGroupMessage(data *dto.WSGroupATMessageData) error {
 		}
 
 		//框架内指令
-		p.HandleFrameworkCommand(messageText, data, "group")
+		if err := p.HandleFrameworkCommand(messageText, data, "group"); err != nil {
+			mylog.Errorf("处理 GROUP_AT_MESSAGE_CREATE 框架指令失败: %v", err)
+		}
 	} else {
 		// 减少无用的性能开支
 		messageText = data.Content
@@ -151,7 +157,7 @@ func (p *Processors) ProcessGroupMessage(data *dto.WSGroupATMessageData) error {
 		}
 		messageID = int(messageID64)
 	}
-	// 记录该群该用户最新一条消息的 real msg_id（用于 [CQ:remove] 撤回）
+	// 记录该群该用户最新一条消息的 real msg_id（用于 delete_group_msg 撤回）
 	idmap.StoreLatestMsgID(data.GroupID, data.Author.ID, data.ID)
 
 	if config.GetAutoBind() {

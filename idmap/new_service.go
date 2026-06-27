@@ -1,3 +1,5 @@
+//go:build legacy_idmap_disabled
+
 package idmap
 
 import (
@@ -828,83 +830,6 @@ func CleanMsgDB() error {
 	})
 }
 
-// StoreLatestMsgID 记录群内用户最新一条消息的 real message_id（用于 [CQ:remove] 撤回）
-// groupOpenID / userOpenID: 真实 OpenID（32位 hex）
-// realMsgID: QQ 消息 ID
-func StoreLatestMsgID(groupOpenID, userOpenID, realMsgID string) {
-	initNewDBs()
-	_ = msgDB.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(MsgBucketName))
-		key := []byte("latest:" + groupOpenID + ":" + userOpenID)
-		tsKey := []byte("tsl:" + groupOpenID + ":" + userOpenID)
-
-		b.Put(key, []byte(realMsgID))
-		tsBytes := make([]byte, 8)
-		binary.BigEndian.PutUint64(tsBytes, uint64(time.Now().Unix()))
-		b.Put(tsKey, tsBytes)
-		return nil
-	})
-}
-
-// GetLatestMsgID 获取群内用户最新一条消息的 real message_id
-// 自动检查过期（≥6分钟），过期返回空
-func GetLatestMsgID(groupOpenID, userOpenID string) (string, error) {
-	initNewDBs()
-	cutoff := time.Now().Add(-6 * time.Minute).Unix()
-
-	var msgID string
-	err := msgDB.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(MsgBucketName))
-		tsKey := []byte("tsl:" + groupOpenID + ":" + userOpenID)
-		tsBytes := b.Get(tsKey)
-		if tsBytes == nil {
-			return ErrKeyNotFound
-		}
-		ts := int64(binary.BigEndian.Uint64(tsBytes))
-		if ts < cutoff {
-			return ErrKeyNotFound
-		}
-		key := []byte("latest:" + groupOpenID + ":" + userOpenID)
-		v := b.Get(key)
-		if v == nil {
-			return ErrKeyNotFound
-		}
-		msgID = string(v)
-		return nil
-	})
-	if err != nil {
-		return "", err
-	}
-	return msgID, nil
-}
-
-// cleanExpiredLatestMsg 扫描 msg DB，删除存在时间 ≥ 6 分钟的 latest_msg 索引
-func cleanExpiredLatestMsg() {
-	initNewDBs()
-	cutoff := time.Now().Add(-6 * time.Minute).Unix()
-
-	_ = msgDB.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(MsgBucketName))
-		if b == nil {
-			return nil
-		}
-
-		tslPrefix := []byte("tsl:")
-		c := b.Cursor()
-		for k, v := c.Seek(tslPrefix); k != nil && bytes.HasPrefix(k, tslPrefix); k, v = c.Next() {
-			ts := int64(binary.BigEndian.Uint64(v))
-			if ts < cutoff {
-				// 从 "tsl:{gid}:{uid}" 提取 "{gid}:{uid}"
-				suffix := k[len(tslPrefix):]
-				// 删除 latest 键和时间戳键
-				b.Delete(append([]byte("latest:"), suffix...))
-				b.Delete(k)
-			}
-		}
-		return nil
-	})
-}
-
 // newDBStore 由旧 StoreIDv2 调用，双写到新 identity DB
 func newDBStore(openID string, virtualID int64) {
 	initNewDBs()
@@ -1004,7 +929,6 @@ func startMsgCleanup() {
 		for {
 			time.Sleep(1 * time.Minute)
 			cleanExpiredMsgIDs()
-			cleanExpiredLatestMsg()
 		}
 	}()
 }

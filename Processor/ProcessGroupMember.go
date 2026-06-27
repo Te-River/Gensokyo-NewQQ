@@ -35,6 +35,7 @@ func (p *Processors) ProcessGroupMember(data *dto.GroupMemberEvent, eventType st
 		mylog.Printf("ProcessGroupMember: user_id 转换失败: %v", err)
 		return
 	}
+	mylog.Printf("[message] group_member id mapped: event=%s raw_group=%s vGroup=%d raw_user=%s vUser=%d", eventType, data.GroupOpenID, groupID, data.MemberOpenID, userID)
 
 	// 时间戳
 	var timestamp int64

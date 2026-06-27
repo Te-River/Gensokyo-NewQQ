@@ -4,14 +4,20 @@ on:
   pull_request:
     types: [opened, synchronize]
   push:
-    tags:
+    branches:
       - '*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
     name: Build on ${{ matrix.os }} for ${{ matrix.goarch }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: linux
@@ -32,103 +38,122 @@ jobs:
             goarch: 386
           - os: android
             goarch: arm64
-          # ... Add other combinations as needed
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v7
 
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.21.1' # Set to specific Go version.
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
 
-    - name: Set up Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '20.9.0' # 使用最新的 LTS 版本
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
-    - name: Cache Node modules
-      uses: actions/cache@v4
-      with:
-        path: |
-          frontend/node_modules
-          ~/.npm
-        key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
-        restore-keys: |
-          ${{ runner.os }}-node-
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
 
-    - name: Install Quasar CLI and dependencies
-      run: |
-        cd frontend
-        npm install -g @quasar/cli
-        npm install
+      - name: Build Quasar project
+        working-directory: frontend
+        run: npm run build
 
-    - name: Build Quasar Project
-      run: |
-        cd frontend
-        quasar build
+      - name: Cache Android NDK
+        id: android-ndk-cache
+        if: matrix.os == 'android'
+        uses: actions/cache@v6
+        with:
+          path: android-ndk-r21e
+          key: android-ndk-r21e-linux-x86_64
 
-    - name: Cache Android NDK
-      uses: actions/cache@v4
-      with:
-        path: |
-          ${{ github.workspace }}/android-ndk-r21e
-        key: ${{ runner.os }}-android-ndk-r21e
+      - name: Download Android NDK
+        if: matrix.os == 'android' && steps.android-ndk-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          ndk_zip="$RUNNER_TEMP/android-ndk-r21e-linux-x86_64.zip"
+          rm -rf "$GITHUB_WORKSPACE/android-ndk-r21e"
+          curl -fsSL --retry 3 --retry-delay 5 \
+            https://dl.google.com/android/repository/android-ndk-r21e-linux-x86_64.zip \
+            -o "$ndk_zip"
+          unzip -q "$ndk_zip" -d "$GITHUB_WORKSPACE"
 
-    - name: Download and setup Android NDK
-      if: steps.cache.outputs.cache-hit != 'true' && matrix.os == 'android'
-      run: |
-        sudo apt-get install -y wget unzip
-        wget https://dl.google.com/android/repository/android-ndk-r21e-linux-x86_64.zip -O ndk.zip
-        unzip ndk.zip
-        export ANDROID_NDK_HOME=$PWD/android-ndk-r21e
-        echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME" >> $GITHUB_ENV
+      - name: Configure Android NDK
+        if: matrix.os == 'android'
+        run: echo "ANDROID_NDK_HOME=$GITHUB_WORKSPACE/android-ndk-r21e" >> "$GITHUB_ENV"
 
-    - name: Create output directory
-      run: mkdir -p output
+      - name: Create output directory
+        run: mkdir -p output
 
-    - name: Compile Go for target
-      env:
-        GOOS: ${{ matrix.os }}
-        GOARCH: ${{ matrix.goarch }}
-        CGO_ENABLED: 0
-      run: |
-        if [ "$GOOS" = "windows" ]; then
-          go build -ldflags="-s -w" -o output/gensokyo-${{ matrix.os }}-${{ matrix.goarch }}.exe
-        else
-          go build -ldflags="-s -w" -o output/gensokyo-${{ matrix.os }}-${{ matrix.goarch }}
-        fi
+      - name: Compile Go for target
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          build_spec="${GITHUB_SHA::7}"
+          ldflags="-s -w -X github.com/hoshinonyaruko/gensokyo/buildinfo.BuildType=git -X github.com/hoshinonyaruko/gensokyo/buildinfo.BuildSpec=${build_spec}"
+          if [ "$GOOS" = "windows" ]; then
+            go build -ldflags="$ldflags" -o output/gensokyo-${{ matrix.os }}-${{ matrix.goarch }}.exe
+          else
+            go build -ldflags="$ldflags" -o output/gensokyo-${{ matrix.os }}-${{ matrix.goarch }}
+          fi
 
-    - name: Compress executable files with UPX (except for gensokyo-android-arm64 and darwin)
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y upx
-        if [[ "${{ matrix.os }}" == *"windows"* ]]; then
-          FILENAME="output/gensokyo-${{ matrix.os }}-${{ matrix.goarch }}.exe"
-        else
-          FILENAME="output/gensokyo-${{ matrix.os }}-${{ matrix.goarch }}"
-        fi
-        if [[ "${{ matrix.os }}" == "android" && "${{ matrix.goarch }}" == "arm64" ]] || [[ "${{ matrix.os }}" == "darwin" ]]; then
-          echo "Skipping UPX compression for $FILENAME"
-        else
-          upx --best --lzma "$FILENAME"
-        fi      
+      - name: Compress executable files with UPX
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y upx
+          if [[ "${{ matrix.os }}" == *"windows"* ]]; then
+            FILENAME="output/gensokyo-${{ matrix.os }}-${{ matrix.goarch }}.exe"
+          else
+            FILENAME="output/gensokyo-${{ matrix.os }}-${{ matrix.goarch }}"
+          fi
+          if [[ "${{ matrix.os }}" == "android" && "${{ matrix.goarch }}" == "arm64" ]] || [[ "${{ matrix.os }}" == "darwin" ]]; then
+            echo "Skipping UPX compression for $FILENAME"
+          else
+            upx --best --lzma "$FILENAME"
+          fi
 
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: gensokyo-${{ matrix.os }}-${{ matrix.goarch }}
-        path: output/gensokyo-${{ matrix.os }}-${{ matrix.goarch }}${{ endsWith(matrix.os, 'windows') && '.exe' || '' }}
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: gensokyo-${{ matrix.os }}-${{ matrix.goarch }}
+          path: output/gensokyo-${{ matrix.os }}-${{ matrix.goarch }}${{ endsWith(matrix.os, 'windows') && '.exe' || '' }}
+          if-no-files-found: error
 
   prepare_release:
+    if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
+      - name: Checkout release commit
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Generate release metadata
+        id: release_info
+        run: |
+          set -euo pipefail
+          build_date="$(TZ=Asia/Shanghai LC_ALL=C date +'%Y-%b-%d')"
+          commit_count="$(git rev-list --all --count)"
+          tag_name="build-${build_date}.r${commit_count}"
+          echo "tag_name=${tag_name}" >> "$GITHUB_OUTPUT"
+          echo "Release tag: ${tag_name}"
+
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: output
+          pattern: gensokyo-*
 
       - name: Create Release
         id: create_release
@@ -136,32 +161,55 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ github.ref_name }}
-          release_name: Release ${{ github.ref_name }}
+          tag_name: ${{ steps.release_info.outputs.tag_name }}
+          release_name: Release ${{ steps.release_info.outputs.tag_name }}
+          body: Automated build for ${{ github.sha }}
+          commitish: ${{ github.sha }}
           draft: false
+          prerelease: false
 
       - name: Upload Release Assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_UPLOAD_URL: ${{ steps.create_release.outputs.upload_url }}
         run: |
+          set -euo pipefail
+          upload_url="${GITHUB_UPLOAD_URL%\{*}"
+          upload_url="${upload_url%\?*}"
+          asset_count=0
+          shopt -s nullglob
+
           for dir in output/*; do
-            if [ -d "$dir" ]; then
-              for file in "$dir"/*; do
-                if [ -f "$file" ]; then
-                  asset_name=$(basename "$file")
-                  echo "Uploading ${asset_name}"
-                  GITHUB_UPLOAD_URL=${{ steps.create_release.outputs.upload_url }}
-                  GITHUB_UPLOAD_URL="${GITHUB_UPLOAD_URL%\{*}"
-                  GITHUB_UPLOAD_URL="${GITHUB_UPLOAD_URL%\?*}"
-                  curl \
-                  -X POST \
-                  -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-                  -H "Content-Type: application/octet-stream" \
-                  --data-binary @"${file}" \
-                  "${GITHUB_UPLOAD_URL}?name=${asset_name}&label=${asset_name}"
-                else
-                  echo "Expected a file in ${dir}, but found something else."
-                fi
-              done
-            else
-              echo "Expected ${dir} to be a directory."
+            if [ ! -d "$dir" ]; then
+              echo "Expected ${dir} to be a directory." >&2
+              exit 1
             fi
+
+            for file in "$dir"/*; do
+              if [ ! -f "$file" ]; then
+                echo "Expected a file in ${dir}, but found something else." >&2
+                exit 1
+              fi
+
+              asset_name="$(basename "$file")"
+              encoded_asset_name="$(jq -rn --arg value "$asset_name" '$value | @uri')"
+              echo "Uploading ${asset_name}"
+              curl \
+                --fail-with-body \
+                --silent \
+                --show-error \
+                --retry 3 \
+                -X POST \
+                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                -H "Content-Type: application/octet-stream" \
+                --data-binary @"${file}" \
+                --output /dev/null \
+                "${upload_url}?name=${encoded_asset_name}&label=${encoded_asset_name}"
+              asset_count=$((asset_count + 1))
+            done
           done
+
+          if [ "$asset_count" -eq 0 ]; then
+            echo "No release assets were found in output." >&2
+            exit 1
+          fi

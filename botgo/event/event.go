@@ -9,6 +9,7 @@ import (
 	"github.com/tidwall/gjson" // 由于回包的 d 类型不确定，gjson 用于从回包json中提取 d 并进行针对性的解析
 
 	"github.com/tencent-connect/botgo/dto"
+	botlog "github.com/tencent-connect/botgo/log"
 )
 
 func init() {
@@ -76,7 +77,7 @@ var eventParseFuncMap = map[dto.OPCode]map[dto.EventType]eventParseFunc{
 
 		dto.EventInteractionCreate:    interactionHandler,
 		dto.EventGroupAtMessageCreate: groupAtMessageHandler,
-		dto.EventGroupMessageCreate:  groupMessageHandler, // [新增] 映射到新建的groupMessageHandler
+		dto.EventGroupMessageCreate:   groupMessageHandler, // [新增] 映射到新建的groupMessageHandler
 		dto.EventC2CMessageCreate:     c2cMessageHandler,
 		dto.EventGroupAddRobot:        groupaddbothandler,
 		dto.EventGroupDelRobot:        groupdelbothandler,
@@ -333,6 +334,7 @@ func groupMemberAddHandler(payload *dto.WSPayload, message []byte) error {
 	if DefaultHandlers.GroupMemberAdd != nil {
 		return DefaultHandlers.GroupMemberAdd(payload, data)
 	}
+	botlog.Warnf("[event] GROUP_MEMBER_ADD received but GroupMemberAddEventHandler is not registered; add it to text_intent to process this event. event_id=%s group_openid=%s member_openid=%s", payload.ID, data.GroupOpenID, data.MemberOpenID)
 	return nil
 }
 
@@ -344,6 +346,7 @@ func groupMemberRemoveHandler(payload *dto.WSPayload, message []byte) error {
 	if DefaultHandlers.GroupMemberRemove != nil {
 		return DefaultHandlers.GroupMemberRemove(payload, data)
 	}
+	botlog.Warnf("[event] GROUP_MEMBER_REMOVE received but GroupMemberRemoveEventHandler is not registered; add it to text_intent to process this event. event_id=%s group_openid=%s member_openid=%s", payload.ID, data.GroupOpenID, data.MemberOpenID)
 	return nil
 }
 
@@ -539,5 +542,6 @@ func groupMessageHandler(payload *dto.WSPayload, message []byte) error {
 	if DefaultHandlers.GroupMessage != nil {
 		return DefaultHandlers.GroupMessage(payload, data)
 	}
+	botlog.Warnf("[event] GROUP_MESSAGE_CREATE received but GroupMessageEventHandler is not registered; add it to text_intent to process this event. event_id=%s msg_id=%s group_openid=%s author_openid=%s", payload.ID, data.ID, data.GroupID, data.Author.ID)
 	return nil
 }

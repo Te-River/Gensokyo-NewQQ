@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
@@ -392,6 +391,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				postGroupMessageWithRetry(apiv2, message.Params.GroupID.(string), groupMessage)
 			}
 
+			rememberLatestBotGroupMessageInGroup(message.Params.GroupID.(string), resp)
 			if !config.GetNoRetMsg() {
 				if config.GetThreadsRetMsg() {
 					if !config.GetStringOb11() {
@@ -423,51 +423,6 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			messageText, realGroupID, _ = ProcessCQMemberOutbound(messageText, &eventID, message.Params.GroupID.(string), apiv2)
 			if realGroupID != "" {
 				mylog.Printf("[CQ:member] CQ 码 group_id 已转为 OpenID=%s", realGroupID)
-			}
-
-			// 处理出站 [CQ:remove,user_id=虚拟ID,msg_id=虚拟消息ID] → 撤回指定消息
-			if strings.Contains(messageText, "[CQ:remove,") {
-				var recallOK bool
-				messageText, targetUserOpenID, realMsgID := ProcessCQRemoveOutbound(messageText)
-				if targetUserOpenID != "" && realMsgID != "" {
-					// 将群 ID 转为真实 OpenID
-					groupOpenID := message.Params.GroupID.(string)
-					if len(groupOpenID) != 32 {
-						var err error
-						groupOpenID, err = idmap.RetrieveRowByIDv2(groupOpenID)
-						if err != nil || groupOpenID == "" {
-							mylog.Printf("[CQ:remove] 转换群 ID 失败: %v", err)
-							groupOpenID = ""
-						}
-					}
-					if groupOpenID != "" {
-						mylog.Printf("[CQ:remove] 撤回消息: group=%s user=%s msgID=%s", groupOpenID, targetUserOpenID, realMsgID)
-						err := apiv2.RetractGroupMessage(context.TODO(), groupOpenID, realMsgID, openapi.RetractMessageOptionHidetip)
-						if err != nil {
-							mylog.Printf("[CQ:remove] 撤回失败: %v", err)
-						} else {
-							recallOK = true
-						}
-					}
-				}
-				// 剥离后消息为空 → 给客户端回执，不发送到频道
-				if messageText == "" {
-					mylog.Printf("[CQ:remove] 消息仅含 CQ 码，已剥离，跳过发送")
-					response := map[string]interface{}{
-						"status":  "ok",
-						"retcode": 0,
-						"data":    nil,
-						"message": "",
-					}
-					if recallOK {
-						response["message"] = "recall ok"
-					}
-					response["echo"] = message.Echo
-					outputMap := response
-					client.SendMessage(outputMap)
-					result, _ := json.Marshal(response)
-					return string(result), nil
-				}
 			}
 
 			// 如果 CQ 码中携带了 group_id，优先使用它作为目标群（支持跨群路由）
@@ -567,6 +522,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				postGroupMessageWithRetry(apiv2, targetGroupID, groupMessage)
 			}
 
+			rememberLatestBotGroupMessageInGroup(targetGroupID, resp)
 			if !config.GetNoRetMsg() {
 				//发送成功回执
 				if config.GetThreadsRetMsg() {
@@ -664,6 +620,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 							postGroupMessageWithRetry(apiv2, message.Params.GroupID.(string), groupMessage)
 						}
 
+						rememberLatestBotGroupMessageInGroup(message.Params.GroupID.(string), resp)
 						if !config.GetNoRetMsg() {
 							//发送成功回执
 							if config.GetThreadsRetMsg() {
@@ -742,6 +699,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 					}
 				}
 
+				rememberLatestBotGroupMessageInGroup(message.Params.GroupID.(string), resp)
 				if !config.GetNoRetMsg() {
 					//发送成功回执
 					if config.GetThreadsRetMsg() {

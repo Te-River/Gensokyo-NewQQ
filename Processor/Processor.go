@@ -13,14 +13,15 @@ import (
 	"net/http"
 	"reflect"
 	"regexp"
-	"strconv"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/go-multierror"
+	"github.com/hoshinonyaruko/gensokyo/buildinfo"
 	"github.com/hoshinonyaruko/gensokyo/callapi"
 	"github.com/hoshinonyaruko/gensokyo/config"
 	"github.com/hoshinonyaruko/gensokyo/echo"
@@ -224,6 +225,33 @@ func structToMap(obj interface{}) map[string]interface{} {
 	return out
 }
 
+func applyOpUserIDType(message map[string]interface{}) {
+	mode := config.GetOpUserIDType()
+	if mode == "vuin" {
+		return
+	}
+
+	replace := func(field, realField string) {
+		raw, ok := message[realField].(string)
+		if !ok || raw == "" {
+			return
+		}
+		if mode == "ruin" && !strings.HasPrefix(strings.ToLower(raw), "ruin-") {
+			return
+		}
+		message[field] = raw
+	}
+
+	replace("user_id", "real_user_id")
+	replace("group_id", "real_group_id")
+
+	if sender, ok := message["sender"].(map[string]interface{}); ok {
+		if userID, exists := message["user_id"]; exists {
+			sender["user_id"] = userID
+		}
+	}
+}
+
 // 修改函数的返回类型为 *Processor
 func NewProcessor(api openapi.OpenAPI, apiv2 openapi.OpenAPI, settings *structs.Settings, wsclient []*wsclient.WebSocketClient) *Processors {
 	return &Processors{
@@ -245,6 +273,7 @@ func NewProcessorV2(api openapi.OpenAPI, apiv2 openapi.OpenAPI, settings *struct
 
 // 发信息给所有连接正向ws的客户端
 func (p *Processors) SendMessageToAllClients(message map[string]interface{}) error {
+	applyOpUserIDType(message)
 	var result *multierror.Error
 
 	for _, client := range p.WsServerClients {
@@ -262,6 +291,7 @@ func (p *Processors) SendMessageToAllClients(message map[string]interface{}) err
 
 // 方便快捷的发信息函数
 func (p *Processors) BroadcastMessageToAllFAF(message map[string]interface{}, api openapi.MessageAPI, data interface{}) error {
+	applyOpUserIDType(message)
 	// 并发发送到我们作为客户端的Wsclient
 	for _, client := range p.Wsclient {
 		go func(c callapi.WebSocketServerClienter) {
@@ -282,6 +312,7 @@ func (p *Processors) BroadcastMessageToAllFAF(message map[string]interface{}, ap
 
 // 方便快捷的发信息函数
 func (p *Processors) BroadcastMessageToAll(message map[string]interface{}, api openapi.MessageAPI, data interface{}) error {
+	applyOpUserIDType(message)
 	var wg sync.WaitGroup
 	errorCh := make(chan string, len(p.Wsclient)+len(p.WsServerClients))
 	defer close(errorCh)
@@ -480,6 +511,8 @@ func (p *Processors) HandleFrameworkCommand(messageText string, data interface{}
 	switch v := data.(type) {
 	case *dto.WSGroupATMessageData:
 		realid = v.Author.ID
+	case *dto.WSGroupMessageData:
+		realid = v.Author.ID
 	case *dto.WSATMessageData:
 		realid = v.Author.ID
 		guildid = v.GuildID
@@ -496,6 +529,8 @@ func (p *Processors) HandleFrameworkCommand(messageText string, data interface{}
 
 	switch v := data.(type) {
 	case *dto.WSGroupATMessageData:
+		realid2 = v.GroupID
+	case *dto.WSGroupMessageData:
 		realid2 = v.GroupID
 	case *dto.WSATMessageData:
 		realid2 = v.ChannelID
@@ -523,9 +558,14 @@ func (p *Processors) HandleFrameworkCommand(messageText string, data interface{}
 			mylog.Printf("根据realid获取new(用户id) 错误:%v", err)
 		}
 		// 根据realid获取new(群id)
-		nowgroup, newgroup, err = idmap.RetrieveVirtualValuev2(realid2)
-		if err != nil {
-			mylog.Printf("根据realid获取new(群id)错误:%v", err)
+		if realid2 != "group_private" {
+			nowgroup, newgroup, err = idmap.RetrieveVirtualValuev2(realid2)
+			if err != nil {
+				mylog.Printf("根据realid获取new(群id)错误:%v", err)
+			}
+		} else {
+			nowgroup = realid2
+			newgroup = ""
 		}
 	}
 	// 检查真实值或虚拟值是否在数组中
@@ -542,7 +582,7 @@ func (p *Processors) HandleFrameworkCommand(messageText string, data interface{}
 	}
 
 	//unlock指令
-	if Type == "guild" && strings.HasPrefix(cleanedMessage, config.GetUnlockPrefix()) {
+	if Type == "guild" && commandMatch(cleanedMessage, config.GetUnlockPrefix()) {
 		dm := &dto.DirectMessageToCreate{
 			SourceGuildID: guildid,
 			RecipientID:   guilduserid,
@@ -563,7 +603,7 @@ func (p *Processors) HandleFrameworkCommand(messageText string, data interface{}
 	}
 
 	// me指令处理逻辑
-	if strings.HasPrefix(cleanedMessage, config.GetMePrefix()) {
+	if commandMatch(cleanedMessage, config.GetMePrefix()) {
 		if err != nil {
 			// 发送错误信息
 			SendMessage(err.Error(), data, Type, p.Api, p.Apiv2)
@@ -582,7 +622,11 @@ func (p *Processors) HandleFrameworkCommand(messageText string, data interface{}
 			message := fmt.Sprintf("idmaps-pro状态:\n%s\n%s\n%s", userMapping, groupMapping, bindInstruction)
 			SendMessage(message, data, Type, p.Api, p.Apiv2)
 		} else {
-			SendMessage("目前状态:\n当前真实值(用户) "+now+"\n当前虚拟值(用户) "+new+"\n当前真实值(群/频道) "+nowgroup+"\n当前虚拟值(群/频道) "+newgroup+"\nbind指令:"+config.GetBindPrefix()+" 当前虚拟值"+" 目标虚拟值", data, Type, p.Api, p.Apiv2)
+			if Type == "group_private" {
+				SendMessage("目前状态:\n当前真实值(用户) "+now+"\n当前虚拟值(用户) "+new+"\nbind指令:"+config.GetBindPrefix()+" 当前虚拟值"+" 目标虚拟值", data, Type, p.Api, p.Apiv2)
+			} else {
+				SendMessage("目前状态:\n当前真实值(用户) "+now+"\n当前虚拟值(用户) "+new+"\n当前真实值(群/频道) "+nowgroup+"\n当前虚拟值(群/频道) "+newgroup+"\nbind指令:"+config.GetBindPrefix()+" 当前虚拟值"+" 目标虚拟值", data, Type, p.Api, p.Apiv2)
+			}
 		}
 		return nil
 	}
@@ -607,7 +651,8 @@ func (p *Processors) HandleFrameworkCommand(messageText string, data interface{}
 	}
 
 	// 如果不是临时指令，检查是否具有执行bind操作的权限并且消息以特定前缀开始
-	if (realValueIncluded || virtualValueIncluded) && strings.HasPrefix(cleanedMessage, config.GetBindPrefix()) {
+	bindMatched := commandMatch(cleanedMessage, config.GetBindPrefix())
+	if (realValueIncluded || virtualValueIncluded) && bindMatched {
 		// 执行 bind 操作
 		if config.GetIdmapPro() {
 			err := performBindOperationV2(cleanedMessage, data, Type, p.Api, p.Apiv2, newpro1)
@@ -621,47 +666,28 @@ func (p *Processors) HandleFrameworkCommand(messageText string, data interface{}
 			}
 		}
 		return nil
-	} else if strings.HasPrefix(cleanedMessage, config.GetBindPrefix()) {
+	} else if bindMatched {
 		// 生成临时指令
 		tempCmd := handleNoPermission()
 		mylog.Printf("您没有权限,使用临时指令：%s 忽略权限检查,或将masterid设置为空数组", tempCmd)
-		SendMessage("您没有权限,请配置config.yml或查看日志,使用临时指令", data, Type, p.Api, p.Apiv2)
+		return SendMessage("您没有权限,请配置config.yml或查看日志,使用临时指令", data, Type, p.Api, p.Apiv2)
 	}
 
-	// -status 指令
-	if (realValueIncluded || virtualValueIncluded) && strings.HasPrefix(cleanedMessage, "-status") {
-		msgRecv := atomic.LoadUint64(&mylog.MetricMsgReceived)
-		msgSent := atomic.LoadUint64(&mylog.MetricMsgSent)
-		errCount := atomic.LoadUint64(&mylog.MetricErrorCount)
-		slowEvents := atomic.LoadUint64(&mylog.MetricSlowEvents)
-		uptimeSec := time.Since(mylog.StartTime).Seconds()
-
-		var m runtime.MemStats
-		runtime.ReadMemStats(&m)
-		memAlloc := float64(m.Alloc) / 1024 / 1024
-		goroutines := runtime.NumGoroutine()
-
-		statusText := fmt.Sprintf(
-			"Gensokyo Bot Status:\n"+
-				"- 运行时间 (Uptime): %.2f 秒\n"+
-				"- 内存分配 (Alloc Memory): %.2f MB\n"+
-				"- 协程数量 (Goroutines): %d\n"+
-				"- 接收消息数 (Msg Received): %d\n"+
-				"- 发送消息数 (Msg Sent): %d\n"+
-				"- 错误发生数 (Errors): %d\n"+
-				"- 慢事件发生数 (Slow Events): %d",
-			uptimeSec, memAlloc, goroutines, msgRecv, msgSent, errCount, slowEvents,
-		)
-		SendMessage(statusText, data, Type, p.Api, p.Apiv2)
-		return nil
+	// status 指令
+	if commandMatch(cleanedMessage, config.GetStatusPrefix()) {
+		return SendMessage(buildStatusText(), data, Type, p.Api, p.Apiv2)
 	}
 
-	// -broadcast 指令
-	if (realValueIncluded || virtualValueIncluded) && strings.HasPrefix(cleanedMessage, "-broadcast") {
-		broadcastMsg := strings.TrimSpace(strings.TrimPrefix(cleanedMessage, "-broadcast"))
+	// broadcast 指令
+	broadcastMatched := commandMatch(cleanedMessage, config.GetBroadcastPrefix())
+	if broadcastMatched && !(realValueIncluded || virtualValueIncluded) {
+		return SendMessage("您没有权限执行广播指令，请在 config.yml 的 master_id 中配置当前用户。", data, Type, p.Api, p.Apiv2)
+	}
+	if broadcastMatched {
+		broadcastPrefix := strings.TrimSpace(config.GetBroadcastPrefix())
+		broadcastMsg := strings.TrimSpace(strings.TrimPrefix(cleanedMessage, broadcastPrefix))
 		if broadcastMsg == "" {
-			SendMessage("广播内容不能为空。用法: -broadcast <内容>", data, Type, p.Api, p.Apiv2)
-			return nil
+			return SendMessage("广播内容不能为空。用法: "+broadcastPrefix+" <内容>", data, Type, p.Api, p.Apiv2)
 		}
 
 		// 获取虚拟群组 (channel)
@@ -704,17 +730,90 @@ func (p *Processors) HandleFrameworkCommand(messageText string, data interface{}
 			}(grpID)
 		}
 
-		SendMessage(fmt.Sprintf("已向 %d 个频道和 %d 个群聊提交广播请求。", len(channelIDs), len(groupIDs)), data, Type, p.Api, p.Apiv2)
-		return nil
+		return SendMessage(fmt.Sprintf("已向 %d 个频道和 %d 个群聊提交广播请求。", len(channelIDs), len(groupIDs)), data, Type, p.Api, p.Apiv2)
 	}
 
 	//link指令
-	if strings.HasPrefix(cleanedMessage, config.GetLinkPrefix()) {
+	if commandMatch(cleanedMessage, config.GetLinkPrefix()) {
 		md, kb := generateMdByConfig()
 		SendMessageMd(md, kb, data, Type, p.Api, p.Apiv2)
 	}
 
 	return nil
+}
+
+func commandDisabled(prefix string) bool {
+	trimmed := strings.TrimSpace(prefix)
+	return trimmed == "" || strings.HasPrefix(strings.ToLower(trimmed), "/disabled")
+}
+
+func commandMatch(message, prefix string) bool {
+	if commandDisabled(prefix) {
+		return false
+	}
+	return strings.HasPrefix(message, strings.TrimSpace(prefix))
+}
+
+func buildStatusText() string {
+	msgRecv := atomic.LoadUint64(&mylog.MetricMsgReceived)
+	msgSent := atomic.LoadUint64(&mylog.MetricMsgSent)
+	errCount := atomic.LoadUint64(&mylog.MetricErrorCount)
+	slowEvents := atomic.LoadUint64(&mylog.MetricSlowEvents)
+
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	memAllocMB := m.Alloc / 1024 / 1024
+
+	return fmt.Sprintf(
+		"Gensokyo Status\n"+
+			"  - Version: %s\n"+
+			"  - Recv/Send: %d / %d\n"+
+			"  - Slow/Error: %d / %d\n"+
+			"  - Mem: %d MB with %d goroutines\n"+
+			"  - Uptime: %s",
+		buildinfo.Version(),
+		msgRecv, msgSent,
+		slowEvents, errCount,
+		memAllocMB, runtime.NumGoroutine(),
+		formatUptime(time.Since(mylog.StartTime)),
+	)
+}
+
+func formatUptime(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+
+	totalSeconds := int64(d / time.Second)
+	years := totalSeconds / (365 * 24 * 3600)
+	totalSeconds %= 365 * 24 * 3600
+	months := totalSeconds / (30 * 24 * 3600)
+	totalSeconds %= 30 * 24 * 3600
+	days := totalSeconds / (24 * 3600)
+	totalSeconds %= 24 * 3600
+	hours := totalSeconds / 3600
+	totalSeconds %= 3600
+	minutes := totalSeconds / 60
+	seconds := d.Seconds() - float64(int64(d/time.Minute)*60)
+
+	parts := make([]string, 0, 6)
+	if years > 0 {
+		parts = append(parts, fmt.Sprintf("%dy", years))
+	}
+	if len(parts) > 0 || months > 0 {
+		parts = append(parts, fmt.Sprintf("%dm", months))
+	}
+	if len(parts) > 0 || days > 0 {
+		parts = append(parts, fmt.Sprintf("%dd", days))
+	}
+	if len(parts) > 0 || hours > 0 {
+		parts = append(parts, fmt.Sprintf("%dh", hours))
+	}
+	if len(parts) > 0 || minutes > 0 {
+		parts = append(parts, fmt.Sprintf("%dm", minutes))
+	}
+	parts = append(parts, fmt.Sprintf("%.2f", seconds))
+	return strings.Join(parts, " ")
 }
 
 // 生成由两个英文字母构成的唯一临时指令
@@ -883,6 +982,8 @@ func SendMessage(messageText string, data interface{}, messageType string, api o
 	switch v := data.(type) {
 	case *dto.WSGroupATMessageData:
 		msg = (*dto.Message)(v)
+	case *dto.WSGroupMessageData:
+		msg = (*dto.Message)(v)
 	case *dto.WSATMessageData:
 		msg = (*dto.Message)(v)
 	case *dto.WSMessageData:
@@ -892,7 +993,7 @@ func SendMessage(messageText string, data interface{}, messageType string, api o
 	case *dto.WSC2CMessageData:
 		msg = (*dto.Message)(v)
 	default:
-		return nil
+		return fmt.Errorf("不支持的消息事件类型 %T", data)
 	}
 	switch messageType {
 	case "guild":
@@ -910,10 +1011,13 @@ func SendMessage(messageText string, data interface{}, messageType string, api o
 		msgseq := echo.GetMappingSeq(msg.ID)
 		echo.AddMappingSeq(msg.ID, msgseq+1)
 		textMsg, _ := handlers.GenerateReplyMessage(msg.ID, nil, messageText, msgseq+1, nil)
-		_, err := apiv2.PostGroupMessage(context.TODO(), msg.GroupID, textMsg)
+		response, err := apiv2.PostGroupMessage(context.TODO(), msg.GroupID, textMsg)
 		if err != nil {
 			mylog.Printf("发送文本群组信息失败: %v", err)
 			return err
+		}
+		if response != nil && response.Message != nil {
+			idmap.StoreLatestBotMsgID(msg.GroupID, response.Message.ID)
 		}
 
 	case "guild_private":
@@ -958,6 +1062,8 @@ func SendMessageMd(md *dto.Markdown, kb *keyboard.MessageKeyboard, data interfac
 	switch v := data.(type) {
 	case *dto.WSGroupATMessageData:
 		msg = (*dto.Message)(v)
+	case *dto.WSGroupMessageData:
+		msg = (*dto.Message)(v)
 	case *dto.WSATMessageData:
 		msg = (*dto.Message)(v)
 	case *dto.WSMessageData:
@@ -967,7 +1073,7 @@ func SendMessageMd(md *dto.Markdown, kb *keyboard.MessageKeyboard, data interfac
 	case *dto.WSC2CMessageData:
 		msg = (*dto.Message)(v)
 	default:
-		return nil
+		return fmt.Errorf("不支持的消息事件类型 %T", data)
 	}
 	switch messageType {
 	case "guild":
@@ -1000,10 +1106,13 @@ func SendMessageMd(md *dto.Markdown, kb *keyboard.MessageKeyboard, data interfac
 			MsgType:  2, //md信息
 		}
 		Message.Timestamp = time.Now().Unix() // 设置时间戳
-		_, err := apiv2.PostGroupMessage(context.TODO(), msg.GroupID, Message)
+		response, err := apiv2.PostGroupMessage(context.TODO(), msg.GroupID, Message)
 		if err != nil {
 			mylog.Printf("发送文本群组信息失败: %v", err)
 			return err
+		}
+		if response != nil && response.Message != nil {
+			idmap.StoreLatestBotMsgID(msg.GroupID, response.Message.ID)
 		}
 
 	case "guild_private":
@@ -1091,6 +1200,10 @@ func (p *Processors) Autobind(data interface{}) error {
 	// 群at
 	switch v := data.(type) {
 	case *dto.WSGroupATMessageData:
+		realID = v.Author.ID
+		groupID = v.GroupID
+		attachmentURL = v.Attachments[0].URL
+	case *dto.WSGroupMessageData:
 		realID = v.Author.ID
 		groupID = v.GroupID
 		attachmentURL = v.Attachments[0].URL

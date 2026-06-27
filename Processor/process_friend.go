@@ -50,6 +50,7 @@ func (p *Processors) ProcessFriendAdd(data *dto.WSFriendAddData) error {
 		mylog.Printf("Error storing ID: %v", err)
 		return nil
 	}
+	mylog.Printf("[message] friend_add id mapped: raw_user=%s vUser=%d", data.OpenID, userid64)
 
 	// 2. 时间戳转换
 	timestampInt64 := int64(data.Timestamp)
@@ -129,6 +130,7 @@ func (p *Processors) ProcessFriendDel(data *dto.WSFriendDelData) error {
 		mylog.Printf("Error storing ID: %v", err)
 		return nil
 	}
+	mylog.Printf("[message] friend_del id mapped: raw_user=%s vUser=%d", data.OpenID, userid64)
 
 	// 2. 时间戳转换
 	timestampInt64 := int64(data.Timestamp)

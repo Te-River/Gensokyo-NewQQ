@@ -1,10 +1,7 @@
-# 扩展 CQ 码文档
+# 扩展 CQ 码
 
-本 Fork 新增的 CQ 码详细说明。
-
-| CQ 码 | 说明 | 详细文档 |
-|-------|------|:--------:|
-| `[CQ:member]` | 群成员变动标记（入群/退群双向流程） | [查看](./扩展CQ码/扩展cq码-cq-member.md) |
-| `[CQ:remove]` | 撤回用户最近一条消息（出站单向） | [查看](./扩展CQ码/扩展cq码-cq-remove.md) |
-| `[CQ:active]` | 主动推送模式标记 | [查看](./扩展CQ码/扩展cq码-cq-active.md) |
-| `[CQ:at]` | Markdown 消息中的 @ 支持（自动合并到 md 内容） | [查看](./扩展CQ码/扩展cq码-cq-at-md.md) |
+| CQ 码 | 范围 | 说明 | 文档 |
+|-------|------|------|------|
+| `[CQ:member]` | `q群 (Group Chat)` | 群成员入群/退群通知及回复路由。 | [查看](./扩展CQ码/扩展cq码-cq-member.md) |
+| `[CQ:active]` | `-` | 当前仅解析并移除带参数的 active 标记。 | [查看](./扩展CQ码/扩展cq码-cq-active.md) |
+| `[CQ:at]` in Markdown | `q群 (Group Chat)` / `q頻 (QQ Guild)` | Markdown 内容中的 @ 转 QQ 官方标签。 | [查看](./扩展CQ码/扩展cq码-cq-at-md.md) |

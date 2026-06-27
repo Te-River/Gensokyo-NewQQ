@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hoshinonyaruko/gensokyo/acnode"
@@ -38,6 +39,48 @@ import (
 
 var BotID string
 var AppID string
+var selfAtMu sync.RWMutex
+var selfAtIDs = make(map[string]struct{})
+
+// RememberSelfAtID 记录 GROUP_MESSAGE_CREATE mentions 中标记为 is_you 的 OpenID。
+func RememberSelfAtID(id string) {
+	if id == "" {
+		return
+	}
+	selfAtMu.Lock()
+	selfAtIDs[id] = struct{}{}
+	selfAtMu.Unlock()
+}
+
+func isSelfAtID(id string) bool {
+	if id == "" {
+		return false
+	}
+	if id == BotID || id == AppID || id == config.GetAppIDStr() {
+		return true
+	}
+	selfAtMu.RLock()
+	_, ok := selfAtIDs[id]
+	selfAtMu.RUnlock()
+	return ok
+}
+
+func resolveIncomingAtID(id string) (string, bool) {
+	if isSelfAtID(id) {
+		if AppID != "" {
+			return AppID, true
+		}
+		return config.GetAppIDStr(), true
+	}
+	if !config.GetConvertOtherAt() {
+		return "", false
+	}
+	_, virtualID, err := idmap.RetrieveVirtualValuev2(id)
+	if err != nil || virtualID == "" {
+		return "", false
+	}
+	return virtualID, true
+}
 
 // 定义响应结构体
 type ServerResponse struct {
@@ -1157,7 +1200,7 @@ func RevertTransformedText(data interface{}, msgtype string, api openapi.OpenAPI
 	case *dto.WSGroupATMessageData:
 		msg = (*dto.Message)(v)
 	case *dto.WSGroupMessageData:
-    	msg = (*dto.Message)(v)
+		msg = (*dto.Message)(v)
 	case *dto.WSATMessageData:
 		msg = (*dto.Message)(v)
 	case *dto.WSMessageData:
@@ -1204,21 +1247,17 @@ func RevertTransformedText(data interface{}, msgtype string, api openapi.OpenAPI
 		submatches := re.FindStringSubmatch(m)
 		if len(submatches) > 1 {
 			userID := submatches[1]
-			// 如果是机器人自己（BotID），按配置决定移除或保留
-			if userID == BotID {
+			atID, ok := resolveIncomingAtID(userID)
+			if !ok {
+				return m
+			}
+			if isSelfAtID(userID) {
 				if config.GetRemoveAt() {
 					return ""
 				}
-				return "[CQ:at,qq=" + BotID + "]"   // 必须有 CQ:
+				return "[CQ:at,qq=" + atID + "]"
 			}
-			// 正常用户，映射成虚拟 ID
-			userID64, err := idmap.StoreIDv2(userID)
-			if err != nil {
-				mylog.Printf("Error storing ID: %v", err)
-				// 映射失败时，仍用原始 ID（避免丢信息），格式必须是 CQ 码
-				return "[CQ:at,qq=" + userID + "]"
-			}
-			return "[CQ:at,qq=" + strconv.FormatInt(userID64, 10) + "]"
+			return "[CQ:at,qq=" + atID + "]"
 		}
 		return m
 	})
@@ -1567,52 +1606,21 @@ func ConvertToSegmentedMessage(data interface{}) []map[string]interface{} {
 	atMatches := r.FindAllStringSubmatch(msg.Content, -1)
 	for _, match := range atMatches {
 		userID := match[1]
-
-		if userID == AppID {
-			if config.GetRemoveAt() {
-				// 根据配置移除 at 文本
-				msg.Content = strings.Replace(msg.Content, match[0], "", 1)
-				continue
-			} else {
-				// 保留为 AppID 形式
-				userID = AppID
-				atSegment := map[string]interface{}{
-					"type": "at",
-					"data": map[string]interface{}{
-						"qq": userID,
-					},
-				}
-				messageSegments = append(messageSegments, atSegment)
-				msg.Content = strings.Replace(msg.Content, match[0], "", 1)
-				continue
-			}
+		atID, ok := resolveIncomingAtID(userID)
+		if !ok {
+			continue
 		}
-
-		// 非 AppID，映射成虚拟 ID
-		userID64, err := idmap.StoreIDv2(userID)
-		if err != nil {
-			mylog.Printf("Error storing ID: %v", err)
-			// 映射失败时使用原始 ID
-			// 但仍然生成 at 段，避免丢信息
-			atSegment := map[string]interface{}{
-				"type": "at",
-				"data": map[string]interface{}{
-					"qq": userID,   // 使用原始 OpenID
-				},
-			}
-			messageSegments = append(messageSegments, atSegment)
-		} else {
-			// 映射成功，使用虚拟 ID
-			atSegment := map[string]interface{}{
-				"type": "at",
-				"data": map[string]interface{}{
-					"qq": strconv.FormatInt(userID64, 10),
-				},
-			}
-			messageSegments = append(messageSegments, atSegment)
+		atSegment := map[string]interface{}{
+			"type": "at",
+			"data": map[string]interface{}{
+				"qq": atID,
+			},
 		}
-
-		// 从原始内容中移除这个 at 文本
+		if isSelfAtID(userID) && config.GetRemoveAt() {
+			msg.Content = strings.Replace(msg.Content, match[0], "", 1)
+			continue
+		}
+		messageSegments = append(messageSegments, atSegment)
 		msg.Content = strings.Replace(msg.Content, match[0], "", 1)
 	}
 
@@ -1686,6 +1694,8 @@ func SendMessage(messageText string, data interface{}, messageType string, api o
 	switch v := data.(type) {
 	case *dto.WSGroupATMessageData:
 		msg = (*dto.Message)(v)
+	case *dto.WSGroupMessageData:
+		msg = (*dto.Message)(v)
 	case *dto.WSATMessageData:
 		msg = (*dto.Message)(v)
 	case *dto.WSMessageData:
@@ -1695,7 +1705,7 @@ func SendMessage(messageText string, data interface{}, messageType string, api o
 	case *dto.WSC2CMessageData:
 		msg = (*dto.Message)(v)
 	default:
-		return nil
+		return fmt.Errorf("不支持的消息事件类型 %T", data)
 	}
 	switch messageType {
 	case "guild":
@@ -1713,10 +1723,13 @@ func SendMessage(messageText string, data interface{}, messageType string, api o
 		msgseq := echo.GetMappingSeq(msg.ID)
 		echo.AddMappingSeq(msg.ID, msgseq+1)
 		textMsg, _ := GenerateReplyMessage(msg.ID, nil, messageText, msgseq+1, nil)
-		_, err := apiv2.PostGroupMessage(context.TODO(), msg.GroupID, textMsg)
+		response, err := apiv2.PostGroupMessage(context.TODO(), msg.GroupID, textMsg)
 		if err != nil {
 			mylog.Printf("发送文本群组信息失败: %v", err)
 			return err
+		}
+		if response != nil && response.Message != nil {
+			idmap.StoreLatestBotMsgID(msg.GroupID, response.Message.ID)
 		}
 
 	case "guild_private":
@@ -2218,53 +2231,6 @@ func ProcessCQMemberOutbound(text string, eventID *string, groupID string, apiv2
 	})
 
 	return result, realTargetGroupID, cqUserID
-}
-
-// ProcessCQRemoveOutbound 处理出站 [CQ:remove,user_id=虚拟用户ID,msg_id=虚拟消息ID]
-// 剥离 CQ 码，将虚拟 user_id/msg_id 转为真实 OpenID/消息 ID
-// 返回: (清理后的文本, 真实用户OpenID, 真实消息ID)
-func ProcessCQRemoveOutbound(text string) (string, string, string) {
-	var cqUserID, cqMsgID string
-	re := regexp.MustCompile(`\[CQ:remove,([^\]]*)\]`)
-	result := re.ReplaceAllStringFunc(text, func(match string) string {
-		inner := match[1 : len(match)-1]
-		for _, part := range strings.Split(inner, ",") {
-			kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
-			if len(kv) == 2 {
-				switch strings.TrimSpace(kv[0]) {
-				case "user_id":
-					cqUserID = strings.TrimSpace(kv[1])
-				case "msg_id":
-					cqMsgID = strings.TrimSpace(kv[1])
-				}
-			}
-		}
-		return ""
-	})
-
-	if cqUserID == "" || cqMsgID == "" {
-		if cqMsgID == "" {
-			mylog.Printf("[CQ:remove] msg_id 为空，跳过撤回")
-		}
-		return result, "", ""
-	}
-
-	// 虚拟 user_id → 真实 OpenID
-	openID, err := idmap.RetrieveRowByIDv2(cqUserID)
-	if err != nil || openID == "" {
-		mylog.Printf("[CQ:remove] user_id=%s 转换 OpenID 失败: %v", cqUserID, err)
-		return result, "", ""
-	}
-
-	// 虚拟 msg_id → 真实消息 ID
-	realMsgID, err := idmap.RetrieveMsgID(cqMsgID)
-	if err != nil || realMsgID == "" {
-		mylog.Printf("[CQ:remove] msg_id=%s 转换消息 ID 失败: %v", cqMsgID, err)
-		return result, "", ""
-	}
-
-	mylog.Printf("[CQ:remove] user_id=%s → %s, msg_id=%s → %s", cqUserID, openID, cqMsgID, realMsgID)
-	return result, openID, realMsgID
 }
 
 // parseMarkdownFromMessage 从 base64 编码的 markdown JSON 数据中解析 dto.Markdown + keyboard

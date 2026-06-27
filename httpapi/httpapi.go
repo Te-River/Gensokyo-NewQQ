@@ -79,6 +79,10 @@ func CombinedMiddleware(api openapi.OpenAPI, apiV2 openapi.OpenAPI) gin.HandlerF
 			handleDeleteMsg(c, api, apiV2)
 			return
 		}
+		if c.Request.URL.Path == "/delete_group_msg" {
+			handleDeleteGroupMsg(c, api, apiV2)
+			return
+		}
 		if c.Request.URL.Path == "/get_avatar" {
 			handleGetAvatar(c, api, apiV2)
 			return
@@ -776,6 +780,62 @@ func handleDeleteMsg(c *gin.Context, api openapi.OpenAPI, apiV2 openapi.OpenAPI)
 		c.JSON(http.StatusOK, gin.H{"message": retmsg})
 	}
 
+}
+
+func handleDeleteGroupMsg(c *gin.Context, api openapi.OpenAPI, apiV2 openapi.OpenAPI) {
+	var params callapi.ParamsContent
+	var echoValue interface{}
+
+	if c.Request.Method == http.MethodGet {
+		var req struct {
+			GroupID   string `json:"group_id" form:"group_id"`
+			UserID    string `json:"user_id,omitempty" form:"user_id"`
+			MessageID string `json:"message_id,omitempty" form:"message_id"`
+			Echo      string `json:"echo,omitempty" form:"echo"`
+		}
+		if err := c.ShouldBindQuery(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		params.GroupID = req.GroupID
+		params.UserID = req.UserID
+		params.MessageID = req.MessageID
+		echoValue = req.Echo
+	} else {
+		var req struct {
+			GroupID   interface{} `json:"group_id" form:"group_id"`
+			UserID    interface{} `json:"user_id,omitempty" form:"user_id"`
+			MessageID interface{} `json:"message_id,omitempty" form:"message_id"`
+			Echo      interface{} `json:"echo,omitempty" form:"echo"`
+		}
+		if err := c.ShouldBind(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if req.GroupID != nil {
+			params.GroupID = convertToString(req.GroupID)
+		}
+		if req.UserID != nil {
+			params.UserID = convertToString(req.UserID)
+		}
+		if req.MessageID != nil {
+			params.MessageID = convertToString(req.MessageID)
+		}
+		echoValue = req.Echo
+	}
+
+	message := callapi.ActionMessage{
+		Action: "delete_group_msg",
+		Params: params,
+		Echo:   echoValue,
+	}
+	client := &HttpAPIClient{}
+	result, err := handlers.DeleteGroupMsg(client, api, apiV2, message)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.Data(http.StatusOK, "application/json; charset=utf-8", []byte(result))
 }
 
 // handleGetAvatar 处理get_avatar的请求

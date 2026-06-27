@@ -2,7 +2,9 @@ package handlers
 
 import (
 	"encoding/json"
+	"runtime"
 
+	"github.com/hoshinonyaruko/gensokyo/buildinfo"
 	"github.com/hoshinonyaruko/gensokyo/callapi"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/tencent-connect/botgo/openapi"
@@ -44,18 +46,18 @@ func GetVersionInfo(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.Op
 	response.Data = VersionData{
 		AppFullName:              "gensokyo",
 		AppName:                  "gensokyo",
-		AppVersion:               "v1.0.0",
+		AppVersion:               buildinfo.Version(),
 		CoolQDirectory:           "",
 		CoolQEdition:             "pro",
 		GoCQHTTP:                 true,
-		PluginBuildConfiguration: "release",
-		PluginBuildNumber:        99,
-		PluginVersion:            "4.15.0",
+		PluginBuildConfiguration: buildinfo.Version(),
+		PluginBuildNumber:        0,
+		PluginVersion:            buildinfo.Version(),
 		ProtocolName:             4,
 		ProtocolVersion:          "v11",
-		RuntimeOS:                "windows",
-		RuntimeVersion:           "go1.20.2",
-		Version:                  "v1.0.0",
+		RuntimeOS:                runtime.GOOS,
+		RuntimeVersion:           runtime.Version(),
+		Version:                  buildinfo.Version(),
 	}
 	response.Message = ""
 	response.RetCode = 0
@@ -65,7 +67,7 @@ func GetVersionInfo(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.Op
 	// Convert the members slice to a map
 	outputMap := structToMap(response)
 
-	mylog.Printf("get_version_info: %+v/n", outputMap)
+	mylog.Printf("get_version_info: %+v\n", outputMap)
 
 	err := client.SendMessage(outputMap)
 	if err != nil {

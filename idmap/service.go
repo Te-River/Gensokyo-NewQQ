@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,40 +51,27 @@ var db *bbolt.DB
 var ErrKeyNotFound = errors.New("key not found")
 
 func InitializeDB() {
-	var err error
-	// 打开数据库文件
-	db, err = bbolt.Open(DBName, 0600, nil)
-	if err != nil {
-		log.Fatalf("Error opening DB: %v", err)
+	initNewDBs()
+	if _, err := os.Stat(DBName); err != nil {
+		if !os.IsNotExist(err) {
+			log.Fatalf("Error checking legacy DB: %v", err)
+		}
+		db = nil
+		return
 	}
 
-	// 在数据库中创建必要的buckets
-	err = db.Update(func(tx *bbolt.Tx) error {
-		// 创建默认的Bucket
-		if _, err := tx.CreateBucketIfNotExists([]byte(BucketName)); err != nil {
-			return err
-		}
-		// 创建存储用户信息的Bucket
-		if _, err := tx.CreateBucketIfNotExists([]byte(UserInfoBucket)); err != nil {
-			return err
-		}
-		// 创建配置数据的Bucket
-		if _, err := tx.CreateBucketIfNotExists([]byte(ConfigBucket)); err != nil {
-			return err
-		}
-		// 创建储存缓存的Bucket
-		if _, err := tx.CreateBucketIfNotExists([]byte(CacheBucketName)); err != nil {
-			return err
-		}
-		return nil
-	})
-
+	var err error
+	db, err = bbolt.Open(DBName, 0600, nil)
 	if err != nil {
-		log.Fatalf("Error setting up buckets: %v", err)
+		log.Fatalf("Error opening legacy DB: %v", err)
 	}
 }
 
 func DeleteBucket(bucketName string) {
+	if db == nil {
+		mylog.Printf("%s 不存在旧库，跳过旧 bucket 删除。", DBName)
+		return
+	}
 	// 清空指定的bucket
 	err := db.Update(func(tx *bbolt.Tx) error {
 		// 获取指定的bucket
@@ -111,6 +99,10 @@ func DeleteBucket(bucketName string) {
 }
 
 func CleanBucket(bucketName string) {
+	if db == nil {
+		mylog.Printf("%s 不存在旧库，跳过旧 bucket 清理。", DBName)
+		return
+	}
 	var deleteCount int
 
 	err := db.Update(func(tx *bbolt.Tx) error {
@@ -213,7 +205,10 @@ func Compaction(sourceDBPath, targetDBPath string) error {
 }
 
 func CloseDB() {
-	db.Close()
+	if db != nil {
+		_ = db.Close()
+	}
+	closeNewDBs()
 }
 
 func GenerateRowID(id string, length int) (int64, error) {
@@ -332,8 +327,8 @@ func StoreID(id string) (int64, error) {
 
 	// 迁移期间：走旧库逻辑 + 双写到新库
 	var newRow int64
-	key := uinKey(id)
-	revKey := uinRowKey("")
+	key := uinKey(id)       // 隔离时加 UIN 前缀
+	revKey := uinRowKey("") // "row-" 或 "row-{UIN}"
 
 	if hasOldDB() {
 		err = db.Update(func(tx *bbolt.Tx) error {
@@ -378,8 +373,9 @@ func StoreID(id string) (int64, error) {
 			b.Put([]byte(key), rowBytes)
 			b.Put([]byte(revKey+strconv.FormatInt(newRow, 10)), []byte(key))
 
+			// 兼容模式：同时写旧格式
 			if config.GetIdmapIsolation() && config.GetIdmapLegacyCompat() {
-				b.Put([]byte(id), rowBytes)
+				b.Put([]byte(id), rowBytes) // 旧前向
 			}
 			return nil
 		})
@@ -454,42 +450,7 @@ func StoreCache(id string) (int64, error) {
 }
 
 func SimplifiedStoreID(id string) (int64, error) {
-	var newRow int64
-
-	err := db.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(BucketName))
-
-		var err error
-		newRow, err = GenerateRowID(uinKey(id), 9)
-		if err != nil {
-			return err
-		}
-
-		rowKey := uinRowKey(strconv.FormatInt(newRow, 10))
-		if b.Get([]byte(rowKey)) != nil {
-			newRow, err = GenerateRowID(uinKey(id), 10)
-			if err != nil {
-				return err
-			}
-			rowKey = uinRowKey(strconv.FormatInt(newRow, 10))
-			if b.Get([]byte(rowKey)) != nil {
-				return fmt.Errorf("unable to find a unique row ID 195")
-			}
-		}
-
-		b.Put([]byte(rowKey), []byte(uinKey(id)))
-
-		if config.GetIdmapIsolation() && config.GetIdmapLegacyCompat() {
-			oldRowKey := fmt.Sprintf("row-%d", newRow)
-			if b.Get([]byte(oldRowKey)) == nil {
-				b.Put([]byte(oldRowKey), []byte(id))
-			}
-		}
-
-		return nil
-	})
-
-	return newRow, err
+	return storeIdentity(id)
 }
 
 // SimplifiedStoreID 根据a储存b 储存一半
@@ -510,7 +471,7 @@ func SimplifiedStoreIDv2(id string) (int64, error) {
 
 		// 根据portValue确定协议
 		protocol := "http"
-		if portValue == "443" || config.GetForceSsl(){
+		if portValue == "443" || config.GetForceSsl() {
 			protocol = "https"
 		}
 
@@ -614,7 +575,7 @@ func StoreIDv2(id string) (int64, error) {
 
 		// 根据portValue确定协议
 		protocol := "http"
-		if portValue == "443" ||config.GetForceSsl(){
+		if portValue == "443" || config.GetForceSsl() {
 			protocol = "https"
 		}
 
@@ -643,16 +604,7 @@ func StoreIDv2(id string) (int64, error) {
 		return int64(rowValue), nil
 	}
 
-	// 迁移完成后直接走新库，不再写旧库
-	if isMigrationComplete() {
-		return storeIdentity(id)
-	}
-	// 迁移未完成：保持双写
-	result, err := StoreID(id)
-	if err == nil && len(id) == 32 {
-		newDBStore(id, result)
-	}
-	return result, err
+	return storeIdentity(id)
 }
 
 // StoreCachev2 根据a储存b
@@ -672,7 +624,7 @@ func StoreCachev2(id string) (int64, error) {
 
 		// 根据portValue确定协议
 		protocol := "http"
-		if portValue == "443" ||config.GetForceSsl(){
+		if portValue == "443" || config.GetForceSsl() {
 			protocol = "https"
 		}
 
@@ -701,16 +653,7 @@ func StoreCachev2(id string) (int64, error) {
 		return int64(rowValue), nil
 	}
 
-	// 迁移完成后直接走新库，不再写旧库
-	if isMigrationComplete() {
-		return StoreMsgID(id)
-	}
-	// 迁移未完成：保持双写
-	result, err := StoreCache(id)
-	if err == nil {
-		newDBMsgStore(id, result)
-	}
-	return result, err
+	return StoreMsgID(id)
 }
 
 // 群号 然后 用户号
@@ -730,7 +673,7 @@ func StoreIDv2Pro(id string, subid string) (int64, int64, error) {
 
 		// 根据portValue确定协议
 		protocol := "http"
-		if portValue == "443" ||config.GetForceSsl(){
+		if portValue == "443" || config.GetForceSsl() {
 			protocol = "https"
 		}
 
@@ -764,8 +707,15 @@ func StoreIDv2Pro(id string, subid string) (int64, int64, error) {
 		return int64(newRowValue), int64(newSubRowValue), nil
 	}
 
-	// 如果lotus为假,调用本地StoreIDPro
-	return StoreIDPro(id, subid)
+	row, err := StoreIDv2(id)
+	if err != nil {
+		return 0, 0, err
+	}
+	subRow, err := StoreIDv2(subid)
+	if err != nil {
+		return 0, 0, err
+	}
+	return row, subRow, nil
 }
 
 // 根据b得到a
@@ -842,7 +792,7 @@ func RetrieveRowByIDv2Pro(newRowID string, newSubRowID string) (string, string, 
 
 		// 根据portValue确定协议
 		protocol := "http"
-		if portValue == "443" ||config.GetForceSsl(){
+		if portValue == "443" || config.GetForceSsl() {
 			protocol = "https"
 		}
 
@@ -876,8 +826,15 @@ func RetrieveRowByIDv2Pro(newRowID string, newSubRowID string) (string, string, 
 		return id, subid, nil
 	}
 
-	// 如果lotus为假,调用本地数据库
-	return RetrieveRowByIDPro(newRowID, newSubRowID)
+	id, err := RetrieveRowByIDv2(newRowID)
+	if err != nil {
+		return "", "", err
+	}
+	subid, err := RetrieveRowByIDv2(newSubRowID)
+	if err != nil {
+		return "", "", err
+	}
+	return id, subid, nil
 }
 
 // 群号 还有用户号
@@ -919,7 +876,7 @@ func RetrieveRowByIDv2(rowid string) (string, error) {
 	// 根据portValue确定协议
 	protocol := "http"
 	portValue := config.GetPortValue()
-	if portValue == "443" ||config.GetForceSsl(){
+	if portValue == "443" || config.GetForceSsl() {
 		protocol = "https"
 	}
 	if config.GetLotusGrpc() && config.GetLotusValue() {
@@ -963,7 +920,7 @@ func RetrieveRowByIDv2(rowid string) (string, error) {
 	if id, ok := newDBLookup(rowid); ok {
 		return id, nil
 	}
-	return RetrieveRowByID(rowid)
+	return "", ErrKeyNotFound
 }
 
 // RetrieveRowByCachev2 根据b得到a
@@ -971,7 +928,7 @@ func RetrieveRowByCachev2(rowid string) (string, error) {
 	// 根据portValue确定协议
 	protocol := "http"
 	portValue := config.GetPortValue()
-	if portValue == "443" ||config.GetForceSsl(){
+	if portValue == "443" || config.GetForceSsl() {
 		protocol = "https"
 	}
 	if config.GetLotusGrpc() && config.GetLotusValue() {
@@ -1015,7 +972,7 @@ func RetrieveRowByCachev2(rowid string) (string, error) {
 	if id, ok := newDBMsgLookup(rowid); ok {
 		return id, nil
 	}
-	return RetrieveRowByCache(rowid)
+	return "", ErrKeyNotFound
 }
 
 // 根据a 以b为类别 储存c
@@ -1072,7 +1029,7 @@ func WriteConfigv2(sectionName, keyName, value string) error {
 
 		// 根据portValue确定协议
 		protocol := "http"
-		if portValue == "443" ||config.GetForceSsl(){
+		if portValue == "443" || config.GetForceSsl() {
 			protocol = "https"
 		}
 
@@ -1169,7 +1126,7 @@ func DeleteConfigv2(sectionName, keyName string) error {
 	// 根据portValue确定协议
 	protocol := "http"
 	portValue := config.GetPortValue()
-	if portValue == "443" ||config.GetForceSsl(){
+	if portValue == "443" || config.GetForceSsl() {
 		protocol = "https"
 	}
 
@@ -1218,7 +1175,7 @@ func ReadConfigv2(sectionName, keyName string) (string, error) {
 	// 根据portValue确定协议
 	protocol := "http"
 	portValue := config.GetPortValue()
-	if portValue == "443" ||config.GetForceSsl(){
+	if portValue == "443" || config.GetForceSsl() {
 		protocol = "https"
 	}
 	if config.GetLotusGrpc() && config.GetLotusValue() {
@@ -1484,7 +1441,7 @@ func UpdateVirtualValuev2(oldRowValue, newRowValue int64) error {
 		serverDir := config.GetServer_dir()
 		portValue := config.GetPortValue()
 		protocol := "http"
-		if portValue == "443" ||config.GetForceSsl(){
+		if portValue == "443" || config.GetForceSsl() {
 			protocol = "https"
 		}
 		url := fmt.Sprintf("%s://%s:%s/getid?type=5&oldRowValue=%d&newRowValue=%d", protocol, serverDir, portValue, oldRowValue, newRowValue)
@@ -1501,7 +1458,7 @@ func UpdateVirtualValuev2(oldRowValue, newRowValue int64) error {
 		return nil
 	}
 
-	return UpdateVirtualValue(oldRowValue, newRowValue)
+	return bindVuin(oldRowValue, newRowValue)
 }
 
 // RetrieveRealValuev2 根据虚拟值获取真实值
@@ -1520,7 +1477,7 @@ func RetrieveRealValuev2(virtualValue int64) (string, string, error) {
 		serverDir := config.GetServer_dir()
 		portValue := config.GetPortValue()
 		protocol := "http"
-		if portValue == "443" ||config.GetForceSsl(){
+		if portValue == "443" || config.GetForceSsl() {
 			protocol = "https"
 		}
 		url := fmt.Sprintf("%s://%s:%s/getid?type=6&virtualValue=%d", protocol, serverDir, portValue, virtualValue)
@@ -1546,7 +1503,11 @@ func RetrieveRealValuev2(virtualValue int64) (string, string, error) {
 		return fmt.Sprintf("%d", virtualValue), realValue, nil
 	}
 
-	return RetrieveRealValue(virtualValue)
+	real, err := retrieveIdentity(strconv.FormatInt(virtualValue, 10))
+	if err != nil {
+		return "", "", err
+	}
+	return fmt.Sprintf("%d", virtualValue), real, nil
 }
 
 // RetrieveVirtualValuev2 根据真实值获取虚拟值
@@ -1568,7 +1529,7 @@ func RetrieveVirtualValuev2(realValue string) (string, string, error) {
 
 		// 根据portValue确定协议
 		protocol := "http"
-		if portValue == "443" ||config.GetForceSsl(){
+		if portValue == "443" || config.GetForceSsl() {
 			protocol = "https"
 		}
 
@@ -1597,8 +1558,10 @@ func RetrieveVirtualValuev2(realValue string) (string, string, error) {
 		return realValue, virtualValue, nil
 	}
 
-	// 如果lotus为假,就保持原来的RetrieveVirtualValue的方法
-	return RetrieveVirtualValue(realValue)
+	if virtualValue, ok := lookupVirtualIdentity(realValue); ok {
+		return realValue, fmt.Sprintf("%d", virtualValue), nil
+	}
+	return "", "", ErrKeyNotFound
 }
 
 // 根据2个真实值 获取2个虚拟值 群号 然后 用户号
@@ -1622,7 +1585,7 @@ func RetrieveVirtualValuev2Pro(realValue string, realValueSub string) (string, s
 
 		// 根据portValue确定协议
 		protocol := "http"
-		if portValue == "443" ||config.GetForceSsl(){
+		if portValue == "443" || config.GetForceSsl() {
 			protocol = "https"
 		}
 
@@ -1656,8 +1619,15 @@ func RetrieveVirtualValuev2Pro(realValue string, realValueSub string) (string, s
 		return firstValue, secondValue, nil
 	}
 
-	// 如果lotus为假,调用本地RetrieveVirtualValuePro
-	return RetrieveVirtualValuePro(realValue, realValueSub)
+	_, firstValue, err := RetrieveVirtualValuev2(realValue)
+	if err != nil {
+		return "", "", err
+	}
+	_, secondValue, err := RetrieveVirtualValuev2(realValueSub)
+	if err != nil {
+		return "", "", err
+	}
+	return firstValue, secondValue, nil
 }
 
 // 根据2个真实值 获取2个虚拟值 群号 然后 用户号
@@ -1750,7 +1720,7 @@ func RetrieveRealValuesv2Pro(virtualValue int64, virtualValueSub int64) (string,
 
 		// 根据portValue确定协议
 		protocol := "http"
-		if portValue == "443" ||config.GetForceSsl(){
+		if portValue == "443" || config.GetForceSsl() {
 			protocol = "https"
 		}
 
@@ -1784,8 +1754,15 @@ func RetrieveRealValuesv2Pro(virtualValue int64, virtualValueSub int64) (string,
 		return firstRealValue, secondRealValue, nil
 	}
 
-	// 如果lotus为假,调用本地函数
-	return RetrieveRealValuePro(virtualValue, virtualValueSub)
+	firstRealValue, err := retrieveIdentity(strconv.FormatInt(virtualValue, 10))
+	if err != nil {
+		return "", "", err
+	}
+	secondRealValue, err := retrieveIdentity(strconv.FormatInt(virtualValueSub, 10))
+	if err != nil {
+		return "", "", err
+	}
+	return firstRealValue, secondRealValue, nil
 }
 
 // UpdateVirtualValuePro 更新一对旧虚拟值到新虚拟值的映射 旧群号 新群号 旧用户 新用户
@@ -1844,7 +1821,7 @@ func UpdateVirtualValuev2Pro(oldVirtualValue1, newVirtualValue1, oldVirtualValue
 		serverDir := config.GetServer_dir()
 		portValue := config.GetPortValue()
 		protocol := "http"
-		if portValue == "443" ||config.GetForceSsl(){
+		if portValue == "443" || config.GetForceSsl() {
 			protocol = "https"
 		}
 
@@ -1864,7 +1841,10 @@ func UpdateVirtualValuev2Pro(oldVirtualValue1, newVirtualValue1, oldVirtualValue
 		return nil
 	}
 
-	return UpdateVirtualValuePro(oldVirtualValue1, newVirtualValue1, oldVirtualValue2, newVirtualValue2)
+	if err := bindVuin(oldVirtualValue1, newVirtualValue1); err != nil {
+		return err
+	}
+	return bindVuin(oldVirtualValue2, newVirtualValue2)
 }
 
 // sub 要匹配的类型 typesuffix 相当于:type 的type
@@ -1946,7 +1926,7 @@ func FindSubKeysByIdPro(id string) ([]string, error) {
 
 		// 根据portValue确定协议
 		protocol := "http"
-		if portValue == "443" ||config.GetForceSsl(){
+		if portValue == "443" || config.GetForceSsl() {
 			protocol = "https"
 		}
 

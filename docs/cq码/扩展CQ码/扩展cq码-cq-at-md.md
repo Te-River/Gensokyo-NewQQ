@@ -1,39 +1,30 @@
-# [CQ:at] — Markdown 消息中的 @ 支持
-
-## 说明
-
-标准 OneBot 的 `[CQ:at,qq=虚拟ID]` 在普通文本消息中会转换为 `<qqbot-at-user>` 标签放在 `content` 字段。但在 **Markdown 消息**（`msg_type=2`）中，`content` 字段被忽略，@ 需要嵌入到 `markdown.content` 内。
-
-Gensokyo 自动处理这一转换——当消息同时包含 `[CQ:at]` 和 `[CQ:markdown]` 时，自动将 @ 标签合并到 markdown 内容头部。
-
-## 格式
-
-```
-[CQ:at,qq=虚拟用户ID]
-```
-
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| `qq` | int64 | Gensokyo 转化的虚拟用户 ID |
+# Markdown 中的 [CQ:at]
 
 ## 行为
 
-当消息**不含** `[CQ:markdown]` 时，`[CQ:at]` 行为与标准 OneBot 一致，转换为 `<qqbot-at-user>` 标签放在 `content` 字段。
+普通文本中的 `[CQ:at,qq=<虚拟用户ID>]` 会先转成 QQ 官方 @ 标签：
 
-当消息**同时包含** `[CQ:at]` 和 `[CQ:markdown]` 时，Gensokyo 将 @ 标签提取并嵌入到 markdown 内容头部，消息以 `msg_type=2` 发送：
-
-```
-发送: [CQ:at,qq=3607918353][CQ:markdown,data=base64://...]
-  ↓
-实际请求:
-{
-  "msg_type": 2,
-  "markdown": {
-    "content": "<qqbot-at-user id=\"真实OPENID\" />\n## 欢迎消息..."
-  }
-}
+```text
+<qqbot-at-user id="OpenID" />
 ```
 
-## 适用范围
+当消息包含 Markdown 时，Gensokyo 会把该标签合并到 Markdown 内容中。Markdown 内容自身也可以直接写 `[CQ:at,qq=<虚拟用户ID>]`，发送前会转换为同样的 QQ 标签。
 
-🏷️ 群聊
+## 写法
+
+```text
+[CQ:at,qq=<虚拟用户ID>][CQ:markdown,data=base64://<base64-json>]
+```
+
+Markdown JSON 中也可以写：
+
+```markdown
+你好 [CQ:at,qq=123456]
+```
+
+## 限制
+
+- `qq` 必须能通过 idmap 反查到 OpenID；失败时保留原 CQ 码或原数字。
+- 该转换在 `send_group_msg` 和 `send_guild_channel_msg` 路径中执行。
+
+范围：`q群 (Group Chat)` / `q頻 (QQ Guild)`

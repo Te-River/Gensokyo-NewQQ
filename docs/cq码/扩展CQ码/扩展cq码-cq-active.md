@@ -1,46 +1,28 @@
-# [CQ:active] — 主动推送标记
+# [CQ:active]
 
-## 说明
+## 当前行为
 
-用于标记消息为**主动推送模式**。当后端在群聊或私聊中发送主动消息时，加入此 CQ 码，Gensokyo 收到后自动清空 `msg_id`/`event_id`，不走被动回复逻辑。
+文本消息中只解析带参数的形式：
 
-## 格式
-
-```
-[CQ:active]
+```text
+[CQ:active,type=<值>,sub_type=<值>]
 ```
 
-无参数。直接放在消息文本中任意位置即可。
+解析结果：
 
-## 用法
+- CQ 码从文本中移除。
+- `type` 写入内部 `foundItems["active_type"]`。
+- `sub_type` 写入内部 `foundItems["active_sub_type"]`。
+- 当前代码没有消费这两个字段，也不会因此改变发送通道、`msg_id` 或 `event_id`。
 
-### 群主动推送
+数组消息段也支持：
 
-后端调用 `send_group_msg` 时在消息中嵌入：
-
-```
-[CQ:active]大家好，这是一条主动推送的消息
-```
-
-Gensokyo 行为：
-1. 通过 `parseMessageContent` 解析并移除 `[CQ:active]`
-2. 清空 `msg_id`（避免使用过期的被动回复消息 ID）
-3. 发送时不含 `msg_id`、`event_id`，走群聊主动消息通道
-
-### C2C 唤醒私聊
-
-与 `send_private_msg_wakeup` 配合使用（自动通过插件 `active_msg()` 函数添加）：
-
-```python
-def active_msg(text: str) -> Message:
-    return Message(segs)
+```json
+{"type":"active","data":{"type":"<值>","sub_type":"<值>"}}
 ```
 
-## 注意事项
+## 注意
 
-- `[CQ:active]` 仅标记消息模式，不含消息内容
-- 群聊主动推送需要群管理员已在机器人资料页开启"群消息推送"
+裸 `[CQ:active]` 当前不会被文本正则匹配。需要 C2C 召回消息时，使用 [`send_private_msg_wakeup`](../../api/扩展api/扩展api-send_private_msg_wakeup.md)。
 
-## 适用范围
-
-🌐 全场景（群聊 + 频道 + C2C）
+范围：`-`

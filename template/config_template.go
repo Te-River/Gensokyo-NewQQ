@@ -57,7 +57,8 @@ settings:
   global_c2c_msg_receive_message: "机器人C2C推送已开启" # 当开启 global_c2c_msg_switch_to_message 时, C2C主动信息被开启将上报的信息.
   
   hash_id : true                                    # 使用hash来进行idmaps转换,可以让user_id不是123开始的递增值
-  idmap_pro : false                                  # 需开启hash_id配合,高级id转换增强,可以多个真实值bind到同一个虚拟值,对于每个用户,每个群\私聊\判断私聊\频道,都会产生新的虚拟值,但可以多次bind,bind到同一个数字.数据库负担会变大.
+  op_userid_type : "vuin"                           # 下游user_id/group_id来源: vuin/raw/ruin,默认使用内部vUIN
+  msgid_ttl_seconds : 3600                          # msgid-map.db中message_id映射保留时间,默认1小时
 
   #Gensokyo互联类
   server_dir: "<YOUR_SERVER_DIR>"                    # Lotus地址.不带http头的域名或ip,提供图片上传服务的服务器(图床)需要带端口号. 如果需要发base64图,需为公网ip,且开放对应端口
@@ -74,6 +75,7 @@ settings:
   master_id : ["1","2"]             #群场景尚未开放获取管理员和列表能力,手动从日志中获取需要设置为管理,的user_id并填入(适用插件有权限判断场景)
   record_sampleRate : 24000         #语音文件的采样率 最高48000 默认24000 单位Khz
   discover_unknown_events: false    #订阅所有未使用的intent位,用于探测QQ API未文档化的事件（如GROUP_MEMBER_ADD）。日志将输出未知事件类型
+  suppress_disallowed_intents: false #开启后仅屏蔽已在text_intent启用的高风险intent位,不自动注册handler
   record_bitRate : 24000            #语音文件的比特率 默认25000 代表 25 kbps 最高无限 请根据带宽 您发送的实际码率调整
   card_nick : ""                    #默认为空,连接mirai-overflow时,请设置为非空,这里是机器人对用户称谓,为空为插件获取,mirai不支持
   auto_bind : true                  #测试功能,后期会移除
@@ -106,12 +108,12 @@ settings:
   #日志类
   developer_log : false             #开启开发者日志 默认关闭
   log_level : 1                     # 0=debug 1=info 2=warning 3=error 默认1
-  save_logs : false                 #自动储存日志
+  save_logs : false                 #是否保存本地日志; 与启动参数 run --local-logger=enable 等效
   log_suffix_per_mins : 0           #默认0,代表不切分日志文件,设置60代表每60分钟储存一个日志文件,如果你的日志文件太大打不开,可以设置这个到合适的时间范围.
   log_color_enabled : true          #控制台日志彩色高亮显示 默认true
-  log_json_output : false           #文件日志是否以结构化 JSON 格式输出 默认false
-  log_max_age_days : 30             #文件日志最大保留天数 默认30
-  log_max_size_mb : 100             #单个日志文件大小上限(MB) 默认100
+  log_max_age_days : 7              #本地日志最大保留天数 默认7
+  log_max_size_mb : 24              #单个日志文件大小上限(MB) 默认24
+  log_keep_files : 12               #本地旧日志文件最大保留个数 默认12
   log_slow_event_threshold_ms : 500  #慢事件判定耗时阈值(毫秒) 默认500
 
   #webui设置
@@ -122,6 +124,7 @@ settings:
   #指令魔法类
   remove_prefix : false             #是否忽略公域机器人指令前第一个/
   remove_at : false                 #是否忽略公域机器人指令前第一个[CQ:aq,qq=机器人] 场景(公域机器人,但插件未适配at开头)
+  convert_other_at : false          #是否将消息中非机器人自身的<@OpenID>转成已有idmap映射; false时保留原文,避免假at创建映射
   remove_bot_at_group : true        #因为群聊机器人不支持发at,开启本开关会自动隐藏群机器人发出的at(不影响频道场景)
   add_at_group : false              #自动在群聊指令前加上at,某些机器人写法特别,必须有at才反应时,请打开,默认请关闭(如果需要at,不需要at指令混杂,请优化代码适配群场景,群场景目前没有at概念)
 
@@ -225,6 +228,8 @@ settings:
   #内置指令类
   bind_prefix : "/bind"             #需设置   #增强配置项  master_id 可触发
   me_prefix : "/me"                 #需设置   #增强配置项  master_id 可触发
+  status_prefix : "/gskstatus"      #运行状态查询指令; 设为 ""、/disabled 或 /disabled... 可禁用
+  broadcast_prefix : "/gskbroadcast" #广播指令; 设为 ""、/disabled 或 /disabled... 可禁用
   unlock_prefix : "/unlock"         #频道私信卡住了? gsk可以帮到你 在任意子频道发送unlock 你会收到来自机器人的频道私信
   link_prefix : "/link"             #友情链接配置 配置custom_template_id后可用(https://www.yuque.com/km57bt/hlhnxg/tzbr84y59dbz6pib)
   auto_link : false                 #友情链接最高礼仪,机器人被添加到群内时发送友情链接.
@@ -269,15 +274,15 @@ settings:
 
 `
 const Logo = `
-'                                                                                                      
-'    ,hakurei,                                                      ka                                  
-'   ho"'     iki                                                    gu                                  
-'  ra'                                                              ya                                  
-'  is              ,kochiya,    ,sanae,    ,Remilia,   ,Scarlet,    fl   and  yu        ya   ,Flandre,   
-'  an      Reimu  'Dai   sei  yas     aka  Rei    sen  Ten     shi  re  sca    yu      ku'  ta"     "ko  
-'  Jun        ko  Kirisame""  ka       na    Izayoi,   sa       ig  Koishi       ko   mo'   ta       ga  
-'   you.     rei  sui   riya  ko       hi  Ina    baI  'ran   you   ka  rlet      komei'    "ra,   ,sa"  
-'     "Marisa"      Suwako    ji       na   "Sakuya"'   "Cirno"'    bu     sen     yu''        Satori  
-'                                                                                ka'                   
-'                                                                               ri'                    
+'                                                                                                           
+'    ,hakurei,                                                         ka                                   
+'   ho"'     iki                                                       gu                                   
+'  ra'                                                                 ya                                   
+'  is                ,kochiya,   52|,sanae,    ,Remilia,   ,Scarlet,   fl   and  yu        ya   ,Flandre,   
+'  an       Reimu   Dai_____sei  yas     'ka  Rei    sen  Ten     shi  re  sca    yu      ku'  ta"     "ko  
+'  Jun         ko   8PP""""""""  na       yu    "Mirai,   sa       ig  Koishi       ko   mo'   ta       ga  
+'   you.     rei    sui     ,aa  ko       hi  Ina    baI  'ran   you   ka  rlet      komei'    "ra,   ,sa"  
+'     "Marisa"       'LunaRyu'   ji       na   "Sakuya"'    "Cirno"'   bu     sen     yu''       'Satori    
+'                                                                                    ka'                    
+'                                                                                   ri'                                        
 `

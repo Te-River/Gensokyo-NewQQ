@@ -30,6 +30,10 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 	var userid64, GroupID64 int64
 	var err error
 
+	if _, err := idmap.RecordQQGroupMessageReception(data.GroupID, data.ID, true); err != nil {
+		mylog.Errorf("[idmap] 更新QQ群全量消息接收标志失败: group=%s message=%s event=GROUP_MESSAGE_CREATE error=%v", data.GroupID, data.ID, err)
+	}
+
 	if data.Author.ID == "" {
 		mylog.Printf("出现ID为空未知错误.%v\n", data)
 		return nil
@@ -74,6 +78,7 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 				return nil
 			}
 		}
+		mylog.Printf("[message] group id mapped: raw_group=%s vGroup=%d raw_user=%s vUser=%d", data.GroupID, GroupID64, data.Author.ID, userid64)
 	}
 
 	// 前置兼容：遍历 Mentions 数组，移除 bot 自己的 <@OpenID> / <@!OpenID>
@@ -83,26 +88,13 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 	for _, mention := range data.Mentions {
 		if mention.IsYou {
 			toMe = true
+			handlers.RememberSelfAtID(mention.ID)
 			reMention := regexp.MustCompile(`<@!?` + regexp.QuoteMeta(mention.ID) + `>`)
 			data.Content = reMention.ReplaceAllString(data.Content, "")
 			break
 		}
 	}
-	// 遍历非自身 @，将其转化为 CQ at 码，并建立虚拟 ID 映射
-	// 仅在非 array 模式下进行，array 模式下 ConvertToSegmentedMessage 会处理
-	if !config.GetArrayValue() {
-		for _, mention := range data.Mentions {
-			if !mention.IsYou {
-				userID64, err := idmap.StoreIDv2(mention.ID)
-				if err != nil {
-					mylog.Printf("Error storing mention ID: %v", err)
-				}
-				cqAt := "[CQ:at,qq=" + strconv.FormatInt(userID64, 10) + "]"
-				reMention := regexp.MustCompile(`<@!?` + regexp.QuoteMeta(mention.ID) + `>`)
-				data.Content = reMention.ReplaceAllString(data.Content, cqAt)
-			}
-		}
-	}
+	// 非自身 @ 统一交给 RevertTransformedText / ConvertToSegmentedMessage 处理，避免陌生 OpenID 写入 idmap。
 	data.Content = strings.TrimSpace(data.Content)
 
 	messageText := data.Content
@@ -114,7 +106,9 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 			mylog.Printf("信息被自定义黑白名单拦截")
 			return nil
 		}
-		p.HandleFrameworkCommand(messageText, data, "group")
+		if err := p.HandleFrameworkCommand(messageText, data, "group"); err != nil {
+			mylog.Errorf("处理 GROUP_MESSAGE_CREATE 框架指令失败: %v", err)
+		}
 	} else {
 		messageText = strings.TrimSpace(messageText)
 		if messageText == "/ " || messageText == " /" {
@@ -143,8 +137,9 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 			log.Fatalf("Error storing ID: %v", err)
 		}
 		messageID = int(messageID64)
+		mylog.Printf("[message] group msg_id mapped: raw_msg=%s vMsg=%d", data.ID, messageID64)
 	}
-	// 记录该群该用户最新一条消息的 real msg_id（用于 [CQ:remove] 撤回）
+	// 记录该群该用户最新一条消息的 real msg_id（用于 delete_group_msg 撤回）
 	idmap.StoreLatestMsgID(data.GroupID, data.Author.ID, data.ID)
 
 	if config.GetAutoBind() {
@@ -200,8 +195,8 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 			// ------ 修改 start ------
 			SubType: "normal",
 			// ------ 修改 end ------
-			Time:    time.Now().Unix(),
-			ToMe:    toMe,
+			Time: time.Now().Unix(),
+			ToMe: toMe,
 		}
 		if !config.GetNativeOb11() {
 			groupMsg.RealMessageType = "group"
@@ -273,7 +268,7 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 				Level:  "0",
 			},
 			// ------ 修改 start ------
-			SubType:  "normal",
+			SubType: "normal",
 			// ------ 修改 end ------
 			Time:     time.Now().Unix(),
 			ToMe:     toMe,

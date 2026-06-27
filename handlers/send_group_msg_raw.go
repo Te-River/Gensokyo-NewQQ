@@ -297,6 +297,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 				echo.PushGlobalStack(pair)
 			}
 
+			rememberLatestBotGroupMessage(&message, resp)
 			if !config.GetNoRetMsg() {
 				// 发送成功回执
 				if config.GetThreadsRetMsg() {
@@ -340,6 +341,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 				echo.PushGlobalStack(pair)
 			}
 
+			rememberLatestBotGroupMessage(&message, resp)
 			if !config.GetNoRetMsg() {
 				//发送成功回执
 				if config.GetThreadsRetMsg() {
@@ -384,6 +386,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 							echo.PushGlobalStack(pair)
 						}
 
+						rememberLatestBotGroupMessage(&message, resp)
 						if !config.GetNoRetMsg() {
 							//发送成功回执
 							if config.GetThreadsRetMsg() {
@@ -439,6 +442,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 					}
 				}
 
+				rememberLatestBotGroupMessage(&message, resp)
 				if !config.GetNoRetMsg() {
 					//发送成功回执
 					if config.GetThreadsRetMsg() {

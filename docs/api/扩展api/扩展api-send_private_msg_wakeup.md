@@ -1,8 +1,10 @@
-# 发送被动唤醒私聊消息
+# send_private_msg_wakeup
 
 ## 说明
 
-用于向用户发送**互动召回消息**（被动唤醒私聊）。QQ 官方 API 中，机器人向未主动发过消息的用户发私聊需要标记 `IsWakeup`。
+向用户发送 C2C 召回消息。发送时会设置 `is_wakeup=true`。
+
+范围：`私聊 (C2C)`
 
 ## 请求参数
 
@@ -10,10 +12,10 @@
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `user_id` | string | 目标用户的 **32 位 OpenID**（注意：不是虚拟数字 ID） |
+| `user_id` | string | 目标用户 OpenID；如果不是 32 位 OpenID，会先尝试按虚拟用户 ID 反查。 |
 | `message` | array/string | 消息内容，支持文本、图片、Markdown 等 |
 
-> ⚠️ `user_id` 必须是 QQ 原生的 32 位 OpenID 字符串，不能使用虚拟数字 ID。
+无法反查为 32 位 OpenID 时，请求会停止发送。
 
 ## 返回方式
 
@@ -22,7 +24,7 @@
 ```json
 {
     "post_type": "notice",
-    "notice_type": "wakeup_response",
+    "notice_type": "c2c_wakeup_resp",
     "user_id": 虚拟数字ID,
     "real_user_id": "32位OpenID",
     "status": "success",
@@ -43,7 +45,7 @@ from nonebot.adapters.onebot.v11 import Bot, Event
 async def _(bot: Bot, event: Event):
     await bot.call_api(
         "send_private_msg_wakeup",
-        user_id="目标用户的32位OpenID",
-        message="这是一条被动唤醒消息"
+        user_id="目标用户OpenID或虚拟用户ID",
+        message="这是一条 C2C 召回消息"
     )
 ```

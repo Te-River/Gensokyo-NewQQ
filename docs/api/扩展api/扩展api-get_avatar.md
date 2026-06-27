@@ -16,7 +16,7 @@
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `user_id` | int64/string | **是** | 用户的虚拟 ID（OneBot 层看到的数字 ID） |
-| `group_id` | int64/string | 否 | 当启用 `idmap_pro` 时建议传入辅助还原 |
+| `group_id` | int64/string | 否 | 可选上下文，用于在同一 vUIN 有多个身份时辅助选择当前身份 |
 
 ## 返回值
 

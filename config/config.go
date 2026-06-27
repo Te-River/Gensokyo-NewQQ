@@ -774,6 +774,18 @@ func GetRemoveAt() bool {
 	return instance.Settings.RemoveAt
 }
 
+// 获取ConvertOtherAt的值
+func GetConvertOtherAt() bool {
+	mu.RLock()
+	defer mu.RUnlock()
+
+	if instance == nil {
+		fmt.Println("Warning: instance is nil when trying to get ConvertOtherAt value.")
+		return false
+	}
+	return instance.Settings.ConvertOtherAt
+}
+
 // 获取port的值
 func GetPortValue() string {
 	mu.RLock()
@@ -1076,6 +1088,30 @@ func GetMePrefix() string {
 	return instance.Settings.MePrefix
 }
 
+// GetStatusPrefix 获取状态指令前缀。
+func GetStatusPrefix() string {
+	mu.RLock()
+	defer mu.RUnlock()
+
+	if instance == nil {
+		fmt.Println("Warning: instance is nil when trying to GetStatusPrefix value.")
+		return "/gskstatus"
+	}
+	return instance.Settings.StatusPrefix
+}
+
+// GetBroadcastPrefix 获取广播指令前缀。
+func GetBroadcastPrefix() string {
+	mu.RLock()
+	defer mu.RUnlock()
+
+	if instance == nil {
+		fmt.Println("Warning: instance is nil when trying to GetBroadcastPrefix value.")
+		return "/gskbroadcast"
+	}
+	return instance.Settings.BroadcastPrefix
+}
+
 // 获取FrpPort的值
 func GetFrpPort() string {
 	mu.RLock()
@@ -1222,16 +1258,40 @@ func GetWsServerPath() string {
 	return instance.Settings.WsServerPath
 }
 
-// 获取GetIdmapPro的值
+// GetIdmapPro 已废弃。MultiMap idmap 始终启用，旧 idmap_pro 分支保持关闭。
 func GetIdmapPro() bool {
+	return false
+}
+
+func GetOpUserIDType() string {
 	mu.RLock()
 	defer mu.RUnlock()
 
 	if instance == nil {
-		fmt.Println("Warning: instance is nil when trying to GetIdmapPro value.")
-		return false
+		fmt.Println("Warning: instance is nil when trying to OpUserIDType value.")
+		return "vuin"
 	}
-	return instance.Settings.IdmapPro
+	value := strings.ToLower(strings.TrimSpace(instance.Settings.OpUserIDType))
+	switch value {
+	case "raw", "ruin", "vuin":
+		return value
+	default:
+		return "vuin"
+	}
+}
+
+func GetMsgIDTTLSeconds() int {
+	mu.RLock()
+	defer mu.RUnlock()
+
+	if instance == nil {
+		fmt.Println("Warning: instance is nil when trying to MsgIDTTLSeconds value.")
+		return 3600
+	}
+	if instance.Settings.MsgIDTTLSeconds <= 0 {
+		return 3600
+	}
+	return instance.Settings.MsgIDTTLSeconds
 }
 
 // 获取GetCardAndNick的值
@@ -1830,6 +1890,15 @@ func GetDiscoverUnknownEvents() bool {
 		return false
 	}
 	return instance.Settings.DiscoverUnknownEvents
+}
+
+func GetSuppressDisallowedIntents() bool {
+	mu.RLock()
+	defer mu.RUnlock()
+	if instance == nil {
+		return false
+	}
+	return instance.Settings.SuppressDisallowedIntents
 }
 
 // 获取Alias的值
@@ -2592,25 +2661,15 @@ func GetLogColorEnabled() bool {
 	return instance.Settings.LogColorEnabled
 }
 
-// GetLogJsonOutput 获取是否开启 JSON 输出
-func GetLogJsonOutput() bool {
-	mu.RLock()
-	defer mu.RUnlock()
-	if instance == nil {
-		return false
-	}
-	return instance.Settings.LogJsonOutput
-}
-
 // GetLogMaxAgeDays 获取日志最大保存天数
 func GetLogMaxAgeDays() int {
 	mu.RLock()
 	defer mu.RUnlock()
 	if instance == nil {
-		return 30
+		return 7
 	}
 	if instance.Settings.LogMaxAgeDays <= 0 {
-		return 30
+		return 7
 	}
 	return instance.Settings.LogMaxAgeDays
 }
@@ -2620,12 +2679,25 @@ func GetLogMaxSizeMB() int {
 	mu.RLock()
 	defer mu.RUnlock()
 	if instance == nil {
-		return 100
+		return 24
 	}
 	if instance.Settings.LogMaxSizeMB <= 0 {
-		return 100
+		return 24
 	}
 	return instance.Settings.LogMaxSizeMB
+}
+
+// GetLogKeepFiles 获取本地旧日志文件最大保留个数
+func GetLogKeepFiles() int {
+	mu.RLock()
+	defer mu.RUnlock()
+	if instance == nil {
+		return 12
+	}
+	if instance.Settings.LogKeepFiles <= 0 {
+		return 12
+	}
+	return instance.Settings.LogKeepFiles
 }
 
 // GetLogSlowEventThresholdMS 获取慢事件阈值

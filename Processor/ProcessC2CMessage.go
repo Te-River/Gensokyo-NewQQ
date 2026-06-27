@@ -69,6 +69,7 @@ func (p *Processors) ProcessC2CMessage(data *dto.WSC2CMessageData) error {
 				mylog.Errorf("Error storing ID: %v", err)
 			}
 		}
+		mylog.Printf("[message] c2c id mapped: raw_user=%s vUser=%d", data.Author.ID, userid64)
 
 		//收到私聊信息调用的具体还原步骤
 		//1,idmap还原真实userid,
@@ -87,6 +88,7 @@ func (p *Processors) ProcessC2CMessage(data *dto.WSC2CMessageData) error {
 		}
 
 		messageID := int(messageID64)
+		mylog.Printf("[message] c2c msg_id mapped: raw_msg=%s vMsg=%d", data.ID, messageID64)
 		if config.GetAutoBind() {
 			if len(data.Attachments) > 0 && data.Attachments[0].URL != "" {
 				p.Autobind(data)
@@ -400,9 +402,9 @@ func (p *Processors) ProcessC2CMessage(data *dto.WSC2CMessageData) error {
 					Area:   "0",
 					Level:  "0",
 				},
-				SubType: "normal",
-				Time:    time.Now().Unix(),
-				Platform:    "qq",
+				SubType:  "normal",
+				Time:     time.Now().Unix(),
+				Platform: "qq",
 			}
 
 			//增强配置

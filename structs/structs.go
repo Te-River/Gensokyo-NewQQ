@@ -14,16 +14,16 @@ type Settings struct {
 	HeartBeatInterval   int      `yaml:"heart_beat_interval"`
 	LaunchReconectTimes int      `yaml:"launch_reconnect_times"`
 	//基础配置
-	AppID        uint64 `yaml:"app_id"`
-	Uin          int64  `yaml:"uin"`
-	Token        string `yaml:"token"`
-	ClientSecret string `yaml:"client_secret"`
-	ShardCount   int    `yaml:"shard_count"`
-	ShardID      int    `yaml:"shard_id"`
-	UseUin       bool   `yaml:"use_uin"`
-	IdmapIsolation     bool   `yaml:"idmap_isolation"`
-	IdmapLegacyCompat  bool   `yaml:"idmap_legacy_compat"`
-	ShardNum     int    `yaml:"shard_num"`
+	AppID             uint64 `yaml:"app_id"`
+	Uin               int64  `yaml:"uin"`
+	Token             string `yaml:"token"`
+	ClientSecret      string `yaml:"client_secret"`
+	ShardCount        int    `yaml:"shard_count"`
+	ShardID           int    `yaml:"shard_id"`
+	UseUin            bool   `yaml:"use_uin"`
+	IdmapIsolation    bool   `yaml:"idmap_isolation"`
+	IdmapLegacyCompat bool   `yaml:"idmap_legacy_compat"`
+	ShardNum          int    `yaml:"shard_num"`
 	//事件订阅类
 	TextIntent []string `yaml:"text_intent"`
 	//转换类
@@ -38,7 +38,8 @@ type Settings struct {
 	GlobalC2CMsgRejectMessage                string `yaml:"global_c2c_msg_reject_message"`
 	GlobalC2CMsgReceiveMessage               string `yaml:"global_c2c_msg_receive_message"`
 	HashID                                   bool   `yaml:"hash_id"`
-	IdmapPro                                 bool   `yaml:"idmap_pro"`
+	OpUserIDType                             string `yaml:"op_userid_type"`
+	MsgIDTTLSeconds                          int    `yaml:"msgid_ttl_seconds"`
 	//gensokyo互联类
 	Server_dir            string `yaml:"server_dir"`
 	Port                  string `yaml:"port"`
@@ -85,9 +86,9 @@ type Settings struct {
 	SaveLogs                bool `yaml:"save_logs"`
 	LogSuffixPerMins        int  `yaml:"log_suffix_per_mins"`
 	LogColorEnabled         bool `yaml:"log_color_enabled"`
-	LogJsonOutput           bool `yaml:"log_json_output"`
 	LogMaxAgeDays           int  `yaml:"log_max_age_days"`
 	LogMaxSizeMB            int  `yaml:"log_max_size_mb"`
+	LogKeepFiles            int  `yaml:"log_keep_files"`
 	LogSlowEventThresholdMS int  `yaml:"log_slow_event_threshold_ms"`
 	//webui相关
 	DisableWebui bool   `yaml:"disable_webui"`
@@ -96,6 +97,7 @@ type Settings struct {
 	//指令魔法类
 	RemovePrefix        bool                 `yaml:"remove_prefix"`
 	RemoveAt            bool                 `yaml:"remove_at"`
+	ConvertOtherAt      bool                 `yaml:"convert_other_at"`
 	RemoveBotAtGroup    bool                 `yaml:"remove_bot_at_group"`
 	AddAtGroup          bool                 `yaml:"add_at_group"`
 	WhitePrefixMode     bool                 `yaml:"white_prefix_mode"`
@@ -174,17 +176,19 @@ type Settings struct {
 	HttpOnlyBot       bool `yaml:"http_only_bot"`
 	DoNotReplaceAppid bool `yaml:"do_not_replace_appid"`
 	//内置指令
-	BindPrefix   string   `yaml:"bind_prefix"`
-	MePrefix     string   `yaml:"me_prefix"`
-	UnlockPrefix string   `yaml:"unlock_prefix"`
-	LinkPrefix   string   `yaml:"link_prefix"`
-	AutoLink     bool     `yaml:"auto_link"`
-	MusicPrefix  string   `yaml:"music_prefix"`
-	LinkBots     []string `yaml:"link_bots"`
-	LinkText     string   `yaml:"link_text"`
-	LinkPic      string   `yaml:"link_pic"`
-	LinkLines    int      `yaml:"link_lines"`
-	LinkNum      int      `yaml:"link_num"`
+	BindPrefix      string   `yaml:"bind_prefix"`
+	MePrefix        string   `yaml:"me_prefix"`
+	StatusPrefix    string   `yaml:"status_prefix"`
+	BroadcastPrefix string   `yaml:"broadcast_prefix"`
+	UnlockPrefix    string   `yaml:"unlock_prefix"`
+	LinkPrefix      string   `yaml:"link_prefix"`
+	AutoLink        bool     `yaml:"auto_link"`
+	MusicPrefix     string   `yaml:"music_prefix"`
+	LinkBots        []string `yaml:"link_bots"`
+	LinkText        string   `yaml:"link_text"`
+	LinkPic         string   `yaml:"link_pic"`
+	LinkLines       int      `yaml:"link_lines"`
+	LinkNum         int      `yaml:"link_num"`
 	//HTTP API配置
 	HttpAddress         string   `yaml:"http_address"`
 	AccessToken         string   `yaml:"http_access_token"`
@@ -214,7 +218,8 @@ type Settings struct {
 	// 额外 intent 位探测（用于发现未文档化的事件位）
 	ExtraIntents []int `yaml:"extra_intents"`
 	// 发现未知事件开关——自动订阅所有未使用的 intent 位
-	DiscoverUnknownEvents bool `yaml:"discover_unknown_events"`
+	DiscoverUnknownEvents     bool `yaml:"discover_unknown_events"`
+	SuppressDisallowedIntents bool `yaml:"suppress_disallowed_intents"`
 }
 
 type VisualPrefixConfig struct {
