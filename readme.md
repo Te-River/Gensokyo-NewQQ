@@ -62,7 +62,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 ## 功能亮点
 
 -  兼容 OneBot V11 的 HTTP API、反向 HTTP POST、正向 WebSocket、反向 WebSocket
--  q群 (Group Chat) 非 @ 消息支持（GroupMessageEventHandler）
+-  群非 @ 消息支持（GroupMessageEventHandler）
 -  q群 (Group Chat) 消息自动剔除 @机器人字符
 -  非自身 @ 可配置转换为已有 idmap 的 `[CQ:at,qq=虚拟ID]` 格式
 -  按钮权限中虚拟数字 ID 自动转化为 QQ 官方 OpenID
@@ -159,28 +159,28 @@ todo,正在施工...
 | /send_msg | [发送消息] |
 | /delete_msg              | [撤回信息]             |
 | /delete_group_msg        | [撤回QQ群用户或Bot消息] |
-| /set_group_kick          | [q群 (Group Chat) 踢人] |
-| /set_group_ban | [q群 (Group Chat) 单人禁言] |
-| /set_group_whole_ban | [q群 (Group Chat) 全员禁言] |
-| /set_group_admin         | [q群 (Group Chat) 设置管理员] |
-| /set_group_card          | [设置 q群 (Group Chat) 名片] |
-| /set_group_name          | [设置 q群 (Group Chat) 名称] |
-| /set_group_leave         | [退出 q群 (Group Chat)] |
-| /set_group_special_title | [设置 q群 (Group Chat) 专属头衔] |
+| /set_group_kick          | [群 (Group Chat) 踢人] |
+| /set_group_ban | [群单人禁言] |
+| /set_group_whole_ban | [群全员禁言] |
+| /set_group_admin         | [群设置管理员] |
+| /set_group_card          | [设置群名片] |
+| /set_group_name          | [设置群名称] |
+| /set_group_leave         | [退出群] |
+| /set_group_special_title | [设置群专属头衔] |
 | /set_friend_add_request  | [处理加好友请求]       |
-| /set_group_add_request   | [处理加 q群 (Group Chat) 请求/邀请] |
+| /set_group_add_request   | [处理加群请求/邀请] |
 | /get_login_info | [获取登录号信息] |
 | /get_stranger_info | [获取陌生人信息] |
 | /get_friend_list | [获取好友列表] |
-| /get_group_info | [获取 q群 (Group Chat) / q頻 (QQ Guild) 信息] |
-| /get_group_list | [获取 q群 (Group Chat) 列表] |
-| /get_group_member_info | [获取 q群 (Group Chat) 成员信息] |
-| /get_group_member_list | [获取 q群 (Group Chat) 成员列表] |
-| /get_group_honor_info    | [获取 q群 (Group Chat) 荣誉信息] |
+| /get_group_info | [获取群聊/频道信息] |
+| /get_group_list | [获取群列表] |
+| /get_group_member_info | [获取群成员信息] |
+| /get_group_member_list | [获取群成员列表] |
+| /get_group_honor_info    | [获取群荣誉信息] |
 | /can_send_image | [检查是否可以发送图片] |
 | /can_send_record | [检查是否可以发送语音] |
 | /get_version_info | [获取版本信息] |
-| /set_restart | [重启 gensokyo] |
+| /set_restart | [重启 Gensokyo] |
 | /.handle_quick_operation | [对事件执行快速操作]   |
 
 
@@ -223,23 +223,23 @@ todo,正在施工...
 | 事件类型 | Event            |
 | -------- | ---------------- |
 | 消息事件 | [私聊信息] |
-| 消息事件 | [q群 消息] |
-| 通知事件 | [q群 文件上传]   |
-| 通知事件 | [q群 管理员变动] |
-| 通知事件 | [q群 成员减少]   |
-| 通知事件 | [q群 成员增加]   |
-| 通知事件 | [q群 禁言]       |
+| 消息事件 | [群消息] |
+| 通知事件 | [群文件上传]   |
+| 通知事件 | [群管理员变动] |
+| 通知事件 | [群成员减少]   |
+| 通知事件 | [群成员增加]   |
+| 通知事件 | [群禁言]       |
 | 通知事件 | [好友添加]       |
 | 通知事件 | [好友删除]       |
-| 通知事件 | [q群 消息撤回]   |
+| 通知事件 | [群消息撤回]   |
 | 通知事件 | [好友消息撤回]   |
-| 通知事件 | [q群 内戳一戳]   |
-| 通知事件 | [q群 红包运气王] |
-| 通知事件 | [q群 成员荣誉变更] |
-| 通知事件 | [q群 消息推送关闭] |
-| 通知事件 | [q群 消息推送开启] |
+| 通知事件 | [群内戳一戳]   |
+| 通知事件 | [群红包运气王] |
+| 通知事件 | [群成员荣誉变更] |
+| 通知事件 | [群消息推送关闭] |
+| 通知事件 | [群消息推送开启] |
 | 请求事件 | [加好友请求]     |
-| 请求事件 | [加 q群 请求/邀请] |
+| 请求事件 | [加群请求/邀请] |
 
 
 #### 拓展 Event
@@ -247,8 +247,8 @@ todo,正在施工...
 | 事件类型 | 拓展 Event       |
 | -------- | ---------------- |
 | 通知事件 | [好友戳一戳]     |
-| 通知事件 | [q群 内戳一戳]   |
-| 通知事件 | [q群 成员名片更新] |
+| 通知事件 | [群内戳一戳]   |
+| 通知事件 | [群成员名片更新] |
 | 通知事件 | [接收到离线文件] |
 | 通知事件 | [按钮交互回调] |
 | 通知事件 | [私聊 (C2C) 消息推送关闭] |
@@ -273,27 +273,27 @@ todo,正在施工...
 
 | 事件名称                   | 代表含义                         |
 | --------------------------- | ------------------------------- |
-| ATmessageEventHandler      | [q頻 @ 消息]                       |
-| DirectMessageHandler       | [q頻 私信 dms]                     |
+| ATmessageEventHandler      | [频道@ 消息]                       |
+| DirectMessageHandler       | [频道私信 dms]                     |
 | ReadyHandler               | [连接成功]                         |
 | ErrorNotifyHandler         | [连接关闭]                         |
-| GuildEventHandler          | [q頻 事件]                         |
-| MemberEventHandler         | [q頻 成员新增]                     |
-| ChannelEventHandler        | [q頻 子频道事件]                   |
-| CreateMessageHandler       | [q頻 非 @ 消息]                    |
-| InteractionHandler         | [q頻 卡片按钮 data 回调事件]       |
-| GroupATMessageEventHandler | [q群 @ 消息]                       |
-| GroupMessageEventHandler   | [q群 普通消息]                     |
+| GuildEventHandler          | [频道事件]                         |
+| MemberEventHandler         | [频道成员新增]                     |
+| ChannelEventHandler        | [频道子频道事件]                   |
+| CreateMessageHandler       | [频道非@ 消息]                    |
+| InteractionHandler         | [频道卡片按钮 data 回调事件]       |
+| GroupATMessageEventHandler | [群聊@ 消息]                       |
+| GroupMessageEventHandler   | [群聊普通消息]                     |
 | C2CMessageEventHandler     | [私聊 (C2C)]                       |
-| ThreadEventHandler         | [q頻 发帖事件]                     |
+| ThreadEventHandler         | [频道发帖事件]                     |
 | FriendAddEventHandler      | [被添加好友]                       |
 | FriendDelEventHandler      | [被删除好友]                       |
-| GroupAddRobotEventHandler  | [q群 机器人新增]                   |
-| GroupDelRobotEventHandler  | [q群 机器人删除]                   |
-| GroupMsgRejectHandler      | [q群 请求关闭推送]                 |
-| GroupMsgReceiveHandler     | [q群 请求开启推送]                 |
-| GroupMemberAddEventHandler | [q群 成员新增]                     |
-| GroupMemberRemoveEventHandler | [q群 成员移除]                  |
+| GroupAddRobotEventHandler  | [群聊机器人新增]                   |
+| GroupDelRobotEventHandler  | [群聊机器人删除]                   |
+| GroupMsgRejectHandler      | [群聊请求关闭推送]                 |
+| GroupMsgReceiveHandler     | [群聊请求开启推送]                 |
+| GroupMemberAddEventHandler | [群聊成员新增]                     |
+| GroupMemberRemoveEventHandler | [群聊成员移除]                  |
 | C2CMsgRejectHandler        | [用户拒绝私聊 (C2C) 消息推送]      |
 | C2CMsgReceiveHandler       | [用户同意私聊 (C2C) 消息推送]      |
 
