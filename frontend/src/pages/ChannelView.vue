@@ -1,64 +1,43 @@
 <template>
-  <q-page class="flex flex-center">
-    <div class="q-pa-md full-width">
-      <q-select
-        v-model="selectedType"
-        :options="typeOptions"
-        label="选择列表类型"
-        outlined
-      />
+  <q-page class="gsk-list-page">
+    <div class="gsk-page-header">
+      <div>
+        <div class="gsk-page-title">子频道列表</div>
+        <div class="gsk-page-subtitle">频道 ID: {{ channelid }}</div>
+      </div>
     </div>
-    <q-banner v-if="loading" class="q-pa-md" inline-actions dense>
-      <template v-slot:avatar>
-        <q-spinner color="primary" />
-      </template>
+
+    <q-banner v-if="loading" class="q-mb-md" dense>
+      <template v-slot:avatar><q-spinner color="primary" size="sm" /></template>
       加载中...
     </q-banner>
-    <q-banner
-      v-if="error"
-      class="q-pa-md bg-negative text-white"
-      inline-actions
-      dense
-    >
+    <q-banner v-if="error" class="q-mb-md bg-negative text-white" dense>
       {{ errorMessage }}
     </q-banner>
-    <ChannelList
-      v-if="!loading && !error"
-      :data-list="channelList"
-      @select="handleSelectItem"
-      @selectAll="handleSelectAll"
-      @row-click="handleRowClick"
-    ></ChannelList>
-    <div class="q-pa-md full-width row items-center">
-      <q-input v-model="message" label="发送消息" outlined class="col-9" />
-      <q-btn
-        :disabled="!selectedItems.length || !message"
-        label="发送"
-        @click="sendMessage"
-        color="primary"
-        class="col-3"
+
+    <q-card class="gsk-table-card">
+      <ChannelList
+        v-if="!loading && !error"
+        :data-list="channelList"
+        @select="handleSelectItem"
+        @selectAll="handleSelectAll"
+        @row-click="handleRowClick"
       />
-      <q-btn
-        :disabled="currentPage <= 1"
-        icon="chevron_left"
-        @click="previousPage"
-        label="上一页"
-      />
-      <q-btn
-        :disabled="currentPage >= totalPages"
-        icon-right="chevron_right"
-        @click="nextPage"
-        label="下一页"
-      />
-    </div>
-    <div class="q-pa-md full-width">
-      <q-pagination
-        v-model="currentPage"
-        :max="totalPages"
-        :max-pages="11"
-        class="justify-center"
-      />
-    </div>
+
+      <div class="gsk-table-footer">
+        <q-pagination v-model="currentPage" :max="totalPages" :max-pages="7" :boundary-numbers="false" size="sm" />
+        <q-space />
+        <q-btn :disabled="currentPage <= 1" icon="chevron_left" @click="previousPage" flat round size="sm" />
+        <q-btn :disabled="currentPage >= totalPages" icon="chevron_right" @click="nextPage" flat round size="sm" />
+      </div>
+    </q-card>
+
+    <q-card class="gsk-msg-card">
+      <div class="gsk-msg-row">
+        <q-input v-model="message" label="发送消息" outlined dense class="gsk-msg-input" bg-color="transparent" />
+        <q-btn :disabled="!selectedItems.length || !message" label="发送" @click="sendMessage" color="primary" unelevated no-caps />
+      </div>
+    </q-card>
   </q-page>
 </template>
 <script setup lang="ts">
@@ -225,30 +204,53 @@ onMounted(async () => {
   }
 });
 </script>
-  
-  <style scoped>
-/* 样式逻辑，根据您的实际需求添加 */
-.selector {
-  margin-bottom: 1rem;
+
+<style lang="scss" scoped>
+.gsk-list-page {
+  padding: 24px;
+  max-width: 1400px;
+  margin: 0 auto;
 }
-.message-sender {
+
+.gsk-page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.gsk-page-title { font-size: 1.25rem; font-weight: 700; color: var(--gsk-text); }
+.gsk-page-subtitle { font-size: 0.85rem; color: var(--gsk-text-muted); }
+
+.gsk-table-card {
+  border: 1px solid var(--gsk-border);
+  border-radius: 12px;
+  overflow: hidden;
+  margin-bottom: 16px;
+}
+
+.gsk-table-footer {
   display: flex;
   align-items: center;
-  margin-top: 1rem;
+  padding: 8px 16px;
+  border-top: 1px solid var(--gsk-border);
 }
-.q-input {
-  flex-grow: 1;
-  margin-right: 1rem;
+
+.gsk-msg-card {
+  border: 1px solid var(--gsk-border);
+  border-radius: 12px;
+  overflow: hidden;
 }
-.error-message {
-  color: red;
-  margin: 1rem 0;
-}
-.pagination {
+
+.gsk-msg-row {
   display: flex;
-  justify-content: center;
   align-items: center;
-  margin-top: 1rem;
+  gap: 8px;
+  padding: 12px 16px;
+}
+
+.gsk-msg-input {
+  flex: 1;
 }
 </style>
   

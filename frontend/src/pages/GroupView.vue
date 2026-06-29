@@ -1,64 +1,61 @@
 <template>
-  <q-page class="flex flex-center">
-    <div class="q-pa-md full-width">
+  <q-page class="gsk-list-page">
+    <div class="gsk-page-header">
+      <div>
+        <div class="gsk-page-title">频道 / 群列表</div>
+        <div class="gsk-page-subtitle">管理和发送消息</div>
+      </div>
       <q-select
         v-model="selectedType"
         :options="typeOptions"
-        label="选择列表类型"
+        label="列表类型"
         outlined
+        dense
+        class="gsk-type-select"
+        bg-color="transparent"
       />
     </div>
-    <q-banner v-if="loading" class="q-pa-md" inline-actions dense>
-      <template v-slot:avatar>
-        <q-spinner color="primary" />
-      </template>
+
+    <q-banner v-if="loading" class="q-mb-md" dense>
+      <template v-slot:avatar><q-spinner color="primary" size="sm" /></template>
       加载中...
     </q-banner>
-    <q-banner
-      v-if="error"
-      class="q-pa-md bg-negative text-white"
-      inline-actions
-      dense
-    >
+    <q-banner v-if="error" class="q-mb-md bg-negative text-white" dense>
       {{ errorMessage }}
     </q-banner>
-    <GroupList
-      v-if="!loading && !error"
-      :data-list="groupList"
-      @select="handleSelectItem"
-      @selectAll="handleSelectAll"
-      @row-click="handleRowClick"
-    ></GroupList>
-    <div class="q-pa-md full-width row items-center">
-      <q-input v-model="message" label="发送消息" outlined class="col-9" />
-      <q-btn
-        :disabled="!selectedItems.length || !message"
-        label="发送"
-        @click="sendMessage"
-        color="primary"
-        class="col-3"
+
+    <!-- Table Card -->
+    <q-card class="gsk-table-card">
+      <GroupList
+        v-if="!loading && !error"
+        :data-list="groupList"
+        @select="handleSelectItem"
+        @selectAll="handleSelectAll"
+        @row-click="handleRowClick"
       />
-      <q-btn
-        :disabled="currentPage <= 1"
-        icon="chevron_left"
-        @click="previousPage"
-        label="上一页"
-      />
-      <q-btn
-        :disabled="currentPage >= totalPages"
-        icon-right="chevron_right"
-        @click="nextPage"
-        label="下一页"
-      />
-    </div>
-    <div class="q-pa-md full-width">
-      <q-pagination
-        v-model="currentPage"
-        :max="totalPages"
-        :max-pages="11"
-        class="justify-center"
-      />
-    </div>
+
+      <!-- Pagination -->
+      <div class="gsk-table-footer">
+        <q-pagination
+          v-model="currentPage"
+          :max="totalPages"
+          :max-pages="7"
+          :boundary-numbers="false"
+          size="sm"
+        />
+        <q-space />
+        <q-btn :disabled="currentPage <= 1" icon="chevron_left" @click="previousPage" flat round size="sm" />
+        <q-btn :disabled="currentPage >= totalPages" icon="chevron_right" @click="nextPage" flat round size="sm" />
+      </div>
+    </q-card>
+
+    <!-- Message Sender -->
+    <q-card class="gsk-msg-card">
+      <div class="gsk-msg-row">
+        <q-input v-model="message" label="发送消息" outlined dense class="gsk-msg-input" bg-color="transparent" />
+        <q-btn :disabled="!selectedItems.length || !message" label="发送" @click="sendMessage" color="primary" unelevated no-caps />
+      </div>
+    </q-card>
   </q-page>
 </template>
 <script setup lang="ts">

@@ -1,1 +1,106 @@
-// app global css in SCSS form
+// Gensokyo-NewQQ Design Tokens
+:root {
+  --gsk-primary: #6366f1;
+  --gsk-primary-hover: #818cf8;
+  --gsk-secondary: #8b5cf6;
+  --gsk-accent: #a78bfa;
+  --gsk-surface: #ffffff;
+  --gsk-surface-soft: #f8fafc;
+  --gsk-surface-hover: #f1f5f9;
+  --gsk-border: #e2e8f0;
+  --gsk-border-strong: #cbd5e1;
+  --gsk-text: #0f172a;
+  --gsk-text-secondary: #475569;
+  --gsk-text-muted: #94a3b8;
+  --gsk-success: #22c55e;
+  --gsk-error: #ef4444;
+  --gsk-warning: #f59e0b;
+  --gsk-info: #06b6d4;
+  --gsk-gradient-1: linear-gradient(135deg, #6366f1, #8b5cf6);
+  --gsk-gradient-2: linear-gradient(135deg, #06b6d4, #6366f1);
+  --gsk-gradient-3: linear-gradient(135deg, #f59e0b, #ef4444);
+  --gsk-shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --gsk-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+  --gsk-shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  --gsk-shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+  --gsk-radius: 8px;
+  --gsk-radius-sm: 6px;
+  --gsk-radius-lg: 12px;
+  --gsk-radius-xl: 16px;
+  --gsk-sidebar-width: 240px;
+  --gsk-header-height: 56px;
+}
+
+.body--dark {
+  --gsk-surface: #0f1015;
+  --gsk-surface-soft: #16171d;
+  --gsk-surface-hover: #1e1f26;
+  --gsk-border: #1e1f26;
+  --gsk-border-strong: #2a2b33;
+  --gsk-text: #f1f5f9;
+  --gsk-text-secondary: #94a3b8;
+  --gsk-text-muted: #64748b;
+  --gsk-shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.3);
+  --gsk-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.4);
+  --gsk-shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.4);
+  --gsk-shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.4);
+}
+
+// Global styles
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+// Gradient text utility
+.gsk-gradient-text {
+  background: var(--gsk-gradient-1);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+// Card hover effect
+.gsk-card-hover {
+  transition: all 0.2s ease;
+  &:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--gsk-shadow-lg);
+  }
+}
+
+// Glass effect
+.gsk-glass {
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+// Status dot
+.gsk-status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  &.online { background-color: var(--gsk-success); box-shadow: 0 0 6px var(--gsk-success); }
+  &.offline { background-color: var(--gsk-text-muted); }
+  &.error { background-color: var(--gsk-error); box-shadow: 0 0 6px var(--gsk-error); }
+  &.warning { background-color: var(--gsk-warning); box-shadow: 0 0 6px var(--gsk-warning); }
+}
+
+// Scrollbar
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--gsk-border-strong);
+  border-radius: 3px;
+  &:hover { background: var(--gsk-text-muted); }
+}

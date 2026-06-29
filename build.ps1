@@ -18,7 +18,8 @@ param(
 
     [switch]$All,
     [switch]$LinuxOnly,
-    [switch]$NoUPX
+    [switch]$NoUPX,
+    [switch]$Small
 )
 
 $ErrorActionPreference = 'Stop'
@@ -74,17 +75,21 @@ function Invoke-GensokyoBuild {
         [hashtable]$Target,
 
         [Parameter(Mandatory = $true)]
-        [string]$Ldflags
+        [string]$Ldflags,
+
+        [switch]$Small
     )
 
     $env:GOOS = $Target.GOOS
     $env:GOARCH = $Target.GOARCH
 
     $ext = if ($Target.GOOS -eq 'windows') { '.exe' } else { '' }
-    $outName = "gensokyo-$($Target.OS)-$($Target.Arch)$ext"
+    $nameSuffix = if ($Small) { '-small' } else { '' }
+    $tagArg = if ($Small) { '-tags=small' } else { '' }
+    $outName = "gensokyo$nameSuffix-$($Target.OS)-$($Target.Arch)$ext"
 
     Write-Host "[build] $($Target.GOOS)/$($Target.GOARCH) -> $outName" -ForegroundColor Yellow
-    go build -trimpath -ldflags="$Ldflags" -v -o $outName .
+    go build -trimpath -ldflags="$Ldflags" $tagArg -v -o $outName .
 
     if ($LASTEXITCODE -ne 0) {
         throw "Build failed: $($Target.GOOS)/$($Target.GOARCH)"
@@ -154,7 +159,8 @@ $outputs = @()
 $failed = @()
 foreach ($target in $targets) {
     try {
-        $outputs += Invoke-GensokyoBuild -Target $target -Ldflags $ldflags
+        $smallParam = if ($Small) { @{ Small = $true } } else { @{} }
+        $outputs += Invoke-GensokyoBuild -Target $target -Ldflags $ldflags @smallParam
     } catch {
         $failed += "$($target.GOOS)/$($target.GOARCH)"
         Write-Host "  FAILED: $($target.GOOS)/$($target.GOARCH)" -ForegroundColor Red

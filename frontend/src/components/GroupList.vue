@@ -163,12 +163,22 @@ const columns = ref([
 ]);
 </script>
   
-<style>
+<style lang="scss">
 .table-icon {
-  width: 30px; /* Adjust as needed */
-  height: auto;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
 }
 .highlighted {
-  background-color: #e0e0e0; /* 你选择的高亮颜色 */
+  background-color: rgba(99, 102, 241, 0.08);
 }
-</style>  
+
+.q-table {
+  th {
+    font-weight: 600;
+    font-size: 0.8rem;
+    color: var(--gsk-text-secondary);
+  }
+  td { font-size: 0.85rem; }
+}
+</style>

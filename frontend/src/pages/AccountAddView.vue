@@ -1,41 +1,45 @@
 <template>
-  <q-page class="row justify-center">
-    <q-card class="col-12 col-xs-8 col-sm-6 col-md-4 shadow q-pa-md self-center">
-      <q-card-section>
-        <div class="text-h5">
-          <q-icon name="person" color="accent" />添加机器人
+  <q-page class="gsk-add-page">
+    <div class="gsk-add-container">
+      <div class="gsk-add-header">
+        <q-icon name="add_circle" size="32px" color="primary" />
+        <div>
+          <div class="gsk-add-title">添加机器人</div>
+          <div class="gsk-add-subtitle">输入 AppID 创建一个新的机器人实例</div>
         </div>
-      </q-card-section>
-      <q-separator />
-      <q-form
-        autocorrect="off"
-        autocapitalize="off"
-        autocomplete="off"
-        spellcheck="false"
-        @submit="addAccount"
-        @reset="clearForm"
-      >
-        <q-card-section class="q-gutter-md">
-          <q-input
-            v-model.number="uin"
-            autofocus
-            filled
-            counter
-            clearable
-            label="Appid"
-            :rules="[(v) => +v >= 1e4 || '请输入机器人Appid']"
+      </div>
+
+      <q-card class="gsk-add-card">
+        <q-card-section>
+          <q-form
+            autocorrect="off"
+            autocapitalize="off"
+            autocomplete="off"
+            spellcheck="false"
+            @submit="addAccount"
+            @reset="clearForm"
           >
-            <template v-slot:prepend><q-icon name="badge" /></template>
-          </q-input>
-          <!-- Password and Protocol inputs removed -->
+            <q-input
+              v-model.number="uin"
+              autofocus
+              outlined
+              clearable
+              label="AppID"
+              :rules="[(v) => +v >= 1e4 || '请输入有效的 AppID']"
+              class="q-mb-md"
+              bg-color="transparent"
+            >
+              <template v-slot:prepend><q-icon name="badge" color="primary" /></template>
+            </q-input>
+
+            <div class="row q-gutter-sm">
+              <q-btn type="submit" color="primary" icon="add" label="提交" no-caps unelevated class="gsk-btn" />
+              <q-btn type="reset" flat color="grey-6" icon="clear" label="清除" no-caps />
+            </div>
+          </q-form>
         </q-card-section>
-        <q-separator />
-        <q-card-actions class="justify-center">
-          <q-btn flat color="positive" type="submit" icon="add">提交</q-btn>
-          <q-btn flat color="negative" type="reset" icon="clear">清除</q-btn>
-        </q-card-actions>
-      </q-form>
-    </q-card>
+      </q-card>
+    </div>
   </q-page>
 </template>
 
@@ -54,9 +58,7 @@ async function addAccount() {
   if (!uin.value) return;
   try {
     $q.loading.show();
-    await api.createAccountApiUinPut(uin.value, {
-      // Ensure password and protocol are not included or set to undefined
-    });
+    await api.createAccountApiUinPut(uin.value, {});
     void $router.push(`/accounts/${uin.value}`);
   } catch (err) {
     $q.notify({
@@ -70,6 +72,48 @@ async function addAccount() {
 
 function clearForm() {
   uin.value = undefined;
-  // No need to clear password and protocol as they are not present
 }
 </script>
+
+<style lang="scss" scoped>
+.gsk-add-page {
+  display: flex;
+  justify-content: center;
+  padding: 40px 24px;
+  min-height: calc(100vh - var(--gsk-header-height));
+  background: var(--gsk-surface-soft);
+}
+
+.gsk-add-container {
+  width: 100%;
+  max-width: 480px;
+}
+
+.gsk-add-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.gsk-add-title {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--gsk-text);
+}
+
+.gsk-add-subtitle {
+  font-size: 0.85rem;
+  color: var(--gsk-text-muted);
+}
+
+.gsk-add-card {
+  border: 1px solid var(--gsk-border);
+  border-radius: 12px;
+}
+
+.gsk-btn {
+  border-radius: 8px;
+  height: 40px;
+}
+</style>

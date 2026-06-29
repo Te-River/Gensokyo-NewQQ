@@ -1,146 +1,69 @@
 <template>
-  <q-page class="row q-pa-md justify-center">
-    <q-card class="shadow col-12" style="height: calc(100vh - 5rem)">
-      <q-card-section class="row items-center">
-        <q-btn
-          @click="$router.back"
-          flat
-          label="返回"
-          color="grey"
-          icon="arrow_back"
-        />
-        <div class="text-h5">编辑设备信息文件</div>
+  <q-page class="gsk-editor-page">
+    <div class="gsk-editor-container">
+      <div class="gsk-editor-header">
+        <q-btn @click="$router.back" flat round icon="arrow_back" size="sm" />
+        <q-icon name="smartphone" size="22px" color="accent" class="q-ml-sm" />
+        <span class="gsk-editor-title">编辑设备信息</span>
         <q-space />
-        <div class="column">
-          <div class="text-body">
-            <a href="https://qdvc.ilharp.cc/">QDVC</a>
-            导入导出
-          </div>
-          <div class="q-gutter-md">
-            <q-btn
-              class="q-ml-md"
-              @click="importDialog = true"
-              flat
-              round
-              color="primary"
-              icon="login"
-            />
-            <q-btn
-              class="q-ml-md"
-              @click="exportDialog = true"
-              flat
-              round
-              color="secondary"
-              icon="logout"
-            />
-          </div>
-        </div>
-      </q-card-section>
+        <q-btn flat color="primary" icon="save" label="保存" @click="updateConfig" size="sm" no-caps unelevated />
+        <q-btn flat color="secondary" icon="refresh" label="重新加载" @click="loadConfig" size="sm" no-caps />
+        <q-btn flat color="negative" icon="delete" label="重置" @click="deleteConfig" size="sm" no-caps />
+        <q-separator vertical class="q-mx-sm" />
+        <q-btn flat color="primary" icon="login" label="导入 QDVC" @click="importDialog = true" size="sm" no-caps />
+        <q-btn flat color="secondary" icon="logout" label="导出 QDVC" @click="exportDialog = true" size="sm" no-caps />
+      </div>
+
+      <!-- Export Dialog -->
       <q-dialog v-model="exportDialog">
-        <q-card>
-          <q-card-section>
-            <div class="text-h6">导出 QDVC</div>
+        <q-card class="gsk-dialog">
+          <q-card-section class="gsk-dialog-header">
+            <q-icon name="logout" size="20px" color="primary" />
+            <span>导出 QDVC</span>
           </q-card-section>
-          <q-separator />
           <q-card-section>
-            <div style="max-height: 30vh; font-family: monospace">
-              <q-input
-                v-model="qdvcUri"
-                :loading="qdvcUri.length <= 0"
-                readonly
-                type="textarea"
-                label="QDVC分享连接"
-              />
-            </div>
+            <q-input v-model="qdvcUri" :loading="qdvcUri.length <= 0" readonly type="textarea" label="QDVC 分享链接" outlined dense bg-color="transparent" />
           </q-card-section>
-          <q-card-actions class="row justify-center">
-            <q-btn-toggle
-              v-model="qdvcEncoding"
-              toggle-color="secondary"
-              flat
-              :options="[
-                { label: 'Base64', value: 'base64' },
-                { label: 'Base16384', value: 'base16384' },
-              ]"
-            />
-            <q-btn
-              @click="writeQdvcUri"
-              flat
-              label="复制到剪贴板"
-              color="primary"
-              icon="content_copy"
-            />
+          <q-card-actions class="justify-center q-gutter-sm">
+            <q-btn-toggle v-model="qdvcEncoding" toggle-color="primary" flat dense
+              :options="[{ label: 'Base64', value: 'base64' }, { label: 'Base16384', value: 'base16384' }]" />
+            <q-btn flat color="primary" icon="content_copy" label="复制" @click="writeQdvcUri" size="sm" no-caps />
           </q-card-actions>
         </q-card>
       </q-dialog>
+
+      <!-- Import Dialog -->
       <q-dialog v-model="importDialog">
-        <q-card>
-          <q-card-section>
-            <div class="text-h6">导入 QDVC</div>
+        <q-card class="gsk-dialog">
+          <q-card-section class="gsk-dialog-header">
+            <q-icon name="login" size="20px" color="primary" />
+            <span>导入 QDVC</span>
           </q-card-section>
-          <q-separator />
           <q-card-section>
-            <div style="max-height: 30vh; font-family: monospace">
-              <q-input
-                v-model="qdvcUri"
-                :loading="qdvcApplying"
-                :disable="qdvcApplying"
-                :rules="[(val) => QDVC.RE.test(val) || '不是有效的 QDVC 链接']"
-                type="textarea"
-                label="QDVC分享连接"
-              />
-            </div>
+            <q-input v-model="qdvcUri" :loading="qdvcApplying" :disable="qdvcApplying" outlined dense
+              :rules="[(val) => QDVC.RE.test(val) || '不是有效的 QDVC 链接']" type="textarea" label="QDVC 分享链接" bg-color="transparent" />
           </q-card-section>
-          <q-card-actions class="row justify-center">
-            <q-btn
-              @click="applyQdvcUri"
-              flat
-              label="应用 QDVC 配置"
-              color="primary"
-              icon="login"
-            />
+          <q-card-actions class="justify-center">
+            <q-btn flat color="primary" icon="login" label="应用" @click="applyQdvcUri" size="sm" no-caps />
           </q-card-actions>
         </q-card>
       </q-dialog>
-      <q-separator />
-      <q-card-actions class="q-gutter-md q-mx-md">
-        <q-btn
-          flat
-          @click="updateConfig"
-          color="primary"
-          label="提交修改"
-          icon="save"
-        />
-        <q-btn
-          flat
-          @click="loadConfig"
-          color="secondary"
-          label="重新加载配置文件"
-          icon="refresh"
-        />
-        <q-btn
-          flat
-          @click="deleteConfig"
-          color="negative"
-          label="删除并重新生成配置文件"
-          icon="delete"
-        />
-      </q-card-actions>
-      <q-card-section>
+
+      <div class="gsk-editor-body">
         <config-file-editor
           v-if="typeof content !== 'undefined'"
           v-model="content"
           language="json"
-          style="height: 70vh"
+          style="height: 100%"
           :theme="$q.dark.isActive ? 'vs-dark' : 'vs'"
         />
         <q-inner-loading :showing="loading" />
-      </q-card-section>
-    </q-card>
+      </div>
+    </div>
   </q-page>
 </template>
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue';
+import { onMounted, ref } from 'vue';
 import { useQuasar } from 'quasar';
 import ConfigFileEditor from 'src/components/ConfigFileEditor.vue';
 import type { DeviceInfo } from 'src/api';
@@ -149,14 +72,14 @@ import { QDVC } from './qdvc-utils';
 
 const $q = useQuasar();
 
-const props = defineProps<{ uin: number }>(),
-  content = ref<string>(),
-  loading = ref(true),
-  exportDialog = ref(false),
-  importDialog = ref(false),
-  qdvcUri = ref(''),
-  qdvcApplying = ref(false),
-  qdvcEncoding = ref<'base64' | 'base16384'>('base64');
+const props = defineProps<{ uin: number }>();
+const content = ref<string>();
+const loading = ref(true);
+const exportDialog = ref(false);
+const importDialog = ref(false);
+const qdvcUri = ref('');
+const qdvcApplying = ref(false);
+const qdvcEncoding = ref<'base64' | 'base16384'>('base64');
 
 async function loadConfig() {
   try {
@@ -175,21 +98,12 @@ async function updateConfig() {
   try {
     loading.value = true;
     content.value = JSON.stringify(
-      await api
-        .accountDeviceWriteApiUinDevicePatch(
-          props.uin,
-          JSON.parse(content.value) as DeviceInfo
-        )
-        .then((res) => res.data),
-      null,
-      2
+      await api.accountDeviceWriteApiUinDevicePatch(props.uin, JSON.parse(content.value) as DeviceInfo).then(r => r.data),
+      null, 2
     );
     $q.notify({ message: '设备信息修改成功', color: 'positive' });
   } catch (e) {
-    $q.notify({
-      message: `设备信息修改失败: ${(e as Error).message}`,
-      color: 'negative',
-    });
+    $q.notify({ message: `设备信息修改失败: ${(e as Error).message}`, color: 'negative' });
   } finally {
     loading.value = false;
   }
@@ -210,6 +124,7 @@ async function deleteConfig() {
 
 onMounted(loadConfig);
 
+// eslint-disable-next-line @typescript-eslint/no-unsafe-call
 watch(exportDialog, async (val) => {
   if (val)
     try {
@@ -263,10 +178,61 @@ async function applyQdvcUri() {
   }
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unsafe-call
 watch(qdvcEncoding, (val) => {
-  const parsed = QDVC.parse(qdvcUri.value); // 将解析结果存储在变量中，以避免重复解析
-  qdvcUri.value = parsed // 检查解析结果是否为 truthy 值
-    ? QDVC.stringify(parsed, val) // 如果是，使用结果进行字符串化
-    : ''; // 如果不是，将 qdvcUri.value 设置为空字符串
+  const parsed = QDVC.parse(qdvcUri.value);
+  qdvcUri.value = parsed ? QDVC.stringify(parsed, val as 'base64' | 'base16384') : '';
 });
 </script>
+
+<style lang="scss" scoped>
+.gsk-editor-page {
+  padding: 16px;
+  height: calc(100vh - var(--gsk-header-height));
+  background: var(--gsk-surface-soft);
+}
+
+.gsk-editor-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  border: 1px solid var(--gsk-border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--gsk-surface);
+}
+
+.gsk-editor-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--gsk-border);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.gsk-editor-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--gsk-text);
+}
+
+.gsk-editor-body {
+  flex: 1;
+  overflow: hidden;
+}
+
+.gsk-dialog {
+  border-radius: 12px;
+  min-width: 400px;
+}
+
+.gsk-dialog-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 1rem;
+  font-weight: 600;
+}
+</style>

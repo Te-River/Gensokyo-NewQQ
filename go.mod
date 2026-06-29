@@ -1,6 +1,6 @@
 module github.com/hoshinonyaruko/gensokyo
 
-go 1.21.1
+go 1.25.0
 
 require (
 	github.com/Baidu-AIP/golang-sdk v1.1.1
@@ -18,6 +18,7 @@ require (
 	github.com/tencent-connect/botgo v0.1.6
 	github.com/tencentyun/cos-go-sdk-v5 v0.7.45
 	go.etcd.io/bbolt v1.3.9
+	golang.org/x/time v0.15.0
 	google.golang.org/grpc v1.65.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -34,7 +35,6 @@ require (
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect
 	github.com/yusufpapurcu/wmi v1.2.3 // indirect
-	golang.org/x/time v0.5.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240528184218-531527333157 // indirect
 	gopkg.in/ini.v1 v1.66.2 // indirect
 )
