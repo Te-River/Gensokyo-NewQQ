@@ -415,8 +415,8 @@ func getMissingSettingsByReflection(currentConfig, defaultConfig *Config) (map[s
 	for i := 0; i < currentVal.NumField(); i++ {
 		field := currentVal.Type().Field(i)
 		yamlTag := field.Tag.Get("yaml")
-		if yamlTag == "" || field.Type.Kind() == reflect.Int || field.Type.Kind() == reflect.Bool {
-			continue // 跳过没有yaml标签的字段，或者字段类型为int或bool
+		if yamlTag == "" || field.Type.Kind() == reflect.Int || field.Type.Kind() == reflect.Bool || field.Type.Kind() == reflect.Struct {
+			continue // 跳过没有yaml标签的字段，或者字段类型为int/bool/struct（struct子字段由文本比对覆盖）
 		}
 		yamlKeyName := strings.SplitN(yamlTag, ",", 2)[0]
 		if isZeroOfUnderlyingType(currentVal.Field(i).Interface()) && !isZeroOfUnderlyingType(defaultVal.Field(i).Interface()) {
@@ -484,38 +484,73 @@ func extractMissingConfigLines(missingSettings map[string]string, configTemplate
 }
 
 func appendToConfigFile(path string, lines []string) error {
-	// 先读取现有内容，用于去重
+	// 先读取现有内容
 	existingBytes, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
 	existingContent := string(existingBytes)
+	contentLines := strings.Split(existingContent, "\n")
 
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		fmt.Println("打开文件错误:", err)
-		return err
+	// 找到 settings: 块内最后一个有效行，在其后插入缺失配置
+	insertAt := -1
+	inSettings := false
+
+	for i, line := range contentLines {
+		trimmed := strings.TrimSpace(line)
+		if !inSettings && trimmed == "settings:" {
+			inSettings = true
+			continue
+		}
+		if inSettings {
+			// 跳过空行和注释
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			// 如果缩进回到顶层（缩进<2空格），说明settings块结束
+			stripped := strings.TrimLeft(line, " ")
+			if len(line)-len(stripped) < 2 && strings.Contains(line, ":") {
+				insertAt = i
+				inSettings = false
+				break
+			}
+			// 否则记录当前位置（settings内最后一个有效行的下一行）
+			insertAt = i + 1
+		}
 	}
-	defer file.Close()
+	if insertAt < 0 {
+		insertAt = len(contentLines)
+	}
 
-	// 写入缺失的配置项（去重）
+	// 插入缺失的配置项（去重 + 缩进到settings块内）
+	inserted := 0
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
+			continue
+		}
+		// 跳过 settings: 本身（结构键，不应追加）
+		if trimmed == "settings:" {
 			continue
 		}
 		// 检查该行是否已存在于文件中
 		if strings.Contains(existingContent, trimmed) {
 			continue
 		}
-		if _, err := file.WriteString("\n" + line); err != nil {
+		// 用2空格缩进，使其嵌套在 settings: 块内
+		indentedLine := "  " + trimmed
+		// 在 insertAt 位置插入
+		contentLines = append(contentLines[:insertAt], append([]string{indentedLine}, contentLines[insertAt:]...)...)
+		insertAt++
+		inserted++
+	}
+
+	if inserted > 0 {
+		result := strings.Join(contentLines, "\n")
+		if err := os.WriteFile(path, []byte(result), 0644); err != nil {
 			fmt.Println("写入配置错误:", err)
 			return err
 		}
-	}
-
-	// 输出写入状态
-	if len(lines) > 0 {
 		fmt.Println("配置已更新，写入到文件:", path)
 	}
 
