@@ -588,7 +588,7 @@ func cleanupDuplicateSettings(data []byte) []byte {
 	// 如果第一个非空非注释行不是 version: 或 settings:，说明顶层 key 丢失
 	if firstNonEmpty >= 0 {
 		trimmed := strings.TrimSpace(lines[firstNonEmpty])
-		if trimmed != "settings:" && trimmed != "version:" {
+		if trimmed != "settings:" && !strings.HasPrefix(trimmed, "version:") {
 			// 文件结构损坏，重建：version + settings + 原内容缩进
 			var rebuilt []string
 			if !hasVersion {
