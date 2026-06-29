@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -18,7 +17,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/hajimehoshi/go-mp3"
 	"github.com/hoshinonyaruko/gensokyo/config"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 )
@@ -271,26 +269,6 @@ func stereoToMono(stereo []byte) []byte {
 		binary.LittleEndian.PutUint16(mono[i*2:i*2+2], uint16(m))
 	}
 	return mono
-}
-
-// mp3ToPcm 使用纯 Go 解码 MP3 为 16-bit 单声道 PCM
-func mp3ToPcm(data []byte, targetSampleRate int) ([]byte, error) {
-	decoder, err := mp3.NewDecoder(bytes.NewReader(data))
-	if err != nil {
-		return nil, fmt.Errorf("mp3 decoder init: %w", err)
-	}
-	srcRate := decoder.SampleRate()
-
-	var buf bytes.Buffer
-	_, err = io.CopyN(&buf, decoder, int64(math.MaxInt32)) // 限制最大约 2GB
-	if err != nil && err != io.EOF {
-		return nil, fmt.Errorf("mp3 decode: %w", err)
-	}
-	pcm := buf.Bytes() // 16-bit 立体声交错
-
-	// MP3 输出始终为立体声
-	mono := stereoToMono(pcm)
-	return resamplePcm(mono, srcRate, targetSampleRate), nil
 }
 
 // decodeToPcm 尝试内置解码器将音频转为 PCM

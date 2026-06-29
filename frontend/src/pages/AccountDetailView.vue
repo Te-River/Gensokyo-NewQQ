@@ -1,147 +1,123 @@
 <template>
-  <q-page class="row q-pa-md justify-center">
-    <div class="row col-12 col-md-4">
-      <q-card class="col-12 column justify-between">
-        <q-card-section class="row items-center justify-start q-gutter-md">
-          <q-avatar>
-            <q-img :src="`https://q1.qlogo.cn/g?b=qq&nk=${uin}&s=640`" />
-          </q-avatar>
-          <div class="text-h5">进程状态</div>
-          <q-space />
-          <q-chip color="green">
-            <q-icon name="person" />帐号: {{ uin }}
-          </q-chip>
-        </q-card-section>
-
-        <q-slide-transition>
-          <q-card-section v-if="status" class="row justify-center items-center">
-            <running-process-status
-              v-if="status.status == 'running' && status.details"
-              :status="status.details"
-            />
-            <div v-else-if="status.details">
-              <q-chip>
-                <q-avatar icon="error" color="red" text-color="white" />
-                <strong>退出代码:</strong><code>{{ status.details.code }}</code>
-              </q-chip>
-            </div>
-
-            <div class="row justify-center">
-              <q-chip outline color="green">
-                <q-icon name="description" color="accent" />
-                日志条数<code>{{ status.total_logs }}条</code>
-              </q-chip>
-              <q-chip outline color="red">
-                <q-icon name="restart_alt" color="accent" />
-                重启次数<code>{{ status.restarts }}次</code>
-              </q-chip>
-            </div>
-
-            <q-slide-transition v-if="status.qr_uri" class="q-ma-md">
-              <q-btn push icon="qr_code" color="accent">
-                显示登录二维码
-                <q-popup-proxy>
-                  <q-img width="30vh" :src="status.qr_uri" />
-                </q-popup-proxy>
-              </q-btn>
-            </q-slide-transition>
-
-            <q-card-actions>
-              <q-btn
-                flat
-                color="red"
-                icon="stop"
-                @click="stopProcess"
-                label="停止"
-              />
-              <q-btn
-                flat
-                color="green"
-                icon="play_arrow"
-                @click="startProcess"
-                label="启动"
-              />
-            </q-card-actions>
-          </q-card-section>
-        </q-slide-transition>
-
-        <q-card-actions class="row justify-center q-gutter-sm">
-          <q-btn
-            flat
-            color="primary"
-            icon="refresh"
-            @click="updateStatus"
-            label="刷新"
-          />
-          <q-btn
-            flat
-            color="secondary"
-            label="修改配置"
-            icon="settings"
-            :to="`/accounts/${uin}/config`"
-          />
-          <q-btn
-            flat
-            color="accent"
-            label="修改设备"
-            icon="smartphone"
-            :to="`/accounts/${uin}/device`"
-          />
-        </q-card-actions>
-      </q-card>
-      <message-sender class="col-12 shadow" :uin="uin" />
-      <q-btn
-        class="my-btn"
-        label="详细频道/群列表"
-        color="blue"
-        :to="`/list/${uin}`"
-      />
+  <q-page class="gsk-detail-page">
+    <!-- Page Header -->
+    <div class="gsk-page-header">
+      <div class="gsk-page-header-left">
+        <q-avatar size="40px">
+          <q-img :src="`https://q1.qlogo.cn/g?b=qq&nk=${uin}&s=640`" />
+        </q-avatar>
+        <div>
+          <div class="gsk-page-title">机器人 #{{ uin }}</div>
+          <div class="gsk-page-subtitle">进程监控与管理</div>
+        </div>
+      </div>
+      <div class="gsk-header-actions">
+        <q-btn flat color="primary" label="频道/群列表" icon="list" :to="`/list/${uin}`" size="sm" no-caps />
+        <q-btn flat color="secondary" label="配置" icon="settings" :to="`/accounts/${uin}/config`" size="sm" no-caps />
+        <q-btn flat color="accent" label="设备" icon="smartphone" :to="`/accounts/${uin}/device`" size="sm" no-caps />
+      </div>
     </div>
-    <logs-console
-      class="col-12 col-md-8"
-      @reconnect="processLog"
-      :logs="logs"
-      :connected="!!logConnection"
-    >
-      <template v-slot:top-trailing>
-        <q-checkbox
-          v-model="enableInput"
-          checked-icon="menu_open"
-          unchecked-icon="menu"
-          color="secondary"
-        />
-      </template>
-      <template v-slot:top>
-        <q-slide-transition>
-          <q-card-section v-show="enableInput">
-            <q-input v-model="stdinInput" filled dense label="传入文字到进程">
-              <template v-slot:after>
-                <q-btn
-                  icon="input"
-                  flat
-                  color="accent"
-                  round
-                  @click="sendStdin"
-                />
-              </template>
-            </q-input>
+
+    <div class="gsk-detail-grid">
+      <!-- Left Column -->
+      <div class="gsk-detail-left">
+        <!-- Status Card -->
+        <q-card class="gsk-card gsk-detail-status">
+          <q-card-section class="gsk-card-header">
+            <q-icon name="monitor_heart" size="20px" color="primary" />
+            <span>进程状态</span>
           </q-card-section>
-        </q-slide-transition>
-      </template>
-    </logs-console>
+
+          <q-slide-transition>
+            <q-card-section v-if="status" class="gsk-status-content">
+              <div class="gsk-status-badge" v-if="status.status === 'running'">
+                <span class="gsk-status-dot online"></span>
+                <span class="text-positive fw-500">运行中</span>
+              </div>
+              <div class="gsk-status-badge" v-else>
+                <span class="gsk-status-dot offline"></span>
+                <span class="text-muted">已停止</span>
+              </div>
+
+              <running-process-status v-if="status.status === 'running' && status.details" :status="status.details" />
+              <div v-else-if="status.details">
+                <q-chip size="sm" color="negative" text-color="white" icon="error">
+                  退出代码: {{ status.details.code }}
+                </q-chip>
+              </div>
+
+              <div class="gsk-stat-chips">
+                <q-chip size="sm" outline color="primary" icon="description">
+                  日志 {{ status.total_logs }} 条
+                </q-chip>
+                <q-chip size="sm" outline color="warning" icon="restart_alt">
+                  重启 {{ status.restarts }} 次
+                </q-chip>
+              </div>
+
+              <q-slide-transition v-if="status.qr_uri">
+                <q-btn push icon="qr_code" color="accent" size="sm" class="q-mt-sm">
+                  二维码
+                  <q-popup-proxy>
+                    <q-img width="200px" :src="status.qr_uri" />
+                  </q-popup-proxy>
+                </q-btn>
+              </q-slide-transition>
+            </q-card-section>
+          </q-slide-transition>
+
+          <q-card-actions class="gsk-card-actions">
+            <q-btn flat color="negative" icon="stop" @click="stopProcess" label="停止" size="sm" no-caps />
+            <q-btn flat color="positive" icon="play_arrow" @click="startProcess" label="启动" size="sm" no-caps />
+            <q-space />
+            <q-btn flat color="grey-6" icon="refresh" @click="updateStatus" size="sm" round />
+          </q-card-actions>
+        </q-card>
+
+        <!-- Message Sender -->
+        <message-sender :uin="uin" class="gsk-card" />
+      </div>
+
+      <!-- Right Column - Logs -->
+      <logs-console
+        @reconnect="processLog"
+        :logs="logs"
+        :connected="!!logConnection"
+        class="gsk-card gsk-detail-logs"
+      >
+        <template v-slot:top-trailing>
+          <q-checkbox
+            v-model="enableInput"
+            checked-icon="menu_open"
+            unchecked-icon="menu"
+            color="secondary"
+            dense
+            size="sm"
+          />
+        </template>
+        <template v-slot:top>
+          <q-slide-transition>
+            <q-card-section v-show="enableInput" class="q-pb-none">
+              <q-input v-model="stdinInput" outlined dense label="传入文字到进程" bg-color="transparent">
+                <template v-slot:after>
+                  <q-btn icon="input" flat color="accent" round size="sm" @click="sendStdin" />
+                </template>
+              </q-input>
+            </q-card-section>
+          </q-slide-transition>
+        </template>
+      </logs-console>
+    </div>
   </q-page>
 </template>
 <script setup lang="ts">
-import { onBeforeUnmount, ref, watch } from 'vue';
+import { onBeforeUnmount, ref } from 'vue';
 import { useQuasar } from 'quasar';
 import { api } from 'boot/axios';
 import type { ProcessInfo, ProcessLog } from 'src/api';
 import RunningProcessStatus from 'components/RunningProcessStatus.vue';
 import LogsConsole from 'components/LogsConsole.vue';
 import MessageSender from 'src/components/MessageSender.vue';
-import { useRouter } from 'vue-router';
-
-const router = useRouter();
 
 const $q = useQuasar();
 
@@ -244,6 +220,8 @@ async function processLog() {
   };
 }
 
+import { watch } from 'vue';
+
 const updateTimer = window.setInterval(() => void updateStatus(), 3000);
 
 watch(
@@ -270,10 +248,102 @@ onBeforeUnmount(() => {
 void updateStatus();
 </script>
 
-
-<style>
-.my-btn {
-  width: 100%; /* 如果需要按钮宽度与<message-sender>相同 */
-  margin-top: 10px; /* 添加一些上边距，视视觉效果而定 */
+<style lang="scss" scoped>
+.gsk-detail-page {
+  padding: 24px;
+  max-width: 1600px;
+  margin: 0 auto;
 }
+
+.gsk-page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.gsk-page-header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.gsk-page-title {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--gsk-text);
+}
+
+.gsk-page-subtitle {
+  font-size: 0.8rem;
+  color: var(--gsk-text-muted);
+}
+
+.gsk-header-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.gsk-detail-grid {
+  display: grid;
+  grid-template-columns: 380px 1fr;
+  gap: 16px;
+}
+
+@media (max-width: 1024px) {
+  .gsk-detail-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.gsk-detail-left {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.gsk-card {
+  border: 1px solid var(--gsk-border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.gsk-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 16px !important;
+  font-size: 0.9rem;
+  font-weight: 600;
+  border-bottom: 1px solid var(--gsk-border);
+}
+
+.gsk-card-actions {
+  padding: 8px 12px !important;
+  border-top: 1px solid var(--gsk-border);
+}
+
+.gsk-status-content {
+  padding: 16px !important;
+}
+
+.gsk-status-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.gsk-stat-chips {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.text-positive { color: var(--gsk-success); }
+.text-muted { color: var(--gsk-text-muted); }
+.fw-500 { font-weight: 500; }
 </style>

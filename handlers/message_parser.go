@@ -29,7 +29,6 @@ import (
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/hoshinonyaruko/gensokyo/structs"
 	"github.com/hoshinonyaruko/gensokyo/url"
-	"github.com/skip2/go-qrcode"
 	"github.com/tencent-connect/botgo/dto"
 	"github.com/tencent-connect/botgo/dto/keyboard"
 	"github.com/tencent-connect/botgo/openapi"
@@ -1127,16 +1126,14 @@ func transformMessageTextUrl(messageText string, message callapi.ActionMessage, 
 
 			// 如果启用了URL到QR码的转换
 			if config.GetUrlToQrimage() {
-				// 将URL转换为QR码的字节形式
-				qrCodeGenerator, _ := qrcode.New(originalURL, qrcode.High)
-				qrCodeGenerator.DisableBorder = true
-				qrSize := config.GetQrSize()
-				pngBytes, _ := qrCodeGenerator.PNG(qrSize)
-				//pngBytes 二维码图片的字节数据
-				base64Image := base64.StdEncoding.EncodeToString(pngBytes)
-				picmsg := processActionMessageWithBase64PicReplace(base64Image, message)
-				ret := callapi.CallAPIFromDict(client, api, apiv2, picmsg)
-				mylog.Printf("发送url转图片结果:%v", ret)
+				base64Image, err := generateQRCode(originalURL)
+				if err != nil {
+					mylog.Printf("生成二维码失败: %v", err)
+				} else {
+					picmsg := processActionMessageWithBase64PicReplace(base64Image, message)
+					ret := callapi.CallAPIFromDict(client, api, apiv2, picmsg)
+					mylog.Printf("发送url转图片结果:%v", ret)
+				}
 				// 从文本中去除原始URL
 				return "" // 返回空字符串以去除URL
 			}

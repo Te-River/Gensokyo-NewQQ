@@ -1,25 +1,25 @@
 <template>
-  <div class="text-center">
-    <q-chip>
-      <q-avatar color="accent" icon="developer_board" />
-      <strong>CPU:</strong>
-      <pre>{{ status?.cpu_percent }}%</pre>
-    </q-chip>
-    <q-chip>
-      <q-avatar color="blue" icon="account_tree" />
-      <strong>PID:</strong>
-      <code>{{ status?.pid }}</code>
-    </q-chip>
-    <q-chip>
-      <q-avatar color="yellow" icon="memory" />
-      <strong>内存:</strong>
-      <code>{{ ((status?.memory_used ?? 0) / 1024 ** 2).toFixed(2) }}MB</code>
-    </q-chip>
-    <q-chip>
-      <q-avatar color="green" icon="timer" />
-      <strong>进程在线时间:</strong>
-      <code>{{ formatTimeDelta(uptime) }}</code>
-    </q-chip>
+  <div class="gsk-process-stats">
+    <div class="gsk-process-stat">
+      <q-icon name="developer_board" size="16px" color="primary" />
+      <span class="gsk-stat-label">CPU</span>
+      <span class="gsk-stat-val">{{ status?.cpu_percent }}%</span>
+    </div>
+    <div class="gsk-process-stat">
+      <q-icon name="account_tree" size="16px" color="secondary" />
+      <span class="gsk-stat-label">PID</span>
+      <span class="gsk-stat-val">{{ status?.pid }}</span>
+    </div>
+    <div class="gsk-process-stat">
+      <q-icon name="memory" size="16px" color="warning" />
+      <span class="gsk-stat-label">内存</span>
+      <span class="gsk-stat-val">{{ ((status?.memory_used ?? 0) / 1024 ** 2).toFixed(1) }}MB</span>
+    </div>
+    <div class="gsk-process-stat">
+      <q-icon name="timer" size="16px" color="positive" />
+      <span class="gsk-stat-label">在线</span>
+      <span class="gsk-stat-val">{{ formatTimeDelta(uptime) }}</span>
+    </div>
   </div>
 </template>
 <script setup lang="ts">
@@ -32,30 +32,50 @@ const uptime = ref(0),
 let uptimeRefreshTimer: number;
 
 function formatTimeDelta(delta: number) {
-  const days = Math.floor(delta / 86400000);
-  delta -= days * 86400000;
-  const hours = Math.floor(delta / 3600000) % 24;
-  delta -= hours * 3600000;
-  const minutes = Math.floor(delta / 60000) % 60;
-  delta -= minutes * 60000;
-  const seconds = Math.floor(delta / 1000) % 60;
-
-  const resultString = ''
-    .concat(days ? `${days}天` : '')
-    .concat(hours ? `${hours}小时` : '')
-    .concat(minutes ? `${minutes}分` : '')
-    .concat(seconds ? `${seconds}秒` : '');
-
-  return resultString || '0秒';
+  const d = Math.floor(delta / 86400000);
+  const h = Math.floor((delta % 86400000) / 3600000);
+  const m = Math.floor((delta % 3600000) / 60000);
+  const s = Math.floor((delta % 60000) / 1000);
+  const daysStr = d ? String(d) + '天' : '';
+  return `${daysStr}${h}时${m}分${s}秒` || '0秒';
 }
 
 onMounted(() => {
-  uptimeRefreshTimer = setInterval(() => {
+  uptimeRefreshTimer = window.setInterval(() => {
     uptime.value = Date.now() - (props.status?.start_time ?? 0) * 1000;
-  }, 1000) as unknown as number;
+  }, 1000);
 });
 
 onUnmounted(() => {
   clearInterval(uptimeRefreshTimer);
 });
 </script>
+
+<style lang="scss" scoped>
+.gsk-process-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.gsk-process-stat {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--gsk-surface-soft);
+}
+
+.gsk-stat-label {
+  font-size: 0.75rem;
+  color: var(--gsk-text-muted);
+}
+
+.gsk-stat-val {
+  margin-left: auto;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--gsk-text);
+}
+</style>

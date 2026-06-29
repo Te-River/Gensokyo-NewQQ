@@ -40,7 +40,9 @@ _✨ 基于 [OneBot](https://github.com/howmanybots/onebot/blob/master/README.md
   <a href="https://github.com/hoshinonyaruko/gensokyo/blob/master/CONTRIBUTING.md">参与贡献</a>
 </p>
 <p align="center">
-  <a href="https://gensokyo.bot">项目主页:gensokyo.bot</a>
+  <a href="https://gsk.mizuki.top">项目主页:gsk.mizuki.top</a>
+  ·
+  <a href="https://help.mizuki.top">帮助文档</a>
 </p>
 
 ## 介绍

@@ -1,7 +1,8 @@
 <template>
-  <q-card>
-    <q-card-section class="row q-gutter-x-md items-center justify-start">
-      <div class="text-h5 self-start">进程日志</div>
+  <div class="gsk-logs-wrapper">
+    <div class="gsk-logs-header">
+      <q-icon name="terminal" size="18px" color="primary" />
+      <span class="gsk-logs-title">进程日志</span>
       <q-space />
       <q-chip
         v-if="typeof connected === 'boolean'"
@@ -9,38 +10,38 @@
         :clickable="!connected"
         :color="connected ? 'positive' : 'negative'"
         :icon="connected ? 'link' : 'link_off'"
+        size="sm"
+        text-color="white"
       >
-        状态: {{ connected ? '实时' : '断开' }}
+        {{ connected ? '实时' : '断开' }}
       </q-chip>
       <q-btn
         @click="scroll?.setScrollPercentage('vertical', 1, 300)"
         flat
         rounded
         icon="move_down"
-        label="跳转底部"
-      />
+        size="sm"
+      >
+        <q-tooltip>跳转底部</q-tooltip>
+      </q-btn>
       <slot name="top-trailing" />
-    </q-card-section>
+    </div>
     <slot name="top" />
     <q-scroll-area
       ref="scroll"
-      class="page-logs"
-      :style="{ height: height ?? 'calc(100vh - 10rem)' }"
+      class="gsk-logs-area"
+      :style="{ height: height ?? 'calc(100vh - 12rem)' }"
     >
-      <!--Terminal component, thanks to @koishijs/plugin-logger and its creator @Shigma-->
-      <div ref="root" class="logs ansi-up-theme">
-        <div class="line" :key="index" v-for="(line, index) in logs">
+      <div ref="root" class="gsk-logs-content ansi-up-theme">
+        <div class="gsk-log-line" :key="index" v-for="(line, index) in logs">
           <div v-if="typeof line === 'string'">
             <code v-html="converter.ansi_to_html(line)" />
           </div>
-          <div
-            v-else
-            :class="{ start: line.message.startsWith(START_LINE_MARK) }"
-          >
-            <code v-if="line.time" class="timestamp">
+          <div v-else :class="{ start: line.message.startsWith(START_LINE_MARK) }">
+            <code v-if="line.time" class="gsk-log-time">
               {{ new Date(line.time).toLocaleString() }}
             </code>
-            <code v-if="line.level" class="level">{{ line.level }}</code>
+            <code v-if="line.level" class="gsk-log-level">{{ line.level }}</code>
             <code
               v-html="converter.ansi_to_html(line.message)"
               :class="LOG_LEVEL_MAP[line.level ?? ProcessLogLevel.Stdout]"
@@ -49,7 +50,7 @@
         </div>
       </div>
     </q-scroll-area>
-  </q-card>
+  </div>
 </template>
 <script setup lang="ts">
 import { nextTick, watch, ref } from 'vue';
@@ -59,7 +60,7 @@ import { AnsiUp } from 'ansi_up';
 import { type ProcessLog, ProcessLogLevel } from 'src/api';
 
 const START_LINE_MARK = '当前版本:',
-  LOG_LEVEL_MAP = {
+  LOG_LEVEL_MAP: Record<string, string> = {
     [ProcessLogLevel.Debug]: 'level-debug',
     [ProcessLogLevel.Info]: 'level-info',
     [ProcessLogLevel.Warning]: 'level-warn',
@@ -71,7 +72,7 @@ const START_LINE_MARK = '当前版本:',
 const converter = new AnsiUp();
 converter.use_classes = true;
 
-const reconnect = defineEmits(['reconnect']);
+const emit = defineEmits(['reconnect']);
 
 const props = defineProps<{
     logs: ProcessLog[] | string[];
@@ -85,7 +86,6 @@ watch(
   () => props.logs.length,
   async () => {
     if (!scroll.value) return;
-
     const wrapper = scroll.value.getScrollTarget();
     const { scrollTop, clientHeight, scrollHeight } = wrapper;
     if (Math.abs(scrollTop + clientHeight - scrollHeight) <= 1) {
@@ -95,109 +95,86 @@ watch(
   }
 );
 </script>
+
 <style lang="scss">
 @import '~@fontsource/roboto-mono/index.css';
 
-:root {
-  --terminal-bg: #24292f;
-  --terminal-fg: #d0d7de;
-  --terminal-bg-hover: #32383f;
-  --terminal-fg-hover: #f6f8fa;
-  --terminal-bg-selection: rgba(33, 139, 255, 0.15);
-  --terminal-separator: rgba(140, 149, 159, 0.75);
-  --terminal-timestamp: #8c959f;
-
-  --terminal-debug: #4194e7;
-  --terminal-info: #86e6f3;
-  --terminal-warn: #f8c471;
-  --terminal-error: #f37672;
-  --terminal-fatal: #f72a1b;
+.gsk-logs-wrapper {
+  border: 1px solid var(--gsk-border);
+  border-radius: 12px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
-.page-logs {
-  color: var(--terminal-fg);
-  background-color: var(--terminal-bg);
-  .logs {
-    padding: 1rem 1rem;
-    code {
-      font-family: 'Roboto Mono', monospace, serif;
-    }
-  }
-  .logs .line.start {
-    margin-top: 1rem;
-    &::before {
-      content: '';
-      position: absolute;
-      left: 0;
-      right: 0;
-      top: -0.5rem;
-      border-top: 1px solid var(--terminal-separator);
-    }
-  }
-  .logs:first-child .line:first-child {
-    margin-top: 0;
-    &::before {
-      display: none;
-    }
-  }
-  .line {
-    padding: 0 0.5rem;
-    border-radius: 2px;
-    font-size: 14px;
-    line-height: 20px;
-    white-space: pre-wrap;
-    position: relative;
-    &:hover {
-      color: var(--terminal-fg-hover);
-      background-color: var(--terminal-bg-hover);
-    }
-    ::selection {
-      background-color: var(--terminal-bg-selection);
-    }
+.gsk-logs-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--gsk-border);
+  background: var(--gsk-surface);
+}
 
-    .timestamp {
-      color: var(--terminal-timestamp);
-      font-size: 12px;
-      font-weight: bold;
-      margin-right: 0.5rem;
-    }
-    .level {
-      color: var(--terminal-fg);
-      font-weight: bold;
-      margin-right: 0.5rem;
-    }
-    .level-debug {
-      color: var(--terminal-debug);
-    }
-    .level-info {
-      color: var(--terminal-info);
-    }
-    .level-warn {
-      color: var(--terminal-warn);
-    }
-    .level-error {
-      color: var(--terminal-error);
-    }
-    .level-fatal {
-      color: var(--terminal-fatal);
-    }
-    .stdout {
-      color: var(--terminal-fg);
-    }
+.gsk-logs-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--gsk-text);
+}
+
+.gsk-logs-area {
+  background: #0d1117;
+  color: #c9d1d9;
+}
+
+.gsk-logs-content {
+  padding: 12px 14px;
+  font-family: 'Roboto Mono', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.gsk-log-line {
+  padding: 1px 4px;
+  border-radius: 2px;
+  white-space: pre-wrap;
+
+  &:hover {
+    background: rgba(255, 255, 255, 0.03);
+  }
+
+  &.start {
+    margin-top: 12px;
+    border-top: 1px solid rgba(140, 149, 159, 0.4);
+    padding-top: 12px;
   }
 }
+
+.gsk-log-time {
+  color: #8b949e;
+  font-size: 11px;
+  font-weight: 600;
+  margin-right: 6px;
+}
+
+.gsk-log-level {
+  color: #c9d1d9;
+  font-weight: 600;
+  margin-right: 6px;
+}
+
+// Level colors
+.level-debug { color: #58a6ff; }
+.level-info { color: #79c0ff; }
+.level-warn { color: #d29922; }
+.level-error { color: #f85149; }
+.level-fatal { color: #ff7b72; font-weight: 700; }
+.stdout { color: #c9d1d9; }
 </style>
 <style lang="scss">
 .ansi-up-theme {
-  .ansi-black-fg {
-    color: #3e424d;
-  }
-  .ansi-black-bg {
-    background-color: #3e424d;
-  }
-  .ansi-black-intense-fg {
-    color: #282c36;
-  }
+  .ansi-black-fg { color: #484f58; }
+  .ansi-black-bg { background-color: #484f58; }
   .ansi-black-intense-bg {
     background-color: #282c36;
   }

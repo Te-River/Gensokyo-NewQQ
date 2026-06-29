@@ -20,6 +20,7 @@ import (
 	"github.com/hoshinonyaruko/gensokyo/idmap"
 	"github.com/hoshinonyaruko/gensokyo/images"
 	"github.com/hoshinonyaruko/gensokyo/mdutil"
+	"github.com/hoshinonyaruko/gensokyo/messagequeue"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/hoshinonyaruko/gensokyo/silk"
 	"github.com/hoshinonyaruko/gensokyo/structs"
@@ -2601,12 +2602,16 @@ func processImgUrl(input string) string {
 }
 
 func postGroupMessageWithRetry(apiv2 openapi.OpenAPI, groupID string, groupMessage *dto.MessageToCreate) (resp *dto.GroupMessageResponse, err error) {
-	retryCount := 3 // 设置最大重试次数为3
+	retryCount := 3
 	for i := 0; i < retryCount; i++ {
-		// 递增msgid
 		msgseq := echo.GetMappingSeq(groupMessage.MsgID)
 		echo.AddMappingSeq(groupMessage.MsgID, msgseq+1)
 		groupMessage.MsgSeq = msgseq + 1
+
+		if !messagequeue.GetRateLimiter().WaitWithTimeout(5 * time.Second) {
+			mylog.Printf("[限流] 群消息发送等待超时，重试 %d/%d", i+1, retryCount)
+			continue
+		}
 
 		resp, err = apiv2.PostGroupMessage(context.TODO(), groupID, groupMessage)
 		if err != nil && strings.Contains(err.Error(), "context deadline exceeded") {

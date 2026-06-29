@@ -504,7 +504,7 @@ func SimplifiedStoreID(id string) (int64, error) {
 // SimplifiedStoreID 根据a储存b 储存一半
 func SimplifiedStoreIDv2(id string) (int64, error) {
 	//是否使用grpc
-	if config.GetLotusGrpc() && config.GetLotusValue() {
+	if GrpcClient != nil && config.GetLotusGrpc() && config.GetLotusValue() {
 		// 使用 gRPC 调用
 		req := &proto.SimplifiedStoreIDRequest{IdOrRow: id}
 		resp, err := GrpcClient.SimplifiedStoreIDV2(context.Background(), req)
@@ -608,7 +608,7 @@ func StoreIDPro(id string, subid string) (int64, int64, error) {
 // StoreIDv2 根据a储存b
 func StoreIDv2(id string) (int64, error) {
 	//是否使用grpc
-	if config.GetLotusGrpc() && config.GetLotusValue() {
+	if GrpcClient != nil && config.GetLotusGrpc() && config.GetLotusValue() {
 		// 使用 gRPC 调用
 		req := &proto.StoreIDRequest{IdOrRow: id}
 		resp, err := GrpcClient.StoreIDV2(context.Background(), req)
@@ -657,7 +657,7 @@ func StoreIDv2(id string) (int64, error) {
 
 // StoreCachev2 根据a储存b
 func StoreCachev2(id string) (int64, error) {
-	if config.GetLotusGrpc() && config.GetLotusValue() {
+	if GrpcClient != nil && config.GetLotusGrpc() && config.GetLotusValue() {
 		// 使用 gRPC 调用
 		req := &proto.StoreCacheRequest{IdOrRow: id}
 		resp, err := GrpcClient.StoreCacheV2(context.Background(), req)
@@ -706,7 +706,7 @@ func StoreCachev2(id string) (int64, error) {
 
 // 群号 然后 用户号
 func StoreIDv2Pro(id string, subid string) (int64, int64, error) {
-	if config.GetLotusGrpc() && config.GetLotusValue() {
+	if GrpcClient != nil && config.GetLotusGrpc() && config.GetLotusValue() {
 		// 使用 gRPC 调用
 		req := &proto.StoreIDProRequest{IdOrRow: id, Subid: subid}
 		resp, err := GrpcClient.StoreIDV2Pro(context.Background(), req)
@@ -846,7 +846,7 @@ func RetrieveRowByCache(rowid string) (string, error) {
 
 // 群号 然后 用户号
 func RetrieveRowByIDv2Pro(newRowID string, newSubRowID string) (string, string, error) {
-	if config.GetLotusGrpc() && config.GetLotusValue() {
+	if GrpcClient != nil && config.GetLotusGrpc() && config.GetLotusValue() {
 		// 使用 gRPC 调用
 		req := &proto.RetrieveRowByIDProRequest{IdOrRow: newRowID, Subid: newSubRowID}
 		resp, err := GrpcClient.RetrieveRowByIDV2Pro(context.Background(), req)
@@ -948,7 +948,7 @@ func RetrieveRowByIDv2(rowid string) (string, error) {
 	if portValue == "443" || config.GetForceSsl() {
 		protocol = "https"
 	}
-	if config.GetLotusGrpc() && config.GetLotusValue() {
+	if GrpcClient != nil && config.GetLotusGrpc() && config.GetLotusValue() {
 		// 使用 gRPC 调用
 		req := &proto.RetrieveRowByIDRequest{IdOrRow: rowid}
 		resp, err := GrpcClient.RetrieveRowByIDV2(context.Background(), req)
@@ -1022,7 +1022,7 @@ func RetrieveRowByCachev2(rowid string) (string, error) {
 	if portValue == "443" || config.GetForceSsl() {
 		protocol = "https"
 	}
-	if config.GetLotusGrpc() && config.GetLotusValue() {
+	if GrpcClient != nil && config.GetLotusGrpc() && config.GetLotusValue() {
 		// 使用 gRPC 调用
 		req := &proto.RetrieveRowByCacheRequest{IdOrRow: rowid}
 		resp, err := GrpcClient.RetrieveRowByCacheV2(context.Background(), req)
@@ -1105,7 +1105,7 @@ func WriteConfig(sectionName, keyName, value string) error {
 
 // WriteConfigv2 根据a以b为类别储存c
 func WriteConfigv2(sectionName, keyName, value string) error {
-	if config.GetLotusGrpc() && config.GetLotusValue() {
+	if GrpcClient != nil && config.GetLotusGrpc() && config.GetLotusValue() {
 		// 使用 gRPC 调用
 		req := &proto.WriteConfigRequest{Section: sectionName, Subtype: keyName, Value: value}
 		_, err := GrpcClient.WriteConfigV2(context.Background(), req)
@@ -1221,7 +1221,7 @@ func DeleteConfigv2(sectionName, keyName string) error {
 		protocol = "https"
 	}
 
-	if config.GetLotusGrpc() && config.GetLotusValue() {
+	if GrpcClient != nil && config.GetLotusGrpc() && config.GetLotusValue() {
 		// 使用 gRPC 调用
 		req := &proto.DeleteConfigRequest{Section: sectionName, Subtype: keyName}
 		_, err := GrpcClient.DeleteConfigV2(context.Background(), req)
@@ -1269,7 +1269,7 @@ func ReadConfigv2(sectionName, keyName string) (string, error) {
 	if portValue == "443" || config.GetForceSsl() {
 		protocol = "https"
 	}
-	if config.GetLotusGrpc() && config.GetLotusValue() {
+	if GrpcClient != nil && config.GetLotusGrpc() && config.GetLotusValue() {
 		// 使用 gRPC 调用
 		req := &proto.ReadConfigRequest{Section: sectionName, Subtype: keyName}
 		resp, err := GrpcClient.ReadConfigV2(context.Background(), req)
@@ -1557,7 +1557,7 @@ func RetrieveVirtualValue(realValue string) (string, string, error) {
 
 // 更新真实值对应的虚拟值
 func UpdateVirtualValuev2(oldRowValue, newRowValue int64) error {
-	if config.GetLotusGrpc() && config.GetLotusValue() {
+	if GrpcClient != nil && config.GetLotusGrpc() && config.GetLotusValue() {
 		// 使用 gRPC 调用
 		req := &proto.UpdateVirtualValueRequest{
 			OldVirtualValue: oldRowValue,
@@ -1595,7 +1595,7 @@ func UpdateVirtualValuev2(oldRowValue, newRowValue int64) error {
 
 // RetrieveRealValuev2 根据虚拟值获取真实值
 func RetrieveRealValuev2(virtualValue int64) (string, string, error) {
-	if config.GetLotusGrpc() && config.GetLotusValue() {
+	if GrpcClient != nil && config.GetLotusGrpc() && config.GetLotusValue() {
 		// 使用 gRPC 调用
 		req := &proto.RetrieveRealValueRequest{
 			VirtualValue: virtualValue,
@@ -1644,7 +1644,7 @@ func RetrieveRealValuev2(virtualValue int64) (string, string, error) {
 
 // RetrieveVirtualValuev2 根据真实值获取虚拟值
 func RetrieveVirtualValuev2(realValue string) (string, string, error) {
-	if config.GetLotusGrpc() && config.GetLotusValue() {
+	if GrpcClient != nil && config.GetLotusGrpc() && config.GetLotusValue() {
 		// 使用 gRPC 调用
 		req := &proto.RetrieveVirtualValueRequest{
 			RealValue: realValue,
@@ -1697,7 +1697,7 @@ func RetrieveVirtualValuev2(realValue string) (string, string, error) {
 // 根据2个真实值 获取2个虚拟值 群号 然后 用户号
 func RetrieveVirtualValuev2Pro(realValue string, realValueSub string) (string, string, error) {
 	//是否使用grpc
-	if config.GetLotusGrpc() && config.GetLotusValue() {
+	if GrpcClient != nil && config.GetLotusGrpc() && config.GetLotusValue() {
 		// 使用 gRPC 调用
 		req := &proto.RetrieveVirtualValueProRequest{
 			IdOrRow: realValue,
@@ -1832,7 +1832,7 @@ func RetrieveRealValuePro(virtualValue1, virtualValue2 int64) (string, string, e
 
 // RetrieveRealValuesv2Pro 根据两个虚拟值获取两个真实值 群号 然后 用户号
 func RetrieveRealValuesv2Pro(virtualValue int64, virtualValueSub int64) (string, string, error) {
-	if config.GetLotusGrpc() && config.GetLotusValue() {
+	if GrpcClient != nil && config.GetLotusGrpc() && config.GetLotusValue() {
 		// 使用 gRPC 调用
 		req := &proto.RetrieveRealValueRequestPro{
 			VirtualValue:    virtualValue,
@@ -1933,7 +1933,7 @@ func UpdateVirtualValuePro(oldVirtualValue1, newVirtualValue1, oldVirtualValue2,
 
 // UpdateVirtualValuev2Pro 根据配置更新两对虚拟值 旧群 新群 旧用户 新用户
 func UpdateVirtualValuev2Pro(oldVirtualValue1, newVirtualValue1, oldVirtualValue2, newVirtualValue2 int64) error {
-	if config.GetLotusGrpc() && config.GetLotusValue() {
+	if GrpcClient != nil && config.GetLotusGrpc() && config.GetLotusValue() {
 		// 使用 gRPC 调用
 		req := &proto.UpdateVirtualValueProRequest{
 			OldVirtualValue_1: oldVirtualValue1,
@@ -2039,7 +2039,7 @@ func FindSubKeysById(id string) ([]string, error) {
 
 // FindSubKeysByIdPro 根据1个值获取key中的k:v给出k获取所有v，通过网络调用
 func FindSubKeysByIdPro(id string) ([]string, error) {
-	if config.GetLotusGrpc() && config.GetLotusValue() {
+	if GrpcClient != nil && config.GetLotusGrpc() && config.GetLotusValue() {
 		// 使用 gRPC 调用
 		req := &proto.FindSubKeysRequest{
 			Id: id,
