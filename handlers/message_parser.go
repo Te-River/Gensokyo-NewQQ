@@ -2259,7 +2259,7 @@ func ProcessCQRemoveOutbound(text string, apiv2 openapi.OpenAPI, groupID string)
 			mylog.Printf("[CQ:remove] 已撤回消息 group=%s msg=%s", groupID, realMsgID)
 		}
 
-		return "" // 从 messageText 中移除 CQ 码
+		return "" // 从 messageText 中移除 CQ 码，无论成败都不发送原文
 	})
 }
 

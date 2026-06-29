@@ -484,6 +484,13 @@ func extractMissingConfigLines(missingSettings map[string]string, configTemplate
 }
 
 func appendToConfigFile(path string, lines []string) error {
+	// 先读取现有内容，用于去重
+	existingBytes, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	existingContent := string(existingBytes)
+
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		fmt.Println("打开文件错误:", err)
@@ -491,8 +498,16 @@ func appendToConfigFile(path string, lines []string) error {
 	}
 	defer file.Close()
 
-	// 写入缺失的配置项
+	// 写入缺失的配置项（去重）
 	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		// 检查该行是否已存在于文件中
+		if strings.Contains(existingContent, trimmed) {
+			continue
+		}
 		if _, err := file.WriteString("\n" + line); err != nil {
 			fmt.Println("写入配置错误:", err)
 			return err
@@ -500,7 +515,9 @@ func appendToConfigFile(path string, lines []string) error {
 	}
 
 	// 输出写入状态
-	fmt.Println("配置已更新，写入到文件:", path)
+	if len(lines) > 0 {
+		fmt.Println("配置已更新，写入到文件:", path)
+	}
 
 	return nil
 }
