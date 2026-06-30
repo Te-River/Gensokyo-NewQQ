@@ -9,6 +9,8 @@
 /* eslint-env node */
 /* eslint-disable @typescript-eslint/no-var-requires */
 const { configure } = require('quasar/wrappers');
+const MonacoWebpackPlugin = require('monaco-editor-webpack-plugin');
+
 const fs = require('fs');
 const path = require('path');
 
@@ -113,6 +115,36 @@ module.exports = configure(function (ctx) {
       // "chain" is a webpack-chain object https://github.com/neutrinojs/webpack-chain
       chainWebpack(chain) {
         chain
+          .plugin('monaco-editor-webpack-plugin')
+          .use(MonacoWebpackPlugin, [
+            {
+              languages: ['yaml', 'json'],
+              filename: '[name].worker.[contenthash].js',
+              features: [
+                '!accessibilityHelp',
+                '!browser',
+                '!clipboard',
+                '!contextmenu',
+                '!colorPicker',
+                '!find',
+                '!folding',
+                '!gotoError',
+                '!gotoLine',
+                '!inPlaceReplace',
+                '!links',
+                '!parameterHints',
+                '!quickCommand',
+                '!quickOutline',
+                '!referenceSearch',
+                '!rename',
+                '!smartSelect',
+                '!toggleHighContrast',
+                '!toggleTabFocusMode',
+                '!transpose',
+              ],
+            },
+          ])
+          .end()
           .optimization.splitChunks({
             chunks: 'all',
             maxSize: 512 * 1024,
