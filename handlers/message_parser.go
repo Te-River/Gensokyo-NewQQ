@@ -2228,6 +2228,26 @@ func ProcessCQRemoveOutbound(text string, apiv2 openapi.OpenAPI, groupID string)
 			}
 		}
 		if userID == "" || msgID == "" {
+			if userID != "" && msgID == "" {
+				// 缺 msg_id 时自动查该用户最新消息
+				realUserID, err := idmap.RetrieveRowByIDv2(userID)
+				if err != nil {
+					mylog.Printf("[CQ:remove] 解析 user_id=%s 失败: %v", userID, err)
+					return match
+				}
+				latestRealMsgID, err := idmap.GetLatestMsgID(groupID, realUserID)
+				if err != nil {
+					mylog.Printf("[CQ:remove] 获取用户 %s 最新消息失败: %v", userID, err)
+					return match
+				}
+				mylog.Printf("[CQ:remove] 自动获取用户 %s 最新消息: %s", userID, latestRealMsgID)
+				if err := apiv2.RetractGroupMessage(context.TODO(), groupID, latestRealMsgID); err != nil {
+					mylog.Printf("[CQ:remove] 撤回消息失败 group=%s msg=%s: %v", groupID, latestRealMsgID, err)
+				} else {
+					mylog.Printf("[CQ:remove] 已撤回消息 group=%s msg=%s", groupID, latestRealMsgID)
+				}
+				return ""
+			}
 			mylog.Printf("[CQ:remove] user_id 或 msg_id 为空: %s", match)
 			return match
 		}

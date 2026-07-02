@@ -1,6 +1,6 @@
-# Changelog — Release006 (since Release005)
+# Changelog — Release006 (since PR #5)
 
-> 自 `Release005` 以来的所有变更。提交范围: `Release005..6d987d6`
+> 自 PR #5 (`c426ea4`) 合并以来的所有变更，即 Release006 的全部内容。
 
 ---
 
