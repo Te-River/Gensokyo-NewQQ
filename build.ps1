@@ -93,16 +93,17 @@ function Invoke-GensokyoBuild {
     $suffix = if ($NoWebUI) { '-noWebui' } else { '' }
     $tagArg = if ($NoWebUI) { '-tags=small' } else { '' }
     $outName = "gensokyo-$($Target.OS)-$($Target.Arch)$suffix$ext"
+    $outPath = "release/$outName"
 
-    Write-Host "[build] $($Target.GOOS)/$($Target.GOARCH) -> $outName" -ForegroundColor Yellow
-    go build -trimpath -ldflags="$Ldflags" $tagArg -v -o $outName .
+    Write-Host "[build] $($Target.GOOS)/$($Target.GOARCH) -> $outPath" -ForegroundColor Yellow
+    go build -trimpath -ldflags="$Ldflags" $tagArg -v -o $outPath .
 
     if ($LASTEXITCODE -ne 0) {
         throw "Build failed: $($Target.GOOS)/$($Target.GOARCH)"
     }
 
-    Write-Host "  OK: $outName" -ForegroundColor Green
-    return $outName
+    Write-Host "  OK: $outPath" -ForegroundColor Green
+    return $outPath
 }
 
 function Invoke-Upx {
