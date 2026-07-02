@@ -9,7 +9,6 @@
 ### 消息撤回 (OneBot V11 语义)
 - `delete_group_msg` / `delete_msg` 实现，符合 OneBot V11 风格
 - `[CQ:remove]` 支持按指定消息 ID 撤回，msg_id 为必填参数
-- 撤回用户最近一条消息的出站 CQ 码
 
 ### 构建信息 & 命令前缀
 - 新增 `buildinfo` 包，嵌入构建元数据（git commit / 时间戳）
