@@ -1,4 +1,4 @@
-package handlers
+﻿package handlers
 
 import (
 	"bytes"
@@ -867,27 +867,10 @@ func generateGroupMessage(id string, eventid string, foundItems map[string][]str
 		// base64编码
 		base64Encoded := base64.StdEncoding.EncodeToString(compressedData)
 
-		if config.GetUploadPicV2Base64() {
-			// 直接上传图片返回 MessageToCreate type=7
-			messageToCreate, err := images.CreateAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 1, false, "", groupid, id, msgseq, apiv2)
-			if err != nil {
-				mylog.Printf("Error messageToCreate: %v", err)
-				return &dto.MessageToCreate{
-					Content: "错误: 上传图片失败",
-					MsgID:   id,
-					EventID: eventid,
-					MsgSeq:  msgseq,
-					MsgType: 0, // 默认文本类型
-				}
-			}
-			return messageToCreate
-		}
-
-		// 上传base64编码的图片并获取其URL
-		imageURL, _, _, err := images.UploadBase64ImageToServer(base64Encoded, apiv2)
+		// 直接 base64 上传图片到 QQ CDN
+		messageToCreate, err := images.CreateAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 1, false, "", groupid, id, msgseq, apiv2)
 		if err != nil {
-			mylog.Printf("Error uploading base64 encoded image: %v", err)
-			// 如果上传失败，也返回文本信息，提示上传失败
+			mylog.Printf("Error messageToCreate: %v", err)
 			return &dto.MessageToCreate{
 				Content: "错误: 上传图片失败",
 				MsgID:   id,
@@ -896,15 +879,7 @@ func generateGroupMessage(id string, eventid string, foundItems map[string][]str
 				MsgType: 0, // 默认文本类型
 			}
 		}
-
-		// 创建RichMediaMessage并返回，当作URL图片处理
-		return &dto.RichMediaMessage{
-			EventID:    id,
-			FileType:   1, // 1代表图片
-			URL:        imageURL,
-			Content:    "", // 这个字段文档没有了
-			SrvSendMsg: false,
-		}
+		return messageToCreate
 	} else if RecordURLs, ok := foundItems["local_record"]; ok && len(RecordURLs) > 0 {
 		// 从本地路径读取语音
 		RecordData, err := os.ReadFile(RecordURLs[0])
@@ -989,26 +964,10 @@ func generateGroupMessage(id string, eventid string, foundItems map[string][]str
 			// 转换为base64
 			base64Encoded := base64.StdEncoding.EncodeToString(imageData)
 
-			if config.GetUploadPicV2Base64() {
-				// 直接上传图片返回 MessageToCreate type=7
-				messageToCreate, err := images.CreateAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 1, false, "", groupid, id, msgseq, apiv2)
-				if err != nil {
-					mylog.Printf("Error messageToCreate: %v", err)
-					return &dto.MessageToCreate{
-						Content: "错误: 上传图片失败",
-						MsgID:   id,
-						EventID: eventid,
-						MsgSeq:  msgseq,
-						MsgType: 0, // 默认文本类型
-					}
-				}
-				return messageToCreate
-			}
-
-			// 上传图片并获取新的URL
-			newURL, _, _, err := images.UploadBase64ImageToServer(base64Encoded, apiv2)
+			// 直接 base64 上传到 QQ CDN
+			messageToCreate, err := images.CreateAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 1, false, "", groupid, id, msgseq, apiv2)
 			if err != nil {
-				mylog.Printf("Error uploading base64 encoded image: %v", err)
+				mylog.Printf("Error messageToCreate: %v", err)
 				return &dto.MessageToCreate{
 					Content: "错误: 上传图片失败",
 					MsgID:   id,
@@ -1017,17 +976,7 @@ func generateGroupMessage(id string, eventid string, foundItems map[string][]str
 					MsgType: 0,
 				}
 			}
-			// 将图片链接缩短 避免 url not allow
-			// if config.GetLotusValue() {
-			// 	// 连接到另一个gensokyo
-			// 	newURL = url.GenerateShortURL(newURL)
-			// } else {
-			// 	// 自己是主节点
-			// 	newURL = url.GenerateShortURL(newURL)
-			// 	// 使用getBaseURL函数来获取baseUrl并与newURL组合
-			// 	newURL = url.GetBaseURL() + "/url/" + newURL
-			// }
-			newpiclink = newURL
+			return messageToCreate
 		} else {
 			newpiclink = "http://" + imageURLs[0]
 		}
@@ -1073,45 +1022,19 @@ func generateGroupMessage(id string, eventid string, foundItems map[string][]str
 			// 转换为base64
 			base64Encoded := base64.StdEncoding.EncodeToString(imageData)
 
-			if config.GetUploadPicV2Base64() {
-				// 直接上传图片返回 MessageToCreate type=7
-				messageToCreate, err := images.CreateAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 1, false, "", groupid, id, msgseq, apiv2)
-				if err != nil {
-					mylog.Printf("Error messageToCreate: %v", err)
-					return &dto.MessageToCreate{
-						Content: "错误: 上传图片失败",
-						MsgID:   id,
-						EventID: eventid,
-						MsgSeq:  msgseq,
-						MsgType: 0, // 默认文本类型
-					}
-				}
-				return messageToCreate
-			}
-
-			// 上传图片并获取新的URL
-			newURL, _, _, err := images.UploadBase64ImageToServer(base64Encoded, apiv2)
+			// 直接 base64 上传到 QQ CDN
+			messageToCreate, err := images.CreateAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 1, false, "", groupid, id, msgseq, apiv2)
 			if err != nil {
-				mylog.Printf("Error uploading base64 encoded image: %v", err)
+				mylog.Printf("Error messageToCreate: %v", err)
 				return &dto.MessageToCreate{
 					Content: "错误: 上传图片失败",
 					MsgID:   id,
 					EventID: eventid,
 					MsgSeq:  msgseq,
-					MsgType: 0,
+					MsgType: 0, // 默认文本类型
 				}
 			}
-			// 将图片链接缩短 避免 url not allow
-			// if config.GetLotusValue() {
-			// 	// 连接到另一个gensokyo
-			// 	newURL = url.GenerateShortURL(newURL)
-			// } else {
-			// 	// 自己是主节点
-			// 	newURL = url.GenerateShortURL(newURL)
-			// 	// 使用getBaseURL函数来获取baseUrl并与newURL组合
-			// 	newURL = url.GetBaseURL() + "/url/" + newURL
-			// }
-			newpiclink = newURL
+			return messageToCreate
 		} else {
 			newpiclink = "https://" + imageURLs[0]
 		}
@@ -1314,36 +1237,19 @@ func generateGroupMessage(id string, eventid string, foundItems map[string][]str
 		}
 
 		base64Encoded := base64.StdEncoding.EncodeToString(compressedData)
-		if config.GetUploadPicV2Base64() {
-			// 直接上传图片返回 MessageToCreate type=7
-			messageToCreate, err := images.CreateAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 1, false, "", groupid, id, msgseq, apiv2)
-			if err != nil {
-				mylog.Printf("Error messageToCreate: %v", err)
-				return &dto.MessageToCreate{
-					Content: "错误: 上传图片失败",
-					MsgID:   id,
-					EventID: eventid,
-					MsgSeq:  msgseq,
-					MsgType: 0, // 默认文本类型
-				}
-			}
-			return messageToCreate
-		}
-
-		// 将解码的图片数据转换回base64格式并上传
-		imageURL, _, _, err := images.UploadBase64ImageToServer(base64Encoded, apiv2)
+		// 直接 base64 上传到 QQ CDN
+		messageToCreate, err := images.CreateAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 1, false, "", groupid, id, msgseq, apiv2)
 		if err != nil {
-			mylog.Printf("failed to upload base64 image: %v", err)
-			return nil
+			mylog.Printf("Error messageToCreate: %v", err)
+			return &dto.MessageToCreate{
+				Content: "错误: 上传图片失败",
+				MsgID:   id,
+				EventID: eventid,
+				MsgSeq:  msgseq,
+				MsgType: 0, // 默认文本类型
+			}
 		}
-		// 创建RichMediaMessage并返回
-		return &dto.RichMediaMessage{
-			EventID:    id,
-			FileType:   1, // 1代表图片
-			URL:        imageURL,
-			Content:    "", // 这个字段文档没有了
-			SrvSendMsg: false,
-		}
+		return messageToCreate
 	} else if mdContent, ok := foundItems["markdown"]; ok && len(mdContent) > 0 {
 		// 解码base64 markdown数据
 		mdData, err := base64.StdEncoding.DecodeString(mdContent[0])
@@ -1470,27 +1376,10 @@ func generatePrivateMessage(id string, eventid string, foundItems map[string][]s
 		// base64编码
 		base64Encoded := base64.StdEncoding.EncodeToString(compressedData)
 
-		if config.GetUploadPicV2Base64() {
-			// 直接上传图片返回 MessageToCreate type=7
-			messageToCreate, err := images.CreateAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 1, false, "", userid, id, msgseq, apiv2)
-			if err != nil {
-				mylog.Printf("Error messageToCreate: %v", err)
-				return &dto.MessageToCreate{
-					Content: "错误: 上传图片失败",
-					MsgID:   id,
-					EventID: eventid,
-					MsgSeq:  msgseq,
-					MsgType: 0, // 默认文本类型
-				}
-			}
-			return messageToCreate
-		}
-
-		// 上传base64编码的图片并获取其URL
-		imageURL, _, _, err := images.UploadBase64ImageToServer(base64Encoded, apiv2)
+		// 直接 base64 上传到 QQ CDN
+		messageToCreate, err := images.CreateAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 1, false, "", userid, id, msgseq, apiv2)
 		if err != nil {
-			mylog.Printf("Error uploading base64 encoded image: %v", err)
-			// 如果上传失败，也返回文本信息，提示上传失败
+			mylog.Printf("Error messageToCreate: %v", err)
 			return &dto.MessageToCreate{
 				Content: "错误: 上传图片失败",
 				MsgID:   id,
@@ -1499,15 +1388,7 @@ func generatePrivateMessage(id string, eventid string, foundItems map[string][]s
 				MsgType: 0, // 默认文本类型
 			}
 		}
-
-		// 创建RichMediaMessage并返回，当作URL图片处理
-		return &dto.RichMediaMessage{
-			EventID:    id,
-			FileType:   1, // 1代表图片
-			URL:        imageURL,
-			Content:    "", // 这个字段文档没有了
-			SrvSendMsg: false,
-		}
+		return messageToCreate
 	} else if RecordURLs, ok := foundItems["local_record"]; ok && len(RecordURLs) > 0 {
 		// 从本地路径读取语音
 		RecordData, err := os.ReadFile(RecordURLs[0])
@@ -1592,45 +1473,19 @@ func generatePrivateMessage(id string, eventid string, foundItems map[string][]s
 			// 转换为base64
 			base64Encoded := base64.StdEncoding.EncodeToString(imageData)
 
-			if config.GetUploadPicV2Base64() {
-				// 直接上传图片返回 MessageToCreate type=7
-				messageToCreate, err := images.CreateAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 1, false, "", userid, id, msgseq, apiv2)
-				if err != nil {
-					mylog.Printf("Error messageToCreate: %v", err)
-					return &dto.MessageToCreate{
-						Content: "错误: 上传图片失败",
-						MsgID:   id,
-						EventID: eventid,
-						MsgSeq:  msgseq,
-						MsgType: 0, // 默认文本类型
-					}
-				}
-				return messageToCreate
-			}
-
-			// 上传图片并获取新的URL
-			newURL, _, _, err := images.UploadBase64ImageToServer(base64Encoded, apiv2)
+			// 直接 base64 上传到 QQ CDN
+			messageToCreate, err := images.CreateAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 1, false, "", userid, id, msgseq, apiv2)
 			if err != nil {
-				mylog.Printf("Error uploading base64 encoded image: %v", err)
+				mylog.Printf("Error messageToCreate: %v", err)
 				return &dto.MessageToCreate{
 					Content: "错误: 上传图片失败",
 					MsgID:   id,
 					EventID: eventid,
 					MsgSeq:  msgseq,
-					MsgType: 0,
+					MsgType: 0, // 默认文本类型
 				}
 			}
-			// 将图片链接缩短 避免 url not allow
-			// if config.GetLotusValue() {
-			// 	// 连接到另一个gensokyo
-			// 	newURL = url.GenerateShortURL(newURL)
-			// } else {
-			// 	// 自己是主节点
-			// 	newURL = url.GenerateShortURL(newURL)
-			// 	// 使用getBaseURL函数来获取baseUrl并与newURL组合
-			// 	newURL = url.GetBaseURL() + "/url/" + newURL
-			// }
-			newpiclink = newURL
+			return messageToCreate
 		} else {
 			newpiclink = "http://" + imageURLs[0]
 		}
@@ -1676,45 +1531,19 @@ func generatePrivateMessage(id string, eventid string, foundItems map[string][]s
 			// 转换为base64
 			base64Encoded := base64.StdEncoding.EncodeToString(imageData)
 
-			if config.GetUploadPicV2Base64() {
-				// 直接上传图片返回 MessageToCreate type=7
-				messageToCreate, err := images.CreateAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 1, false, "", userid, id, msgseq, apiv2)
-				if err != nil {
-					mylog.Printf("Error messageToCreate: %v", err)
-					return &dto.MessageToCreate{
-						Content: "错误: 上传图片失败",
-						MsgID:   id,
-						EventID: eventid,
-						MsgSeq:  msgseq,
-						MsgType: 0, // 默认文本类型
-					}
-				}
-				return messageToCreate
-			}
-
-			// 上传图片并获取新的URL
-			newURL, _, _, err := images.UploadBase64ImageToServer(base64Encoded, apiv2)
+			// 直接 base64 上传到 QQ CDN
+			messageToCreate, err := images.CreateAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 1, false, "", userid, id, msgseq, apiv2)
 			if err != nil {
-				mylog.Printf("Error uploading base64 encoded image: %v", err)
+				mylog.Printf("Error messageToCreate: %v", err)
 				return &dto.MessageToCreate{
 					Content: "错误: 上传图片失败",
 					MsgID:   id,
 					EventID: eventid,
 					MsgSeq:  msgseq,
-					MsgType: 0,
+					MsgType: 0, // 默认文本类型
 				}
 			}
-			// 将图片链接缩短 避免 url not allow
-			// if config.GetLotusValue() {
-			// 	// 连接到另一个gensokyo
-			// 	newURL = url.GenerateShortURL(newURL)
-			// } else {
-			// 	// 自己是主节点
-			// 	newURL = url.GenerateShortURL(newURL)
-			// 	// 使用getBaseURL函数来获取baseUrl并与newURL组合
-			// 	newURL = url.GetBaseURL() + "/url/" + newURL
-			// }
-			newpiclink = newURL
+			return messageToCreate
 		} else {
 			newpiclink = "https://" + imageURLs[0]
 		}
@@ -1917,36 +1746,19 @@ func generatePrivateMessage(id string, eventid string, foundItems map[string][]s
 		}
 
 		base64Encoded := base64.StdEncoding.EncodeToString(compressedData)
-		if config.GetUploadPicV2Base64() {
-			// 直接上传图片返回 MessageToCreate type=7
-			messageToCreate, err := images.CreateAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 1, false, "", userid, id, msgseq, apiv2)
-			if err != nil {
-				mylog.Printf("Error messageToCreate: %v", err)
-				return &dto.MessageToCreate{
-					Content: "错误: 上传图片失败",
-					MsgID:   id,
-					EventID: eventid,
-					MsgSeq:  msgseq,
-					MsgType: 0, // 默认文本类型
-				}
-			}
-			return messageToCreate
-		}
-
-		// 将解码的图片数据转换回base64格式并上传
-		imageURL, _, _, err := images.UploadBase64ImageToServer(base64Encoded, apiv2)
+		// 直接 base64 上传到 QQ CDN
+		messageToCreate, err := images.CreateAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 1, false, "", userid, id, msgseq, apiv2)
 		if err != nil {
-			mylog.Printf("failed to upload base64 image: %v", err)
-			return nil
+			mylog.Printf("Error messageToCreate: %v", err)
+			return &dto.MessageToCreate{
+				Content: "错误: 上传图片失败",
+				MsgID:   id,
+				EventID: eventid,
+				MsgSeq:  msgseq,
+				MsgType: 0, // 默认文本类型
+			}
 		}
-		// 创建RichMediaMessage并返回
-		return &dto.RichMediaMessage{
-			EventID:    id,
-			FileType:   1, // 1代表图片
-			URL:        imageURL,
-			Content:    "", // 这个字段文档没有了
-			SrvSendMsg: false,
-		}
+		return messageToCreate
 	} else if mdContent, ok := foundItems["markdown"]; ok && len(mdContent) > 0 {
 		// 解码base64 markdown数据
 		mdData, err := base64.StdEncoding.DecodeString(mdContent[0])
