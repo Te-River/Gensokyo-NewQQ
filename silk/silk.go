@@ -150,6 +150,10 @@ func detectAudioFormat(data []byte) string {
 	if data[0] == 0xFF && (data[1]&0xE0) == 0xE0 {
 		return "MP3"
 	}
+	// MP3 with ID3v2 header (ID3 tags before MPEG data)
+	if len(data) >= 3 && bytes.Equal(data[:3], []byte("ID3")) {
+		return "MP3"
+	}
 	// OGG
 	if bytes.HasPrefix(data, []byte("OggS")) {
 		return "OGG"
