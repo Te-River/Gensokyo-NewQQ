@@ -46,7 +46,21 @@
 - **`go vet` 兼容** — 修复 `fmt.Errorf` 非恒定格式字符串，通过 Go 1.26+ 校验
 
 ---
+## 🔧 工程化改进
 
+- `.gitignore` 修复编码错误，添加 `webui/dist` 占位文件忽略规则
+- 停止跟踪 `webui/dist` 占位文件，由 `build.ps1 Ensure-WebUIDist` 自动创建
+- 删除已失效的 `GetUploadPicV2Base64()` 死代码
+- 清理 `base64_record` 冗余双层检查
+- 统一 `url_record`/`url_records` 变量命名（`imageURLs` → `recordURLs`）
+
+---
+
+## 📝 文档 & TypeScript
+
+- 补全 `SystemMemoryDetail` 接口的 `used` 字段类型声明
+
+---
 ## 🔧 工程化改进
 
 - `.gitignore` 修复编码错误，添加 `webui/dist` 占位文件忽略规则
@@ -64,4 +78,5 @@ b68957c  图片统一直接base64上传QQ CDN，仅Markdown用图床
 576bc9f  修复.gitignore编码错误
 2983b4b  停止跟踪webui/dist占位文件
 6a56b73  最终清理webui/dist跟踪状态
+9e15f6b  清理冗余代码，统一变量命名
 ```
