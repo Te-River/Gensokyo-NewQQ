@@ -1,10 +1,10 @@
-# Changelog — Release007 (since Release006)
+﻿# Changelog — Release007
 
 > 自 Release006 (`7ec67db`) 以来的所有变更。
 
 ---
 
-## � 新增功能
+## 🚀 新增功能
 
 ### [CQ:active] 主动消息标记
 
