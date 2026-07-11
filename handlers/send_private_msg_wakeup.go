@@ -168,6 +168,10 @@ func HandleSendPrivateMsgWakeupAsync(client callapi.Client, api openapi.OpenAPI,
 
 	// --- 场景 C: 遍历 foundItems (核心复刻部分) ---
 	for key, urls := range foundItems {
+		// [CQ:active] 已被消费，跳过
+		if key == "active" || key == "active_type" || key == "active_sub_type" {
+			continue
+		}
 		for _, url := range urls {
 			var singleItem = make(map[string][]string)
 			singleItem[key] = []string{url}
