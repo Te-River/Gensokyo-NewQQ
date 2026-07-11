@@ -37,27 +37,11 @@ func init() {
 // HandleSendPrivateMsgWakeup 处理私聊互动召回消息
 // 逻辑高度复刻 HandleSendPrivateMsg，但适配 IsWakeup 参数并移除 ID 转换逻辑
 func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, message callapi.ActionMessage) (string, error) {
-	// 立即发送带 echo 的响应，避免 WebSocket 客户端超时
-	immediateResp := map[string]interface{}{
-		"status":   "ok",
-		"retcode":  0,
-		"data":     map[string]interface{}{},
-		"echo":     message.Echo,
-	}
-	client.SendMessage(immediateResp)
-
-	// 异步执行实际唤醒逻辑
-	go HandleSendPrivateMsgWakeupAsync(client, api, apiv2, message)
-	return "", nil
-}
-
-// HandleSendPrivateMsgWakeupAsync 实际执行唤醒消息的异步逻辑
-func HandleSendPrivateMsgWakeupAsync(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, message callapi.ActionMessage) {
 	// 1. 获取 UserID，支持虚拟数字 ID → 真实 OpenID 自动转换
 	userID, ok := message.Params.UserID.(string)
 	if !ok || userID == "" {
 		mylog.Printf("send_private_msg_wakeup 错误: UserID 为空")
-		return
+		return "", nil
 	}
 
 	// 如果不是 32 位 OpenID，尝试从 idmap 转换（虚拟数字 ID → 真实 OpenID）
@@ -68,7 +52,7 @@ func HandleSendPrivateMsgWakeupAsync(client callapi.Client, api openapi.OpenAPI,
 			userID = realID
 		} else {
 			mylog.Printf("send_private_msg_wakeup 错误: UserID 不是32位OpenID且无法转换: %s", userID)
-			return
+			return "", nil
 		}
 	}
 
@@ -123,7 +107,7 @@ func HandleSendPrivateMsgWakeupAsync(client callapi.Client, api openapi.OpenAPI,
 		richMediaMessage, ok := groupReply.(*dto.RichMediaMessage)
 		if !ok {
 			mylog.Printf("Error: Expected RichMediaMessage type for key")
-			return
+			return "", nil
 		}
 
 		// 上传图片 (不需要 IsWakeup，只是为了拿 FileInfo)
@@ -131,7 +115,7 @@ func HandleSendPrivateMsgWakeupAsync(client callapi.Client, api openapi.OpenAPI,
 		if err != nil {
 			mylog.Printf("上传图片失败: %v", err)
 			sendWakeupNotice(client, userID, nil, err, selfID)
-			return
+			return "", nil
 		}
 
 		// 构造 MessageToCreate
@@ -289,7 +273,7 @@ func HandleSendPrivateMsgWakeupAsync(client callapi.Client, api openapi.OpenAPI,
 		sendWakeupNotice(client, userID, resp, err, selfID)
 	}
 
-	return
+	return `{"status": "ok", "retcode": 0}`, nil
 }
 
 // postC2CWakeupMessageWithRetry 召回消息专用重试逻辑
