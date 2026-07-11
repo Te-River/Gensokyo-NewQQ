@@ -4,7 +4,21 @@
 
 ---
 
-## 🐛 Bug 修复
+## � 新增功能
+
+### [CQ:active] 主动消息标记
+
+`[CQ:active]` 现被识别为主动推送标记。当出站消息中包含此 CQ 码时，Gensokyo 会强制走主动消息通道（清空缓存的 `msg_id` 和 `event_id`），即使有可用的被动回复上下文也使用主动推送。
+
+- 支持裸 `[CQ:active]` 和带参数 `[CQ:active,type=xxx,sub_type=yyy]` 两种格式
+- CQ 码自动从消息文本中移除，最终用户不可见
+- 数组消息段 `"type":"active"` 同样支持
+
+详见 [CQ:active 文档](./cq码/扩展CQ码/扩展cq码-cq-active.md)。
+
+---
+
+## �🐛 Bug 修复
 
 ### 语音/图片本地图床上传失败（内网 server_dir 场景）
 
@@ -79,4 +93,5 @@ b68957c  图片统一直接base64上传QQ CDN，仅Markdown用图床
 2983b4b  停止跟踪webui/dist占位文件
 6a56b73  最终清理webui/dist跟踪状态
 9e15f6b  清理冗余代码，统一变量命名
+a44882c  [CQ:active] 实现主动消息识别
 ```
