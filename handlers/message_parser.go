@@ -2111,10 +2111,11 @@ func FetchSongDetail(songID string) (string, error) {
 	return string(body), nil
 }
 
-// ProcessCQActive 解析 [CQ:active,type=xxx,sub_type=yyy] 并移除
+// ProcessCQActive 解析 [CQ:active] 或 [CQ:active,type=xxx,sub_type=yyy] 并移除
 func ProcessCQActive(text string, foundItems map[string][]string) string {
+	// 先匹配带参数的 [CQ:active,type=xxx,sub_type=yyy]
 	re := regexp.MustCompile(`\[CQ:active,([^\]]*)\]`)
-	return re.ReplaceAllStringFunc(text, func(match string) string {
+	text = re.ReplaceAllStringFunc(text, func(match string) string {
 		inner := match[1 : len(match)-1]
 		if idx := strings.Index(inner, ","); idx >= 0 {
 			paramsStr := inner[idx+1:]
@@ -2130,8 +2131,16 @@ func ProcessCQActive(text string, foundItems map[string][]string) string {
 				}
 			}
 		}
+		foundItems["active"] = []string{"true"}
 		return ""
 	})
+	// 再匹配裸 [CQ:active]（无参数）
+	bareRe := regexp.MustCompile(`\[CQ:active\]`)
+	if bareRe.MatchString(text) {
+		foundItems["active"] = []string{"true"}
+	}
+	text = bareRe.ReplaceAllString(text, "")
+	return text
 }
 
 // ProcessCQMemberOutbound 处理出站 [CQ:member,type=add/remove,group_id=虚拟群ID,user_id=虚拟用户ID]

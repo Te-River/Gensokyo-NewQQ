@@ -245,6 +245,12 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			messageID = ""
 			mylog.Println("主动推送模式，清空缓存的 msg_id")
 		}
+		// [CQ:active] 标记：强制走主动推送，即使有 msg_id
+		if _, ok := foundItems["active"]; ok {
+			messageID = ""
+			eventID = ""
+			mylog.Println("[CQ:active] 标记，强制主动推送")
+		}
 		//开发环境用 1000在群里无效
 		// if config.GetDevMsgID() {
 		// 	messageID = "1000"
