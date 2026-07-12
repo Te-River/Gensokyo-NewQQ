@@ -17,6 +17,11 @@ Gensokyo 新增 `[CQ:file]` CQ 码的完整支持：
 - `[CQ:file,file=https://example.com/file.zip]` — HTTPS 远程文件链接
 - `[CQ:file,file=base64://<data>]` — base64 编码数据（走 CDN 上传）
 
+支持可选参数 `file_name` 指定文件名，预留给未来 API 开放使用：
+- `[CQ:file,file=file:///path/to/file,file_name=myfile.txt]`
+- 数组段格式：`{"type":"file","data":{"file":"file:///path","file_name":"myfile.txt"}}`
+- 不填时自动从路径/URL 末尾提取（`filepath.Base()`）
+
 支持场景：
 - 群聊发送文件（`send_group_msg`）
 - 私聊发送文件（`send_private_msg`）
