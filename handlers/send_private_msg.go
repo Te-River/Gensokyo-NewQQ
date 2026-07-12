@@ -272,9 +272,13 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 
 		// 遍历foundItems并发送每种信息
 		for key, urls := range foundItems {
-			for _, url := range urls {
+			for i, url := range urls {
 				var singleItem = make(map[string][]string)
 				singleItem[key] = []string{url} // 创建一个只包含一个 URL 的 singleItem
+				// 如果存在 file_name，传递到 singleItem
+				if fileNames, ok := foundItems["file_name"]; ok && i < len(fileNames) {
+					singleItem["file_name"] = []string{fileNames[i]}
+				}
 				//mylog.Println("singleItem:", singleItem)
 				msgseq := echo.GetMappingSeq(messageID)
 				echo.AddMappingSeq(messageID, msgseq+1)

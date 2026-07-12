@@ -564,9 +564,13 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		var resp *dto.GroupMessageResponse
 		// 遍历foundItems并发送每种信息
 		for key, urls := range foundItems {
-			for _, url := range urls {
+			for i, url := range urls {
 				var singleItem = make(map[string][]string)
 				singleItem[key] = []string{url} // 创建一个只包含一个 URL 的 singleItem
+				// 如果存在 file_name，传递到 singleItem
+				if fileNames, ok := foundItems["file_name"]; ok && i < len(fileNames) {
+					singleItem["file_name"] = []string{fileNames[i]}
+				}
 				//mylog.Println("singleItem:", singleItem)
 				msgseq := echo.GetMappingSeq(messageID)
 				echo.AddMappingSeq(messageID, msgseq+1)
@@ -1357,8 +1361,13 @@ resp, err := http.Get("https://" + recordURLs[0])
 				MsgType: 0,
 			}
 		}
-		// 提取文件名
-		fileName := filepath.Base(fileURLs[0])
+		// 提取文件名，优先使用 file_name 参数，否则自动从路径提取
+		fileName := ""
+		if fns, ok := foundItems["file_name"]; ok && len(fns) > 0 && fns[0] != "" {
+			fileName = fns[0]
+		} else {
+			fileName = filepath.Base(fileURLs[0])
+		}
 		// base64编码
 		base64Encoded := base64.StdEncoding.EncodeToString(fileData)
 		// 直接 base64 上传文件到 QQ CDN，文件名作为 content 传递
@@ -1375,10 +1384,15 @@ resp, err := http.Get("https://" + recordURLs[0])
 		}
 		return messageToCreate
 	} else if fileURLs, ok := foundItems["url_file"]; ok && len(fileURLs) > 0 {
-		// 从 URL 提取文件名
-		fileName := filepath.Base(fileURLs[0])
-		if fileName == "." || fileName == "/" {
-			fileName = ""
+		// 提取文件名，优先使用 file_name 参数，否则自动从 URL 提取
+		fileName := ""
+		if fns, ok := foundItems["file_name"]; ok && len(fns) > 0 && fns[0] != "" {
+			fileName = fns[0]
+		} else {
+			fileName = filepath.Base(fileURLs[0])
+			if fileName == "." || fileName == "/" {
+				fileName = ""
+			}
 		}
 		// 发链接文件 http
 		return &dto.RichMediaMessage{
@@ -1389,10 +1403,15 @@ resp, err := http.Get("https://" + recordURLs[0])
 			SrvSendMsg: false,
 		}
 	} else if fileURLs, ok := foundItems["url_files"]; ok && len(fileURLs) > 0 {
-		// 从 URL 提取文件名
-		fileName := filepath.Base(fileURLs[0])
-		if fileName == "." || fileName == "/" {
-			fileName = ""
+		// 提取文件名，优先使用 file_name 参数，否则自动从 URL 提取
+		fileName := ""
+		if fns, ok := foundItems["file_name"]; ok && len(fns) > 0 && fns[0] != "" {
+			fileName = fns[0]
+		} else {
+			fileName = filepath.Base(fileURLs[0])
+			if fileName == "." || fileName == "/" {
+				fileName = ""
+			}
 		}
 		// 发链接文件 https
 		return &dto.RichMediaMessage{
@@ -1937,8 +1956,13 @@ resp, err := http.Get("https://" + recordURLs[0])
 				MsgType: 0,
 			}
 		}
-		// 提取文件名
-		fileName := filepath.Base(fileURLs[0])
+		// 提取文件名，优先使用 file_name 参数，否则自动从路径提取
+		fileName := ""
+		if fns, ok := foundItems["file_name"]; ok && len(fns) > 0 && fns[0] != "" {
+			fileName = fns[0]
+		} else {
+			fileName = filepath.Base(fileURLs[0])
+		}
 		// base64编码
 		base64Encoded := base64.StdEncoding.EncodeToString(fileData)
 		// 直接 base64 上传文件到 QQ CDN，文件名作为 content 传递
@@ -1955,10 +1979,15 @@ resp, err := http.Get("https://" + recordURLs[0])
 		}
 		return messageToCreate
 	} else if fileURLs, ok := foundItems["url_file"]; ok && len(fileURLs) > 0 {
-		// 从 URL 提取文件名
-		fileName := filepath.Base(fileURLs[0])
-		if fileName == "." || fileName == "/" {
-			fileName = ""
+		// 提取文件名，优先使用 file_name 参数，否则自动从 URL 提取
+		fileName := ""
+		if fns, ok := foundItems["file_name"]; ok && len(fns) > 0 && fns[0] != "" {
+			fileName = fns[0]
+		} else {
+			fileName = filepath.Base(fileURLs[0])
+			if fileName == "." || fileName == "/" {
+				fileName = ""
+			}
 		}
 		// 发链接文件 http
 		return &dto.RichMediaMessage{
@@ -1969,10 +1998,15 @@ resp, err := http.Get("https://" + recordURLs[0])
 			SrvSendMsg: false,
 		}
 	} else if fileURLs, ok := foundItems["url_files"]; ok && len(fileURLs) > 0 {
-		// 从 URL 提取文件名
-		fileName := filepath.Base(fileURLs[0])
-		if fileName == "." || fileName == "/" {
-			fileName = ""
+		// 提取文件名，优先使用 file_name 参数，否则自动从 URL 提取
+		fileName := ""
+		if fns, ok := foundItems["file_name"]; ok && len(fns) > 0 && fns[0] != "" {
+			fileName = fns[0]
+		} else {
+			fileName = filepath.Base(fileURLs[0])
+			if fileName == "." || fileName == "/" {
+				fileName = ""
+			}
 		}
 		// 发链接文件 https
 		return &dto.RichMediaMessage{

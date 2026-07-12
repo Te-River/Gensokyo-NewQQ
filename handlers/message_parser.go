@@ -601,6 +601,7 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 		messageText = message
 		// 解析 [CQ:active,type=xxx,sub_type=yyy]
 		messageText = ProcessCQActive(messageText, foundItems)
+		messageText = ProcessCQFile(messageText, foundItems)
 		// 直接应用替换规则
 		if config.GetEnableChangeWord() {
 			messageText = acnode.CheckWordOUT(messageText)
@@ -789,7 +790,9 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 				}
 
 			case "file":
-				fileContent, _ := segmentMap["data"].(map[string]interface{})["file"].(string)
+				dataMap, _ := segmentMap["data"].(map[string]interface{})
+				fileContent, _ := dataMap["file"].(string)
+				fileName, _ := dataMap["file_name"].(string)
 				if strings.HasPrefix(fileContent, "file://") {
 					var cleanContent string
 					if runtime.GOOS == "windows" {
@@ -813,6 +816,9 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 					foundItems["base64_file"] = append(foundItems["base64_file"], cleanContent)
 				} else {
 					foundItems["unknown_file"] = append(foundItems["unknown_file"], fileContent)
+				}
+				if fileName != "" {
+					foundItems["file_name"] = append(foundItems["file_name"], fileName)
 				}
 
 			default:
@@ -943,7 +949,9 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 			}
 
 		case "file":
-			fileContent, _ := message["data"].(map[string]interface{})["file"].(string)
+			dataMap, _ := message["data"].(map[string]interface{})
+			fileContent, _ := dataMap["file"].(string)
+			fileName, _ := dataMap["file_name"].(string)
 			if strings.HasPrefix(fileContent, "file://") {
 				var cleanContent string
 				if runtime.GOOS == "windows" {
@@ -968,6 +976,9 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 			} else {
 				foundItems["unknown_file"] = append(foundItems["unknown_file"], fileContent)
 			}
+			if fileName != "" {
+				foundItems["file_name"] = append(foundItems["file_name"], fileName)
+			}
 
 		default:
 			mylog.Printf("Unhandled message type: %s", messageType)
@@ -987,6 +998,7 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 
 	// 在合并后的 messageText 中统一解析 [CQ:active]（覆盖消息段路径）
 	messageText = ProcessCQActive(messageText, foundItems)
+	messageText = ProcessCQFile(messageText, foundItems)
 
 	if paramsMessage.GroupID == nil {
 		//处理at
@@ -1019,15 +1031,7 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 		httpsUrlRecordPattern := regexp.MustCompile(`\[CQ:record,file=https://(.+?)\]`)
 		httpUrlVideoPattern := regexp.MustCompile(`\[CQ:video,file=http://(.+?)\]`)
 		httpsUrlVideoPattern := regexp.MustCompile(`\[CQ:video,file=https://(.+?)\]`)
-		var localFilePattern *regexp.Regexp
-		if runtime.GOOS == "windows" {
-			localFilePattern = regexp.MustCompile(`\[CQ:file,file=file:///([^\]]+?)\]`)
-		} else {
-			localFilePattern = regexp.MustCompile(`\[CQ:file,file=file://([^\]]+?)\]`)
-		}
-		httpUrlFilePattern := regexp.MustCompile(`\[CQ:file,file=http://(.+?)\]`)
-		httpsUrlFilePattern := regexp.MustCompile(`\[CQ:file,file=https://(.+?)\]`)
-		base64FilePattern := regexp.MustCompile(`\[CQ:file,file=base64://(.+?)\]`)
+
 		mdPattern := regexp.MustCompile(`\[CQ:markdown,data=base64://(.+?)\]`)
 		mdJSONPattern := regexp.MustCompile(`\[CQ:markdown,data=(\{.*\})\]`)
 		qqMusicPattern := regexp.MustCompile(`\[CQ:music,type=qq,id=(\d+)\]`)
@@ -1057,10 +1061,6 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 			{"qqmusic", qqMusicPattern},
 			{"url_video", httpUrlVideoPattern},
 			{"url_videos", httpsUrlVideoPattern},
-			{"local_file", localFilePattern},
-			{"url_file", httpUrlFilePattern},
-			{"url_files", httpsUrlFilePattern},
-			{"base64_file", base64FilePattern},
 		}
 
 		for _, pattern := range patterns {
@@ -2177,6 +2177,62 @@ func FetchSongDetail(songID string) (string, error) {
 	}
 
 	return string(body), nil
+}
+
+// ProcessCQFile 解析 [CQ:file,file=xxx,file_name=yyy] 并移除
+// file_name 为可选参数，不填时由后续处理自动从路径/URL 提取文件名
+func ProcessCQFile(text string, foundItems map[string][]string) string {
+	re := regexp.MustCompile(`\[CQ:file,([^\]]*)\]`)
+	text = re.ReplaceAllStringFunc(text, func(match string) string {
+		inner := match[len("[CQ:file,") : len(match)-1]
+		var filePath, fileName string
+		for _, part := range strings.Split(inner, ",") {
+			kv := strings.SplitN(part, "=", 2)
+			if len(kv) == 2 {
+				switch strings.TrimSpace(kv[0]) {
+				case "file":
+					filePath = strings.TrimSpace(kv[1])
+				case "file_name":
+					fileName = strings.TrimSpace(kv[1])
+				}
+			}
+		}
+		if filePath == "" {
+			return match
+		}
+		// 根据 file 前缀确定类型
+		var itemKey, cleanValue string
+		switch {
+		case strings.HasPrefix(filePath, "file://"):
+			itemKey = "local_file"
+			if runtime.GOOS == "windows" {
+				cleanValue = strings.TrimPrefix(filePath, "file:///")
+			} else {
+				cleanValue = strings.TrimPrefix(filePath, "file://")
+			}
+			// 解码 URL 编码
+			if decoded, err := neturl.PathUnescape(cleanValue); err == nil {
+				cleanValue = decoded
+			}
+		case strings.HasPrefix(filePath, "http://"):
+			itemKey = "url_file"
+			cleanValue = strings.TrimPrefix(filePath, "http://")
+		case strings.HasPrefix(filePath, "https://"):
+			itemKey = "url_files"
+			cleanValue = strings.TrimPrefix(filePath, "https://")
+		case strings.HasPrefix(filePath, "base64://"):
+			itemKey = "base64_file"
+			cleanValue = strings.TrimPrefix(filePath, "base64://")
+		default:
+			return match
+		}
+		foundItems[itemKey] = append(foundItems[itemKey], cleanValue)
+		if fileName != "" {
+			foundItems["file_name"] = append(foundItems["file_name"], fileName)
+		}
+		return ""
+	})
+	return text
 }
 
 // ProcessCQActive 解析 [CQ:active] 或 [CQ:active,type=xxx,sub_type=yyy] 并移除
