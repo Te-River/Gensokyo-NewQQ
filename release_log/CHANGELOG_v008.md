@@ -27,7 +27,7 @@ Gensokyo 新增 `[CQ:file]` CQ 码的完整支持：
 - 私聊发送文件（`send_private_msg`）
 - 私聊互动召回消息（`send_private_msg_wakeup`）
 
-> ⚠️ **已知限制：** QQ Bot API 的 `/files` 接口不支持自定义文件名。使用 `file_data`（base64）上传的文件在 QQ 中始终显示为"未命名"。如需要正确文件名，需自行先将文件托管到公开 URL，然后通过 `[CQ:file,file=http://...]` 方式发送（QQ 会从 URL 末尾提取文件名）。
+> 💡 **文件名：** 使用 `file_data`（base64）上传时，`file_name` 参数会直接写入 QQ Bot API 的 `file_name` 字段使文件正确命名。URL 方式发送时 QQ 默认从 URL 末尾提取文件名，也可用 `file_name` 覆盖。
 
 ### send_private_msg_wakeup API
 

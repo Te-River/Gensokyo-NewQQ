@@ -16,7 +16,7 @@
 [CQ:file,file=file:///path,file_name=myfile.txt]    // 可选指定文件名
 ```
 
-所有格式均支持可选的 `file_name` 参数，用于自定义文件名（预留给未来 API 开放使用）。
+所有格式均支持可选的 `file_name` 参数，用于自定义文件名。该参数会以 `file_name` 字段写入 QQ Bot API 的 `/files` 上传请求体中，QQ 收到后即以此名显示。
 
 ## 与标准 OneBot V11 的差异
 
@@ -49,7 +49,7 @@
 2. `filepath.Base()` 自动从路径/URL 末尾提取
 3. 空（base64 来源无法提取文件名）
 
-> ⚠️ **已知限制：** 当前 QQ Bot API 的 `/files` 接口不支持自定义文件名。使用 `file_data`（base64）上传的文件在 QQ 中始终显示为"未命名"。`file_name` 参数已预留供未来开放使用。URL 方式发送时 QQ 会从 URL 末尾提取文件名。
+> 💡 **注意：** 使用 `file_data`（base64）上传时，如需自定义文件名，请添加 `file_name` 参数。URL 方式发送时 QQ 默认从 URL 末尾提取文件名，也可用 `file_name` 覆盖。
 
 ## 使用示例
 
