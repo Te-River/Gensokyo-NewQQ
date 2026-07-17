@@ -6,8 +6,10 @@ import (
 	"bytes"
 	"fmt"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
+	"strings"
 )
 
 const (
@@ -144,8 +146,18 @@ func requireHTTPSURL(rawURL string) error {
 	if err != nil {
 		return err
 	}
-	if parsed.Scheme != "https" || parsed.Host == "" {
-		return fmt.Errorf("仅允许有效的 HTTPS URL")
+	if parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+		return fmt.Errorf("仅允许不含用户信息的有效 HTTPS URL")
+	}
+
+	hostname := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+	if hostname == "localhost" || strings.HasSuffix(hostname, ".localhost") {
+		return fmt.Errorf("不允许本机地址")
+	}
+	if ip := net.ParseIP(hostname); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return fmt.Errorf("不允许私有、回环或链路本地 IP 地址")
+		}
 	}
 	return nil
 }
