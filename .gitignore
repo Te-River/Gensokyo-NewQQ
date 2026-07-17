@@ -26,6 +26,18 @@ webui/dist/
 #ignore data
 data/.vscode/
 
+# local text artifacts and wordlists
+*.txt
+!readme.md
+!docs/**/*.md
+!docs/**/*.txt
+!frontend/README.md
+
+# sensitive word / runtime generated text files
+handlers/sensitive_words_in.txt
+handlers/sensitive_words_out.txt
+**/sensitive_words_in.txt
+**/sensitive_words_out.txt
 
 # Build output
 release/
