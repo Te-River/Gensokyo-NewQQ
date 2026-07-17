@@ -459,7 +459,8 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 					md.Content = ResolveMarkdownAtMentions(md.Content)
 					md.Content = ResolveMarkdownImages(md.Content, apiv2)
 				}
-				// 提取 messageText 中的 @ 标签（<qqbot-at-user .../>），合并到 markdown 内容
+				// 将 messageText 中的 [CQ:at,qq=数字] 也转换为 <qqbot-at-user>，再合并到 markdown 内容
+				messageText = ResolveMarkdownAtMentions(messageText)
 				atRe := regexp.MustCompile(`<qqbot-at-user\s+[^>]*/>`)
 				atTag := atRe.FindString(messageText)
 				if atTag != "" {
@@ -2712,4 +2713,3 @@ func postGroupRichMediaMessageWithRetry(apiv2 openapi.OpenAPI, groupID string, r
 	}
 	return resp, err
 }
-
