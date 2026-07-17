@@ -26,6 +26,13 @@ func TestRequireHTTPSURL(t *testing.T) {
 		"//example.com/upload",
 		"/relative/upload",
 		"not-a-url",
+		"https://localhost/upload",
+		"https://api.localhost/upload",
+		"https://127.0.0.1/upload",
+		"https://10.0.0.1/upload",
+		"https://169.254.1.1/upload",
+		"https://[::1]/upload",
+		"https://user:pass@example.com/upload",
 	} {
 		if err := requireHTTPSURL(rawURL); err == nil {
 			t.Fatalf("unsafe URL accepted: %s", rawURL)
