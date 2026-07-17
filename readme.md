@@ -317,133 +317,42 @@ todo,正在施工...
 
 </details>
 
-## 完整配置示例
+## 配置示例
 
-首次运行会自动生成 `config.yml`，以下为完整配置项及说明：
+首次运行会自动生成完整的 `config.yml`，以下为最小可用示例：
 
 ```yaml
 version: 1
 settings:
-  #── 反向 WebSocket ──────────────────────────────────
-  ws_address: ["ws://127.0.0.1:8080/onebot/v11/ws"]   # 后端 OneBot 适配器地址
-  ws_token: ["your_ws_token_here"]                    # 对应 ws_address 的 token
-  reconnect_times: 100                                 # 断线重连次数
-  heart_beat_interval: 5                               # 心跳间隔（秒）
-  launch_reconnect_times: 1                            # 启动时重连次数
+  # 你可以在 q.qq.com 的"应用详情"页面找到这些信息
+  app_id: 123456789                    # 应用 ID
+  token: "your_app_token"              # 应用令牌
+  client_secret: "your_client_secret"  # 客户端密钥
 
-  #── 基础设置 ────────────────────────────────────────
-  app_id: 123456789                                    # QQ 开放平台应用 ID
-  uin: 0                                               # 机器人 QQ 号
-  use_uin: false                                       # 使用 QQ 号作为 bot ID
-  token: "your_app_token"                              # 应用令牌
-  client_secret: "your_client_secret"                  # 客户端密钥
-  idmap_isolation: false                               # 多 Bot 共用数据库时加 UIN 前缀隔离
-  idmap_legacy_compat: false                           # 同时写入旧格式 key 兼容官方版
-  shard_count: 1                                       # 分片数量
-  shard_id: 0                                          # 当前分片 ID
-  shard_num: 1                                         # 限频时可调大，尝试多分片
+  # 至少选择一种连接方式
+  ws_address: ["ws://127.0.0.1:8080/onebot/v11/ws"]  # 反向 WS（常用）
+  enable_ws_server: true                               # 正向 WS
+  http_address: "0.0.0.0:5700"                         # HTTP API
 
-  #── 事件订阅 ────────────────────────────────────────
+  # 事件订阅（根据需要开启）
   text_intent:
-    - "ATMessageEventHandler"                          # q頻 @ 消息
-    - "DirectMessageHandler"                           # q頻 私信
-    - "ReadyHandler"                                   # 连接成功
-    - "ErrorNotifyHandler"                             # 连接关闭
-    - "GroupATMessageEventHandler"                     # q群 @ 消息
-    - "GroupMessageEventHandler"                       # q群 普通消息
-    - "GroupMemberAddEventHandler"                     # q群 成员新增
-    - "GroupMemberRemoveEventHandler"                  # q群 成员移除
-    - "C2CMessageEventHandler"                         # 私聊 (C2C)
-  discover_unknown_events: false                       # 探测未文档化事件
-  suppress_disallowed_intents: false                   # 仅屏蔽已在 text_intent 启用的高风险 intent bit, 不自动注册 handler
+    - "GroupATMessageEventHandler"    # 群 @ 消息
+    - "GroupMessageEventHandler"      # 群普通消息
+    - "C2CMessageEventHandler"        # 私聊
 
-  #── 消息转换 ────────────────────────────────────────
-  global_channel_to_group: true                        # q頻 事件转 q群 事件
-  global_private_to_channel: false                     # 私聊转 q頻 事件
-  global_forum_to_channel: false                       # 帖子转 q頻 事件
-  hash_id: true                                        # 使用 hash 生成虚拟 ID
-  op_userid_type: "vuin"                               # 下游 user_id/group_id 来源: vuin/raw/ruin
-  convert_other_at: false                              # 非机器人自身的 <@OpenID> 仅在已有 idmap 映射且开启时转换
-  msgid_ttl_seconds: 3600                              # message_id 映射保留时间
-  array: false                                         # 使用 segment 数组格式上报
-
-  #── Gensokyo 互联 ───────────────────────────────────
-  server_dir: "your_server_ip_or_domain"               # Lotus 地址
-  port: "15630"                                        # HTTP 服务端口
-  lotus: false                                         # 启用 Lotus 模式
-  lotus_grpc: false                                    # 使用 gRPC 进行 Lotus 连接
-
-  #── WebSocket ──────────────────────────────────────
-  enable_ws_server: true                               # 启用正向 WebSocket
-  ws_server_path: "ws"                                 # 正向 WS 路径
-  ws_server_token: ""                                  # 正向 WS token
-
-  #── SSL 与域名校验 ─────────────────────────────────
-  identify_file: true                                  # 自动生成域名校验文件
-  crt: ""                                              # SSL 证书路径
-  key: ""                                              # SSL 密钥路径
-  force_ssl: false                                     # 强制启用 SSL
-
-  #── HTTP API ───────────────────────────────────────
-  http_address: ""                                     # HTTP API 监听地址
-  http_access_token: ""                                # HTTP API token
-  post_url: [""]                                       # 反向 HTTP POST 地址
-  post_secret: [""]                                    # 反向 HTTP POST 密钥
-
-  #── 日志 ────────────────────────────────────────────
-  developer_log: false                                 # 开启开发者日志
-  log_level: 1                                         # 0=debug 1=info 2=warn 3=error
-  save_logs: false                                     # 保存本地日志; 与启动参数 run --local-logger=enable 等效
-  log_max_age_days: 7                                  # 本地日志最大保留天数
-  log_max_size_mb: 24                                  # 单个日志文件大小上限(MB)
-  log_keep_files: 12                                   # 本地旧日志文件最大保留个数
-
-  #── WebUI ───────────────────────────────────────────
-  disable_webui: false                                 # 禁用 Web 管理面板
-  server_user_name: "admin"                            # 面板用户名
-  server_user_password: "admin"                        # 面板密码
-
-  #── 指令控制 ───────────────────────────────────────
-  remove_prefix: false                                 # 忽略指令前 /
-  remove_at: false                                     # 忽略指令前 @
-  white_prefix_mode: false                             # 指令白名单模式
-  black_prefix_mode: false                             # 指令黑名单模式
-  bind_prefix: "/bind"                                 # 绑定指令
-  status_prefix: "/gskstatus"                          # 运行状态查询; 设为 ""、/disabled 或 /disabled... 可禁用
-  broadcast_prefix: "/gskbroadcast"                    # 广播指令; 设为 ""、/disabled 或 /disabled... 可禁用
-
-  #── Markdown 消息 ──────────────────────────────────
-  twoway_echo: false                                   # 启用双向 echo
-  native_md: false                                     # 启用原生 Markdown
-  custom_template_id: ""                               # 图文转 MD 模板 ID
-  keyboard_id: ""                                      # 图文转 MD 按钮 ID
-
-  #── 消息发送 ──────────────────────────────────────
-  memory_msgid: false                                  # 使用内存存储 msg_id
-  lazy_message_id: false                               # 惰性 message_id
-  send_delay: 300                                      # 发送间隔（毫秒）
-  threads_ret_msg: false                               # 异步发送回执
-  no_ret_msg: false                                    # 禁用回执（提升性能）
-
-  #── 云存储 ─────────────────────────────────────────
-  oss_type: 0                                          # 0=本机 1=腾讯COS 2=百度BOS 3=阿里OSS
-  # 腾讯云 COS 配置（oss_type=1 时需填写）
-  t_COS_BUCKETNAME: ""
-  t_COS_REGION: ""
-  t_COS_SECRETID: ""
-  t_COS_SECRETKEY: ""
-  # 百度云 BOS 配置（oss_type=2 时需填写）
-  b_BOS_BUCKETNAME: ""
-  b_BCE_AK: ""
-  b_BCE_SK: ""
-  # 阿里云 OSS 配置（oss_type=3 时需填写）
-  a_OSS_EndPoint: ""
-  a_OSS_BucketName: ""
-  a_OSS_AccessKeyId: ""
-  a_OSS_AccessKeySecret: ""
+  # 图床（以下免费图床只需 enabled: true）
+  image_hosting:
+    chatglm:
+      enabled: true
+    ukaka:
+      enabled: true
+    xingye:
+      enabled: true
+    nature:
+      enabled: true
 ```
 
-> 完整文档请参阅 [docs/开始使用.md](./docs/开始使用.md) 和 [docs/idmap.md](./docs/idmap.md)
+> 完整配置项说明请参阅 [docs/开始使用.md](./docs/开始使用.md) 和 [docs/idmap.md](./docs/idmap.md)
 
 ## 关于 ISSUE
 
