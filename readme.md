@@ -85,7 +85,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 -  q頻 (QQ Guild) 虚拟成 q群 事件、私信虚拟成 q頻 事件
 -  WebUI 管理界面
 -  指令黑白名单、URL 自动转换
--  可自定义图片压缩/图床服务
+-  可自定义图片压缩/图床服务（内置 ChatGLM / Ukaka / 星野 / Nature 等免费图床）
 -  支持文字、图片、语音、视频、Markdown 等多种消息类型
 -  主动信息失败自动转被动
 -  完善的重连机制
@@ -98,6 +98,8 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 - [扩展 API](/docs/api/扩展API文档.md) — 扩展 API 文档索引
 - [Markdown 消息](/docs/文档-markdown消息.md) — Markdown 卡片消息说明
 - [扩展 CQ 码](/docs/cq码/扩展CQ码汇总.md) — 本 Fork 新增 CQ 码
+- [标准 CQ 码差异](/docs/cq码/标准CQ码/) — 与标准 OneBot 有差异的 CQ 码
+- [统一图床服务](/imagehosting/README.md) — 7 种图床后端
 - [更多文档](/docs/更多文档.md) — 完整文档索引
 
 ## CQ 码与 API 支持
@@ -111,6 +113,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 > - **[CQ:markdown]** Markdown 卡片消息
 > - **[CQ:member]** 群成员变动
 > - **[CQ:active,type=...,sub_type=...]** active 标记
+> - **[CQ:file,file=...,file_name=...]** 文件上传
 
 #### 符合 OneBot 标准的 CQ 码
 
@@ -142,6 +145,7 @@ todo,正在施工...
 | [CQ:member]    | [q群成员变动] |
 | [CQ:active]    | [active 标记] |
 | [CQ:tts]       | [文本转语音]                      |
+| [CQ:file]      | [文件上传]                        |
 
 
 </details>
@@ -159,6 +163,7 @@ todo,正在施工...
 > - **get_group_ban**（查询 q群 禁言）
 > - **get_group_whole_ban**（查询 q群 全员禁言）
 > - **send_to_group**（send_group_msg 别名）
+> - **send_group_msg_raw**（发送原始消息）
 
 
 #### 符合 OneBot 标准的 API
@@ -461,12 +466,12 @@ settings:
 - 感谢[`mnixry/nonebot-plugin-gocqhttp`](https://github.com/mnixry/nonebot-plugin-gocqhttp/): 本项目采用了mnixry编写的前端并实现了与它对应的基于qq官方api的后端api.
 - 感谢[`Hoshinonyaruko/Gensokyo`](https://github.com/Hoshinonyaruko/Gensokyo/)
 - 感谢[`ElainaCore/ElainaBot_v2`](https://github.com/ElainaCore/ElainaBot_v2)为本项目的图床方面提供了相关思路
-- 感谢[`HX-Wrdzgzs/GensokyoNewQQWeb`](https://github.com/HX-Wrdzgzs/GensokyoNewQQWeb)为本项目搭建了web ~~（虽然没什么人看就是了）~~
+- 感谢[`HX-Wrdzgzs/GensokyoNewQQWeb`](https://github.com/HX-Wrdzgzs/GensokyoNewQQWeb)为本项目搭建了 WebUI
 
 ## 引用
 
 - [`tencent-connect/botgo`](https://github.com/tencent-connect/botgo): 本项目引用了此项目并做了一些改动
-- [`ElainaCore/ElainaBot_v2`](https://github.com/ElainaCore/ElainaBot_v2)：本项目的免费图床部分基于其相关源代码修改
+- [`ElainaCore/ElainaBot_v2`](https://github.com/ElainaCore/ElainaBot_v2)：本项目的图床服务部分基于其相关源代码修改
 
 
 ## ⭐ Star History
