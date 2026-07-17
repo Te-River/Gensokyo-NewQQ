@@ -7,12 +7,12 @@ import (
 
 func TestIsLoopbackAddress(t *testing.T) {
 	tests := map[string]bool{
-		"127.0.0.1:5700": true,
-		"localhost:5700": true,
-		"[::1]:5700":     true,
-		"0.0.0.0:5700":   false,
-		":5700":          false,
-		"[::]:5700":      false,
+		"127.0.0.1:5700":   true,
+		"localhost:5700":   true,
+		"[::1]:5700":       true,
+		"0.0.0.0:5700":     false,
+		":5700":            false,
+		"[::]:5700":        false,
 		"192.168.1.2:5700": false,
 	}
 	for address, want := range tests {
@@ -105,6 +105,45 @@ settings:
 		if !strings.Contains(finding.Code, "query-token") {
 			t.Fatalf("unexpected finding: %#v", finding)
 		}
+	}
+}
+
+func TestParserPreservesQuotedHashAndNestedPaths(t *testing.T) {
+	values, blocks, err := parseScalarYAML([]byte(`
+settings:
+  server_user_password: "long#password-value" # trailing comment
+  image_hosting:
+    chatglm:
+      enabled: true
+    ukaka:
+      enabled: false
+`))
+	if err != nil {
+		t.Fatalf("parseScalarYAML failed: %v", err)
+	}
+	if !blocks["settings.image_hosting"] {
+		t.Fatal("image_hosting block not detected")
+	}
+	if got := values["settings.server_user_password"]; got != "long#password-value" {
+		t.Fatalf("quoted hash value = %q", got)
+	}
+	if got := values["settings.image_hosting.chatglm.enabled"]; got != "true" {
+		t.Fatalf("chatglm enabled = %q", got)
+	}
+	if got := values["settings.image_hosting.ukaka.enabled"]; got != "false" {
+		t.Fatalf("ukaka enabled = %q", got)
+	}
+}
+
+func TestAuditYAMLRejectsInvalidEnvelope(t *testing.T) {
+	if _, err := AuditYAML(nil); err == nil {
+		t.Fatal("empty config was accepted")
+	}
+	if _, err := AuditYAML([]byte("version: 1\nport: 15630\n")); err == nil {
+		t.Fatal("config without settings block was accepted")
+	}
+	if _, err := AuditYAML(make([]byte, maxAuditConfigBytes+1)); err == nil {
+		t.Fatal("oversized config was accepted")
 	}
 }
 
