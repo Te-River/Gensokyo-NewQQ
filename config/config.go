@@ -423,8 +423,8 @@ func getMissingSettingsByReflection(currentConfig, defaultConfig *Config) (map[s
 	for i := 0; i < currentVal.NumField(); i++ {
 		field := currentVal.Type().Field(i)
 		yamlTag := field.Tag.Get("yaml")
-		if yamlTag == "" || field.Type.Kind() == reflect.Int || field.Type.Kind() == reflect.Bool {
-			continue // 跳过没有yaml标签的字段，或者字段类型为int或bool
+		if yamlTag == "" {
+			continue // 跳过没有yaml标签的字段
 		}
 		yamlKeyName := strings.SplitN(yamlTag, ",", 2)[0]
 		// 跳过结构体类型的字段（如 Settings），无法通过追加一行来修复
@@ -453,17 +453,17 @@ func getMissingSettingsByText(templateContent, currentConfigContent string) (map
 			missingSettings[key] = "missing"
 		}
 	}
-
-	// 第一轮过滤：如果父 key 已在配置中存在 → 跳过（属于已存在的块）
-	for key := range missingSettings {
-		parent, hasParent := parentMap[key]
-		if !hasParent {
-			continue
-		}
-		if _, parentExists := currentKeys[parent]; parentExists {
-			delete(missingSettings, key)
-		}
-	}
+		// 第一轮过滤：如果父 key 已在配置中存在 → 跳过（属于已存在的块）
+	  // 但父 key 为 "settings" 时不过滤（顶级配置项，单独缺失需要追加）
+	  for key := range missingSettings {
+	   parent, hasParent := parentMap[key]
+	   if !hasParent || parent == "settings" {
+	    continue
+	   }
+	   if _, parentExists := currentKeys[parent]; parentExists {
+	    delete(missingSettings, key)
+	   }
+	  }
 
 	// 第二轮：如果某个缺失 key 的祖先 key 不在配置中，补上祖先 key
 	// 例如子 key 缺失但父 `image_hosting` 也不在配置中 → 把 `image_hosting` 加入缺失
