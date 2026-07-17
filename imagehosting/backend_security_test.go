@@ -1,6 +1,8 @@
 package imagehosting
 
 import (
+	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +11,9 @@ import (
 func TestImageHostingHTTPClientHasTimeout(t *testing.T) {
 	if imageHostingHTTPClient.Timeout != 15*time.Second {
 		t.Fatalf("HTTP client timeout = %v", imageHostingHTTPClient.Timeout)
+	}
+	if imageHostingHTTPClient.CheckRedirect == nil {
+		t.Fatal("HTTP client redirect policy is not configured")
 	}
 }
 
@@ -37,6 +42,31 @@ func TestRequireHTTPSURL(t *testing.T) {
 		if err := requireHTTPSURL(rawURL); err == nil {
 			t.Fatalf("unsafe URL accepted: %s", rawURL)
 		}
+	}
+}
+
+func TestImageHostRedirectPolicy(t *testing.T) {
+	makeRequest := func(rawURL string) *http.Request {
+		parsed, err := url.Parse(rawURL)
+		if err != nil {
+			t.Fatalf("parse URL %s: %v", rawURL, err)
+		}
+		return &http.Request{URL: parsed}
+	}
+
+	if err := imageHostingHTTPClient.CheckRedirect(makeRequest("https://cdn.example.com/image.png"), nil); err != nil {
+		t.Fatalf("safe redirect rejected: %v", err)
+	}
+	if err := imageHostingHTTPClient.CheckRedirect(makeRequest("https://127.0.0.1/image.png"), nil); err == nil {
+		t.Fatal("private redirect target was accepted")
+	}
+
+	via := make([]*http.Request, maxImageHostRedirects)
+	for index := range via {
+		via[index] = makeRequest("https://example.com/previous")
+	}
+	if err := imageHostingHTTPClient.CheckRedirect(makeRequest("https://example.com/next"), via); err == nil {
+		t.Fatal("excessive redirect chain was accepted")
 	}
 }
 
