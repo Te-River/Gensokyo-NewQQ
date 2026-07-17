@@ -247,8 +247,19 @@ func GenerateForumMessage(foundItems map[string][]string, messageText string, ap
 	for _, url := range foundItems["url_image"] {
 		richText.Paragraphs[0].Elems = append(richText.Paragraphs[0].Elems, map[string]interface{}{
 			"image": map[string]interface{}{
-				"third_url":     url,
+				"third_url":     "http://" + url,
 				"width_percent": 1.0, // 设置图片宽度比例为1.0
+			},
+			"type": 2,
+		})
+	}
+
+	// 处理 HTTPS 图片链接
+	for _, url := range foundItems["url_images"] {
+		richText.Paragraphs[0].Elems = append(richText.Paragraphs[0].Elems, map[string]interface{}{
+			"image": map[string]interface{}{
+				"third_url":     "https://" + url,
+				"width_percent": 1.0,
 			},
 			"type": 2,
 		})
