@@ -1,4 +1,4 @@
-// ChatGLM 图床 — 智谱第三方图床
+// ChatGLM 图床 — 智谱第三方图床。
 // 仅在管理员显式允许第三方图床后使用。
 package imagehosting
 
@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"mime/multipart"
 	"net/http"
+	"strings"
 )
 
 func tryChatGLM(data []byte, filename string) (string, error) {
@@ -55,8 +56,12 @@ func tryChatGLM(data []byte, filename string) (string, error) {
 	if err := jsonUnmarshal(bodyBytes, &result); err != nil {
 		return "", fmt.Errorf("解析响应失败: %w", err)
 	}
-	if result.Result.FileURL == "" {
+	fileURL := strings.TrimSpace(result.Result.FileURL)
+	if fileURL == "" {
 		return "", fmt.Errorf("ChatGLM 返回空 URL")
 	}
-	return result.Result.FileURL, nil
+	if err := requireHTTPSURL(fileURL); err != nil {
+		return "", fmt.Errorf("ChatGLM 返回无效图片 URL: %w", err)
+	}
+	return fileURL, nil
 }
