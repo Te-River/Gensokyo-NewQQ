@@ -785,7 +785,20 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 				} else {
 					avatarCQCode, _ = GetAvatarCQCode(paramsMessage.GroupID.(string), qqNumber)
 				}
-				messageText += avatarCQCode
+				// 从 [CQ:image,file=URL] 中提取 URL 存入 foundItems
+				if avatarCQCode != "" {
+					re := regexp.MustCompile(`\[CQ:image,file=(.+?)\]`)
+					if m := re.FindStringSubmatch(avatarCQCode); len(m) > 1 {
+						url := m[1]
+						if strings.HasPrefix(url, "https://") {
+							foundItems["url_images"] = append(foundItems["url_images"], strings.TrimPrefix(url, "https://"))
+						} else if strings.HasPrefix(url, "http://") {
+							foundItems["url_image"] = append(foundItems["url_image"], strings.TrimPrefix(url, "http://"))
+						} else {
+							foundItems["unknown_image"] = append(foundItems["unknown_image"], url)
+						}
+					}
+				}
 
 			case "markdown":
 				mdContent, ok := segmentMap["data"].(map[string]interface{})["data"]
@@ -889,14 +902,31 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 					foundItems["file_name"] = append(foundItems["file_name"], fileName)
 				}
 
-			default:
-				mylog.Printf("Unhandled segment type: %s", segmentType)
-			}
+			case "video":
+			     fileContent, _ := segmentMap["data"].(map[string]interface{})["file"].(string)
+			     if strings.HasPrefix(fileContent, "http://") {
+			      cleanContent := strings.TrimPrefix(fileContent, "http://")
+			      foundItems["url_video"] = append(foundItems["url_video"], cleanContent)
+			     } else if strings.HasPrefix(fileContent, "https://") {
+			      cleanContent := strings.TrimPrefix(fileContent, "https://")
+			      foundItems["url_videos"] = append(foundItems["url_videos"], cleanContent)
+			     }
 
-			messageText += segmentContent
+			    case "music":
+			     musicType, _ := segmentMap["data"].(map[string]interface{})["type"].(string)
+			     musicID, _ := segmentMap["data"].(map[string]interface{})["id"].(string)
+			     if musicType == "qq" && musicID != "" {
+			      foundItems["qqmusic"] = append(foundItems["qqmusic"], musicID)
+			     }
 
-		}
-	case map[string]interface{}:
+			    default:
+			     mylog.Printf("Unhandled segment type: %s", segmentType)
+			    }
+
+			    messageText += segmentContent
+
+			   }
+			  case map[string]interface{}:
 		mylog.Printf("params.message is a map (segment_type_trss)\n")
 		messageType, _ := message["type"].(string)
 
@@ -983,14 +1013,27 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 			messageText += "[CQ:at,qq=" + qqNumber + "]"
 
 		case "avatar":
-			qqNumber, _ := message["data"].(map[string]interface{})["qq"].(string)
-			var avatarCQCode string
-			if paramsMessage.GroupID == nil {
-				avatarCQCode, _ = GetAvatarCQCodeNoGroupID(qqNumber)
-			} else {
-				avatarCQCode, _ = GetAvatarCQCode(paramsMessage.GroupID.(string), qqNumber)
-			}
-			messageText += avatarCQCode
+		    qqNumber, _ := message["data"].(map[string]interface{})["qq"].(string)
+		    var avatarCQCode string
+		    if paramsMessage.GroupID == nil {
+		     avatarCQCode, _ = GetAvatarCQCodeNoGroupID(qqNumber)
+		    } else {
+		     avatarCQCode, _ = GetAvatarCQCode(paramsMessage.GroupID.(string), qqNumber)
+		    }
+		    // 从 [CQ:image,file=URL] 中提取 URL 存入 foundItems
+		    if avatarCQCode != "" {
+		     re := regexp.MustCompile(`\[CQ:image,file=(.+?)\]`)
+		     if m := re.FindStringSubmatch(avatarCQCode); len(m) > 1 {
+		      url := m[1]
+		      if strings.HasPrefix(url, "https://") {
+		       foundItems["url_images"] = append(foundItems["url_images"], strings.TrimPrefix(url, "https://"))
+		      } else if strings.HasPrefix(url, "http://") {
+		       foundItems["url_image"] = append(foundItems["url_image"], strings.TrimPrefix(url, "http://"))
+		      } else {
+		       foundItems["unknown_image"] = append(foundItems["unknown_image"], url)
+		      }
+		     }
+		    }
 
 		case "markdown":
 			mdContent, ok := message["data"].(map[string]interface{})["data"]
@@ -1066,12 +1109,29 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 				foundItems["file_name"] = append(foundItems["file_name"], fileName)
 			}
 
-		default:
-			mylog.Printf("Unhandled message type: %s", messageType)
-		}
+		case "video":
+		    fileContent, _ := message["data"].(map[string]interface{})["file"].(string)
+		    if strings.HasPrefix(fileContent, "http://") {
+		     cleanContent := strings.TrimPrefix(fileContent, "http://")
+		     foundItems["url_video"] = append(foundItems["url_video"], cleanContent)
+		    } else if strings.HasPrefix(fileContent, "https://") {
+		     cleanContent := strings.TrimPrefix(fileContent, "https://")
+		     foundItems["url_videos"] = append(foundItems["url_videos"], cleanContent)
+		    }
 
-	default:
-		mylog.Println("Unsupported message format: params.message field is not a string, map or slice")
+		   case "music":
+		    musicType, _ := message["data"].(map[string]interface{})["type"].(string)
+		    musicID, _ := message["data"].(map[string]interface{})["id"].(string)
+		    if musicType == "qq" && musicID != "" {
+		     foundItems["qqmusic"] = append(foundItems["qqmusic"], musicID)
+		    }
+
+		   default:
+		    mylog.Printf("Unhandled message type: %s", messageType)
+		   }
+
+		  default:
+		   mylog.Println("Unsupported message format: params.message field is not a string, map or slice")
 	}
 
 	// 从 messageText 中提取 [CQ:reply,id=数字] 用于构建 message_reference

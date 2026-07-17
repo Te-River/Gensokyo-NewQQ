@@ -1,20 +1,21 @@
 package handlers
 
 import (
-	"context"
-	"fmt"
-	"strconv"
-	"strings"
-	"time"
+  "context"
+  "fmt"
+  "strconv"
+  "strings"
+  "time"
 
-	"github.com/hoshinonyaruko/gensokyo/callapi"
-	"github.com/hoshinonyaruko/gensokyo/config"
-	"github.com/hoshinonyaruko/gensokyo/echo"
-	"github.com/hoshinonyaruko/gensokyo/idmap"
-	"github.com/hoshinonyaruko/gensokyo/mylog"
-	"github.com/tencent-connect/botgo/dto"
-	"github.com/tencent-connect/botgo/openapi"
-)
+  "github.com/hoshinonyaruko/gensokyo/callapi"
+  "github.com/hoshinonyaruko/gensokyo/config"
+  "github.com/hoshinonyaruko/gensokyo/echo"
+  "github.com/hoshinonyaruko/gensokyo/idmap"
+  "github.com/hoshinonyaruko/gensokyo/mylog"
+  "github.com/tencent-connect/botgo/dto"
+  "github.com/tencent-connect/botgo/dto/keyboard"
+  "github.com/tencent-connect/botgo/openapi"
+ )
 
 func init() {
 	callapi.RegisterHandler("send_private_msg", HandleSendPrivateMsg)
@@ -281,6 +282,26 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			}
 
 			groupMessage.Timestamp = time.Now().Unix() // 设置时间戳
+
+			// 处理 [CQ:markdown] → 将消息类型切换为 markdown
+			var md *dto.Markdown
+			var kb *keyboard.MessageKeyboard
+			if mdItems, ok := foundItems["markdown"]; ok && len(mdItems) > 0 {
+				md, kb = parseMarkdownFromMessage(mdItems[0])
+				if md != nil && md.Content != "" {
+					md.Content = ResolveMarkdownAtMentions(md.Content)
+					md.Content = ResolveMarkdownImages(md.Content, apiv2)
+				}
+				if md != nil {
+					groupMessage.Markdown = md
+					groupMessage.Keyboard = kb
+					groupMessage.MsgType = 2
+					groupMessage.Content = ""
+					delete(foundItems, "markdown")
+					mylog.Printf("[CQ:markdown] 将私聊消息类型切换为 markdown")
+				}
+			}
+
 			resp, err := apiv2.PostC2CMessage(context.TODO(), UserID, groupMessage)
 			if err != nil {
 				mylog.Printf("发送文本私聊信息失败: %v", err)

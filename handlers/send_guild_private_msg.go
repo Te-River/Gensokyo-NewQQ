@@ -216,8 +216,17 @@ func HandleSendGuildChannelPrivateMsg(client callapi.Client, api openapi.OpenAPI
 	}
 
 	// 遍历foundItems并发送每种信息
-	for key, urls := range foundItems {
-		for _, url := range urls {
+	  for key, urls := range foundItems {
+	   // 跳过控制型 key 和频道私信不支持的媒体类型
+	   if key == "active" || key == "active_type" || key == "active_sub_type" ||
+	    key == "reply_msg_id" || key == "file_name" ||
+	    key == "markdown" || key == "qqmusic" ||
+	    key == "url_video" || key == "url_videos" ||
+	    key == "local_file" || key == "url_file" || key == "url_files" || key == "base64_file" {
+	    mylog.Printf("频道私信暂不支持媒体类型: %s", key)
+	    continue
+	   }
+	   for _, url := range urls {
 			var singleItem = make(map[string][]string)
 			singleItem[key] = []string{url} // 创建一个只包含单个 URL 的 singleItem
 			msgseq := echo.GetMappingSeq(messageID)
