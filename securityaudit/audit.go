@@ -2,14 +2,16 @@
 package securityaudit
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
 	"net"
 	"os"
 	"strconv"
 	"strings"
-
-	"gopkg.in/yaml.v3"
 )
+
+const maxAuditConfigBytes = 4 << 20
 
 // Severity represents the operational impact of a finding.
 type Severity string
@@ -40,32 +42,20 @@ func (r Report) HasHighRisk() bool {
 	return false
 }
 
-type configFile struct {
-	Settings struct {
-		Port               string `yaml:"port"`
-		ForceSSL           bool   `yaml:"force_ssl"`
-		EnableWSServer     bool   `yaml:"enable_ws_server"`
-		WSServerToken      string `yaml:"ws_server_token"`
-		HTTPAddress        string `yaml:"http_address"`
-		HTTPAccessToken    string `yaml:"http_access_token"`
-		DisableWebUI       bool   `yaml:"disable_webui"`
-		WebUIUsername      string `yaml:"server_user_name"`
-		WebUIPassword      string `yaml:"server_user_password"`
-		ThirdPartyImageOpt struct {
-			ChatGLM struct {
-				Enabled bool `yaml:"enabled"`
-			} `yaml:"chatglm"`
-			Ukaka struct {
-				Enabled bool `yaml:"enabled"`
-			} `yaml:"ukaka"`
-			Xingye struct {
-				Enabled bool `yaml:"enabled"`
-			} `yaml:"xingye"`
-			Nature struct {
-				Enabled bool `yaml:"enabled"`
-			} `yaml:"nature"`
-		} `yaml:"image_hosting"`
-	} `yaml:"settings"`
+type securitySettings struct {
+	Port              string
+	ForceSSL          bool
+	EnableWSServer    bool
+	WSServerToken     string
+	HTTPAddress       string
+	HTTPAccessToken   string
+	DisableWebUI      bool
+	WebUIUsername     string
+	WebUIPassword     string
+	ChatGLMEnabled    bool
+	UkakaEnabled      bool
+	XingyeEnabled     bool
+	NatureEnabled     bool
 }
 
 // AuditFile reads and audits a Gensokyo config file.
@@ -78,13 +68,16 @@ func AuditFile(path string) (Report, error) {
 }
 
 // AuditYAML audits config bytes without modifying them.
+//
+// The audit intentionally parses only the scalar keys it needs. This keeps the
+// startup guard independent from the application's YAML loader and prevents a
+// malformed optional section from silently disabling the audit.
 func AuditYAML(data []byte) (Report, error) {
-	var cfg configFile
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return Report{}, fmt.Errorf("parse config for security audit: %w", err)
+	settings, err := parseSecuritySettings(data)
+	if err != nil {
+		return Report{}, err
 	}
 
-	settings := cfg.Settings
 	report := Report{}
 	add := func(severity Severity, code, message string) {
 		report.Findings = append(report.Findings, Finding{Severity: severity, Code: code, Message: message})
@@ -121,17 +114,176 @@ func AuditYAML(data []byte) (Report, error) {
 		}
 	}
 
-	thirdPartyConfigured := settings.ThirdPartyImageOpt.ChatGLM.Enabled ||
-		settings.ThirdPartyImageOpt.Ukaka.Enabled ||
-		settings.ThirdPartyImageOpt.Xingye.Enabled
+	thirdPartyConfigured := settings.ChatGLMEnabled || settings.UkakaEnabled || settings.XingyeEnabled
 	if thirdPartyConfigured && !ThirdPartyImageHostsOptedIn() {
 		add(SeverityWarning, "third-party-image-hosts-gated", "配置中启用了第三方图床，但运行时显式授权未开启；图片不会上传到这些后端")
 	}
-	if settings.ThirdPartyImageOpt.Nature.Enabled {
+	if settings.NatureEnabled {
 		add(SeverityWarning, "nature-disabled", "Nature 图床配置仍为 enabled，但该后端已因公开凭据问题永久禁用")
 	}
 
 	return report, nil
+}
+
+func parseSecuritySettings(data []byte) (securitySettings, error) {
+	if len(data) == 0 {
+		return securitySettings{}, fmt.Errorf("security audit: config is empty")
+	}
+	if len(data) > maxAuditConfigBytes {
+		return securitySettings{}, fmt.Errorf("security audit: config exceeds %d MiB", maxAuditConfigBytes>>20)
+	}
+
+	values, blocks, err := parseScalarYAML(data)
+	if err != nil {
+		return securitySettings{}, fmt.Errorf("security audit: %w", err)
+	}
+	if !blocks["settings"] {
+		return securitySettings{}, fmt.Errorf("security audit: missing settings block")
+	}
+
+	get := func(path string) string { return values[path] }
+	getBool := func(path string) bool {
+		value, _ := strconv.ParseBool(strings.TrimSpace(get(path)))
+		return value
+	}
+
+	return securitySettings{
+		Port:            get("settings.port"),
+		ForceSSL:        getBool("settings.force_ssl"),
+		EnableWSServer:  getBool("settings.enable_ws_server"),
+		WSServerToken:   get("settings.ws_server_token"),
+		HTTPAddress:     get("settings.http_address"),
+		HTTPAccessToken: get("settings.http_access_token"),
+		DisableWebUI:    getBool("settings.disable_webui"),
+		WebUIUsername:   get("settings.server_user_name"),
+		WebUIPassword:   get("settings.server_user_password"),
+		ChatGLMEnabled:  getBool("settings.image_hosting.chatglm.enabled"),
+		UkakaEnabled:    getBool("settings.image_hosting.ukaka.enabled"),
+		XingyeEnabled:   getBool("settings.image_hosting.xingye.enabled"),
+		NatureEnabled:   getBool("settings.image_hosting.nature.enabled"),
+	}, nil
+}
+
+type yamlStackEntry struct {
+	indent int
+	key    string
+}
+
+// parseScalarYAML is a conservative path-aware parser for block-style scalar
+// configuration. It does not attempt to implement the full YAML specification.
+func parseScalarYAML(data []byte) (map[string]string, map[string]bool, error) {
+	values := make(map[string]string)
+	blocks := make(map[string]bool)
+	stack := make([]yamlStackEntry, 0, 8)
+
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 4096), maxAuditConfigBytes)
+	lineNumber := 0
+	for scanner.Scan() {
+		lineNumber++
+		line := strings.TrimSuffix(scanner.Text(), "\r")
+		line = stripYAMLComment(line)
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		indent := leadingIndent(line)
+		trimmed := strings.TrimSpace(line)
+		colon := strings.IndexByte(trimmed, ':')
+		if colon <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(trimmed[:colon])
+		if key == "" || strings.HasPrefix(key, "-") {
+			continue
+		}
+
+		for len(stack) > 0 && stack[len(stack)-1].indent >= indent {
+			stack = stack[:len(stack)-1]
+		}
+		pathParts := make([]string, 0, len(stack)+1)
+		for _, entry := range stack {
+			pathParts = append(pathParts, entry.key)
+		}
+		pathParts = append(pathParts, key)
+		path := strings.Join(pathParts, ".")
+
+		rawValue := strings.TrimSpace(trimmed[colon+1:])
+		if rawValue == "" {
+			blocks[path] = true
+			stack = append(stack, yamlStackEntry{indent: indent, key: key})
+			continue
+		}
+
+		value, err := decodeYAMLScalar(rawValue)
+		if err != nil {
+			return nil, nil, fmt.Errorf("line %d key %s: %w", lineNumber, path, err)
+		}
+		values[path] = value
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, nil, err
+	}
+	return values, blocks, nil
+}
+
+func stripYAMLComment(line string) string {
+	var singleQuoted, doubleQuoted, escaped bool
+	for index, char := range line {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if char == '\\' && doubleQuoted {
+			escaped = true
+			continue
+		}
+		switch char {
+		case '\'':
+			if !doubleQuoted {
+				singleQuoted = !singleQuoted
+			}
+		case '"':
+			if !singleQuoted {
+				doubleQuoted = !doubleQuoted
+			}
+		case '#':
+			if !singleQuoted && !doubleQuoted {
+				return line[:index]
+			}
+		}
+	}
+	return line
+}
+
+func leadingIndent(line string) int {
+	indent := 0
+	for _, char := range line {
+		switch char {
+		case ' ':
+			indent++
+		case '\t':
+			indent += 2
+		default:
+			return indent
+		}
+	}
+	return indent
+}
+
+func decodeYAMLScalar(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
+		decoded, err := strconv.Unquote(value)
+		if err != nil {
+			return "", err
+		}
+		return decoded, nil
+	}
+	if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
+		return strings.ReplaceAll(value[1:len(value)-1], "''", "'"), nil
+	}
+	return strings.TrimSpace(value), nil
 }
 
 // StrictModeEnabled reports whether startup should fail on high-risk findings.
