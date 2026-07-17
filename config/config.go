@@ -474,18 +474,34 @@ func extractMissingConfigLines(missingSettings map[string]string, configTemplate
 	for yamlKey := range missingSettings {
 		found := false
 		// Create a regex to match the line with optional spaces around the colon
-		regexPattern := fmt.Sprintf(`^\s*%s\s*:\s*`, regexp.QuoteMeta(yamlKey))
+		regexPattern := fmt.Sprintf(`^(\s*)%s\s*:\s*`, regexp.QuoteMeta(yamlKey))
 		regex, err := regexp.Compile(regexPattern)
 		if err != nil {
 			return nil, fmt.Errorf("invalid regex pattern: %s", err)
 		}
 
-		for _, line := range lines {
-			if regex.MatchString(line) {
-				missingConfigLines = append(missingConfigLines, line)
-				found = true
-				break
+		for i, line := range lines {
+			matches := regex.FindStringSubmatch(line)
+			if matches == nil {
+				continue
 			}
+			// 提取整个块：从当前行到下一个同等或更浅缩进的行
+			indent := len(matches[1])
+			missingConfigLines = append(missingConfigLines, line)
+			for j := i + 1; j < len(lines); j++ {
+				nextLine := lines[j]
+				if strings.TrimSpace(nextLine) == "" {
+					missingConfigLines = append(missingConfigLines, nextLine)
+					continue
+				}
+				nextIndent := len(nextLine) - len(strings.TrimLeft(nextLine, " \t"))
+				if nextIndent <= indent {
+					break
+				}
+				missingConfigLines = append(missingConfigLines, nextLine)
+			}
+			found = true
+			break
 		}
 		if !found {
 			return nil, fmt.Errorf("missing configuration for key: %s", yamlKey)
