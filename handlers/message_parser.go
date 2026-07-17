@@ -1963,38 +1963,66 @@ func ResolveMarkdownAtMentions(content string) string {
 	})
 }
 
-// ResolveMarkdownImages 处理 Markdown 内容中的 ![](path) 图片
+func resolveMarkdownMediaReferences(content string, resolve func(path string) (string, bool)) string {
+	if content == "" || resolve == nil {
+		return content
+	}
+
+	markdownPattern := regexp.MustCompile(`(!?)\[([^\]]*)\]\(([^)]+)\)`)
+	htmlImgPattern := regexp.MustCompile(`(?i)(<img\b[^>]*?\bsrc=)(["']?)([^"'\s>]+)([^>]*>)`)
+
+	content = markdownPattern.ReplaceAllStringFunc(content, func(match string) string {
+		parts := markdownPattern.FindStringSubmatch(match)
+		if len(parts) < 4 {
+			return match
+		}
+		prefix := parts[1]
+		altText := parts[2]
+		mediaPath := parts[3]
+		if rewritten, ok := resolve(mediaPath); ok {
+			return prefix + "[" + altText + "](" + rewritten + ")"
+		}
+		return match
+	})
+
+	content = htmlImgPattern.ReplaceAllStringFunc(content, func(match string) string {
+		parts := htmlImgPattern.FindStringSubmatch(match)
+		if len(parts) < 5 {
+			return match
+		}
+		if rewritten, ok := resolve(parts[3]); ok {
+			return parts[1] + parts[2] + rewritten + parts[4]
+		}
+		return match
+	})
+
+	return content
+}
+
+// ResolveMarkdownImages 处理 Markdown 内容中的 ![](path) 图片、[link](path) 和 HTML img 标签
 // - 本地文件路径（file:// 或绝对路径）→ 上传到 QQ CDN，替换为 CDN URL
 // - HTTP(S) URL → 直接保留
 func ResolveMarkdownImages(content string, apiv2 openapi.OpenAPI) string {
-	re := regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+)\)`)
-	return re.ReplaceAllStringFunc(content, func(m string) string {
-		parts := re.FindStringSubmatch(m)
-		if len(parts) < 3 {
-			return m
+	return resolveMarkdownMediaReferences(content, func(mediaPath string) (string, bool) {
+		if strings.HasPrefix(mediaPath, "http://") || strings.HasPrefix(mediaPath, "https://") {
+			return "", false
 		}
-		altText := parts[1]
-		imgPath := parts[2]
-
-		// HTTP(S) URL 直接保留
-		if strings.HasPrefix(imgPath, "http://") || strings.HasPrefix(imgPath, "https://") {
-			return m
+		if strings.HasPrefix(mediaPath, "data:") {
+			return "", false
 		}
-
-		// 本地文件：去除 file:// 前缀后读取
-		localPath := strings.TrimPrefix(imgPath, "file://")
+		localPath := strings.TrimPrefix(mediaPath, "file://")
 		imageData, err := os.ReadFile(localPath)
 		if err != nil {
 			mylog.Printf("Error reading local image for markdown: %v", err)
-			return m
+			return "", false
 		}
 		base64Encoded := base64.StdEncoding.EncodeToString(imageData)
 		cdnURL, _, _, err := images.UploadBase64ImageToServer(base64Encoded, apiv2)
 		if err != nil {
 			mylog.Printf("Error uploading image for markdown: %v", err)
-			return m
+			return "", false
 		}
-		return "![" + altText + "](" + cdnURL + ")"
+		return cdnURL, true
 	})
 }
 

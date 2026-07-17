@@ -494,7 +494,15 @@ func getMissingSettingsByText(templateContent, currentConfigContent string) (map
 		}
 	}
 
-	return missingSettings, nil
+	// 第四轮：只保留 settings 下的直接缺失项，避免子 key 被单独追加造成结构混乱
+	topLevelMissing := make(map[string]string)
+	for key := range missingSettings {
+		if parentMap[key] == "settings" {
+			topLevelMissing[key] = "missing"
+		}
+	}
+
+	return topLevelMissing, nil
 }
 
 // buildParentKeyMap 解析模板，为每个 key 找到其父 key
@@ -597,7 +605,7 @@ func extractMissingConfigLines(missingSettings map[string]string, configTemplate
 }
 
 func appendToConfigFile(path string, lines []string) (int, error) {
-	// 先读取现有内容，用于去重
+	// 先读取现有内容
 	existingBytes, err := os.ReadFile(path)
 	if err != nil {
 		return 0, err
@@ -611,30 +619,91 @@ func appendToConfigFile(path string, lines []string) (int, error) {
 	}
 	defer file.Close()
 
-	// 写入缺失的配置项（去重）
+	// 按配置块写入，对每个顶层 key 做存在性检查，避免同名子 key 被误跳过
 	written := 0
-	for _, line := range lines {
+	i := 0
+	for i < len(lines) {
+		line := lines[i]
 		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
+		if trimmed == "" || !strings.Contains(trimmed, ":") {
+			if trimmed != "" {
+				if _, err := file.WriteString("\n" + line); err != nil {
+					return written, err
+				}
+				written++
+			}
+			i++
 			continue
 		}
-		// 检查该行是否已存在于文件中
-		if strings.Contains(existingContent, trimmed) {
+
+		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+		key := strings.TrimSpace(strings.SplitN(trimmed, ":", 2)[0])
+
+		// 收集当前块（从当前行到下一个同等或更浅缩进的行）
+		var blockLines []string
+		blockLines = append(blockLines, line)
+		j := i + 1
+		for j < len(lines) {
+			nextLine := lines[j]
+			if strings.TrimSpace(nextLine) == "" {
+				blockLines = append(blockLines, nextLine)
+				j++
+				continue
+			}
+			nextIndent := len(nextLine) - len(strings.TrimLeft(nextLine, " \t"))
+			if nextIndent <= indent {
+				break
+			}
+			blockLines = append(blockLines, nextLine)
+			j++
+		}
+
+		// 如果顶层 key 已存在，跳过整个块
+		if keyExistsInConfig(existingContent, key) {
+			i = j
 			continue
 		}
-		if _, err := file.WriteString("\n" + line); err != nil {
-			fmt.Println("写入配置错误:", err)
-			return written, err
+
+		// 写入整个块
+		for _, blockLine := range blockLines {
+			if _, err := file.WriteString("\n" + blockLine); err != nil {
+				fmt.Println("写入配置错误:", err)
+				return written, err
+			}
+			written++
 		}
-		written++
+		i = j
 	}
 
-	// 输出写入状态
 	if written > 0 {
 		fmt.Println("配置已更新，写入到文件:", path)
 	}
 
 	return written, nil
+}
+
+// keyExistsInConfig 检查配置中是否已存在某个顶层 key（按行首缩进判断为同层级）
+func keyExistsInConfig(content, key string) bool {
+	lines := strings.Split(content, "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || trimmed == "" {
+			continue
+		}
+		if !strings.Contains(trimmed, ":") {
+			continue
+		}
+		// 只检查顶层或 settings 下的同层级 key（缩进为 2 个空格）
+		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+		if indent != 2 {
+			continue
+		}
+		lineKey := strings.TrimSpace(strings.SplitN(trimmed, ":", 2)[0])
+		if lineKey == key {
+			return true
+		}
+	}
+	return false
 }
 
 // cleanupDuplicateSettings 清理配置文件中因旧版 bug 产生的异常。

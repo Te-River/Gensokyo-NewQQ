@@ -200,22 +200,22 @@ type Settings struct {
 	PostSecret          []string `yaml:"post_secret"`
 	PostMaxRetries      []int    `yaml:"post_max_retries"`
 	PostRetriesInterval []int    `yaml:"post_retries_interval"`
-	//腾讯云
+	//腾讯云配置
 	TencentBucketName   string `yaml:"t_COS_BUCKETNAME"`
 	TencentBucketRegion string `yaml:"t_COS_REGION"`
 	TencentCosSecretid  string `yaml:"t_COS_SECRETID"`
 	TencentSecretKey    string `yaml:"t_COS_SECRETKEY"`
 	TencentAudit        bool   `yaml:"t_audit"`
-	//百度云
+	//百度云配置
 	BaiduBOSBucketName string `yaml:"b_BOS_BUCKETNAME"`
 	BaiduBCEAK         string `yaml:"b_BCE_AK"`
 	BaiduBCESK         string `yaml:"b_BCE_SK"`
 	BaiduAudit         int    `yaml:"b_audit"`
-	//阿里云
+	//阿里云配置
 	AliyunEndpoint        string `yaml:"a_OSS_EndPoint"`
+	AliyunBucketName      string `yaml:"a_OSS_BucketName"`
 	AliyunAccessKeyId     string `yaml:"a_OSS_AccessKeyId"`
 	AliyunAccessKeySecret string `yaml:"a_OSS_AccessKeySecret"`
-	AliyunBucketName      string `yaml:"a_OSS_BucketName"`
 	AliyunAudit           bool   `yaml:"a_audit"`
 	// 额外 intent 位探测（用于发现未文档化的事件位）
 	ExtraIntents []int `yaml:"extra_intents"`
