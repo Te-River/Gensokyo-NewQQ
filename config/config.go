@@ -454,12 +454,43 @@ func getMissingSettingsByText(templateContent, currentConfigContent string) (map
 		}
 	}
 
-	// 过滤：如果某个 key 的父 key 已在配置中存在，说明它属于已存在的嵌套块，不再补
+	// 第一轮过滤：如果父 key 已在配置中存在 → 跳过（属于已存在的块）
 	for key := range missingSettings {
-		if parent, ok := parentMap[key]; ok {
-			if _, parentExists := currentKeys[parent]; parentExists {
-				delete(missingSettings, key)
+		parent, hasParent := parentMap[key]
+		if !hasParent {
+			continue
+		}
+		if _, parentExists := currentKeys[parent]; parentExists {
+			delete(missingSettings, key)
+		}
+	}
+
+	// 第二轮：如果某个缺失 key 的祖先 key 不在配置中，补上祖先 key
+	// 例如子 key 缺失但父 `image_hosting` 也不在配置中 → 把 `image_hosting` 加入缺失
+	for key := range missingSettings {
+		// 沿着父链向上追溯
+		cur := key
+		for {
+			p, ok := parentMap[cur]
+			if !ok {
+				break // 已到顶层 key
 			}
+			if _, exists := currentKeys[p]; !exists {
+				// 祖先不存在配置中，加入缺失
+				missingSettings[p] = "missing"
+			}
+			cur = p
+		}
+	}
+
+	// 第三轮：如果父 key 现在也在缺失列表中（刚补上的祖先）→ 跳过子 key
+	for key := range missingSettings {
+		parent, hasParent := parentMap[key]
+		if !hasParent {
+			continue
+		}
+		if _, parentMissing := missingSettings[parent]; parentMissing {
+			delete(missingSettings, key)
 		}
 	}
 
