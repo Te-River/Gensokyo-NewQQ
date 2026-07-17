@@ -1,67 +1,82 @@
 # 统一图床服务
 
-提供 7 种图床后端，按配置顺序依次尝试，第一个成功的返回结果。
+统一图床模块会按配置顺序尝试已启用后端，并返回第一个成功的公开图片 URL。
 
-## 配置 (config.yml)
+## 安全默认值
+
+- Nature 后端已禁用。上游版本曾在公开源码中内置对象存储访问凭据，公开凭据不能继续作为秘密使用。
+- ChatGLM、Ukaka、星野属于第三方免配置服务。即使旧配置中仍为 `enabled: true`，默认也不会上传。
+- 明确接受图片会离开当前服务器并上传到第三方后，才可设置环境变量：
+
+```text
+GENSOKYO_ENABLE_THIRD_PARTY_IMAGE_HOSTS=1
+```
+
+推荐优先使用自行控制的 COS 或 QQ 频道后端。
+
+## 配置示例
 
 ```yaml
-# 统一图床服务 — 按顺序依次尝试，第一个成功的返回 URL
-# 免费图床（ChatGLM / Ukaka / 星野 / Nature）只需 enabled: true 即可使用
 image_hosting:
   cos:
     enabled: false
-    secret_id: ""           # 腾讯云 API SecretId
-    secret_key: ""          # 腾讯云 API SecretKey
-    region: "ap-guangzhou"  # 存储桶地域
-    bucket: ""              # 存储桶名称
-    domain: ""              # 自定义域名（留空使用 COS 默认域名）
+    secret_id: ""
+    secret_key: ""
+    region: "ap-guangzhou"
+    bucket: ""
+    domain: ""
   bilibili:
     enabled: false
-    csrf_token: ""          # B站 Cookie 中的 bili_jct
-    sessdata: ""            # B站 Cookie 中的 SESSDATA
-    bucket: "openplatform"  # 上传 bucket
+    csrf_token: ""
+    sessdata: ""
+    bucket: "openplatform"
   qq_channel:
     enabled: false
-    channel_id: ""          # 用于上传图片的子频道 ID
-    token: ""               # Authorization 值，如 "QQBot xxx.yyy"
+    channel_id: ""
+    token: ""
   chatglm:
-    enabled: true           # 智谱免费图床
+    enabled: false
   ukaka:
-    enabled: true           # Ukaka 免费图床
+    enabled: false
   xingye:
-    enabled: true           # 星野免费图床
+    enabled: false
   nature:
-    enabled: true           # Nature 免费图床（腾讯 COS 直传，密钥内置）
+    enabled: false
 ```
 
-## 图床优先级
+`nature.enabled` 已不再生效，仅为兼容旧配置保留字段。
 
-| 优先级 | 图床 | 费用 | 是否需要配置 |
-|--------|------|------|-------------|
-| 1 | COS (腾讯云) | 按量付费 | 需要 SecretId/SecretKey |
-| 2 | Bilibili | 免费 | 需要 Cookie |
-| 3 | QQ频道 | 免费 | 需要 channel_id + token |
-| 4 | ChatGLM (智谱) | 免费 | 仅需 `enabled: true` |
-| 5 | Ukaka | 免费 | 仅需 `enabled: true` |
-| 6 | 星野 | 免费 | 仅需 `enabled: true` |
-| 7 | Nature (腾讯COS) | 免费 | 仅需 `enabled: true` |
+## 上传限制
+
+统一入口当前执行以下检查：
+
+- 单张图片最大 10 MiB
+- JPEG、PNG、GIF、WebP 文件头检查
+- PNG、JPEG、GIF 实际解码检查
+- 最大 4000 万像素
+- 文件名路径和控制字符清理
+- HTTP 请求总超时 15 秒
+- 第三方响应体最大读取 1 MiB
+
+无法识别或损坏的数据不会再默认按 JPEG 上传。
+
+## 后端说明
+
+| 优先级 | 后端 | 默认状态 | 说明 |
+|---|---|---|---|
+| 1 | COS | 关闭 | 需要自行配置访问凭据和存储桶 |
+| 2 | Bilibili | 关闭 | 需要用户 Cookie，注意账号安全和平台规则 |
+| 3 | QQ频道 | 关闭 | 需要频道 ID 和机器人 Authorization |
+| 4 | ChatGLM | 关闭 | 还需要显式启用第三方图床环境变量 |
+| 5 | Ukaka | 关闭 | 还需要显式启用第三方图床环境变量 |
+| 6 | 星野 | 关闭 | 还需要显式启用第三方图床环境变量 |
+| - | Nature | 禁用 | 不再包含或使用上游公开凭据 |
 
 ## 集成点
 
-- `images/upload_api.go` 中的 `UploadBase64ImageToServer` 优先尝试图床链，失败后回退传统模式
-- `handlers/message_parser.go` 中的 `ResolveMarkdownImages` 受益于图床链获取公开 URL
+- `images/upload_api.go` 中的 `UploadBase64ImageToServer` 会优先尝试图床链，失败后回退传统模式。
+- `handlers/message_parser.go` 中的 `ResolveMarkdownImages` 可使用图床链获取公开 URL。
 
-## 代码结构
+## 运维提醒
 
-```
-imagehosting/
-├── hosting.go       # 统一接口 + 调度器 + 辅助函数
-├── cos.go           # 腾讯云 COS (HMAC 自签)
-├── bilibili.go      # B站图床
-├── qq_channel.go    # QQ频道图床
-├── chatglm.go       # 智谱免费图床
-├── signed.go        # Ukaka + 星野 (签名上传)
-├── nature.go        # Nature 腾讯 COS 直传 (密钥内置)
-├── utils.go         # 辅助函数
-└── README.md        # 本文档
-```
+已经出现在 Git 历史或公开页面中的凭据无法通过一次代码提交恢复保密性。对应凭据的所有者应立即在云平台撤销或轮换密钥，并检查访问日志与账单。
