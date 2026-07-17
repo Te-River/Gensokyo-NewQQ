@@ -64,16 +64,21 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 
 	mylog.Printf("发送互动召回消息 UserID:[%s]", userID)
 
-	// 定义 KeyMap (复刻原逻辑)
+	// 定义 KeyMap (对齐 HandleSendPrivateMsg)
 	keyMap := map[string]bool{
 		"markdown":      true,
 		"qqmusic":       true,
 		"local_image":   true,
 		"local_record":  true,
 		"url_image":     true,
-		"url_images":    true, // 注意：原代码中有 url_image 和 url_images
+		"url_images":    true,
 		"base64_record": true,
 		"base64_image":  true,
+		"local_file":    true,
+		"url_file":      true,
+		"url_files":     true,
+		"base64_file":   true,
+		"embed":         true,
 	}
 
 	var singleItem = make(map[string][]string)

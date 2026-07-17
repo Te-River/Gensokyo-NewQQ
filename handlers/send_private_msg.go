@@ -172,6 +172,12 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			}
 			mylog.Printf("尝试获取当前是否有eventID可用,如果有则不消耗主动次数:%v", eventID)
 		}
+		// [CQ:active] 标记：强制走主动推送，即使有 msg_id
+		if _, ok := foundItems["active"]; ok {
+			messageID = ""
+			eventID = ""
+			mylog.Println("[CQ:active] 标记，强制主动推送")
+		}
 		//开发环境用 私聊不可用1000
 		// if config.GetDevMsgID() {
 		// 	messageID = "1000"
@@ -232,6 +238,21 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			}
 			groupMessage.Timestamp = time.Now().Unix() // 设置时间戳
 
+			// 处理 [CQ:reply,id=数字] → message_reference
+			if replyIDs, ok := foundItems["reply_msg_id"]; ok && len(replyIDs) > 0 {
+				if messageText != "" {
+					realReplyID, err := idmap.RetrieveRowByCachev2(replyIDs[0])
+					if err == nil && realReplyID != "" {
+						parts := strings.Split(realReplyID, " ")
+						refID := parts[len(parts)-1]
+						groupMessage.MessageReference = &dto.MessageReference{
+							MessageID:             refID,
+							IgnoreGetMessageError: true,
+						}
+					}
+				}
+			}
+
 			// 发送组合消息
 			resp, err = apiv2.PostC2CMessage(context.TODO(), UserID, groupMessage)
 			if err != nil {
@@ -272,6 +293,11 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 
 		// 遍历foundItems并发送每种信息
 		for key, urls := range foundItems {
+			// 跳过控制型 key，避免误发送空消息
+			if key == "active" || key == "active_type" || key == "active_sub_type" ||
+				key == "reply_msg_id" || key == "file_name" {
+				continue
+			}
 			for i, url := range urls {
 				var singleItem = make(map[string][]string)
 				singleItem[key] = []string{url} // 创建一个只包含一个 URL 的 singleItem
@@ -288,19 +314,20 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 				if !ok {
 					// 定义一个map来存储关键字
 					keyMap := map[string]bool{
-						"markdown":      true,
-						"qqmusic":       true,
-						"local_image":   true,
-						"local_record":  true,
-						"url_image":     true,
-						"url_images":    true,
-						"base64_record": true,
-						"base64_image":  true,
-						"local_file":    true,
-						"url_file":      true,
-						"url_files":     true,
-						"base64_file":   true,
-					}
+					     "markdown":      true,
+					     "embed":         true,
+					     "qqmusic":       true,
+					     "local_image":   true,
+					     "local_record":  true,
+					     "url_image":     true,
+					     "url_images":    true,
+					     "base64_record": true,
+					     "base64_image":  true,
+					     "local_file":    true,
+					     "url_file":      true,
+					     "url_files":     true,
+					     "base64_file":   true,
+					    }
 					// key 是 for key, urls := range foundItems { 这里的 key
 					if _, exists := keyMap[key]; exists {
 						// 进行类型断言

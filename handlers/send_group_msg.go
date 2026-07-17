@@ -571,8 +571,13 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		}
 		var resp *dto.GroupMessageResponse
 		// 遍历foundItems并发送每种信息
-		for key, urls := range foundItems {
-			for i, url := range urls {
+		   for key, urls := range foundItems {
+		    // 跳过控制型 key，避免误发送空消息
+		    if key == "active" || key == "active_type" || key == "active_sub_type" ||
+		     key == "reply_msg_id" || key == "file_name" {
+		     continue
+		    }
+		    for i, url := range urls {
 				var singleItem = make(map[string][]string)
 				singleItem[key] = []string{url} // 创建一个只包含一个 URL 的 singleItem
 				// 如果存在 file_name，传递到 singleItem

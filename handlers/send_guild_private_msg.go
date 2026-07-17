@@ -187,6 +187,12 @@ func HandleSendGuildChannelPrivateMsg(client callapi.Client, api openapi.OpenAPI
 		messageID = "1000"
 	}
 
+	// [CQ:active] 标记：强制走主动推送，即使有 msg_id
+	if _, ok := foundItems["active"]; ok {
+		messageID = ""
+		mylog.Println("[CQ:active] 标记，强制主动推送")
+	}
+
 	timestamp := time.Now().Unix()
 	timestampStr := fmt.Sprintf("%d", timestamp)
 

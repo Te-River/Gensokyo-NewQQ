@@ -652,11 +652,8 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 	switch message := paramsMessage.Message.(type) {
 	case string:
 		mylog.Printf("params.message is a string\n")
-		messageText = message
-		// 解析 [CQ:active,type=xxx,sub_type=yyy]
-		messageText = ProcessCQActive(messageText, foundItems)
-		messageText = ProcessCQFile(messageText, foundItems)
-		// 直接应用替换规则
+		   messageText = message
+		   // 直接应用替换规则
 		if config.GetEnableChangeWord() {
 			messageText = acnode.CheckWordOUT(messageText)
 		}
@@ -767,7 +764,6 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 				if replyID != "" {
 					foundItems["reply_msg_id"] = append(foundItems["reply_msg_id"], replyID)
 				}
-				messageText += "[CQ:reply,id=" + replyID + "]"
 
 			case "active":
 				dataMap, ok := segmentMap["data"].(map[string]interface{})
