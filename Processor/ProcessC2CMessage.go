@@ -247,66 +247,42 @@ func (p *Processors) ProcessC2CMessage(data *dto.WSC2CMessageData) error {
 				selfid64 = int64(p.Settings.AppID)
 			}
 
-			groupMsg := OnebotGroupMessage{
+			privateMsg := OnebotPrivateMessage{
 				RawMessage:  messageText,
 				Message:     messageText,
 				MessageID:   messageID,
-				GroupID:     userid64,
-				MessageType: "group",
+				MessageType: "private",
 				PostType:    "message",
 				SelfID:      selfid64,
 				UserID:      userid64,
-				Sender: Sender{
-					UserID: userid64,
-					TinyID: "0",
-					Sex:    "0",
-					Age:    0,
-					Area:   "0",
-					Level:  "0",
+				Sender: PrivateSender{
+					Nickname: "", //这个不支持,但加机器人好友,会收到一个事件,可以对应储存获取,用idmaps可以做到.
+					UserID:   userid64,
 				},
-				SubType: "normal",
+				SubType: "friend",
 				Time:    time.Now().Unix(),
 			}
 			//增强配置
 			if !config.GetNativeOb11() {
-				groupMsg.RealMessageType = "group_private"
-				groupMsg.IsPrivate = true
-				groupMsg.IsBindedUserId = IsBindedUserId
-				groupMsg.RealUserID = data.Author.ID
-				groupMsg.Avatar, _ = GenerateAvatarURLV2(data.Author.ID)
+				privateMsg.RealMessageType = "group_private"
+				privateMsg.IsBindedUserId = IsBindedUserId
+				privateMsg.RealUserID = data.Author.ID
+				privateMsg.Avatar, _ = GenerateAvatarURLV2(data.Author.ID)
 			}
 			//根据条件判断是否增加nick和card
 			var CaN = config.GetCardAndNick()
 			if CaN != "" {
-				groupMsg.Sender.Nickname = CaN
-				groupMsg.Sender.Card = CaN
+				privateMsg.Sender.Nickname = CaN
 			} else if data.Author.Username != "" {
-				groupMsg.Sender.Nickname = data.Author.Username
+				privateMsg.Sender.Nickname = data.Author.Username
 			}
 			// 根据条件判断是否添加Echo字段
 			if config.GetTwoWayEcho() {
-				groupMsg.Echo = echostr
+				privateMsg.Echo = echostr
 				//用向应用端(如果支持)发送echo,来确定客户端的send_msg对应的触发词原文
 				echo.AddMsgIDv3(AppIDString, echostr, messageText)
 			}
-			// 获取MasterID数组
-			masterIDs := config.GetMasterID()
-
-			// 判断userid64是否在masterIDs数组里
-			isMaster := false
-			for _, id := range masterIDs {
-				if strconv.FormatInt(userid64, 10) == id {
-					isMaster = true
-					break
-				}
-			}
-
-			// 根据isMaster的值为groupMsg的Sender赋值role字段
-			if isMaster {
-				groupMsg.Sender.Role = "owner"
-			} else {
-				groupMsg.Sender.Role = "member"
-			}
+			// 私聊消息无需 role 字段
 			//将当前s和appid和message进行映射
 			echo.AddMsgID(AppIDString, s, data.ID)
 			echo.AddMsgType(AppIDString, s, "group_private")
@@ -324,12 +300,12 @@ func (p *Processors) ProcessC2CMessage(data *dto.WSC2CMessageData) error {
 			echo.AddLazyMessageId(data.Author.ID, data.ID, time.Now())
 
 			//调试
-			PrintStructWithFieldNames(groupMsg)
+			PrintStructWithFieldNames(privateMsg)
 
 			// Convert OnebotGroupMessage to map and send
-			groupMsgMap := structToMap(groupMsg)
+			privateMsgMap := structToMap(privateMsg)
 			//上报信息到onebotv11应用端(正反ws)
-			go p.BroadcastMessageToAll(groupMsgMap, p.Apiv2, data)
+			go p.BroadcastMessageToAll(privateMsgMap, p.Apiv2, data)
 
 			//组合FriendData
 			struserid := strconv.FormatInt(userid64, 10)
@@ -347,18 +323,45 @@ func (p *Processors) ProcessC2CMessage(data *dto.WSC2CMessageData) error {
 			currentTimeMillis := time.Now().UnixNano() / 1e6
 			// 构造echostr，包括AppID，原始的s变量和当前时间戳
 			echostr := fmt.Sprintf("%s_%d_%d", AppIDString, s, currentTimeMillis)
-
 			var selfid64 int64
-			if config.GetUseUin() {
-				selfid64 = config.GetUinint64()
-			} else {
-				selfid64 = int64(p.Settings.AppID)
-			}
-
-			var messageText string
-			//当屏蔽错误通道时候=性能模式 不解析at 不解析图片
+			  if config.GetUseUin() {
+			   selfid64 = config.GetUinint64()
+			  } else {
+			   selfid64 = int64(p.Settings.AppID)
+			  }
+			  // 映射 userid64
+			  var userid64 int64
+			  var err error
+			  if config.GetIdmapPro() {
+			   _, userid64, err = idmap.StoreIDv2Pro("group_private", data.Author.ID)
+			   if err != nil {
+			    mylog.Errorf("Error storing ID: %v", err)
+			   }
+			   _, _ = idmap.StoreIDv2(data.Author.ID)
+			   idmap.SimplifiedStoreID(data.Author.ID)
+			  } else {
+			   userid64, err = idmap.StoreIDv2(data.Author.ID)
+			   if err != nil {
+			    mylog.Errorf("Error storing ID: %v", err)
+			   }
+			  }
+			  var messageText string
+			    // 映射 messageID
+			       var messageID64 int64
+			       if config.GetMemoryMsgid() {
+			     messageID64, err = echo.StoreCacheInMemory(data.ID)
+			     if err != nil {
+			      log.Fatalf("Error storing ID: %v", err)
+			     }
+			    } else {
+			     messageID64, err = idmap.StoreCachev2(data.ID)
+			     if err != nil {
+			      log.Fatalf("Error storing ID: %v", err)
+			     }
+			    }
+			    messageID := int(messageID64)
+			    //当屏蔽错误通道时候=性能模式 不解析at 不解析图片
 			GetDisableErrorChan := config.GetDisableErrorChan()
-
 			// 判断性能模式
 			if !GetDisableErrorChan {
 				//转换at
@@ -376,7 +379,6 @@ func (p *Processors) ProcessC2CMessage(data *dto.WSC2CMessageData) error {
 					messageText = " "
 				}
 				messageText = strings.TrimSpace(messageText)
-
 				// 检查是否需要移除前缀
 				if config.GetRemovePrefixValue() {
 					// 移除消息内容中第一次出现的 "/"
@@ -386,47 +388,39 @@ func (p *Processors) ProcessC2CMessage(data *dto.WSC2CMessageData) error {
 				}
 			}
 
-			groupMsg := OnebotGroupMessageS{
+			privateMsg := OnebotPrivateMessage{
 				RawMessage:  messageText,
 				Message:     messageText,
-				MessageID:   data.ID,
-				GroupID:     data.Author.ID,
-				MessageType: "group",
+				MessageID:   messageID,
+				MessageType: "private",
 				PostType:    "message",
 				SelfID:      selfid64,
-				UserID:      data.Author.ID,
-				Sender: Sender{
-					UserID: 0,
-					TinyID: "0",
-					Sex:    "0",
-					Age:    0,
-					Area:   "0",
-					Level:  "0",
+				UserID:      userid64,
+				Sender: PrivateSender{
+					Nickname: "",
+					UserID:   userid64,
 				},
-				SubType:  "normal",
-				Time:     time.Now().Unix(),
-				Platform: "qq",
+				SubType: "friend",
+				Time:    time.Now().Unix(),
 			}
 
 			//增强配置
 			if !config.GetNativeOb11() {
-				groupMsg.RealMessageType = "group_private"
-				groupMsg.IsPrivate = true
-				groupMsg.RealUserID = data.Author.ID
-				groupMsg.Avatar, _ = GenerateAvatarURLV2(data.Author.ID)
+				privateMsg.RealMessageType = "group_private"
+				privateMsg.RealUserID = data.Author.ID
+				privateMsg.Avatar, _ = GenerateAvatarURLV2(data.Author.ID)
 			}
 			//根据条件判断是否增加nick和card
 			var CaN = config.GetCardAndNick()
 			if CaN != "" {
-				groupMsg.Sender.Nickname = CaN
-				groupMsg.Sender.Card = CaN
+				privateMsg.Sender.Nickname = CaN
 			} else if data.Author.Username != "" {
-				groupMsg.Sender.Nickname = data.Author.Username
+				privateMsg.Sender.Nickname = data.Author.Username
 			}
 
 			// 根据条件判断是否添加Echo字段
 			if config.GetTwoWayEcho() {
-				groupMsg.Echo = echostr
+				privateMsg.Echo = echostr
 				// 用向应用端(如果支持)发送echo,来确定客户端的send_msg对应的触发词原文
 				echo.AddMsgIDv3(AppIDString, echostr, data.Content)
 			}
@@ -444,18 +438,18 @@ func (p *Processors) ProcessC2CMessage(data *dto.WSC2CMessageData) error {
 			echo.AddLazyMessageId(data.Author.ID, data.ID, time.Now())
 
 			//调试
-			PrintStructWithFieldNames(groupMsg)
+			PrintStructWithFieldNames(privateMsg)
 
 			// Convert OnebotGroupMessage to map and send
-			groupMsgMap := structToMap(groupMsg)
+			privateMsgMap := structToMap(privateMsg)
 
 			// 不使用性能模式
 			if !GetDisableErrorChan {
 				//上报信息到onebotv11应用端(正反ws)
-				go p.BroadcastMessageToAll(groupMsgMap, p.Apiv2, data)
+				go p.BroadcastMessageToAll(privateMsgMap, p.Apiv2, data)
 			} else {
 				// 性能模式
-				go p.BroadcastMessageToAllFAF(groupMsgMap, p.Apiv2, data)
+				go p.BroadcastMessageToAllFAF(privateMsgMap, p.Apiv2, data)
 			}
 
 			//组合FriendData
