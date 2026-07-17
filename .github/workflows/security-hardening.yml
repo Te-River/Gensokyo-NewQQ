@@ -3,6 +3,7 @@ name: Security hardening verification
 on:
   push:
     branches:
+      - main
       - fix/security-hardening-v2
   workflow_dispatch:
 
@@ -26,14 +27,17 @@ jobs:
       - name: Check formatting
         shell: bash
         run: |
-          files=$(gofmt -l imagehosting)
+          files=$(gofmt -l imagehosting securityaudit security_bootstrap.go)
           if [ -n "$files" ]; then
             echo "Files requiring gofmt:"
             echo "$files"
             exit 1
           fi
 
-      - name: Run tests
+      - name: Run focused race tests
+        run: go test -race ./imagehosting ./securityaudit
+
+      - name: Run full test suite
         run: go test ./...
 
       - name: Run vet
