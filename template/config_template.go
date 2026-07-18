@@ -97,7 +97,7 @@ settings:
   #正向ws设置
   ws_server_path : "ws"             #默认监听0.0.0.0:port/ws_server_path 若有安全需求,可不放通port到公网,或设置ws_server_token 若想监听/ 可改为"",若想监听到不带/地址请写nil
   enable_ws_server: true            #是否启用正向ws服务器 监听server_dir:port/ws_server_path
-  ws_server_token : "12345"         #正向ws的token 不启动正向ws可忽略 可为空
+  ws_server_token : ""               #正向ws的token 不启动正向ws可忽略 建议设置强密码
 
   #SSL配置类 和 白名单域名自动验证
   identify_file : true               #自动生成域名校验文件,在q.qq.com配置信息URL,在server_dir填入自己已备案域名,正确解析到机器人所在服务器ip地址,机器人即可发送链接
@@ -121,8 +121,8 @@ settings:
 
   #webui设置
   disable_webui: false              #禁用webui
-  server_user_name : "useradmin"    #默认网页面板用户名
-  server_user_password : "admin"    #默认网页面板密码
+  server_user_name : ""             #默认网页面板用户名 建议设置强密码
+  server_user_password : ""         #默认网页面板密码 建议设置强密码
 
   #指令魔法类
   remove_prefix : false             #是否忽略公域机器人指令前第一个/
