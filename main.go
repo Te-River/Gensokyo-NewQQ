@@ -465,9 +465,9 @@ func main() {
 
 	  r.GET("/updateport", uploadAuth, server.HandleIpupdate)
 	  r.POST("/delpic", uploadAuth, server.DeleteImageHandler(rateLimiter))
-	  r.GET("/healthz", HealthzHandler)
-	  r.GET("/readyz", HealthzHandler)
-	  r.GET("/metrics", MetricsHandler)
+	  r.GET("/healthz", uploadAuth, HealthzHandler)
+	      r.GET("/readyz", uploadAuth, HealthzHandler)
+	      r.GET("/metrics", uploadAuth, MetricsHandler)
 	  r.POST("/uploadpic", uploadAuth, server.UploadBase64ImageHandler(rateLimiter))
 	  r.POST("/uploadpicv2", uploadAuth, server.UploadBase64ImageHandlerV2(rateLimiter, apiV2))
 	  r.POST("/uploadpicv3", uploadAuth, server.UploadBase64ImageHandlerV3(rateLimiter, api))
