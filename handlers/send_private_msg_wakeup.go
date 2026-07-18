@@ -74,6 +74,8 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 		"url_images":    true,
 		"base64_record": true,
 		"base64_image":  true,
+		"local_video":   true,
+		"base64_video": true,
 		"local_file":    true,
 		"url_file":      true,
 		"url_files":     true,

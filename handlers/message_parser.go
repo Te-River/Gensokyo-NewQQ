@@ -110,6 +110,22 @@ func safeLocalPath(filePath string, baseDir string) (string, error) {
 	return abs, nil
 }
 
+// trimFilePrefix 剥离 file:// 协议前缀（区分 Windows 的 file:/// 和 Unix 的 file://）
+// 后续的 URL 解码和路径安全校验统一交给 safeLocalPath 完成
+func trimFilePrefix(fileContent string) string {
+	if runtime.GOOS == "windows" {
+		return strings.TrimPrefix(fileContent, "file:///")
+	}
+	return strings.TrimPrefix(fileContent, "file://")
+}
+
+// resolveLocalMedia 解析 file:// 本地路径，返回安全化的绝对路径
+// 失败时返回 (原路径, error) 供调用方决定是否记录或跳过
+func resolveLocalMedia(fileContent string) (string, error) {
+	cleanContent := trimFilePrefix(fileContent)
+	return safeLocalPath(cleanContent, ".")
+}
+
 // RememberSelfAtID 记录 GROUP_MESSAGE_CREATE mentions 中标记为 is_you 的 OpenID。
 func RememberSelfAtID(id string) {
 	if id == "" {
@@ -883,18 +899,8 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 				fileContent, _ := dataMap["file"].(string)
 				fileName, _ := dataMap["file_name"].(string)
 				if strings.HasPrefix(fileContent, "file://") {
-					var cleanContent string
-					if runtime.GOOS == "windows" {
-						cleanContent = strings.TrimPrefix(fileContent, "file:///")
-					} else {
-						cleanContent = strings.TrimPrefix(fileContent, "file://")
-					}
-					// 解码 URL 编码（如 %E7%A5%9E → 神）
-					if decoded, err := neturl.PathUnescape(cleanContent); err == nil {
-						cleanContent = decoded
-					}
-					// 安全校验：防止路径穿越
-					safePath, err := safeLocalPath(cleanContent, ".")
+					// 解码与安全校验统一由 resolveLocalMedia 完成
+					safePath, err := resolveLocalMedia(fileContent)
 					if err != nil {
 						mylog.Printf("安全校验失败，跳过本地文件: %v", err)
 						break
@@ -917,14 +923,24 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 				}
 
 			case "video":
-			     fileContent, _ := segmentMap["data"].(map[string]interface{})["file"].(string)
-			     if strings.HasPrefix(fileContent, "http://") {
-			      cleanContent := strings.TrimPrefix(fileContent, "http://")
-			      foundItems["url_video"] = append(foundItems["url_video"], cleanContent)
-			     } else if strings.HasPrefix(fileContent, "https://") {
-			      cleanContent := strings.TrimPrefix(fileContent, "https://")
-			      foundItems["url_videos"] = append(foundItems["url_videos"], cleanContent)
-			     }
+				fileContent, _ := segmentMap["data"].(map[string]interface{})["file"].(string)
+				if strings.HasPrefix(fileContent, "http://") {
+					cleanContent := strings.TrimPrefix(fileContent, "http://")
+					foundItems["url_video"] = append(foundItems["url_video"], cleanContent)
+				} else if strings.HasPrefix(fileContent, "https://") {
+					cleanContent := strings.TrimPrefix(fileContent, "https://")
+					foundItems["url_videos"] = append(foundItems["url_videos"], cleanContent)
+				} else if strings.HasPrefix(fileContent, "base64://") {
+					cleanContent := strings.TrimPrefix(fileContent, "base64://")
+					foundItems["base64_video"] = append(foundItems["base64_video"], cleanContent)
+				} else if strings.HasPrefix(fileContent, "file://") {
+					safePath, err := resolveLocalMedia(fileContent)
+					if err != nil {
+						mylog.Printf("安全校验失败，跳过本地视频: %v", err)
+						break
+					}
+					foundItems["local_video"] = append(foundItems["local_video"], safePath)
+				}
 
 			    case "music":
 			     musicType, _ := segmentMap["data"].(map[string]interface{})["type"].(string)
@@ -1096,18 +1112,8 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 			fileContent, _ := dataMap["file"].(string)
 			fileName, _ := dataMap["file_name"].(string)
 			if strings.HasPrefix(fileContent, "file://") {
-				var cleanContent string
-				if runtime.GOOS == "windows" {
-					cleanContent = strings.TrimPrefix(fileContent, "file:///")
-				} else {
-					cleanContent = strings.TrimPrefix(fileContent, "file://")
-				}
-				// 解码 URL 编码（如 %E7%A5%9E → 神）
-				if decoded, err := neturl.PathUnescape(cleanContent); err == nil {
-					cleanContent = decoded
-				}
-				// 安全校验：防止路径穿越
-				safePath, err := safeLocalPath(cleanContent, ".")
+				// 解码与安全校验统一由 resolveLocalMedia 完成
+				safePath, err := resolveLocalMedia(fileContent)
 				if err != nil {
 					mylog.Printf("安全校验失败，跳过本地文件: %v", err)
 					break
@@ -1130,14 +1136,24 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 			}
 
 		case "video":
-		    fileContent, _ := message["data"].(map[string]interface{})["file"].(string)
-		    if strings.HasPrefix(fileContent, "http://") {
-		     cleanContent := strings.TrimPrefix(fileContent, "http://")
-		     foundItems["url_video"] = append(foundItems["url_video"], cleanContent)
-		    } else if strings.HasPrefix(fileContent, "https://") {
-		     cleanContent := strings.TrimPrefix(fileContent, "https://")
-		     foundItems["url_videos"] = append(foundItems["url_videos"], cleanContent)
-		    }
+			fileContent, _ := message["data"].(map[string]interface{})["file"].(string)
+			if strings.HasPrefix(fileContent, "http://") {
+				cleanContent := strings.TrimPrefix(fileContent, "http://")
+				foundItems["url_video"] = append(foundItems["url_video"], cleanContent)
+			} else if strings.HasPrefix(fileContent, "https://") {
+				cleanContent := strings.TrimPrefix(fileContent, "https://")
+				foundItems["url_videos"] = append(foundItems["url_videos"], cleanContent)
+			} else if strings.HasPrefix(fileContent, "base64://") {
+				cleanContent := strings.TrimPrefix(fileContent, "base64://")
+				foundItems["base64_video"] = append(foundItems["base64_video"], cleanContent)
+			} else if strings.HasPrefix(fileContent, "file://") {
+				safePath, err := resolveLocalMedia(fileContent)
+				if err != nil {
+					mylog.Printf("安全校验失败，跳过本地视频: %v", err)
+					break
+				}
+				foundItems["local_video"] = append(foundItems["local_video"], safePath)
+			}
 
 		   case "music":
 		    musicType, _ := message["data"].(map[string]interface{})["type"].(string)
@@ -2384,15 +2400,12 @@ func ProcessCQFile(text string, foundItems map[string][]string) string {
 		switch {
 		case strings.HasPrefix(filePath, "file://"):
 			itemKey = "local_file"
-			if runtime.GOOS == "windows" {
-				cleanValue = strings.TrimPrefix(filePath, "file:///")
-			} else {
-				cleanValue = strings.TrimPrefix(filePath, "file://")
+			safePath, err := resolveLocalMedia(filePath)
+			if err != nil {
+				mylog.Printf("安全校验失败，跳过本地文件: %v", err)
+				return match
 			}
-			// 解码 URL 编码
-			if decoded, err := neturl.PathUnescape(cleanValue); err == nil {
-				cleanValue = decoded
-			}
+			cleanValue = safePath
 		case strings.HasPrefix(filePath, "http://"):
 			itemKey = "url_file"
 			cleanValue = strings.TrimPrefix(filePath, "http://")

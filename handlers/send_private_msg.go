@@ -339,22 +339,24 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 				richMediaMessage, ok := groupReply.(*dto.RichMediaMessage)
 				if !ok {
 					// 定义一个map来存储关键字
-					keyMap := map[string]bool{
-					     "markdown":      true,
-					     "qqmusic":       true,
-					     "local_image":   true,
-					     "local_record":  true,
-					     "url_image":     true,
-					     "url_images":    true,
-					     "base64_record": true,
-					     "base64_image":  true,
-					     "local_file":    true,
-					     "url_file":      true,
-					     "url_files":     true,
-					     "base64_file":   true,
-					    }
-					// key 是 for key, urls := range foundItems { 这里的 key
-					if _, exists := keyMap[key]; exists {
+						keyMap := map[string]bool{
+						     "markdown":      true,
+						     "qqmusic":       true,
+						     "local_image":   true,
+						     "local_record":  true,
+						     "url_image":     true,
+						     "url_images":    true,
+						     "base64_record": true,
+						     "base64_image":  true,
+						     "local_video":   true,
+						     "base64_video": true,
+						     "local_file":    true,
+						     "url_file":      true,
+						     "url_files":     true,
+						     "base64_file":   true,
+						    }
+						// key 是 for key, urls := range foundItems { 这里的 key
+						if _, exists := keyMap[key]; exists {
 						// 进行类型断言
 						groupMessage, ok := groupReply.(*dto.MessageToCreate)
 						if !ok {

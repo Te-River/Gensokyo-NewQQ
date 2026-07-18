@@ -547,18 +547,23 @@ func buildParentKeyMap(templateContent string) map[string]string {
 	return parentMap
 }
 
-// extractKeysFromString reads a string and extracts the keys (text before the colon).
-func extractKeysFromString(content string) map[string]bool {
-	keys := make(map[string]bool)
-	lines := strings.Split(content, "\n")
-	for _, line := range lines {
-		if strings.Contains(line, ":") {
-			key := strings.TrimSpace(strings.Split(line, ":")[0])
-			keys[key] = true
+	// extractKeysFromString reads a string and extracts the keys (text before the colon).
+	func extractKeysFromString(content string) map[string]bool {
+		keys := make(map[string]bool)
+		lines := strings.Split(content, "\n")
+		for _, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			// 跳过空行和注释行
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			if strings.Contains(line, ":") {
+				key := strings.TrimSpace(strings.Split(line, ":")[0])
+				keys[key] = true
+			}
 		}
+		return keys
 	}
-	return keys
-}
 
 func extractMissingConfigLines(missingSettings map[string]string, configTemplate string) ([]string, error) {
 	var missingConfigLines []string

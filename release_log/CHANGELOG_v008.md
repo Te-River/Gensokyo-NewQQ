@@ -229,6 +229,17 @@ string 格式（复古 CQ 码）中 `[CQ:video,file=base64://...]` 和 `[CQ:vide
 - `text_intent` 按模板顺序排列，补全完整的 11 个 intent
 
 ---
+### [CQ:video] base64/local 完整支持 + unknown SSRF 校验 + @ 标签顺序修正
+
+**文件：** `handlers/message_parser.go`、`handlers/send_group_msg.go`、`handlers/send_private_msg.go`、`handlers/send_private_msg_wakeup.go`、`config/config.go`
+
+1. **CQ:video base64/local 处理补全**：数组段格式的 `[CQ:video,file=base64://...]` 和 `file://...` 已正确收集到 `base64_video`/`local_video`，并在群聊/私聊消息发送中添加完整的 CDN 上传逻辑（对应 FileType=2 视频）。
+2. **unknown_* SSRF 校验**：`unknown_image/record/file` fallback 处理中补充 `normalizeAndCheckSSRF` 调用，防止无前缀 URL 指向内网或回环地址，补齐 SSRF 防护空白。
+3. **Markdown @ 标签顺序修正**：改用 `FindAllString` 支持多个 @ 标签合并，并用精确正则 `<qqbot-at-user\s+id="[^"]*"\s*/>` 匹配已转换标签，修复因删除顺序颠倒导致的 @ 信息丢失问题。
+4. **keyMap 同步补全**：3 个 send handler 的 keyMap 中已补入 `local_video`/`base64_video`，确保 CDN 上传返回 `MessageToCreate` 时能正确区分并处理。
+5. **配置自动补全注释跳过**：`config.go` 中 `extractKeysFromString` 添加注释行跳过逻辑（`#` 开头），避免注释块中的 key 被误判为已存在。
+
+
 
 ## 📝 文档
 

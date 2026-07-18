@@ -465,27 +465,27 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				return "", nil
 			}
 
-			var md *dto.Markdown
-			var kb *keyboard.MessageKeyboard
-			if mdItems, ok := foundItems["markdown"]; ok && len(mdItems) > 0 {
-				md, kb = parseMarkdownFromMessage(mdItems[0])
-				// 将 markdown 内容中的 [CQ:at,qq=数字] 转换为 QQ @ 语法
-				if md != nil && md.Content != "" {
-					md.Content = ResolveMarkdownAtMentions(md.Content)
-					md.Content = ResolveMarkdownImages(md.Content, apiv2)
-				}
-				// 将 messageText 中的 [CQ:at,qq=数字] 也转换为 <qqbot-at-user>，再合并到 markdown 内容
-				messageText = ResolveMarkdownAtMentions(messageText)
-				atRe := regexp.MustCompile(`<qqbot-at-user\s+[^>]*/>`)
-				atTag := atRe.FindString(messageText)
-				if atTag != "" {
-					md.Content = atTag + "\n" + md.Content
-				}
-				// 从 messageText 中移除 [CQ:markdown,...] 和 <qqbot-at-user> 部分
-				mdRe := regexp.MustCompile(`\[CQ:markdown,[^\]]*\]`)
-				messageText = mdRe.ReplaceAllString(messageText, "")
-				messageText = atRe.ReplaceAllString(messageText, "")
-			}
+					var md *dto.Markdown
+					var kb *keyboard.MessageKeyboard
+					if mdItems, ok := foundItems["markdown"]; ok && len(mdItems) > 0 {
+						md, kb = parseMarkdownFromMessage(mdItems[0])
+						// 步骤 1: 转换 markdown 内部和 messageText 中的 [CQ:at] 为 <qqbot-at-user>
+						if md != nil && md.Content != "" {
+							md.Content = ResolveMarkdownAtMentions(md.Content)
+							md.Content = ResolveMarkdownImages(md.Content, apiv2)
+						}
+						messageText = ResolveMarkdownAtMentions(messageText)
+						// 步骤 2: 提取 messageText 中转换后的 @ 标签，合并到 markdown 头部
+						atRe := regexp.MustCompile(`<qqbot-at-user\s+id="[^"]*"\s*/>`)
+						atTags := atRe.FindAllString(messageText, -1)
+						if len(atTags) > 0 {
+							md.Content = strings.Join(atTags, "\n") + "\n" + md.Content
+						}
+						// 步骤 3: 清理 messageText 中已处理的标签
+						mdRe := regexp.MustCompile(`\[CQ:markdown,[^\]]*\]`)
+						messageText = mdRe.ReplaceAllString(messageText, "")
+						messageText = atRe.ReplaceAllString(messageText, "")
+					}
 
 			// message.Params.GroupID 已在前面转换为真实 OpenID，直接使用
 
@@ -612,22 +612,24 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				richMediaMessage, ok := groupReply.(*dto.RichMediaMessage)
 				if !ok {
 					// 定义一个map来存储关键字
-					keyMap := map[string]bool{
-					       "markdown":      true,
-					       "qqmusic":       true,
-					       "local_image":   true,
-						"local_record":  true,
-						"url_image":     true,
-						"url_images":    true,
-						"base64_record": true,
-						"base64_image":  true,
-						"local_file":    true,
-						"url_file":      true,
-						"url_files":     true,
-						"base64_file":   true,
-					}
-					// key是 for key, urls := range foundItems { 这里的key
-					if _, exists := keyMap[key]; exists {
+						keyMap := map[string]bool{
+						       "markdown":      true,
+						       "qqmusic":       true,
+						       "local_image":   true,
+							"local_record":  true,
+							"url_image":     true,
+							"url_images":    true,
+							"base64_record": true,
+							"base64_image":  true,
+						       "local_video":   true,
+						       "base64_video": true,
+							"local_file":    true,
+							"url_file":      true,
+							"url_files":     true,
+							"base64_file":   true,
+						}
+						// key是 for key, urls := range foundItems { 这里的key
+						if _, exists := keyMap[key]; exists {
 						// 进行类型断言
 						groupMessage, ok := groupReply.(*dto.MessageToCreate)
 						if !ok {
@@ -910,6 +912,22 @@ func isPrivateOrLoopback(rawURL string) bool {
 		}
 	}
 	return false
+}
+
+// normalizeAndCheckSSRF 为 unknown 类型的 URL 补全协议头并执行 SSRF 校验。
+// 返回补全后的完整 URL 和校验结果；校验失败时返回空字符串和 true。
+func normalizeAndCheckSSRF(rawURL string) (string, bool) {
+	if rawURL == "" {
+		return "", true
+	}
+	// 补全协议头
+	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
+		rawURL = "http://" + rawURL
+	}
+	if isPrivateOrLoopback(rawURL) {
+		return "", true
+	}
+	return rawURL, false
 }
 
 func generateGroupMessage(id string, eventid string, foundItems map[string][]string, messageText string, msgseq int, apiv2 openapi.OpenAPI, groupid string) interface{} {
@@ -1433,6 +1451,51 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 			Content:    "",           // 这个字段文档没有了
 			SrvSendMsg: false,
 		}
+	} else if base64Videos, ok := foundItems["base64_video"]; ok && len(base64Videos) > 0 {
+		// base64 视频数据上传到 QQ CDN（FileType=2 视频）
+		messageToCreate, err := images.CreateAndUploadMediaMessage(context.TODO(), base64Videos[0], eventid, 2, false, "", groupid, id, msgseq, apiv2)
+		if err != nil {
+			mylog.Printf("Error uploading base64 video: %v", err)
+			return &dto.MessageToCreate{
+				Content: "错误: 上传视频失败",
+				MsgID:   id,
+				EventID: eventid,
+				MsgSeq:  msgseq,
+				MsgType: 0,
+			}
+		}
+		return messageToCreate
+	} else if localVideos, ok := foundItems["local_video"]; ok && len(localVideos) > 0 {
+		// 从本地路径读取视频并 base64 上传到 QQ CDN
+		safePath, err := safeLocalPath(localVideos[0], ".")
+		if err != nil {
+			mylog.Printf("安全校验失败，跳过本地视频: %v", err)
+			return nil
+		}
+		videoData, err := os.ReadFile(safePath)
+		if err != nil {
+			mylog.Printf("Error reading the video from path %s: %v", localVideos[0], err)
+			return &dto.MessageToCreate{
+				Content: "错误: 视频文件不存在",
+				MsgID:   id,
+				EventID: eventid,
+				MsgSeq:  msgseq,
+				MsgType: 0,
+			}
+		}
+		base64Encoded := base64.StdEncoding.EncodeToString(videoData)
+		messageToCreate, err := images.CreateAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 2, false, "", groupid, id, msgseq, apiv2)
+		if err != nil {
+			mylog.Printf("Error uploading local video: %v", err)
+			return &dto.MessageToCreate{
+				Content: "错误: 上传视频失败",
+				MsgID:   id,
+				EventID: eventid,
+				MsgSeq:  msgseq,
+				MsgType: 0,
+			}
+		}
+		return messageToCreate
 	} else if fileURLs, ok := foundItems["local_file"]; ok && len(fileURLs) > 0 {
 		// 从本地路径读取文件
 		// 安全校验：防止路径穿越
@@ -1531,20 +1594,30 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 	  } else if unknownImages, ok := foundItems["unknown_image"]; ok && len(unknownImages) > 0 {
 	   // 无前缀图片，尝试作为 URL 处理
 	   mylog.Printf("unknown_image 作为 URL 图片尝试发送: %s", unknownImages[0])
+	   safeURL, blocked := normalizeAndCheckSSRF(unknownImages[0])
+	   if blocked {
+	    mylog.Printf("SSRF 阻止: unknown_image 目标地址不安全: %s", unknownImages[0])
+	    return nil
+	   }
 	   return &dto.RichMediaMessage{
 	    EventID:    id,
 	    FileType:   1,
-	    URL:        unknownImages[0],
+	    URL:        safeURL,
 	    Content:    "",
 	    SrvSendMsg: false,
 	   }
 	  } else if unknownRecords, ok := foundItems["unknown_record"]; ok && len(unknownRecords) > 0 {
 	   // 无前缀语音，尝试作为 URL 处理
 	   mylog.Printf("unknown_record 作为 URL 语音尝试发送: %s", unknownRecords[0])
+	   safeURL, blocked := normalizeAndCheckSSRF(unknownRecords[0])
+	   if blocked {
+	    mylog.Printf("SSRF 阻止: unknown_record 目标地址不安全: %s", unknownRecords[0])
+	    return nil
+	   }
 	   return &dto.RichMediaMessage{
 	    EventID:    id,
 	    FileType:   3,
-	    URL:        unknownRecords[0],
+	    URL:        safeURL,
 	    Content:    "",
 	    SrvSendMsg: false,
 	   }
@@ -1555,10 +1628,15 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 	    fileName = fns[0]
 	   }
 	   mylog.Printf("unknown_file 作为 URL 文件尝试发送: %s", unknownFiles[0])
+	   safeURL, blocked := normalizeAndCheckSSRF(unknownFiles[0])
+	   if blocked {
+	    mylog.Printf("SSRF 阻止: unknown_file 目标地址不安全: %s", unknownFiles[0])
+	    return nil
+	   }
 	   return &dto.RichMediaMessage{
 	    EventID:    id,
 	    FileType:   4,
-	    URL:        unknownFiles[0],
+	    URL:        safeURL,
 	    Content:    fileName,
 	    FileName:   fileName,
 	    SrvSendMsg: false,
@@ -2099,6 +2177,51 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 			Content:    "",           // 这个字段文档没有了
 			SrvSendMsg: false,
 		}
+	} else if base64Videos, ok := foundItems["base64_video"]; ok && len(base64Videos) > 0 {
+		// base64 视频数据上传到 QQ CDN（FileType=2 视频）
+		messageToCreate, err := images.CreateAndUploadMediaMessagePrivate(context.TODO(), base64Videos[0], eventid, 2, false, "", userid, id, msgseq, apiv2)
+		if err != nil {
+			mylog.Printf("Error uploading base64 video: %v", err)
+			return &dto.MessageToCreate{
+				Content: "错误: 上传视频失败",
+				MsgID:   id,
+				EventID: eventid,
+				MsgSeq:  msgseq,
+				MsgType: 0,
+			}
+		}
+		return messageToCreate
+	} else if localVideos, ok := foundItems["local_video"]; ok && len(localVideos) > 0 {
+		// 从本地路径读取视频并 base64 上传到 QQ CDN
+		safePath, err := safeLocalPath(localVideos[0], ".")
+		if err != nil {
+			mylog.Printf("安全校验失败，跳过本地视频: %v", err)
+			return nil
+		}
+		videoData, err := os.ReadFile(safePath)
+		if err != nil {
+			mylog.Printf("Error reading the video from path %s: %v", localVideos[0], err)
+			return &dto.MessageToCreate{
+				Content: "错误: 视频文件不存在",
+				MsgID:   id,
+				EventID: eventid,
+				MsgSeq:  msgseq,
+				MsgType: 0,
+			}
+		}
+		base64Encoded := base64.StdEncoding.EncodeToString(videoData)
+		messageToCreate, err := images.CreateAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 2, false, "", userid, id, msgseq, apiv2)
+		if err != nil {
+			mylog.Printf("Error uploading local video: %v", err)
+			return &dto.MessageToCreate{
+				Content: "错误: 上传视频失败",
+				MsgID:   id,
+				EventID: eventid,
+				MsgSeq:  msgseq,
+				MsgType: 0,
+			}
+		}
+		return messageToCreate
 	} else if fileURLs, ok := foundItems["local_file"]; ok && len(fileURLs) > 0 {
 		// 从本地路径读取文件
 		// 安全校验：防止路径穿越
@@ -2197,20 +2320,30 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 	  } else if unknownImages, ok := foundItems["unknown_image"]; ok && len(unknownImages) > 0 {
 	   // 无前缀图片，尝试作为 URL 处理
 	   mylog.Printf("unknown_image 作为 URL 图片尝试发送: %s", unknownImages[0])
+	   safeURL, blocked := normalizeAndCheckSSRF(unknownImages[0])
+	   if blocked {
+	    mylog.Printf("SSRF 阻止: unknown_image 目标地址不安全: %s", unknownImages[0])
+	    return nil
+	   }
 	   return &dto.RichMediaMessage{
 	    EventID:    id,
 	    FileType:   1,
-	    URL:        unknownImages[0],
+	    URL:        safeURL,
 	    Content:    "",
 	    SrvSendMsg: false,
 	   }
 	  } else if unknownRecords, ok := foundItems["unknown_record"]; ok && len(unknownRecords) > 0 {
 	   // 无前缀语音，尝试作为 URL 处理
 	   mylog.Printf("unknown_record 作为 URL 语音尝试发送: %s", unknownRecords[0])
+	   safeURL, blocked := normalizeAndCheckSSRF(unknownRecords[0])
+	   if blocked {
+	    mylog.Printf("SSRF 阻止: unknown_record 目标地址不安全: %s", unknownRecords[0])
+	    return nil
+	   }
 	   return &dto.RichMediaMessage{
 	    EventID:    id,
 	    FileType:   3,
-	    URL:        unknownRecords[0],
+	    URL:        safeURL,
 	    Content:    "",
 	    SrvSendMsg: false,
 	   }
@@ -2221,10 +2354,15 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 	    fileName = fns[0]
 	   }
 	   mylog.Printf("unknown_file 作为 URL 文件尝试发送: %s", unknownFiles[0])
+	   safeURL, blocked := normalizeAndCheckSSRF(unknownFiles[0])
+	   if blocked {
+	    mylog.Printf("SSRF 阻止: unknown_file 目标地址不安全: %s", unknownFiles[0])
+	    return nil
+	   }
 	   return &dto.RichMediaMessage{
 	    EventID:    id,
 	    FileType:   4,
-	    URL:        unknownFiles[0],
+	    URL:        safeURL,
 	    Content:    fileName,
 	    FileName:   fileName,
 	    SrvSendMsg: false,

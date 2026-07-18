@@ -1,0 +1,4 @@
+- CQ码分析完成：共12种CQ码（7标准+5扩展），foundItems 24个key，核心入口parseMessageContent()，出站Handler间功能严重不一致
+- P0问题：send_private_msg缺少[CQ:active]支持；send_private_msg_wakeup keyMap缺少文件key；send_private_msg keyMap缺少embed；video/music在消息段模式未解析
+- P1问题：send_guild_channel_msg完全未处理扩展CQ码；[CQ:reply]在消息段模式重复；send_private_msg图文混合缺少reply处理；send_private_msg纯文本缺少markdown处理；avatar在消息段模式生成的image未进入foundItems
+- nonebot2 插件路径在 D:\Nonebot\Wind\src\plugins\all_test
