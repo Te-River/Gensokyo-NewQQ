@@ -1,19 +1,19 @@
 package url
 
 import (
-	"crypto/md5"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
-	"fmt"
-	"math/big"
-	"net"
-	"net/http"
-	"net/url"
-	"strings"
-	"time"
+  "crypto/hmac"
+  "crypto/rand"
+  "crypto/sha256"
+  "encoding/base64"
+  "encoding/hex"
+  "encoding/json"
+  "fmt"
+  "math/big"
+  "net"
+  "net/http"
+  "net/url"
+  "strings"
+  "time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/hoshinonyaruko/gensokyo/config"
@@ -147,11 +147,11 @@ func GenerateShortURL(longURL string) string {
 		formData.Set("url", longURL)
 		// 获取密码
 		password := config.GetLotusPassword()
-		// 如果密码不为空，则计算 MD5 值并添加 token
-		if password != "" {
-			hasher := md5.New()
-			hasher.Write([]byte(password))
-			token := hex.EncodeToString(hasher.Sum(nil))
+		// 如果密码不为空，则计算 HMAC-SHA256 值并添加 token
+		   if password != "" {
+		    mac := hmac.New(sha256.New, []byte(password))
+		    mac.Write([]byte(longURL))
+		    token := hex.EncodeToString(mac.Sum(nil))
 			// 添加 token
 			formData.Set("token", token)
 		}
@@ -356,12 +356,11 @@ func isValidToken(token string) bool {
 		return true
 	}
 
-	// 计算 MD5
-	hasher := md5.New()
-	hasher.Write([]byte(password))
-	md5Password := hex.EncodeToString(hasher.Sum(nil))
-
-	return md5Password == token
+	// 计算 HMAC-SHA256
+	  mac := hmac.New(sha256.New, []byte(password))
+	  mac.Write([]byte(token))
+	  expected := hex.EncodeToString(mac.Sum(nil))
+	  return expected == token
 }
 
 // 短链接baseurl
