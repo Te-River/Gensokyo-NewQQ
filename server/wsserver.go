@@ -25,10 +25,25 @@ type WebSocketServerClient struct {
 }
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
-}
+  CheckOrigin: func(r *http.Request) bool {
+   // 默认仅允许本地回环地址和配置的 server_dir 域名
+   origin := r.Header.Get("Origin")
+   if origin == "" {
+    return true // 无 Origin 头时放行（兼容非浏览器客户端）
+   }
+   // 允许本地回环
+   if strings.HasPrefix(origin, "http://127.0.0.1") || strings.HasPrefix(origin, "http://localhost") {
+    return true
+   }
+   // 允许配置的 server_dir
+   serverDir := config.GetServer_dir()
+   if serverDir != "" && (strings.Contains(origin, serverDir) || strings.HasPrefix(origin, "https://"+serverDir) || strings.HasPrefix(origin, "http://"+serverDir)) {
+    return true
+   }
+   mylog.Printf("WebSocket Origin 校验失败: %s", origin)
+   return false
+  },
+ }
 
 // 确保WebSocketServerClient实现了interfaces.WebSocketServerClienter接口
 var _ callapi.WebSocketServerClienter = &WebSocketServerClient{}
