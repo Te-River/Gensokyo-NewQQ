@@ -197,6 +197,24 @@ Markdown 内容中的 `![](本地路径)` 图片在自动上传到 QQ CDN 后，
 
 `[CQ:reply]` 处理时仅设置了 `MessageReference` 未同时设置 `MsgID`，导致 QQ Bot v2 API 在某些场景下无法正确识别为回复消息。已为三个 Handler 的回复处理均补充 `MsgID` 设置。
 
+### 后续修复：回复消息处理的三处补充逻辑错误
+
+**文件：** `handlers/send_private_msg.go`、`handlers/send_group_msg.go`
+
+上一轮修复中遗漏或错误实现的部分：
+
+1. **私聊纯文本路径缺少 `[CQ:reply]` 处理** — `send_private_msg.go` 纯文本路径（`messageText != ""`）中 markdown 处理之后、PostC2CMessage 之前没有回复处理代码，导致私聊纯文本消息带 `[CQ:reply]` 时引用被忽略。已补充与群消息一致的 `idmap.RetrieveRowByCachev2` 反查逻辑。
+
+2. **私聊 foundItems 循环缺少 markdown 的 reply 处理** — `send_private_msg.go` 遍历 foundItems 时，keyMap 匹配到 `markdown` 后没有合并回复引用。已补充 `MessageReference` 和 `MsgID` 设置。
+
+3. **群聊 foundItems 中 markdown 的 reply 使用了错误的 messageID** — `send_group_msg.go` foundItems 循环中 markdown 分支的回复处理直接使用了被动上下文 `messageID` 变量作为 `MessageReference.MessageID`，而非通过 `idmap.RetrieveRowByCachev2` 反查 `[CQ:reply]` 指定的真实目标 ID。当回复目标与被动上下文不一致时会导致引用错消息。已修正为正确的反查逻辑。
+
+### 私聊图文混合检查缺少 url_images 分支
+
+**文件：** `handlers/send_private_msg.go`
+
+`send_private_msg.go` 的图文混合检查（`imageCount` 计算）中只检查了 `local_image`/`url_image`/`base64_image`，缺少 `url_images`（HTTPS 图片）分支，导致 HTTPS 图片在私聊中无法进入图文混合发送路径，文本和图片被分为两条消息发送。已补充 `url_images` 分支。
+
 ### 消息段格式（TRSS）缺少 reply 和 avatar 字段处理
 
 **文件：** `handlers/message_parser.go`

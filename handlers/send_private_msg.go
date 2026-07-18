@@ -196,10 +196,14 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			imageUrl = imageURLs[0]
 			imageCount++
 		} else if imageURLs, ok := foundItems["url_image"]; ok && len(imageURLs) == 1 {
-			imageType = "url_image"
-			imageUrl = imageURLs[0]
-			imageCount++
-		} else if base64Images, ok := foundItems["base64_image"]; ok && len(base64Images) == 1 {
+		    imageType = "url_image"
+		    imageUrl = imageURLs[0]
+		    imageCount++
+		   } else if imageURLs, ok := foundItems["url_images"]; ok && len(imageURLs) == 1 {
+		    imageType = "url_images"
+		    imageUrl = imageURLs[0]
+		    imageCount++
+		   } else if base64Images, ok := foundItems["base64_image"]; ok && len(base64Images) == 1 {
 			imageType = "base64_image"
 			imageUrl = base64Images[0]
 			imageCount++
@@ -289,25 +293,47 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			groupMessage.Timestamp = time.Now().Unix() // 设置时间戳
 
 			// 处理 [CQ:markdown] → 将消息类型切换为 markdown
-			var md *dto.Markdown
-			var kb *keyboard.MessageKeyboard
-			if mdItems, ok := foundItems["markdown"]; ok && len(mdItems) > 0 {
-				md, kb = parseMarkdownFromMessage(mdItems[0])
-				if md != nil && md.Content != "" {
-					md.Content = ResolveMarkdownAtMentions(md.Content)
-					md.Content = ResolveMarkdownImages(md.Content, apiv2)
-				}
-				if md != nil {
-					groupMessage.Markdown = md
-					groupMessage.Keyboard = kb
-					groupMessage.MsgType = 2
-					groupMessage.Content = ""
-					delete(foundItems, "markdown")
-					mylog.Printf("[CQ:markdown] 将私聊消息类型切换为 markdown")
-				}
-			}
+			    var md *dto.Markdown
+			    var kb *keyboard.MessageKeyboard
+			    if mdItems, ok := foundItems["markdown"]; ok && len(mdItems) > 0 {
+			     md, kb = parseMarkdownFromMessage(mdItems[0])
+			     if md != nil && md.Content != "" {
+			      md.Content = ResolveMarkdownAtMentions(md.Content)
+			      md.Content = ResolveMarkdownImages(md.Content, apiv2)
+			     }
+			     if md != nil {
+			      groupMessage.Markdown = md
+			      groupMessage.Keyboard = kb
+			      groupMessage.MsgType = 2
+			      groupMessage.Content = ""
+			      delete(foundItems, "markdown")
+			      mylog.Printf("[CQ:markdown] 将私聊消息类型切换为 markdown")
+			     }
+			    }
 
-			resp, err := apiv2.PostC2CMessage(context.TODO(), UserID, groupMessage)
+			    // 处理 [CQ:reply,id=数字] → message_reference + msg_id
+			    if replyIDs, ok := foundItems["reply_msg_id"]; ok && len(replyIDs) > 0 {
+			     if messageText != "" {
+			      // 虚拟 reply ID → 真实 QQ API message_id
+			      realReplyID, err := idmap.RetrieveRowByCachev2(replyIDs[0])
+			      if err == nil && realReplyID != "" {
+			       // echo 缓存中的 ID 格式为 "UserID MessageID"，取后半段
+			       parts := strings.Split(realReplyID, " ")
+			       refID := parts[len(parts)-1]
+			       groupMessage.MessageReference = &dto.MessageReference{
+			        MessageID:             refID,
+			        IgnoreGetMessageError: true,
+			       }
+			       // 同时设置 msg_id，确保 v2 API 识别为回复
+			       groupMessage.MsgID = refID
+			       mylog.Printf("[CQ:reply] 设置私聊回复消息: msg_id=%s", refID)
+			      } else {
+			       mylog.Printf("[CQ:reply] 虚拟 ID %s 反查失败: %v", replyIDs[0], err)
+			      }
+			     }
+			    }
+
+			    resp, err := apiv2.PostC2CMessage(context.TODO(), UserID, groupMessage)
 			if err != nil {
 				mylog.Printf("发送文本私聊信息失败: %v", err)
 				//如果失败 防止进入递归
@@ -359,12 +385,27 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 						if _, exists := keyMap[key]; exists {
 						// 进行类型断言
 						groupMessage, ok := groupReply.(*dto.MessageToCreate)
-						if !ok {
-							mylog.Println("Error: Expected MessageToCreate type.")
-							return "", nil // 或其他错误处理
-						}
+						       if !ok {
+						        mylog.Println("Error: Expected MessageToCreate type.")
+						        return "", nil // 或其他错误处理
+						       }
 
-						// 首次发送私聊 MessageToCreate
+						       // 将 reply 引用合并到 markdown 消息中
+						       if replyIDs, ok := foundItems["reply_msg_id"]; ok && len(replyIDs) > 0 && key == "markdown" {
+						        realReplyID, err := idmap.RetrieveRowByCachev2(replyIDs[0])
+						        if err == nil && realReplyID != "" {
+						         parts := strings.Split(realReplyID, " ")
+						         refID := parts[len(parts)-1]
+						         groupMessage.MessageReference = &dto.MessageReference{
+						          MessageID:             refID,
+						          IgnoreGetMessageError: true,
+						         }
+						         groupMessage.MsgID = refID
+						         mylog.Printf("[CQ:reply] 设置私聊 markdown 回复消息: msg_id=%s", refID)
+						        }
+						       }
+
+						       // 首次发送私聊 MessageToCreate
 						resp, err = apiv2.PostC2CMessage(context.TODO(), UserID, groupMessage)
 						if err != nil {
 							mylog.Printf("发送 MessageToCreate 私聊信息失败: %v", err)
