@@ -461,15 +461,17 @@ func main() {
 	// 启动消息处理协程
 	go webhookHandler.ListenAndProcessMessages()
 
-	r.GET("/updateport", server.HandleIpupdate)
-	r.POST("/delpic", server.DeleteImageHandler(rateLimiter))
-	r.GET("/healthz", HealthzHandler)
-	r.GET("/readyz", HealthzHandler)
-	r.GET("/metrics", MetricsHandler)
-	r.POST("/uploadpic", server.UploadBase64ImageHandler(rateLimiter))
-	r.POST("/uploadpicv2", server.UploadBase64ImageHandlerV2(rateLimiter, apiV2))
-	r.POST("/uploadpicv3", server.UploadBase64ImageHandlerV3(rateLimiter, api))
-	r.POST("/uploadrecord", server.UploadBase64RecordHandler(rateLimiter))
+	uploadAuth := server.UploadAuthMiddleware()
+
+	  r.GET("/updateport", server.HandleIpupdate)
+	  r.POST("/delpic", uploadAuth, server.DeleteImageHandler(rateLimiter))
+	  r.GET("/healthz", HealthzHandler)
+	  r.GET("/readyz", HealthzHandler)
+	  r.GET("/metrics", MetricsHandler)
+	  r.POST("/uploadpic", uploadAuth, server.UploadBase64ImageHandler(rateLimiter))
+	  r.POST("/uploadpicv2", uploadAuth, server.UploadBase64ImageHandlerV2(rateLimiter, apiV2))
+	  r.POST("/uploadpicv3", uploadAuth, server.UploadBase64ImageHandlerV3(rateLimiter, api))
+	  r.POST("/uploadrecord", uploadAuth, server.UploadBase64RecordHandler(rateLimiter))
 	// 使用 CreateHandleValidation，传入 WebhookHandler 实例
 	server.InitPrivateKey(conf.Settings.ClientSecret)
 	//r.POST("/"+conf.Settings.WebhookPath, server.CreateHandleValidationSafe(webhookHandler))

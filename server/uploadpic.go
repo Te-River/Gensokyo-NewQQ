@@ -35,6 +35,23 @@ const (
 	RequestInterval         = time.Minute
 )
 
+// UploadAuthMiddleware 上传/删除接口的认证中间件，复用 HTTP API 的 access_token 配置
+func UploadAuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		accessToken := config.GetHTTPAccessToken()
+		if accessToken != "" {
+			tokenHeader := strings.Replace(c.GetHeader("Authorization"), "Bearer ", "", 1)
+			tokenQuery, _ := c.GetQuery("access_token")
+			if (tokenHeader == "" || tokenHeader != accessToken) && (tokenQuery == "" || tokenQuery != accessToken) {
+				c.JSON(http.StatusForbidden, gin.H{"error": "鉴权失败"})
+				c.Abort()
+				return
+			}
+		}
+		c.Next()
+	}
+}
+
 // RateLimiter 使用 sync.Map 来支持并发操作
 type RateLimiter struct {
 	Counts sync.Map
