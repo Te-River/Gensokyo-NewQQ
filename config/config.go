@@ -60,7 +60,7 @@ func LoadConfig(path string, fastload bool) (*Config, error) {
 	// 清理配置文件中因旧版 bug 产生的重复 settings:/version 行
 	if cleaned := cleanupDuplicateSettings(configData); len(cleaned) != len(configData) {
 		configData = cleaned
-		_ = os.WriteFile(path, configData, 0644)
+		_ = os.WriteFile(path, configData, 0600)
 	}
 
 	// 检查并替换视觉前缀行，如果有必要，后期会注释
@@ -68,7 +68,7 @@ func LoadConfig(path string, fastload bool) (*Config, error) {
 	// configData, isChange = replaceVisualPrefixsLine(configData)
 	// if isChange {
 	// 	// 如果配置文件已修改，重新写入修正后的数据
-	// 	if err = os.WriteFile(path, configData, 0644); err != nil {
+	// 	if err = os.WriteFile(path, configData, 0600); err != nil {
 	// 		return nil, err // 处理写入错误
 	// 	}
 	// }
@@ -322,7 +322,7 @@ func addCommentsToConfigTemp(template, tempFilePath string) error {
 	updatedContent := strings.Join(lines, "\n")
 
 	// 写回更新后的内容到原配置文件
-	err = os.WriteFile(tempFilePath, []byte(updatedContent), 0644)
+	err = os.WriteFile(tempFilePath, []byte(updatedContent), 0600)
 	if err != nil {
 		return err
 	}
@@ -796,7 +796,7 @@ func UpdateConfig(conf *Config, path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	return os.WriteFile(path, data, 0600)
 }
 
 // WriteYAMLToFile 将YAML格式的字符串写入到指定的文件路径
@@ -815,7 +815,7 @@ func WriteYAMLToFile(yamlContent string) error {
 	configPath := filepath.Join(exeDir, "config.yml")
 
 	// 写入文件
-	os.WriteFile(configPath, []byte(yamlContent), 0644)
+	os.WriteFile(configPath, []byte(yamlContent), 0600)
 
 	sys.RestartApplication()
 	return nil
@@ -853,7 +853,7 @@ func DeleteConfig() error {
 	configData := strings.Replace(template.ConfigTemplate, "<YOUR_SERVER_DIR>", ip, -1)
 
 	// 创建一个新的配置文件模板 写到配置
-	if err := os.WriteFile(configPath, []byte(configData), 0644); err != nil {
+	if err := os.WriteFile(configPath, []byte(configData), 0600); err != nil {
 		fmt.Println("Error writing config.yml:", err)
 		return err
 	}
