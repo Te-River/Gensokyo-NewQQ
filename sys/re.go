@@ -61,7 +61,7 @@ func GetLocalIP() (string, error) {
 
 func GetPublicIP() (string, error) {
 	// 访问iframe提供的URL
-	resp, err := http.Get("http://only-985281-116-238-216-144.nstool.yqkk.link/")
+	resp, err := http.Get("https://only-985281-116-238-216-144.nstool.yqkk.link/")
 	if err != nil {
 		return "", err
 	}
