@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -98,6 +99,10 @@ func EncoderSilk(data []byte) []byte {
 
 // EncodeMP4 将给定视频文件编码为MP4
 func EncodeMP4(src string, dst string) error {
+	// 校验 ffmpeg 是否可用
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		mylog.Errorf("ffmpeg not found: %v", err); return nil
+	}
 	cmd1 := exec.Command("ffmpeg", "-i", src, "-y", "-c", "copy", "-map", "0", dst)
 	if errors.Is(cmd1.Err, exec.ErrDot) {
 		cmd1.Err = nil
@@ -116,6 +121,10 @@ func EncodeMP4(src string, dst string) error {
 
 // ExtractCover 获取给定视频文件的Cover
 func ExtractCover(src string, target string) error {
+	// 校验 ffmpeg 是否可用
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		mylog.Errorf("ffmpeg not found: %v", err); return nil
+	}
 	cmd := exec.Command("ffmpeg", "-i", src, "-y", "-ss", "0", "-frames:v", "1", target)
 	if errors.Is(cmd.Err, exec.ErrDot) {
 		cmd.Err = nil
@@ -342,6 +351,10 @@ func encode(record []byte, tempName string) (silkWav []byte) {
 		if errors.Is(cmd.Err, exec.ErrDot) {
 			cmd.Err = nil
 		}
+		// 校验 ffmpeg 是否可用
+		if _, err := exec.LookPath("ffmpeg"); err != nil {
+			mylog.Errorf("ffmpeg not found: %v", err); return nil
+		}
 		if err = cmd.Run(); err != nil {
 			mylog.Errorf("convert pcm file error: ffmpeg 未安装或输入格式(%s)不受支持", audioFmt)
 			return nil
@@ -349,7 +362,10 @@ func encode(record []byte, tempName string) (silkWav []byte) {
 	}
 	defer os.Remove(pcmPath)
 
-	silkPath := path.Join(silkCachePath, tempName+".silk")
+	// 使用应用私有临时目录，而非共享临时目录
+	silkCacheDir := filepath.Join(os.TempDir(), "gensokyo-silk")
+	os.MkdirAll(silkCacheDir, 0700)
+	silkPath := filepath.Join(silkCacheDir, tempName+".silk")
 
 	// 调用silk_codec转换为Silk
 
