@@ -30,34 +30,6 @@ func HandleSendGuildChannelForum(client callapi.Client, api openapi.OpenAPI, api
 		// 当 message.Echo 是字符串类型时执行此块
 		msgType = echo.GetMsgTypeByKey(echoStr)
 	}
-	// 检查GroupID是否为0
-	checkZeroGroupID := func(id interface{}) bool {
-		switch v := id.(type) {
-		case int:
-			return v != 0
-		case int64:
-			return v != 0
-		case string:
-			return v != "0" // 检查字符串形式的0
-		default:
-			return true // 如果不是int、int64或string，假定它不为0
-		}
-	}
-
-	// 检查UserID是否为0
-	checkZeroUserID := func(id interface{}) bool {
-		switch v := id.(type) {
-		case int:
-			return v != 0
-		case int64:
-			return v != 0
-		case string:
-			return v != "0" // 同样检查字符串形式的0
-		default:
-			return true // 如果不是int、int64或string，假定它不为0
-		}
-	}
-
 	if msgType == "" && message.Params.GroupID != nil && checkZeroGroupID(message.Params.GroupID) {
 		msgType = GetMessageTypeByGroupid(config.GetAppIDStr(), message.Params.GroupID)
 	}

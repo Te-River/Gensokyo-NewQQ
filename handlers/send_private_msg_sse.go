@@ -47,21 +47,7 @@ func HandleSendPrivateMsgSSE(client callapi.Client, api openapi.OpenAPI, apiv2 o
 	// 使用 message.Echo 作为key来获取消息类型
 	var retmsg string
 
-	// 检查UserID是否为0
-	checkZeroUserID := func(id interface{}) bool {
-		switch v := id.(type) {
-		case int:
-			return v != 0
-		case int64:
-			return v != 0
-		case string:
-			return v != "0" // 同样检查字符串形式的0
-		default:
-			return true // 如果不是int、int64或string，假定它不为0
-		}
-	}
-
-	// New checks for UserID and GroupID being nil or 0
+	// 检查UserID和GroupID是否为0
 	if message.Params.UserID == nil || !checkZeroUserID(message.Params.UserID) {
 		mylog.Printf("send_group_msg_sse接收到错误action: %v", message)
 		return "", nil

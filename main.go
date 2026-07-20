@@ -18,8 +18,6 @@ import (
 	"syscall"
 	"time"
 
-	// _ "net/http/pprof"
-
 	"github.com/fatih/color"
 	"github.com/fsnotify/fsnotify"
 	"github.com/hoshinonyaruko/gensokyo/Processor"
@@ -64,7 +62,6 @@ func main() {
 		}
 	}
 
-	// 定义faststart命令行标志。默认为false。
 	fastStart := flag.Bool("faststart", false, "start without initialization if set")
 	tidy := flag.Bool("tidy", false, "backup and tidy your config.yml")
 	cleanids := flag.Bool("clean_ids", false, "clean msg_id in ids bucket.")
@@ -74,17 +71,14 @@ func main() {
 	m := flag.Bool("m", false, "Maintenance mode")
 	localLogger := flag.String("local-logger", "", "set to enable to write local log files")
 
-	// 解析命令行参数到定义的标志。
 	if err := flag.CommandLine.Parse(args); err != nil {
 		log.Fatalf("error parsing flags: %v", err)
 	}
 
-	// 检查是否使用了-faststart参数
 	if !*fastStart {
-		sys.InitBase() // 如果不是faststart模式，则执行初始化
+		sys.InitBase()
 	}
 	if *tidy {
-		//备份配置 并刷新
 		config.CreateAndWriteConfigTemp()
 		log.Println("配置文件已更新为新版,当前配置文件已备份.如产生问题请到群196173384反馈开发者。")
 		return
@@ -92,21 +86,17 @@ func main() {
 	if _, err := os.Stat("config.yml"); os.IsNotExist(err) {
 		var ip string
 		var err error
-		// 检查操作系统是否为Android
 		if runtime.GOOS == "android" {
 			ip = "127.0.0.1"
 		} else {
-			// 获取内网IP地址
 			ip, err = sys.GetLocalIP()
 			if err != nil {
 				log.Println("Error retrieving the local IP address:", err)
 				ip = "127.0.0.1"
 			}
 		}
-		// 将 <YOUR_SERVER_DIR> 替换成实际的内网IP地址 确保初始状态webui能够被访问
 		configData := strings.Replace(template.ConfigTemplate, "<YOUR_SERVER_DIR>", ip, -1)
 
-		// 将修改后的配置写入 config.yml
 		err = os.WriteFile("config.yml", []byte(configData), 0644)
 		if err != nil {
 			log.Println("Error writing config.yml:", err)
@@ -119,26 +109,22 @@ func main() {
 		os.Exit(0)
 	}
 
-	// 主逻辑
-	// 加载配置
 	conf, err := config.LoadConfig("config.yml", false)
 	if err != nil {
 		log.Fatalf("error: %v", err)
 	}
 
-	// 配置热重载
 	go setupConfigWatcher("config.yml")
 
 	sys.SetTitle(conf.Settings.Title)
-	webuiURL := config.ComposeWebUIURL(conf.Settings.Lotus)     // 调用函数获取URL
-	webuiURLv2 := config.ComposeWebUIURLv2(conf.Settings.Lotus) // 调用函数获取URL
+	webuiURL := config.ComposeWebUIURL(conf.Settings.Lotus)
+	webuiURLv2 := config.ComposeWebUIURLv2(conf.Settings.Lotus)
 
 	var api openapi.OpenAPI
 	var apiV2 openapi.OpenAPI
 	var wsClients []*wsclient.WebSocketClient
 	var nologin bool
 
-	//logger
 	logLevel := mylog.GetLogLevelFromConfig(config.GetLogLevel())
 	localFileLogger := config.GetSaveLogs() || strings.EqualFold(strings.TrimSpace(*localLogger), "enable")
 	loggerAdapter := mylog.NewMyLogAdapter(logLevel, localFileLogger)
@@ -146,23 +132,19 @@ func main() {
 	botgo.SetLogger(loggerAdapter)
 
 	if *m {
-		// 维护模式
 		conf.Settings.WsAddress = []string{"ws://127.0.0.1:50000"}
 		conf.Settings.EnableWsServer = false
 	}
 
-	// 创建webui数据库
 	webui.InitializeDB()
 	defer webui.CloseDB()
 
 	if conf.Settings.AppID == 12345 {
-		// 输出天蓝色文本
 		cyan := color.New(color.FgCyan)
 		cyan.Printf("欢迎来到Gensokyo, 控制台地址: %s\n", webuiURL)
 		log.Println("请完成机器人配置后重启框架。")
 
 	} else {
-		//获取bot的token
 		token := token.BotToken(conf.Settings.AppID, conf.Settings.ClientSecret, conf.Settings.Token, token.TypeQQBot)
 
 		ctx := context.Background()
@@ -170,36 +152,29 @@ func main() {
 			log.Fatalln(err)
 		}
 
-		//读取intent
 		if len(conf.Settings.TextIntent) == 0 {
-			// 如果 TextIntent 数组为空，抛出错误
 			panic(errors.New("TextIntent is empty, at least one intent should be specified"))
 		}
 
-		//创建api
 		if !conf.Settings.SandBoxMode {
-			// 创建 v1 版本的 OpenAPI 实例
 			if err := botgo.SelectOpenAPIVersion(openapi.APIv1); err != nil {
 				log.Fatalln(err)
 			}
 			api = botgo.NewOpenAPI(token).WithTimeout(120 * time.Second)
 			log.Println("创建 apiv1 成功")
 
-			// 创建 v2 版本的 OpenAPI 实例
 			if err := botgo.SelectOpenAPIVersion(openapi.APIv2); err != nil {
 				log.Fatalln(err)
 			}
 			apiV2 = botgo.NewOpenAPI(token).WithTimeout(120 * time.Second)
 			log.Println("创建 apiv2 成功")
 		} else {
-			// 创建 v1 版本的 OpenAPI 实例
 			if err := botgo.SelectOpenAPIVersion(openapi.APIv1); err != nil {
 				log.Fatalln(err)
 			}
 			api = botgo.NewSandboxOpenAPI(token).WithTimeout(120 * time.Second)
 			log.Println("创建 沙箱 apiv1 成功")
 
-			// 创建 v2 版本的 OpenAPI 实例
 			if err := botgo.SelectOpenAPIVersion(openapi.APIv2); err != nil {
 				log.Fatalln(err)
 			}
@@ -210,11 +185,10 @@ func main() {
 		configURL := config.GetDevelop_Acdir()
 		fix11300 := config.GetFix11300()
 		var me *dto.User
-		if configURL == "" && !fix11300 { // 执行API请求 显示机器人信息
-			me, err = api.Me(ctx) // Adjusted to pass only the context
+		if configURL == "" && !fix11300 {
+			me, err = api.Me(ctx)
 			if err != nil {
 				log.Printf("Error fetching bot details: %v\n", err)
-				//return
 				nologin = true
 			}
 			log.Printf("Bot details: %+v\n", me)
@@ -223,12 +197,9 @@ func main() {
 		}
 
 		if !nologin {
-			//创建idmap服务器 数据库
 			idmap.InitializeDB()
-			//创建botstats数据库
 			botstats.InitializeDB()
 
-			//关闭时候释放数据库
 			defer idmap.CloseDB()
 			defer botstats.CloseDB()
 
@@ -257,18 +228,14 @@ func main() {
 				return
 			}
 
-			if configURL == "" && !fix11300 { //初始化handlers
+			if configURL == "" && !fix11300 {
 				handlers.BotID = me.ID
-			} else { //初始化handlers
+			} else {
 				handlers.BotID = config.GetDevBotid()
 			}
 
 			handlers.AppID = fmt.Sprintf("%d", conf.Settings.AppID)
 
-			// 获取 websocket 信息 这里用哪一个api获取就是用哪一个api去连接ws
-			// 测试群时候用api2 并且要注释掉api.me
-			//似乎正式场景都可以用apiv2(群)的方式获取ws连接,包括频道的机器人
-			//疑问: 为什么无法用apiv2的方式调用频道的getme接口,会报错
 			wsInfo, err := apiV2.WS(ctx, nil, "")
 			if err != nil {
 				log.Fatalln(err)
@@ -280,11 +247,9 @@ func main() {
 			fmt.Printf("重置计数的剩余时间(ms):%d\n", wsInfo.SessionStartLimit.ResetAfter)
 			fmt.Printf("每 5s 可以创建的 Session 数:%d\n", wsInfo.SessionStartLimit.MaxConcurrency)
 
-			// 定义和初始化intent变量
 			var intent dto.Intent = 0
 			enabledHandlers := make(map[string]bool)
 
-			//动态订阅intent
 			for _, handlerName := range conf.Settings.TextIntent {
 				handler, ok := getHandlerByName(handlerName)
 				if !ok {
@@ -292,12 +257,9 @@ func main() {
 					continue
 				}
 				enabledHandlers[handlerName] = true
-
-				//多次位与 并且订阅事件
 				intent |= websocket.RegisterHandlers(handler)
 			}
 
-			// 发现未知事件模式：订阅所有未使用的 intent 位
 			if config.GetDiscoverUnknownEvents() {
 				unknownBits := []int{6, 7, 8, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 31}
 				for _, bit := range unknownBits {
@@ -306,7 +268,6 @@ func main() {
 				log.Printf("发现未知事件模式已启用，额外订阅的 intent 位: %v", unknownBits)
 			}
 
-			// 自动订阅：开启 global_group_msg_rre_to_message 时自动注册两个群推送开关事件
 			if config.GetGlobalGroupMsgRejectReciveEventToMessage() {
 				for _, name := range []string{"GroupMsgRejectHandler", "GroupMsgReceiveHandler"} {
 					if handler, ok := getHandlerByName(name); ok {
@@ -319,15 +280,10 @@ func main() {
 			intent = applyDisallowedIntentPolicy(intent, enabledHandlers)
 			log.Printf("注册 intents: %v\n", intent)
 
-			// 确保p包含conf
 			p = Processor.NewProcessorV2(api, apiV2, &conf.Settings)
 
-			// 同步旧库计数器到新库（阻塞），保证后续 storeIdentity 不会分配冲突的虚拟 ID
-			// 计数器就绪后才连接 QQ 后端
 			idmap.StartMigration()
 
-			// 启动session manager以管理websocket连接
-			// 指定需要启动的分片数为 2 的话可以手动修改 wsInfo
 			if conf.Settings.ShardCount == 1 {
 				go func() {
 					wsInfo.Shards = uint32(conf.Settings.ShardNum)
@@ -352,20 +308,18 @@ func main() {
 						log.Fatalln(err)
 					}
 				}()
-				log.Printf("使用%d个分片,当前是第%d个分片,比如：[0,4]，代表分为四个片，当前链接是第 0 个片,业务稍后应该继续多开gensokyo,可在不同的服务器和ip地址 shard 为[1,4],[2,4],[3,4]的链接，才能完整接收和处理事件。\n", conf.Settings.ShardCount, conf.Settings.ShardID)
+				log.Printf("使用%d个分片,当前是第%d个分片\n", conf.Settings.ShardCount, conf.Settings.ShardID)
 			}
 
-			// 启动多个WebSocket客户端的逻辑（OnebotV11 反向 WS 适配器）
 			if !allEmpty(conf.Settings.WsAddress) {
 				wsClientChan := make(chan *wsclient.WebSocketClient, len(conf.Settings.WsAddress))
 				errorChan := make(chan error, len(conf.Settings.WsAddress))
-				// 定义计数器跟踪尝试建立的连接数
 				attemptedConnections := 0
 				for _, wsAddr := range conf.Settings.WsAddress {
 					if wsAddr == "" {
-						continue // Skip empty addresses
+						continue
 					}
-					attemptedConnections++ // 增加尝试连接的计数
+					attemptedConnections++
 					go func(address string) {
 						retry := config.GetLaunchReconectTimes()
 						var BotID uint64
@@ -383,7 +337,6 @@ func main() {
 						wsClientChan <- wsClient
 					}(wsAddr)
 				}
-				// 获取连接成功后的wsClient
 				for i := 0; i < attemptedConnections; i++ {
 					select {
 					case wsClient := <-wsClientChan:
@@ -393,23 +346,17 @@ func main() {
 					}
 				}
 
-				// 确保所有尝试建立的连接都有对应的wsClient
 				if len(wsClients) == 0 {
 					log.Println("Error: Not all wsClients are initialized!(反向ws未设置或全部连接失败)")
-					// 处理连接失败的情况 只启动正向
 					p = Processor.NewProcessorV2(api, apiV2, &conf.Settings)
 				} else {
 					log.Println("All wsClients are successfully initialized.")
-					// 所有客户端都成功初始化
 					p = Processor.NewProcessor(api, apiV2, &conf.Settings, wsClients)
 				}
 			} else {
-				// p一定需要初始化
 				p = Processor.NewProcessorV2(api, apiV2, &conf.Settings)
-				// 如果只启动了http api
 				if !conf.Settings.EnableWsServer {
 					if conf.Settings.HttpAddress != "" {
-						// 对全局生效
 						conf.Settings.HttpOnlyBot = true
 						log.Println("提示,目前只启动了httpapi,正反向ws均未配置.")
 					} else {
@@ -424,16 +371,12 @@ func main() {
 				}
 			}
 		} else {
-			// 设置颜色为红色
 			red := color.New(color.FgRed)
-			// 输出红色文本
 			red.Println("请设置正确的appid、token、clientsecret再试")
 		}
 	}
 
-	//图片上传 调用次数限制
 	rateLimiter := server.NewRateLimiter()
-	// 根据 lotus 的值选择端口
 	var serverPort string
 	if !conf.Settings.Lotus {
 		serverPort = conf.Settings.Port
@@ -442,45 +385,41 @@ func main() {
 	}
 	var r *gin.Engine
 	var hr *gin.Engine
-	if config.GetDeveloperLog() { // 是否启动调试状态
+	if config.GetDeveloperLog() {
 		r = gin.Default()
 		hr = gin.Default()
 	} else {
 		r = gin.New()
-		r.Use(gin.Recovery()) // 添加恢复中间件，但不添加日志中间件
+		r.Use(gin.Recovery())
 		hr = gin.New()
 		hr.Use(gin.Recovery())
 	}
-	// 使用 gRPC（Lotus 模式）或 HTTP 处理 IDMap
 	if !initLotusGrpc(conf.Settings.Lotus, conf.Settings.LotusGrpc, conf.Settings.LotusGrpcPort) {
 		r.GET("/getid", server.IDMapAuthMiddleware(), server.GetIDHandler)
 	}
 
 	webhookHandler := server.NewWebhookHandler(5000)
 
-	// 启动消息处理协程
 	go webhookHandler.ListenAndProcessMessages()
 
 	uploadAuth := server.UploadAuthMiddleware()
 
-	  r.GET("/updateport", uploadAuth, server.HandleIpupdate)
-	  r.POST("/delpic", uploadAuth, server.DeleteImageHandler(rateLimiter))
-	  r.GET("/healthz", uploadAuth, HealthzHandler)
-	      r.GET("/readyz", uploadAuth, HealthzHandler)
-	      r.GET("/metrics", uploadAuth, MetricsHandler)
-	  r.POST("/uploadpic", uploadAuth, server.UploadBase64ImageHandler(rateLimiter))
-	  r.POST("/uploadpicv2", uploadAuth, server.UploadBase64ImageHandlerV2(rateLimiter, apiV2))
-	  r.POST("/uploadpicv3", uploadAuth, server.UploadBase64ImageHandlerV3(rateLimiter, api))
-	  r.POST("/uploadrecord", uploadAuth, server.UploadBase64RecordHandler(rateLimiter))
-	// 使用 CreateHandleValidation，传入 WebhookHandler 实例
+	r.GET("/updateport", uploadAuth, server.HandleIpupdate)
+	r.POST("/delpic", uploadAuth, server.DeleteImageHandler(rateLimiter))
+	r.GET("/healthz", uploadAuth, HealthzHandler)
+	r.GET("/readyz", uploadAuth, HealthzHandler)
+	r.GET("/metrics", uploadAuth, MetricsHandler)
+	r.POST("/uploadpic", uploadAuth, server.UploadBase64ImageHandler(rateLimiter))
+	r.POST("/uploadpicv2", uploadAuth, server.UploadBase64ImageHandlerV2(rateLimiter, apiV2))
+	r.POST("/uploadpicv3", uploadAuth, server.UploadBase64ImageHandlerV3(rateLimiter, api))
+	r.POST("/uploadrecord", uploadAuth, server.UploadBase64RecordHandler(rateLimiter))
+
 	server.InitPrivateKey(conf.Settings.ClientSecret)
-	//r.POST("/"+conf.Settings.WebhookPath, server.CreateHandleValidationSafe(webhookHandler))
 
 	r.POST("/"+conf.Settings.WebhookPath, UnionFanout(server.CreateHandleValidationSafe(webhookHandler)))
 
 	r.Static("/channel_temp", "./channel_temp")
 	if config.GetFrpPort() == "0" && !config.GetDisableWebui() {
-		//webui和它的api
 		webuiGroup := r.Group("/webui")
 		{
 			webuiGroup.GET("/*filepath", webui.CombinedMiddleware(api, apiV2))
@@ -492,14 +431,14 @@ func main() {
 	} else {
 		mylog.Println("Either FRP port is set to '0' or WebUI is disabled.")
 	}
-	//正向http api
+
 	http_api_address := config.GetHttpAddress()
 	if http_api_address != "" {
 		mylog.Println("正向http api启动成功,监听" + http_api_address + "若有需要,请对外放通端口...")
 		hr.GET("/metrics", MetricsHandler)
 		hr.NoRoute(httpapi.CombinedMiddleware(api, apiV2))
 	}
-	//正向ws
+
 	if conf.Settings.AppID != 12345 {
 		if conf.Settings.EnableWsServer {
 			wspath := config.GetWsServerPath()
@@ -523,20 +462,14 @@ func main() {
 			c.String(200, content)
 		})
 
-		// 调用 config.GetIdentifyAppids 获取 appid 数组
 		identifyAppids := config.GetIdentifyAppids()
-
-		// 如果 identifyAppids 不是 nil 且有多个元素
 		if len(identifyAppids) >= 1 {
-			// 从数组中去除 config.GetAppID() 来避免重复
 			var filteredAppids []int64
 			for _, appid := range identifyAppids {
 				if appid != int64(config.GetAppID()) {
 					filteredAppids = append(filteredAppids, appid)
 				}
 			}
-
-			// 为每个 appid 设置路由
 			for _, appid := range filteredAppids {
 				fileName := fmt.Sprintf("%d.json", appid)
 				r.GET("/"+fileName, func(c *gin.Context) {
@@ -547,16 +480,14 @@ func main() {
 			}
 		}
 	}
-	// 创建一个http.Server实例（主服务器）
+
 	httpServer := &http.Server{
 		Addr:    "0.0.0.0:" + serverPort,
 		Handler: r,
 	}
 	mylog.Printf("gin运行在%v端口", serverPort)
-	// 在一个新的goroutine中启动主服务器
 	go func() {
 		if serverPort == "443" || conf.Settings.ForceSSL {
-			// 使用HTTPS
 			crtPath := config.GetCrtPath()
 			keyPath := config.GetKeyPath()
 			if crtPath == "" || keyPath == "" {
@@ -567,72 +498,51 @@ func main() {
 				log.Fatalf("listen (HTTPS): %s\n", err)
 			}
 		} else {
-			// 使用HTTP
 			if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Fatalf("listen: %s\n", err)
 			}
 		}
 	}()
 
-	// 如果主服务器使用443端口或conf.Settings.ForceSSL为true，同时在一个新的goroutine中启动conf.Settings.HttpPortAfterSSL端口的HTTP服务器
 	if serverPort == "443" || conf.Settings.ForceSSL {
 		go func() {
-			// 创建另一个http.Server实例（用于conf.Settings.HttpPortAfterSSL端口）
 			httpServerHttpPortAfterSSL := &http.Server{
 				Addr:    "0.0.0.0:" + conf.Settings.HttpPortAfterSSL,
 				Handler: r,
 			}
-
-			// 启动conf.Settings.HttpPortAfterSSL端口的HTTP服务器
 			if err := httpServerHttpPortAfterSSL.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Fatalf("listen (HTTP %s): %s\n", conf.Settings.HttpPortAfterSSL, err)
 			}
 		}()
 	}
-	// 创建 httpapi 的http server
+
 	if http_api_address != "" {
 		go func() {
-			// 创建一个http.Server实例（Http Api服务器）
 			httpServerHttpApi := &http.Server{
 				Addr:    http_api_address,
 				Handler: hr,
 			}
-			// 使用HTTP
 			if err := httpServerHttpApi.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Fatalf("http apilisten: %s\n", err)
 			}
 		}()
 	}
 
-	// // 启动一个用于 pprof 的 HTTP 服务器
-	// go func() {
-	// 	log.Println("pprof server running on :6060")
-	// 	if err := http.ListenAndServe("localhost:6060", nil); err != nil {
-	// 		log.Fatalf("pprof server failed: %s", err)
-	// 	}
-	// }()
-
-	//杂七杂八的地方
 	if conf.Settings.MemoryMsgid {
 		echo.StartCleanupRoutine()
 	}
 	idmap.StartUsernameCacheCleanup()
 
-	// 使用color库输出天蓝色的文本
 	cyan := color.New(color.FgCyan)
 	cyan.Printf("欢迎来到Gensokyo, 控制台地址: %s\n", webuiURL)
 	cyan.Printf("%s\n", template.Logo)
 	cyan.Printf("欢迎来到Gensokyo, 公网控制台地址(需开放端口): %s\n", webuiURLv2)
 
-	// 使用通道来等待信号
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	// 阻塞主线程，直到接收到信号
 	<-sigCh
 
-	// 关闭 WebSocket 连接
-	// wsClients 是一个 *wsclient.WebSocketClient 的切片
 	for _, client := range wsClients {
 		err := client.Close()
 		if err != nil {
@@ -640,329 +550,23 @@ func main() {
 		}
 	}
 
-	// 停止内存清理线程
 	if conf.Settings.MemoryMsgid {
 		echo.StopCleanupRoutine()
 	}
 
-	// 关闭BoltDB数据库
 	url.CloseDB()
 	idmap.CloseDB()
 
-	// 在关闭WebSocket客户端之前
 	for _, wsClient := range p.WsServerClients {
 		if err := wsClient.Close(); err != nil {
 			log.Printf("Error closing WebSocket server client: %v\n", err)
 		}
 	}
 
-	// 使用一个5秒的超时优雅地关闭Gin服务器
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := httpServer.Shutdown(ctx); err != nil {
 		log.Fatal("Server forced to shutdown:", err)
-	}
-}
-
-func runWithTimer(eventName string, fn func()) {
-	go func() {
-		start := time.Now()
-		fn()
-		elapsed := time.Since(start)
-		threshold := time.Duration(config.GetLogSlowEventThresholdMS()) * time.Millisecond
-		if elapsed > threshold {
-			mylog.IncrementSlowEvents()
-			mylog.Warnf("[SLOW] Event %s took %v (threshold: %v)", eventName, elapsed, threshold)
-		}
-	}()
-}
-
-// ReadyHandler 自定义 ReadyHandler 感知连接成功事件
-func ReadyHandler() event.ReadyHandler {
-	return func(event *dto.WSPayload, data *dto.WSReadyData) {
-		log.Println("连接成功,ready event receive: ", data)
-	}
-}
-
-// ErrorNotifyHandler 处理当 ws 链接发送错误的事件
-func ErrorNotifyHandler() event.ErrorNotifyHandler {
-	return func(err error) {
-		log.Println("error notify receive: ", err)
-	}
-}
-
-// ATMessageEventHandler 实现处理 频道at 消息的回调
-func ATMessageEventHandler() event.ATMessageEventHandler {
-	return func(event *dto.WSPayload, data *dto.WSATMessageData) error {
-		botstats.RecordMessageReceived()
-		if config.GetEnableChangeWord() {
-			data.Content = acnode.CheckWordIN(data.Content)
-			if data.Author.Username != "" {
-				data.Author.Username = acnode.CheckWordIN(data.Author.Username)
-			}
-		}
-
-		runWithTimer("ATMessage", func() {
-			p.ProcessGuildATMessage(data)
-		})
-		return nil
-	}
-}
-
-// GuildEventHandler 处理频道事件
-func GuildEventHandler() event.GuildEventHandler {
-	return func(event *dto.WSPayload, data *dto.WSGuildData) error {
-		log.Println(data)
-		return nil
-	}
-}
-
-// ChannelEventHandler 处理子频道事件
-func ChannelEventHandler() event.ChannelEventHandler {
-	return func(event *dto.WSPayload, data *dto.WSChannelData) error {
-		log.Println(data)
-		return nil
-	}
-}
-
-// MemberEventHandler 处理成员变更事件
-func MemberEventHandler() event.GuildMemberEventHandler {
-	return func(event *dto.WSPayload, data *dto.WSGuildMemberData) error {
-		go p.ProcessGuildMember(data, string(event.Type))
-		return nil
-	}
-}
-
-// DirectMessageHandler 处理私信事件
-func DirectMessageHandler() event.DirectMessageEventHandler {
-	return func(event *dto.WSPayload, data *dto.WSDirectMessageData) error {
-		botstats.RecordMessageReceived()
-		if config.GetEnableChangeWord() {
-			data.Content = acnode.CheckWordIN(data.Content)
-			if data.Author.Username != "" {
-				data.Author.Username = acnode.CheckWordIN(data.Author.Username)
-			}
-		}
-		runWithTimer("DirectMessage", func() {
-			p.ProcessChannelDirectMessage(data)
-		})
-		return nil
-	}
-}
-
-// CreateMessageHandler 处理消息事件 私域的事件 不at信息
-func CreateMessageHandler() event.MessageEventHandler {
-	return func(event *dto.WSPayload, data *dto.WSMessageData) error {
-		botstats.RecordMessageReceived()
-		if config.GetEnableChangeWord() {
-			data.Content = acnode.CheckWordIN(data.Content)
-			if data.Author.Username != "" {
-				data.Author.Username = acnode.CheckWordIN(data.Author.Username)
-			}
-		}
-		runWithTimer("CreateMessage", func() {
-			p.ProcessGuildNormalMessage(data)
-		})
-		return nil
-	}
-}
-
-// InteractionHandler 处理内联交互事件
-func InteractionHandler() event.InteractionEventHandler {
-	return func(event *dto.WSPayload, data *dto.WSInteractionData) error {
-		mylog.Printf("收到按钮回调:%v", data)
-		go p.ProcessInlineSearch(data)
-		return nil
-	}
-}
-
-// ThreadEventHandler 处理帖子事件
-func ThreadEventHandler() event.ThreadEventHandler {
-	return func(event *dto.WSPayload, data *dto.WSThreadData) error {
-		mylog.Printf("收到帖子事件:%v", data)
-		go p.ProcessThreadMessage(data)
-		return nil
-	}
-}
-
-// GroupATMessageEventHandler 实现处理 群at 消息的回调
-func GroupATMessageEventHandler() event.GroupATMessageEventHandler {
-	return func(event *dto.WSPayload, data *dto.WSGroupATMessageData) error {
-		runWithTimer("GroupATMessage", func() {
-			p.ProcessGroupMessage(data)
-		})
-
-		if !config.GetDisableErrorChan() {
-			botstats.RecordMessageReceived()
-		}
-
-		if config.GetEnableChangeWord() {
-			data.Content = acnode.CheckWordIN(data.Content)
-			if data.Author.Username != "" {
-				data.Author.Username = acnode.CheckWordIN(data.Author.Username)
-			}
-		}
-
-		return nil
-	}
-}
-
-// C2CMessageEventHandler 实现处理 群私聊 消息的回调
-func C2CMessageEventHandler() event.C2CMessageEventHandler {
-	return func(event *dto.WSPayload, data *dto.WSC2CMessageData) error {
-		runWithTimer("C2CMessage", func() {
-			p.ProcessC2CMessage(data)
-		})
-
-		if !config.GetDisableErrorChan() {
-			botstats.RecordMessageReceived()
-		}
-
-		if config.GetEnableChangeWord() {
-			data.Content = acnode.CheckWordIN(data.Content)
-			if data.Author.Username != "" {
-				data.Author.Username = acnode.CheckWordIN(data.Author.Username)
-			}
-		}
-
-		return nil
-	}
-}
-
-// GroupAddRobotEventHandler 实现处理 群机器人新增 事件的回调
-func GroupAddRobotEventHandler() event.GroupAddRobotEventHandler {
-	return func(event *dto.WSPayload, data *dto.GroupAddBotEvent) error {
-		go p.ProcessGroupAddBot(data)
-		return nil
-	}
-}
-
-// GroupDelRobotEventHandler 实现处理 群机器人删除 事件的回调
-func GroupDelRobotEventHandler() event.GroupDelRobotEventHandler {
-	return func(event *dto.WSPayload, data *dto.GroupAddBotEvent) error {
-		go p.ProcessGroupDelBot(data)
-		return nil
-	}
-}
-
-// GroupMsgRejectHandler 实现处理 群请求关闭机器人主动推送 事件的回调
-func GroupMsgRejectHandler() event.GroupMsgRejectHandler {
-	return func(event *dto.WSPayload, data *dto.GroupMsgRejectEvent) error {
-		go p.ProcessGroupMsgReject(data)
-		return nil
-	}
-}
-
-// GroupMsgReceiveHandler 实现处理 群请求开启机器人主动推送 事件的回调
-func GroupMsgReceiveHandler() event.GroupMsgReceiveHandler {
-	return func(event *dto.WSPayload, data *dto.GroupMsgReceiveEvent) error {
-		go p.ProcessGroupMsgRecive(data)
-		return nil
-	}
-}
-
-// FriendAddEventHandler 实现处理 用户添加机器人 事件的回调
-func FriendAddEventHandler() event.FriendAddEventHandler {
-	return func(event *dto.WSPayload, data *dto.WSFriendAddData) error {
-		// data.SceneParam 即为 generate_url_link 中的 callbackData
-		go p.ProcessFriendAdd(data)
-		return nil
-	}
-}
-
-// FriendDelEventHandler 实现处理 用户删除机器人 事件的回调
-func FriendDelEventHandler() event.FriendDelEventHandler {
-	return func(event *dto.WSPayload, data *dto.WSFriendDelData) error {
-		go p.ProcessFriendDel(data)
-		return nil
-	}
-}
-
-// C2CMsgRejectHandler 实现处理 用户关闭机器人C2C消息推送 事件的回调
-func C2CMsgRejectHandler() event.C2CMsgRejectHandler {
-	return func(event *dto.WSPayload, data *dto.WSC2CMsgRejectData) error {
-		go p.ProcessC2CMsgReject(data)
-		return nil
-	}
-}
-
-// C2CMsgReceiveHandler 实现处理 用户开启机器人C2C消息推送 事件的回调
-func C2CMsgReceiveHandler() event.C2CMsgReceiveHandler {
-	return func(event *dto.WSPayload, data *dto.WSC2CMsgReceiveData) error {
-		go p.ProcessC2CMsgReceive(data)
-		return nil
-	}
-}
-
-// GroupMemberAddEventHandler 实现处理 群成员新增 事件的回调
-func GroupMemberAddEventHandler() event.GroupMemberAddEventHandler {
-	return func(event *dto.WSPayload, data *dto.GroupMemberEvent) error {
-		data.EventID = event.ID
-		go p.ProcessGroupMember(data, "GROUP_MEMBER_ADD")
-		return nil
-	}
-}
-
-// GroupMemberRemoveEventHandler 实现处理 群成员移除 事件的回调
-func GroupMemberRemoveEventHandler() event.GroupMemberRemoveEventHandler {
-	return func(event *dto.WSPayload, data *dto.GroupMemberEvent) error {
-		go p.ProcessGroupMember(data, "GROUP_MEMBER_REMOVE")
-		return nil
-	}
-}
-
-func getHandlerByName(handlerName string) (interface{}, bool) {
-	switch handlerName {
-	case "ReadyHandler": //连接成功
-		return ReadyHandler(), true
-	case "ErrorNotifyHandler": //连接关闭
-		return ErrorNotifyHandler(), true
-	case "ATMessageEventHandler": //频道at信息
-		return ATMessageEventHandler(), true
-	case "GuildEventHandler": //频道事件
-		return GuildEventHandler(), true
-	case "MemberEventHandler": //频道成员新增
-		return MemberEventHandler(), true
-	case "ChannelEventHandler": //频道事件
-		return ChannelEventHandler(), true
-	case "DirectMessageHandler": //私域频道私信(dms)
-		return DirectMessageHandler(), true
-	case "CreateMessageHandler": //频道不at信息
-		return CreateMessageHandler(), true
-	case "InteractionHandler": //添加频道互动回应
-		return InteractionHandler(), true
-	case "ThreadEventHandler": //发帖事件
-		return ThreadEventHandler(), true
-	case "GroupATMessageEventHandler": //群at信息
-		return GroupATMessageEventHandler(), true
-	case "C2CMessageEventHandler": //群私聊
-		return C2CMessageEventHandler(), true
-	case "GroupAddRobotEventHandler": //群添加机器人
-		return GroupAddRobotEventHandler(), true
-	case "GroupDelRobotEventHandler": //群删除机器人
-		return GroupDelRobotEventHandler(), true
-	case "GroupMsgRejectHandler": //群请求关闭机器人主动推送
-		return GroupMsgRejectHandler(), true
-	case "GroupMsgReceiveHandler": //群请求开启机器人主动推送
-		return GroupMsgReceiveHandler(), true
-		// [新增] 下面是补全的4个用户/C2C相关事件
-	case "FriendAddEventHandler": //用户添加机器人
-		return FriendAddEventHandler(), true
-	case "FriendDelEventHandler": //用户删除机器人
-		return FriendDelEventHandler(), true
-	case "C2CMsgRejectHandler": //用户请求关闭机器人C2C主动推送
-		return C2CMsgRejectHandler(), true
-	case "C2CMsgReceiveHandler": //用户请求开启机器人C2C主动推送
-		return C2CMsgReceiveHandler(), true
-	case "GroupMessageEventHandler": // 普通群消息（无需@）
-		return GroupMessageEventHandler(), true
-	case "GroupMemberAddEventHandler": // 群成员新增
-		return GroupMemberAddEventHandler(), true
-	case "GroupMemberRemoveEventHandler": // 群成员移除
-		return GroupMemberRemoveEventHandler(), true
-	default:
-		log.Printf("Unknown handler: %s\n", handlerName)
-		return nil, false
 	}
 }
 
@@ -1026,7 +630,6 @@ func hasAnyHandler(enabledHandlers map[string]bool, names ...string) bool {
 	return false
 }
 
-// allEmpty checks if all the strings in the slice are empty.
 func allEmpty(addresses []string) bool {
 	for _, addr := range addresses {
 		if addr != "" {
@@ -1042,66 +645,54 @@ func setupConfigWatcher(configFilePath string) {
 		log.Fatalf("Error setting up watcher: %v", err)
 	}
 
-	// 添加一个100毫秒的Debouncing
-	//fileLoader := &config.ConfigFileLoader{EventDelay: 100 * time.Millisecond}
-
-	// Start the goroutine to handle file system events.
 	go func() {
 		for {
 			select {
 			case event, ok := <-watcher.Events:
 				if !ok {
-					return // Exit if channel is closed.
+					return
 				}
 				if event.Op&fsnotify.Write == fsnotify.Write {
 					fmt.Println("检测到配置文件变动:", event.Name)
-					//fileLoader.LoadConfigF(configFilePath)
 					config.LoadConfig(configFilePath, true)
 				}
 			case err, ok := <-watcher.Errors:
 				if !ok {
-					return // Exit if channel is closed.
+					return
 				}
 				log.Println("Watcher error:", err)
 			}
 		}
 	}()
 
-	// Add the config file to the list of watched files.
 	err = watcher.Add(configFilePath)
 	if err != nil {
 		log.Fatalf("Error adding watcher: %v", err)
 	}
 }
 
-// 过滤敏感头列表，转发时排除这些 Header
 var sensitiveHeaders = map[string]bool{
-	"authorization": true,
-	"cookie":        true,
-	"set-cookie":    true,
-	"x-token":       true,
-	"x-signature":   true,
-	"x-signature-256": true,
+	"authorization":    true,
+	"cookie":           true,
+	"set-cookie":       true,
+	"x-token":          true,
+	"x-signature":      true,
+	"x-signature-256":  true,
 }
 
-// 包装器：在执行原有处理器前，抓取 Body；在本地处理器运行的同时，异步原样转发到 UnionWebhook。
 func UnionFanout(base gin.HandlerFunc) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// 1) 读取并缓存原始请求体
 		body, err := io.ReadAll(c.Request.Body)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "read body failed"})
 			return
 		}
-		// 2) 复位 Body 给本地处理链使用
 		c.Request.Body = io.NopCloser(bytes.NewReader(body))
 
-		// 3) 异步转发一份到 UnionWebhook（若配置非空）
 		if uw := config.GetUnionWebhook(); uw != "" && uw != "0" {
 			method := c.Request.Method
-			headers := c.Request.Header.Clone() // 原样复制请求头
+			headers := c.Request.Header.Clone()
 
-			// 过滤敏感头，避免泄露 Authorization、Cookie 等凭证
 			for k := range headers {
 				if sensitiveHeaders[strings.ToLower(k)] {
 					delete(headers, k)
@@ -1118,39 +709,16 @@ func UnionFanout(base gin.HandlerFunc) gin.HandlerFunc {
 				if err != nil {
 					return
 				}
-				// 复制过滤后的请求头
 				for k, vs := range headers {
 					for _, v := range vs {
 						req.Header.Add(k, v)
 					}
 				}
-				// 发起转发（忽略返回结果，不影响主流程）
 				_, _ = http.DefaultClient.Do(req)
 			}(method, uw, headers, body)
 		}
 
-		// 4) 继续执行原有处理器（本地业务逻辑）
 		base(c)
-	}
-}
-
-// GroupMessageEventHandler 实现处理 普通群消息（无需@） 的回调
-func GroupMessageEventHandler() event.GroupMessageEventHandler {
-	return func(event *dto.WSPayload, data *dto.WSGroupMessageData) error {
-		mylog.Printf("[GroupMessageEventHandler] 收到非@群消息 ID=%v from=%v content=%v", data.ID, data.Author.ID, data.Content)
-		if config.GetEnableChangeWord() {
-			data.Content = acnode.CheckWordIN(data.Content)
-			if data.Author.Username != "" {
-				data.Author.Username = acnode.CheckWordIN(data.Author.Username)
-			}
-		}
-		runWithTimer("GroupMessage", func() {
-			p.ProcessGroupNormalMessage(data)
-		})
-		if !config.GetDisableErrorChan() {
-			botstats.RecordMessageReceived()
-		}
-		return nil
 	}
 }
 
@@ -1192,14 +760,13 @@ func MetricsHandler(c *gin.Context) {
 	c.String(http.StatusOK, output)
 }
 
-// HealthzHandler 健康检查端点，用于 K8s 探活和负载均衡
 func HealthzHandler(c *gin.Context) {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	c.JSON(http.StatusOK, gin.H{
-		"status":    "ok",
-		"uptime":    time.Since(mylog.StartTime).Seconds(),
+		"status":     "ok",
+		"uptime":     time.Since(mylog.StartTime).Seconds(),
 		"goroutines": runtime.NumGoroutine(),
-		"memory_mb": float64(m.Alloc) / 1024 / 1024,
+		"memory_mb":  float64(m.Alloc) / 1024 / 1024,
 	})
 }

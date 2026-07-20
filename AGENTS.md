@@ -109,26 +109,106 @@ Co-Authored-By: Agent <noreply@example.com>
 
 ## 🔧 构建与验证
 
-- 修改代码后运行 `go build ./...` 检查编译。
-- 运行 `go vet ./...`（如环境支持）。
-- 重点检查循环依赖：`imagehosting` 依赖 `config`，`images` 依赖两者，不要引入新循环。
-- **如果是纯文档性更新（README、docs/、CHANGELOG、AGENTS.md 等），无需构建测试。**
-- **每次构建后删除编译产生的测试/临时文件（如 `_fix_paths.py`），保持仓库干净。**
+### 基础命令
+
+- 编译检查：`go build ./...`（默认编译 `!small` 标签集，即完整版）
+- 静态分析：`go vet ./...`（如环境支持）
+- 构建脚本（Windows）：`powershell ./build.ps1`，支持 `-All`、`-NoWebUI`、`-LinuxOnly` 等参数
+
+### ⚠️ 构建标签（Build Tags）—— 重要！
+
+本项目大量使用 Go 构建标签条件编译，不同标签组合编译不同的文件集：
+
+| 标签 | 包含内容 | 排除内容 |
+|------|----------|----------|
+| 无标签（默认） | WebUI、gRPC、OSS（阿里云/腾讯云/百度云）、二维码、MP3 编码 | — |
+| `-tags=small` | 无前端（noWebUI）精简版 | WebUI、gRPC、OSS、二维码、MP3 编码 |
+
+**非对称编译注意事项：**
+- `go build ./...` 默认编译所有 `!small` 文件，**不会**编译 `small` 标签的文件
+- `go build -tags=small ./...` 编译 `small` 文件，但会跳过 `!small` 文件
+- 平台相关约束：`windows` / `!windows`、`linux \|\| darwin`、`386 \|\| arm` / `amd64 \|\| arm64`
+- 特殊标签：`map_idmap`（仅编译 idmap 独立服务）
+- **修改代码后，建议同时用两种标签集验证编译：** `go build ./...` 和 `go build -tags=small ./...`
+
+### 循环依赖红线
+
+- `imagehosting` 依赖 `config`，`images` 依赖两者，不要引入新的反向依赖。
+- `handlers` 依赖大量包（`config`、`images`、`idmap`、`echo`、`callapi` 等），注意不要形成循环。
+
+### 其他
+
+- **纯文档性更新**（README、docs/、CHANGELOG、AGENTS.md 等），无需构建测试。
+- **每次构建后删除编译产生的测试/临时文件**（如 `_fix_paths.py`），保持仓库干净。
+- build 信息通过 ldflags 注入：`-X github.com/hoshinonyaruko/gensokyo/buildinfo.BuildType=... -X ...BuildSpec=...`
 
 ## 📁 关键目录结构
 
 ```
-├── config/           # 配置加载与访问器
-├── docs/             # 文档
-├── handlers/         # 消息处理
-├── imagehosting/     # 统一图床后端（oss_type 4~10）
-├── images/           # 图片上传 API
-├── structs/          # 配置结构体定义
-├── template/         # 配置模板
-├── release_log/      # 变更日志
-├── botgo/            # QQ Bot SDK（Fork）
-└── frontend/         # WebUI 前端
+├── Processor/         # ⚡ 事件处理（C2C/群/频道/频道私信/Thread 等消息事件）
+├── callapi/           # OneBot API 调用分发
+├── config/            # 配置加载与访问器（YAML，版本化）
+├── docs/              # 文档（CQ码、API、Markdown 消息等）
+├── echo/              # 消息 ID 映射（messageID ↔ echo）
+├── handlers/          # 📨 OneBot API 动作实现（每个文件对应一个 action）
+├── httpapi/           # HTTP API 服务层
+├── idmap/             # ID 映射（支持 gRPC 后端，构建标签控制）
+├── imagehosting/      # 🖼️ 图床后端（oss_type 4~10：Bilibili/ChatGLM/COS/星野/Nature/QQ频道）
+├── images/            # 图片压缩与上传 API
+├── mylog/             # 自定义日志库
+├── oss/               # OSS 对象存储（阿里云/腾讯云/百度云，构建标签控制）
+├── server/            # HTTP/WebSocket 服务器
+├── silk/              # 语音编码（silk/MP3，构建标签控制）
+├── structs/           # 配置结构体定义（Settings）
+├── sys/               # 系统操作（重启、安全启动，平台相关实现）
+├── template/          # 配置模板生成
+├── url/               # URL 处理工具
+├── webui/             # WebUI 后端（构建标签控制）
+├── wsclient/          # WebSocket 客户端
+├── botgo/             # 🔄 QQ Bot SDK（Fork：tencent-connect/botgo，本地替换）
+├── go-silk/           # 🔄 Silk 编码库（Fork：wdvxdr1123/go-silk，本地替换）
+├── frontend/          # Quasar/Vue3 WebUI 前端
+├── release_log/       # 变更日志
+├── acnode/            # acnode 服务
+├── botstats/          # 机器人统计
+├── buildinfo/         # 构建版本信息（ldflags 注入）
+├── proto/             # gRPC protobuf 定义（构建标签控制）
+└── build.ps1          # Windows 构建脚本
 ```
+
+## ⚠️ 非显而易见的坑（Gotchas）
+
+### 1. `botgo` 和 `go-silk` 是本地 Fork
+
+`go.mod` 中有两条 `replace` 指令：
+
+```
+replace github.com/tencent-connect/botgo => ./botgo
+replace github.com/wdvxdr1123/go-silk => ./go-silk
+```
+
+这两个目录是完整的外部仓库 Fork，**不是本项目自有的代码**。修改它们相当于修改上游 SDK，需谨慎；且这两个目录有自己的 `go.mod`，`go build ./...` 不会递归编译它们。
+
+### 2. `Processor/` 是目录名，不是 Go 包名规范
+
+`Processor/` 目录首字母大写，包名声明为 `package Processor`（大写 P）。这不遵循 Go 的 `package` 推荐命名（小写），但这是项目既有约定，不要修改。
+
+### 3. `handlers/` vs `Processor/` 的职责区分
+
+- **`handlers/`**：处理 OneBot API **出站请求**（如 `send_group_msg`、`send_private_msg`），每个文件对应一个 action
+- **`Processor/`**：处理 **入站事件**（QQ Bot SDK 推送的 C2C/Group/Guild 消息事件），每个文件对应一种事件类型
+
+### 4. Config 是版本化的 YAML
+
+配置文件有一个 `version` 字段，`config.LoadConfig` 会根据版本号做迁移。`restartRequiredFields` 列出的字段修改后需要重启才能生效，不会热加载。
+
+### 5. CQ 码解析集中在一处
+
+所有 CQ 码解析逻辑在 `handlers/message_parser.go`（~2600 行），包括标准 CQ 码（`[CQ:at]`、`[CQ:image]`、`[CQ:reply]` 等）和扩展 CQ 码（`[CQ:markdown]`、`[CQ:embed]`、`[CQ:active]` 等）。修改 CQ 码解析逻辑时，注意同步更新 `docs/cq码/` 下的文档。
+
+### 6. 图床后端通过 oss_type 枚举选择
+
+`config` 中的 `OssType` 整数控制使用哪个图床后端，`imagehosting/` 下每个文件对应一个后端。`OssType` 0=本地, 1=腾讯COS, 2=阿里OSS, 3=百度BOS, 4~10=各图床后端。不要添加重复的 `enabled` 开关。
 
 ## 📢 本文件
 
