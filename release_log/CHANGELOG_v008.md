@@ -359,4 +359,32 @@ dae26cc fix: 修复 CQ 码处理的多项需谨慎问题
 54ba0ff fix: 修复 CQ 码处理的高风险问题
 c7c72b8 fix: 补齐 CQ 码处理的多项边缘问题
 215f6bc docs: 更新本版新增功能文档与 Markdown 消息文档
+	751d91d docs: 按 v006/v007 格式重构 CHANGELOG_v008
+	c9afe0c fix: WebUI API 增加 Cookie 认证 (GSK-001)
+	63a0b0b fix: 配置文件写入权限改为 0600 (GSK-002)
+	f7a6508 fix: safeLocalPath 增加基础目录限制 (GSK-003)
+	47ecb29 fix: 频道图片下载增加 SSRF 校验与超时 (GSK-004)
+	b45f90a fix: 统一封装带超时的 HTTP Client (GSK-005)
+	829d174 fix: 敏感信息日志脱敏 (GSK-006)
+	e7b9032 fix: 上传/删除接口增加 access_token 认证 (GSK-007)
+	8ae8ccb fix: SSRF 重定向校验 (GSK-008)
+	c5d2769 fix: /getid HMAC 增加时间戳和查询参数 (GSK-009)
+	671f8b1 fix: 移除默认弱口令 (GSK-010)
+	5ca77d1 fix: UnionWebhook 转发过滤敏感头 (GSK-011)
+	9e915ef fix: WebSocket Origin 校验 (GSK-012)
+	0691b90 fix: /updateport 增加认证 (GSK-013)
+	967a371 fix: 外部命令安全加固 (GSK-014)
+	fa69eb8 fix: 公网 IP 获取改用 HTTPS (GSK-015)
+	15e7f8d fix: 短链接 token 改用 HMAC-SHA256 (GSK-016)
+	a2140ec fix: 监控端点增加访问控制 (GSK-017)
+	47452ec feat: 添加 is_full_group_message 字段区分群消息来源
+	dc57b69 docs: 更新 is_full_group_message 字段文档与 changelog
+	e342d43 fix: is_full_group_message 改为默认始终启用，移除 NativeOb11 配置依赖
+	04d4a18 fix: 修复 CHANGELOG_v008 bugfix 引入的逻辑错误
+	ee91d3c fix: 补充 send_private_msg 回复处理遗漏和 send_group_msg foundItems reply 引用错误
+	e537357 fix: configAndUserInfoDB 新安装时返回 nil DB 导致 panic
+	12c274d fix: 为 idmap/service.go 和 webui/cookie.go 中所有 db 直接调用添加 nil 检查
+	ec7d696 refactor: 全面重构项目结构
+	1f21217 feat: 普通文本出站 [CQ:at] 转为 @用户名，Markdown 出站整个 messageText 合并到 md 头部
+	74d405f docs: 完善 AGENTS.md，补充架构说明、陷阱列表和构建细节
 ```

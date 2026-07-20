@@ -121,12 +121,12 @@ event.json()  # 查看完整字段
 **规则：**
 - 入站 `@bot` 从 content 中剥离（`to_me = true`）
 - 入站 `@其他人` 转为 `[CQ:at,qq=虚拟ID]`
-- 出站 `[CQ:at,qq=数字]` 转为 `<qqbot-at-user id="OpenID" />`（仅 Markdown 消息，普通文本不转换）
-- q群 纯文本出站消息中 @ 可能不渲染（QQ API 限制）
+- 出站 `[CQ:at,qq=数字]`：纯文本消息转为 `@用户名 `（带空格），Markdown 消息转为 `<qqbot-at-user id="OpenID" />`
+- 纯文本出站时 @ 转为 `@用户名` 格式，用户名来自内存缓存（入站时自动缓存，10 分钟 TTL）
 
 ### Markdown 中的 @ 能力
 
-在 Markdown 卡片（`msg_type=2`）内容中嵌入 `[CQ:at,qq=数字]`，Gensokyo 会自动将其转换为 QQ API 的 `<qqbot-at-user>` 标签。
+在 Markdown 卡片（`msg_type=2`）内容中嵌入 `[CQ:at,qq=数字]`，Gensokyo 会自动将其转换为 QQ API 的 `<qqbot-at-user>` 标签，并且**整个 `messageText`**（含 `<qqbot-at-user>` 标签和文本内容）会合并到 Markdown 内容头部，确保文本不丢失。
 
 **nonebot2 示例：**
 
