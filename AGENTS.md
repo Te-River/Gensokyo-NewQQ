@@ -6,7 +6,7 @@
 
 ## 🎯 项目简介
 
-Gensokyo-NewQQ 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 标准的 QQ 机器人服务端，将 QQ 官方 API 和 WebSocket 事件转换为 OneBot V11 协议。使用 Go 语言开发。
+Gensokyo-NewQQ 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 标准的 QQ 机器人服务端，将 QQ 官方 API 和 WebSocket 事件转换为 OneBot V11 协议。使用 Go 语言开发（Go 1.25）。
 
 ## 🌐 语言
 
@@ -84,6 +84,67 @@ Co-Authored-By: Agent <noreply@example.com>
 - `git reset --hard` 丢弃未提交的更改
 - `git checkout -- <file>` 或 `git restore <file>` 丢弃未提交的更改
 
+## 🏗 架构与数据流
+
+### 消息流向
+
+```
+QQ API → Processor/ (入站事件处理) → OneBot 后端
+OneBot 后端 → handlers/ (出站 API 调用) → parseMessageContent → foundItems → 发送
+```
+
+- **入站**（QQ API → 后端）：`Processor/` 目录处理各类事件，将 `<@OpenID>` 转换为 `[CQ:at,qq=虚拟ID]`，建立 idmap 映射
+- **出站**（后端 → QQ API）：`handlers/` 目录处理 OneBot 请求，核心入口 `parseMessageContent()` 解析消息，产出 `foundItems` map 供后续发送
+
+### Handler 注册模式
+
+每个 handler 文件通过 `init()` 函数注册自身：
+
+```go
+func init() {
+    callapi.RegisterHandler("send_group_msg", HandleSendGroupMsg)
+}
+```
+
+同一 handler 可注册多个 action 名称（如 `send_group_msg` 和 `send_to_group` 指向同一函数）。
+
+### foundItems 机制
+
+`parseMessageContent()` 返回 `(messageText string, foundItems map[string][]string)`，`foundItems` 是出站发送的核心桥梁。所有媒体/控制信息通过 key 传递：
+
+| key | 类型 | 说明 |
+|-----|------|------|
+| `reply_msg_id` | 控制 | 回复消息 ID |
+| `active` / `active_type` / `active_sub_type` | 控制 | 主动推送标记 |
+| `markdown` | 媒体 | base64 编码的 Markdown JSON |
+| `local_image` / `url_image` / `url_images` / `base64_image` | 媒体 | 图片 |
+| `local_record` / `url_record` / `url_records` / `base64_record` | 媒体 | 语音 |
+| `local_video` / `url_video` / `url_videos` / `base64_video` | 媒体 | 视频 |
+| `qqmusic` | 媒体 | QQ 音乐 |
+| `local_file` / `url_file` / `url_files` / `base64_file` | 媒体 | 文件 |
+| `file_name` | 媒体 | 文件名（配合文件 key） |
+| `unknown_image` / `unknown_record` / `unknown_file` | 回退 | 无法识别的媒体 |
+
+遍历 `foundItems` 发送时，必须跳过控制型 key：`active`、`active_type`、`active_sub_type`、`reply_msg_id`、`file_name`。
+
+### idmap 系统
+
+虚拟数字 ID 与 QQ 真实 OpenID 之间的双向映射，基于 bbolt 本地数据库（`idmap.db`）：
+
+- `RetrieveRowByIDv2(虚拟ID)` → 真实 OpenID
+- `RetrieveVirtualValuev2(OpenID)` → 虚拟 ID
+- `StoreUserName(虚拟ID, 用户名)` / `GetUserName(虚拟ID)` — 内存缓存，10 分钟 TTL
+- 支持 gRPC 远程模式（`idmap/grpc.go`，需 `-tags=!small`）
+
+### echo 系统
+
+消息 ID 映射与事件缓存：
+
+- `StoreCachev2(真实ID)` → 虚拟 int64 ID
+- `RetrieveRowByCachev2(虚拟ID)` → 真实 ID（格式 `"GroupID MessageID"`）
+- `GetMapping(id)` / `AddMapping(id, count)` — 递归调用计数
+- `GetLazyMessagesId(群OpenID)` — 被动转主动消息的 message_id 缓存
+
 ## 💻 代码风格
 
 ### 最小改动原则
@@ -109,25 +170,59 @@ Co-Authored-By: Agent <noreply@example.com>
 
 ## 🔧 构建与验证
 
-- 修改代码后运行 `go build ./...` 检查编译。
-- 运行 `go vet ./...`（如环境支持）。
-- 重点检查循环依赖：`imagehosting` 依赖 `config`，`images` 依赖两者，不要引入新循环。
-- **如果是纯文档性更新（README、docs/、CHANGELOG、AGENTS.md 等），无需构建测试。**
-- **每次构建后删除编译产生的测试/临时文件（如 `_fix_paths.py`），保持仓库干净。**
+- **编译检查**：`go build ./...`（修改代码后必须运行）
+- **静态分析**：`go vet ./...`（如环境支持）
+- **测试**：仅 1 个测试文件 `handlers/delete_group_msg_test.go`，运行 `go test ./handlers/`
+- **构建脚本**：`build.ps1`（Windows PowerShell），支持 `-All`、`-LinuxOnly`、`-NoWebUI`、`-NoUPX`
+- **构建标签**：`-tags=small` 会移除 WebUI、gRPC、QR 码、OSS 后端（阿里云/百度云/腾讯云），通过 `//go:build !small` 控制
+- **`go:embed` 要求**：`webui/dist/` 目录必须存在（含占位文件），否则 `go build` 因 `go:embed` 失败。`build.ps1` 的 `Ensure-WebUIDist` 会自动创建占位文件
+- **CGO**：`CGO_ENABLED=0`（交叉编译）
+- **循环依赖**：注意 `imagehosting` 依赖 `config`，`images` 依赖两者，不要引入新循环
+- **纯文档更新**（README、docs/、CHANGELOG、AGENTS.md 等）：无需构建测试
+- **清理**：每次构建后删除编译产生的测试/临时文件（如 `_fix_paths.py`），保持仓库干净
+
+## ⚠️ 非显而易见的陷阱
+
+- **`go-silk/` 是 fork 依赖**：不是 Go module 依赖，是直接放在仓库里的 silk 音频编码 SDK，修改需谨慎
+- **`silk/` 目录**： silk 音频编码的 Go 封装，使用 `//go:embed exec/*` 嵌入二进制文件，`mp3_real.go`/`mp3_stub.go` 通过 `//go:build !small`/`small` 切换
+- **配置系统**：`structs.Settings` 定义配置结构体（YAML 标签），`config/config.go` 提供 `GetXxx()` 访问器，部分配置项修改后需要重启（`restartRequiredFields` 列表）
+- **`StringOb11` 模式**：`config.GetStringOb11()` 控制消息 ID 类型（string vs int64），影响大量 ID 转换逻辑
+- **`LazyMessageId` 系统**：`config.GetLazyMessageId()` 启用被动转主动消息，`messageID == "2000"` 是特殊值表示主动推送
+- **`SSM`（Send Stack Messages）**：当消息发送失败（`code:22009`）时，消息会入队等待下次被动回复时补发
+- **`removeAt` 与 `convertOtherAt`**：`GetRemoveAt()` 控制入站时是否剥离 @bot，`GetConvertOtherAt()` 控制是否将 @其他人 转为 CQ 码
+- **`addAtGroup`**：`GetAddAtGroup()` 在出站群消息前自动添加 `[CQ:at,qq=AppID]`，注意这会与 `transformMessageTextAt` 中的 `[CQ:at]` 处理产生交互
+- **`arrayValue` 模式**：`GetArrayValue()` 控制消息以消息段数组（`[]interface{}`）还是字符串形式上报，影响 `ConvertToSegmentedMessage` 的调用
+- **`msg_type` 字段**：`MsgType=2` 是 Markdown，`MsgType=7` 是图文混合，`MsgType=0` 是普通文本
+- **`IsWakeup` 字段**：`send_private_msg_wakeup` 的 `MessageToCreate` 必须设置 `IsWakeup=true` 且 `MsgID`/`EventID` 为空（互斥）
 
 ## 📁 关键目录结构
 
 ```
-├── config/           # 配置加载与访问器
-├── docs/             # 文档
-├── handlers/         # 消息处理
+├── Processor/        # 入站事件处理（QQ API → OneBot）
+├── handlers/         # 出站 API 处理（OneBot → QQ API）+ 消息解析
+├── config/           # 配置加载与 GetXxx() 访问器
+├── structs/          # 配置结构体定义（Settings）
+├── idmap/            # 虚拟 ID ↔ OpenID 双向映射（bbolt + gRPC）
+├── echo/             # 消息 ID 映射、事件缓存、递归计数
+├── callapi/          # Handler 注册框架 + ActionMessage 定义
 ├── imagehosting/     # 统一图床后端（oss_type 4~10）
 ├── images/           # 图片上传 API
-├── structs/          # 配置结构体定义
+├── botgo/            # QQ Bot SDK（Tencent 官方 Fork）
+├── go-silk/          # Silk 音频编码 SDK（Fork，直接放在仓库中）
+├── silk/             # Silk 音频编码 Go 封装
+├── mylog/            # 自定义日志库
+├── webui/            # WebUI 前端构建产物（go:embed）
+├── frontend/         # WebUI 前端源码（Vue3 + Quasar）
 ├── template/         # 配置模板
+├── docs/             # 文档
 ├── release_log/      # 变更日志
-├── botgo/            # QQ Bot SDK（Fork）
-└── frontend/         # WebUI 前端
+├── acnode/           # 敏感词过滤
+├── mdutil/           # Markdown 工具
+├── oss/              # OSS 存储后端（阿里云/百度云/腾讯云，通过 build tag 切换）
+├── proto/            # gRPC 协议定义
+├── server/           # HTTP 服务
+├── wsclient/         # WebSocket 客户端
+├── httpapi/          # HTTP API 接口
 ```
 
 ## 📢 本文件
