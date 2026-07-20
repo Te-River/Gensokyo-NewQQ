@@ -210,6 +210,23 @@ replace github.com/wdvxdr1123/go-silk => ./go-silk
 
 `config` 中的 `OssType` 整数控制使用哪个图床后端，`imagehosting/` 下每个文件对应一个后端。`OssType` 0=本地, 1=腾讯COS, 2=阿里OSS, 3=百度BOS, 4~10=各图床后端。不要添加重复的 `enabled` 开关。
 
+### 7. 消息类型检测共享函数
+
+为了消除重复代码，`handlers/handler_shared.go` 提供了两个共享函数：
+- `GetMessageTypeByUseridAndGroupid(userid, groupid interface{}) string` - 组合检测消息类型
+- `ValidateGroupOrUserIDs(groupid, userid interface{}) bool` - 验证 GroupID 和 UserID 至少有一个有效
+
+这些函数已被用于替换 7 个 handler 文件中的重复代码：
+- `send_group_msg.go`
+- `send_private_msg.go`
+- `send_guild_channel_msg.go`
+- `send_guild_channel_forum.go`
+- `send_msg.go`
+- `send_group_msg_raw.go`
+- `get_group_info.go`
+
+新增代码时，请使用这些共享函数，避免重复编写消息类型检测和验证逻辑。
+
 ## 📢 本文件
 
 - 本文件（`AGENTS.md`）允许随仓库一起公开上传至 GitHub。

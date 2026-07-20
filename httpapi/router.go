@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"github.com/gin-gonic/gin"
-	"github.com/hoshinonyaruko/gensokyo/callapi"
 	"github.com/tencent-connect/botgo/openapi"
 )
 

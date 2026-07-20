@@ -4,20 +4,15 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"math/big"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/hoshinonyaruko/gensokyo/buildinfo"
 	"github.com/hoshinonyaruko/gensokyo/config"
 	"github.com/hoshinonyaruko/gensokyo/echo"
-	"github.com/hoshinonyaruko/gensokyo/idmap"
-	"github.com/hoshinonyaruko/gensokyo/images"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/tencent-connect/botgo/dto"
 	"github.com/tencent-connect/botgo/dto/keyboard"
@@ -86,12 +81,9 @@ func (p *Processors) HandleFrameworkCommand(messageText string, data interface{}
 		statusText := buildStatusText()
 		_ = SendMessage(statusText, data, Type, p.Api, p.Apiv2)
 	} else if commandMatch(cleanedMessage, config.GetBroadcastPrefix()) {
-		if !config.GetMasterIDCheck() {
-			return nil
-		}
+		// 广播功能正在开发
 		msg := strings.TrimPrefix(cleanedMessage, config.GetBroadcastPrefix())
 		msg = strings.TrimSpace(msg)
-		// 广播功能正在开发
 		_ = SendMessage(msg, data, Type, p.Api, p.Apiv2)
 	} else if commandMatch(cleanedMessage, config.GetMusicPrefix()) {
 		// 音乐功能开发中

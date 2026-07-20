@@ -28,25 +28,12 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 		// 当 message.Echo 是字符串类型时执行此块
 		msgType = echo.GetMsgTypeByKey(echoStr)
 	}
-	if message.Params.GroupID != nil && len(message.Params.GroupID.(string)) != 32 {
-		if msgType == "" && message.Params.GroupID != nil && checkZeroGroupID(message.Params.GroupID) {
-			msgType = GetMessageTypeByGroupid(config.GetAppIDStr(), message.Params.GroupID)
-		}
-		if msgType == "" && message.Params.UserID != nil && checkZeroUserID(message.Params.UserID) {
-			msgType = GetMessageTypeByUserid(config.GetAppIDStr(), message.Params.UserID)
-		}
-		if msgType == "" && message.Params.GroupID != nil && checkZeroGroupID(message.Params.GroupID) {
-			msgType = GetMessageTypeByGroupidV2(message.Params.GroupID)
-		}
-		if msgType == "" && message.Params.UserID != nil && checkZeroUserID(message.Params.UserID) {
-			msgType = GetMessageTypeByUseridV2(message.Params.UserID)
-		}
+	if message.Params.GroupID != nil && len(message.Params.GroupID.(string)) != 32 && msgType == "" {
+		msgType = GetMessageTypeByUseridAndGroupid(message.Params.UserID, message.Params.GroupID)
 	}
 
-	// New checks for UserID and GroupID being nil or 0
-	if (message.Params.UserID == nil || !checkZeroUserID(message.Params.UserID)) &&
-		(message.Params.GroupID == nil || !checkZeroGroupID(message.Params.GroupID)) {
-		mylog.Printf("send_group_msgs接收到错误action: %v", message)
+	// 验证 UserID 和 GroupID 至少有一个有效
+	if !ValidateGroupOrUserIDs(message.Params.GroupID, message.Params.UserID) {
 		return "", nil
 	}
 

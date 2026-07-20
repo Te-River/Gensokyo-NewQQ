@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/hoshinonyaruko/gensokyo/callapi"
-	"github.com/hoshinonyaruko/gensokyo/config"
 	"github.com/hoshinonyaruko/gensokyo/echo"
 	"github.com/hoshinonyaruko/gensokyo/idmap"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
@@ -90,10 +89,7 @@ func HandleGetGroupInfo(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		msgType = echo.GetMsgTypeByKey(echoStr)
 	}
 	if msgType == "" {
-		msgType = GetMessageTypeByGroupid(config.GetAppIDStr(), message.Params.GroupID)
-	}
-	if msgType == "" {
-		msgType = GetMessageTypeByGroupidV2(message.Params.GroupID)
+		msgType = GetMessageTypeByUseridAndGroupid(nil, message.Params.GroupID)
 	}
 	switch msgType {
 	case "guild", "guild_private":

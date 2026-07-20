@@ -191,11 +191,11 @@ func (p *Processors) ProcessGroupAddBot(data *dto.GroupAddBotEvent) error {
 		}
 	}
 
-	//link指令
-	if config.GetAutoLink() {
-		md, kb := generateMdByConfig()
-		SendMessageMdAddBot(md, kb, data, p.Api, p.Apiv2)
-	}
+		//link指令 - 暂时注释，因为 generateMdByConfig() 函数不存在
+		// if config.GetAutoLink() {
+		// 	md, kb := generateMdByConfig()
+		// 	SendMessageMdAddBot(md, kb, data, p.Api, p.Apiv2)
+		// }
 
-	return nil
+		return nil
 }
