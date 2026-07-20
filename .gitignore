@@ -52,7 +52,7 @@ webui/dist/js/placeholder.js
 
 # AI editors / assistant tooling (local only)
 .zcode/
-.atmocode/
+.atomcode/
 .aider*
 .cursor/
 .claude/
