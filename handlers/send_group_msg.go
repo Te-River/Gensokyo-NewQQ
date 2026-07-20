@@ -466,26 +466,26 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			}
 
 					var md *dto.Markdown
-					var kb *keyboard.MessageKeyboard
-					if mdItems, ok := foundItems["markdown"]; ok && len(mdItems) > 0 {
-						md, kb = parseMarkdownFromMessage(mdItems[0])
-						// 步骤 1: 转换 markdown 内部和 messageText 中的 [CQ:at] 为 <qqbot-at-user>
-						if md != nil && md.Content != "" {
-							md.Content = ResolveMarkdownAtMentions(md.Content)
-							md.Content = ResolveMarkdownImages(md.Content, apiv2)
-						}
-						messageText = ResolveMarkdownAtMentions(messageText)
-						// 步骤 2: 提取 messageText 中转换后的 @ 标签，合并到 markdown 头部
-						atRe := regexp.MustCompile(`<qqbot-at-user\s+id="[^"]*"\s*/>`)
-						atTags := atRe.FindAllString(messageText, -1)
-						if len(atTags) > 0 {
-							md.Content = strings.Join(atTags, "\n") + "\n" + md.Content
-						}
-						// 步骤 3: 清理 messageText 中已处理的标签
-						mdRe := regexp.MustCompile(`\[CQ:markdown,[^\]]*\]`)
-						messageText = mdRe.ReplaceAllString(messageText, "")
-						messageText = atRe.ReplaceAllString(messageText, "")
-					}
+					    var kb *keyboard.MessageKeyboard
+					    if mdItems, ok := foundItems["markdown"]; ok && len(mdItems) > 0 {
+					     md, kb = parseMarkdownFromMessage(mdItems[0])
+					     // 步骤 1: 转换 markdown 内部和 messageText 中的 [CQ:at] 为 <qqbot-at-user>
+					     if md != nil && md.Content != "" {
+					      md.Content = ResolveMarkdownAtMentions(md.Content)
+					      md.Content = ResolveMarkdownImages(md.Content, apiv2)
+					     }
+					     messageText = ResolveMarkdownAtMentions(messageText)
+					     // 步骤 2: 将整个 messageText 合并到 markdown 内容头部（qq 官方 md 整个消息以 md 语法渲染）
+					     md.Content = messageText + "\n" + md.Content
+					     // 步骤 3: 清理 messageText 中的 [CQ:markdown] 标记
+					     mdRe := regexp.MustCompile(`\[CQ:markdown,[^\]]*\]`)
+					     messageText = mdRe.ReplaceAllString(messageText, "")
+					    }
+
+					    // 没有 markdown 时，纯文本消息转换 [CQ:at] 为 @用户名
+					    if md == nil {
+					     messageText = resolvePlainTextAtMentions(messageText)
+					    }
 
 			// message.Params.GroupID 已在前面转换为真实 OpenID，直接使用
 

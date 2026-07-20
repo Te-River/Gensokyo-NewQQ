@@ -293,25 +293,30 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			groupMessage.Timestamp = time.Now().Unix() // 设置时间戳
 
 			// 处理 [CQ:markdown] → 将消息类型切换为 markdown
-			    var md *dto.Markdown
-			    var kb *keyboard.MessageKeyboard
-			    if mdItems, ok := foundItems["markdown"]; ok && len(mdItems) > 0 {
-			     md, kb = parseMarkdownFromMessage(mdItems[0])
-			     if md != nil && md.Content != "" {
-			      md.Content = ResolveMarkdownAtMentions(md.Content)
-			      md.Content = ResolveMarkdownImages(md.Content, apiv2)
-			     }
-			     if md != nil {
-			      groupMessage.Markdown = md
-			      groupMessage.Keyboard = kb
-			      groupMessage.MsgType = 2
-			      groupMessage.Content = ""
-			      delete(foundItems, "markdown")
-			      mylog.Printf("[CQ:markdown] 将私聊消息类型切换为 markdown")
-			     }
-			    }
+			        var md *dto.Markdown
+			        var kb *keyboard.MessageKeyboard
+			        if mdItems, ok := foundItems["markdown"]; ok && len(mdItems) > 0 {
+			         md, kb = parseMarkdownFromMessage(mdItems[0])
+			         if md != nil && md.Content != "" {
+			          md.Content = ResolveMarkdownAtMentions(md.Content)
+			          md.Content = ResolveMarkdownImages(md.Content, apiv2)
+			         }
+			         if md != nil {
+			          groupMessage.Markdown = md
+			          groupMessage.Keyboard = kb
+			          groupMessage.MsgType = 2
+			          groupMessage.Content = ""
+			          delete(foundItems, "markdown")
+			          mylog.Printf("[CQ:markdown] 将私聊消息类型切换为 markdown")
+			         }
+			        }
 
-			    // 处理 [CQ:reply,id=数字] → message_reference + msg_id
+			        // 没有 markdown 时，纯文本消息转换 [CQ:at] 为 @用户名
+			        if md == nil {
+			         groupMessage.Content = resolvePlainTextAtMentions(groupMessage.Content)
+			        }
+
+			        // 处理 [CQ:reply,id=数字] → message_reference + msg_id
 			    if replyIDs, ok := foundItems["reply_msg_id"]; ok && len(replyIDs) > 0 {
 			     if messageText != "" {
 			      // 虚拟 reply ID → 真实 QQ API message_id

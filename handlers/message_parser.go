@@ -2123,6 +2123,22 @@ func ResolveMarkdownAtMentions(content string) string {
 	})
 }
 
+// resolvePlainTextAtMentions 将普通文本中的 [CQ:at,qq=数字] 替换为 @用户名
+// 用于纯文本消息出站，因为 QQ API 的纯文本不支持 <qqbot-at-user> 标签。
+func resolvePlainTextAtMentions(messageText string) string {
+	re := regexp.MustCompile(`\[CQ:at,qq=(\d+)\]`)
+	return re.ReplaceAllStringFunc(messageText, func(m string) string {
+		submatches := re.FindStringSubmatch(m)
+		if len(submatches) > 1 {
+			username := idmap.GetUserName(submatches[1])
+			if username != "" {
+				return "@" + username + " "
+			}
+		}
+		return m
+	})
+}
+
 func resolveMarkdownMediaReferences(content string, resolve func(path string) (string, bool)) string {
 	if content == "" || resolve == nil {
 		return content

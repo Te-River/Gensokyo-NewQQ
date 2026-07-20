@@ -146,6 +146,8 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 
 	// --- 场景 B: 纯文本消息 ---
 	if messageText != "" {
+		// 转换 [CQ:at] 为 @用户名
+		messageText = resolvePlainTextAtMentions(messageText)
 		// 复用 generatePrivateMessage 获取基础结构 (虽然可以直接构造，但为了保持风格一致)
 		groupReply := generatePrivateMessage("", "", nil, messageText, 0, apiv2, userID)
 
