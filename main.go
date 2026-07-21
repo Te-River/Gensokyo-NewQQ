@@ -599,7 +599,7 @@ func main() {
 			}
 			// 使用HTTP
 			if err := httpServerHttpApi.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Fatalf("http apilisten: %s\n", err)
+				mylog.Printf("http apilisten: %s\n", err)
 			}
 		}()
 	}
