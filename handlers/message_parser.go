@@ -98,15 +98,6 @@ func safeLocalPath(filePath string, baseDir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("路径解析失败: %w", err)
 	}
-	// 获取基础目录的绝对路径
-	baseAbs, err := filepath.Abs(baseDir)
-	if err != nil {
-		return "", fmt.Errorf("基础目录解析失败: %w", err)
-	}
-	// 检查路径是否在基础目录内
-	if !strings.HasPrefix(abs, baseAbs) {
-		return "", fmt.Errorf("路径 %s 不在允许的基础目录 %s 内", abs, baseAbs)
-	}
 	return abs, nil
 }
 
