@@ -1396,11 +1396,13 @@ func RevertTransformedText(data interface{}, msgtype string, api openapi.OpenAPI
 	var msg *dto.Message
 	var menumsg bool
 	var messageText string
+	isFullGroupMsg := false // 标记是否为 GROUP_MESSAGE_CREATE（全量群消息）
 	switch v := data.(type) {
 	case *dto.WSGroupATMessageData:
 		msg = (*dto.Message)(v)
 	case *dto.WSGroupMessageData:
 		msg = (*dto.Message)(v)
+		isFullGroupMsg = true
 	case *dto.WSATMessageData:
 		msg = (*dto.Message)(v)
 	case *dto.WSMessageData:
@@ -1452,7 +1454,8 @@ func RevertTransformedText(data interface{}, msgtype string, api openapi.OpenAPI
 				return m
 			}
 			if isSelfAtID(userID) {
-				if config.GetRemoveAt() {
+				// 全量群消息(GROUP_MESSAGE_CREATE)中的 @Bot 始终剥离，不依赖 remove_at 配置
+				if isFullGroupMsg || config.GetRemoveAt() {
 					return ""
 				}
 				return "[CQ:at,qq=" + atID + "]"
@@ -1464,7 +1467,7 @@ func RevertTransformedText(data interface{}, msgtype string, api openapi.OpenAPI
 
 	//结构 <@!>空格/内容
 	//如果移除了前部at,信息就会以空格开头,因为只移去了最前面的at,但at后紧跟随一个空格
-	if config.GetRemoveAt() {
+	if isFullGroupMsg || config.GetRemoveAt() {
 		if !menumsg {
 			//再次去前后空
 			messageText = strings.TrimSpace(messageText)

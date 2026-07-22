@@ -17,9 +17,10 @@ import (
 	"github.com/tencent-connect/botgo/websocket/client"
 )
 
-// ProcessGroupNormalMessage 处理普通群消息（无需 @）
-// 注意：QQ平台对 GROUP_MESSAGE_CREATE 事件的 Content 中可能包含 <@xxx> 原文，
-// 后续 RevertTransformedText 会统一处理这些 @ 格式转换，此处无需手动剥离。
+// ProcessGroupNormalMessage 处理 GROUP_MESSAGE_CREATE 事件（QQ 全量群消息）
+// 注意：QQ 平台的 GROUP_MESSAGE_CREATE 事件包含群内所有消息（含 @Bot 的），
+// Content 中可能带有 <@OpenID> 原文，后续 RevertTransformedText 会统一处理 @ 格式转换，
+// 此处无需手动剥离。
 func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) error {
 	s := client.GetGlobalS()
 	AppIDString := strconv.FormatUint(p.Settings.AppID, 10)
@@ -89,7 +90,7 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 	// 与 handlers.BotID（来自 Ready 事件）不同，必须从 Mentions 中获取真实 ID。
 	// is_you 字段可能不准确（如多实例场景），因此 bot:true 的 OpenID 也注册。
 	// 不在此处剥离 <@OpenID>，统一交给 RevertTransformedText 处理：
-	//   - 自身 @ → 转换为 [CQ:at,qq=AppID 或 UIN]（依 use_uin），或按 remove_at 移除
+	//   - 自身 @ → 全量群消息始终剥离，不依赖 remove_at 配置
 	//   - 其他 @ → 转换为 [CQ:at,qq=虚拟ID]
 	// 这样消息内容仅含 <@bot> 时，仍能产生非空 messageText，不会被误判为黑白名单拦截。
 	toMe := false

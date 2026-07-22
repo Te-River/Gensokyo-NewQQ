@@ -1134,10 +1134,24 @@ func UnionFanout(base gin.HandlerFunc) gin.HandlerFunc {
 	}
 }
 
-// GroupMessageEventHandler 实现处理 普通群消息（无需@） 的回调
+// GroupMessageEventHandler 实现处理 GROUP_MESSAGE_CREATE 事件（QQ 全量群消息）的回调
+// 注意：QQ 平台在 GROUP_MESSAGE_CREATE 中也可能包含 @Bot 的原文，
+// 后续 ProcessGroupNormalMessage 中的 RevertTransformedText 会统一处理。
 func GroupMessageEventHandler() event.GroupMessageEventHandler {
 	return func(event *dto.WSPayload, data *dto.WSGroupMessageData) error {
-		mylog.Printf("[GroupMessageEventHandler] 收到非@群消息 ID=%v from=%v content=%v", data.ID, data.Author.ID, data.Content)
+		// 检查是否包含 @Bot 的提及
+		hasAtBot := false
+		for _, mention := range data.Mentions {
+			if mention.IsYou || mention.Bot {
+				hasAtBot = true
+				break
+			}
+		}
+		if hasAtBot {
+			mylog.Printf("[GroupMessageEventHandler] 收到群消息(ID=%v, from=%v, content=%v)", data.ID, data.Author.ID, data.Content)
+		} else {
+			mylog.Printf("[GroupMessageEventHandler] 收到非@群消息(ID=%v, from=%v, content=%v)", data.ID, data.Author.ID, data.Content)
+		}
 		if config.GetEnableChangeWord() {
 			data.Content = acnode.CheckWordIN(data.Content)
 			if data.Author.Username != "" {

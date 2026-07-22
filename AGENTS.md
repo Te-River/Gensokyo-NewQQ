@@ -189,7 +189,7 @@ func init() {
 - **`StringOb11` 模式**：`config.GetStringOb11()` 控制消息 ID 类型（string vs int64），影响大量 ID 转换逻辑
 - **`LazyMessageId` 系统**：`config.GetLazyMessageId()` 启用被动转主动消息，`messageID == "2000"` 是特殊值表示主动推送
 - **`SSM`（Send Stack Messages）**：当消息发送失败（`code:22009`）时，消息会入队等待下次被动回复时补发
-- **`removeAt` 与 `convertOtherAt`**：`GetRemoveAt()` 控制入站时是否剥离 @bot，`GetConvertOtherAt()` 控制是否将 @其他人 转为 CQ 码
+- **`removeAt` 与 `convertOtherAt`**：`GetRemoveAt()` 控制入站时是否剥离 @bot（仅对 `GROUP_AT_MESSAGE_CREATE` 事件生效；`GROUP_MESSAGE_CREATE` 全量群消息中的 @Bot 始终剥离，不依赖此配置），`GetConvertOtherAt()` 控制是否将 @其他人 转为 CQ 码
 - **`addAtGroup`**：`GetAddAtGroup()` 在出站群消息前自动添加 `[CQ:at,qq=AppID]`，注意这会与 `transformMessageTextAt` 中的 `[CQ:at]` 处理产生交互
 - **`arrayValue` 模式**：`GetArrayValue()` 控制消息以消息段数组（`[]interface{}`）还是字符串形式上报，影响 `ConvertToSegmentedMessage` 的调用
 - **`msg_type` 字段**：`MsgType=2` 是 Markdown，`MsgType=7` 是图文混合，`MsgType=0` 是普通文本
