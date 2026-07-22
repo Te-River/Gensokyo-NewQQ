@@ -1755,6 +1755,7 @@ func ConvertToSegmentedMessage(data interface{}) []map[string]interface{} {
 	// 强制类型转换，获取Message结构
 	var msg *dto.Message
 	var menumsg bool
+	isFullGroupMsg := false // 标记是否为 GROUP_MESSAGE_CREATE（全量群消息）
 	switch v := data.(type) {
 	case *dto.Message:
 		msg = v // 直接赋值，因为v已经是*dto.Message类型
@@ -1762,6 +1763,7 @@ func ConvertToSegmentedMessage(data interface{}) []map[string]interface{} {
 		msg = (*dto.Message)(v)
 	case *dto.WSGroupMessageData:
 		msg = (*dto.Message)(v)
+		isFullGroupMsg = true
 	case *dto.WSATMessageData:
 		msg = (*dto.Message)(v)
 	case *dto.WSMessageData:
@@ -1819,20 +1821,20 @@ func ConvertToSegmentedMessage(data interface{}) []map[string]interface{} {
 				"qq": atID,
 			},
 		}
-		if isSelfAtID(userID) && config.GetRemoveAt() {
-			msg.Content = strings.Replace(msg.Content, match[0], "", 1)
-			continue
-		}
+		if isSelfAtID(userID) && (isFullGroupMsg || config.GetRemoveAt()) {
+		    msg.Content = strings.Replace(msg.Content, match[0], "", 1)
+		    continue
+		   }
 		messageSegments = append(messageSegments, atSegment)
 		msg.Content = strings.Replace(msg.Content, match[0], "", 1)
 	}
 
 	// 移除 at 后，如果内容以空格开头，可选去除
-	if config.GetRemoveAt() {
-		if !menumsg {
-			msg.Content = strings.TrimSpace(msg.Content)
-		}
-	}
+	  if isFullGroupMsg || config.GetRemoveAt() {
+	   if !menumsg {
+	    msg.Content = strings.TrimSpace(msg.Content)
+	   }
+	  }
 
 	// 检查是否需要移除前缀
 	if config.GetRemovePrefixValue() {
