@@ -2205,6 +2205,82 @@ func ResolveMarkdownImages(content string, apiv2 openapi.OpenAPI) string {
 	})
 }
 
+// ResolveKeyboardImages 遍历 keyboard 中的所有按钮，将 render_data.label 和
+// render_data.visited_label 中的本地图片路径上传到 CDN 并替换为 URL。
+func ResolveKeyboardImages(kb *keyboard.MessageKeyboard, apiv2 openapi.OpenAPI) {
+	if kb == nil || kb.Content == nil {
+		return
+	}
+	for _, row := range kb.Content.Rows {
+		if row == nil {
+			continue
+		}
+		for _, btn := range row.Buttons {
+			if btn == nil || btn.RenderData == nil {
+				continue
+			}
+			if btn.RenderData.Label != "" {
+				btn.RenderData.Label = resolveMarkdownMediaReferences(btn.RenderData.Label, func(mediaPath string) (string, bool) {
+					if strings.HasPrefix(mediaPath, "http://") || strings.HasPrefix(mediaPath, "https://") {
+						return "", false
+					}
+					if strings.HasPrefix(mediaPath, "data:") {
+						return "", false
+					}
+					localPath := strings.TrimPrefix(mediaPath, "file://")
+					safePath, err := safeLocalPath(localPath, ".")
+					if err != nil {
+						mylog.Printf("安全校验失败，跳过Keyboard本地图片: %v", err)
+						return "", false
+					}
+					localPath = safePath
+					imageData, err := os.ReadFile(localPath)
+					if err != nil {
+						mylog.Printf("Error reading local image for keyboard: %v", err)
+						return "", false
+					}
+					base64Encoded := base64.StdEncoding.EncodeToString(imageData)
+					cdnURL, _, _, err := images.UploadBase64ImageToServer(base64Encoded, apiv2)
+					if err != nil {
+						mylog.Printf("Error uploading image for keyboard: %v", err)
+						return "", false
+					}
+					return cdnURL, true
+				})
+			}
+			if btn.RenderData.VisitedLabel != "" {
+				btn.RenderData.VisitedLabel = resolveMarkdownMediaReferences(btn.RenderData.VisitedLabel, func(mediaPath string) (string, bool) {
+					if strings.HasPrefix(mediaPath, "http://") || strings.HasPrefix(mediaPath, "https://") {
+						return "", false
+					}
+					if strings.HasPrefix(mediaPath, "data:") {
+						return "", false
+					}
+					localPath := strings.TrimPrefix(mediaPath, "file://")
+					safePath, err := safeLocalPath(localPath, ".")
+					if err != nil {
+						mylog.Printf("安全校验失败，跳过Keyboard本地图片: %v", err)
+						return "", false
+					}
+					localPath = safePath
+					imageData, err := os.ReadFile(localPath)
+					if err != nil {
+						mylog.Printf("Error reading local image for keyboard: %v", err)
+						return "", false
+					}
+					base64Encoded := base64.StdEncoding.EncodeToString(imageData)
+					cdnURL, _, _, err := images.UploadBase64ImageToServer(base64Encoded, apiv2)
+					if err != nil {
+						mylog.Printf("Error uploading image for keyboard: %v", err)
+						return "", false
+					}
+					return cdnURL, true
+				})
+			}
+		}
+	}
+}
+
 func parseQQMuiscMDData(musicid string) (*dto.Markdown, *keyboard.MessageKeyboard, error) {
 	info, err := QQMusicSongInfo(musicid)
 	if err != nil {

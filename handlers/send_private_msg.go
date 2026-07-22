@@ -300,7 +300,10 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			         if md != nil && md.Content != "" {
 			          md.Content = ResolveMarkdownAtMentions(md.Content)
 			          md.Content = ResolveMarkdownImages(md.Content, apiv2)
-			         }
+			                     }
+			                     if kb != nil {
+			                      ResolveKeyboardImages(kb, apiv2)
+			                     }
 			         if md != nil {
 			          groupMessage.Markdown = md
 			          groupMessage.Keyboard = kb

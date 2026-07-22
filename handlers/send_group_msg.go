@@ -473,7 +473,10 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 					     if md != nil && md.Content != "" {
 					      md.Content = ResolveMarkdownAtMentions(md.Content)
 					      md.Content = ResolveMarkdownImages(md.Content, apiv2)
-					     }
+					              }
+					              if kb != nil {
+					               ResolveKeyboardImages(kb, apiv2)
+					              }
 					     messageText = ResolveMarkdownAtMentions(messageText)
 					     // 步骤 2: 将整个 messageText 合并到 markdown 内容头部（qq 官方 md 整个消息以 md 语法渲染）
 					     md.Content = messageText + "\n" + md.Content
@@ -1399,6 +1402,11 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 			markdown.Content = ResolveMarkdownImages(markdown.Content, apiv2)
 		}
 
+		// 处理 keyboard 按钮中的本地图片路径
+		if keyboard != nil {
+			ResolveKeyboardImages(keyboard, apiv2)
+		}
+
 		return &dto.MessageToCreate{
 			Content:  "markdown",
 			MsgID:    id,
@@ -2123,6 +2131,11 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 		if markdown != nil && markdown.Content != "" {
 			markdown.Content = ResolveMarkdownAtMentions(markdown.Content)
 			markdown.Content = ResolveMarkdownImages(markdown.Content, apiv2)
+		}
+
+		// 处理 keyboard 按钮中的本地图片路径
+		if keyboard != nil {
+			ResolveKeyboardImages(keyboard, apiv2)
 		}
 
 		return &dto.MessageToCreate{

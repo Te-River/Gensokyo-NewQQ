@@ -567,6 +567,12 @@ func GenerateReplyMessage(id string, foundItems map[string][]string, messageText
 			markdown.Content = ResolveMarkdownAtMentions(markdown.Content)
 			markdown.Content = ResolveMarkdownImages(markdown.Content, api2)
 		}
+
+		// 处理 keyboard 按钮中的本地图片路径
+		if keyboard != nil {
+			ResolveKeyboardImages(keyboard, api2)
+		}
+
 		msgtocreate := &dto.MessageToCreate{
 			MsgID:    id,
 			MsgSeq:   msgseq,
