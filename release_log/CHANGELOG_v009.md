@@ -33,7 +33,7 @@ QQ 开放平台 `GROUP_MESSAGE_CREATE`（全量群消息）的 `Mentions` 数组
 
 **修复**：新增 `ResolveKeyboardImages` 函数，遍历 keyboard 所有按钮，将 label/visited_label 中的本地图片通过 `resolveMarkdownMediaReferences` 上传到 CDN 并替换为 URL，与 markdown 内容中的图片处理保持一致。三个 send handler（`send_group_msg`、`send_guild_channel_msg`、`send_private_msg`）在发送前均调用此函数。
 
-### GROUP_MESSAGE_CREATE 全量群消息中 @Bot 未剥离（依赖 remove_at 配置）
+### GROUP_MESSAGE_CREATE 全量群消息中 @Bot 剥离改为不依赖 remove_at 配置
 
 **文件：** `handlers/message_parser.go`、`main.go`、`Processor/ProcessGroupNormalMessage.go`
 
