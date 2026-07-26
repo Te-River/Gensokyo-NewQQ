@@ -132,6 +132,8 @@ func init() {
 
 遍历 `foundItems` 发送时，必须跳过控制型 key：`active`、`active_type`、`active_sub_type`、`reply_msg_id`、`file_name`。
 
+注意：`reply_msg_id` 虽然作为控制型 key 被循环跳过，但需要在循环体内部通过 `foundItems["reply_msg_id"]` 主动读取并设置到每个媒体消息的 `MessageReference` 和 `MsgID` 字段上。当前所有 handler（group/private/channel）的文本路径和 markdown 路径均已处理 reply；富媒体路径（msg_type=7）的 reply 处理在 2026-07 修复中补齐。
+
 ### idmap 系统
 
 虚拟数字 ID 与 QQ 真实 OpenID 之间的双向映射，基于 bbolt 本地数据库（`idmap.db`）：

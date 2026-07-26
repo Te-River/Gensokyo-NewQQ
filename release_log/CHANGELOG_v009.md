@@ -6,6 +6,42 @@
 
 ## 🐛 Bug 修复
 
+### CQ 码处理逻辑修复与 API 规范对齐
+
+**文件：** `handlers/send_group_msg.go`、`handlers/send_private_msg.go`、`handlers/send_guild_channel_msg.go`、`handlers/send_private_msg_wakeup.go`、`handlers/send_private_msg_sse.go`
+
+#### API 字段规范违反修复
+
+1. **`MsgType=2` 时 `Content` 字段违反 API 规范**：QQ API 明确要求"传了 markdown 后此字段必须为空"，但代码中 7 处（`generateGroupMessage`/`generatePrivateMessage` 的 markdown 和 qqmusic 路径、combo transmd 路径）设置的 `Content: "markdown"` 字符串。已全部改为 `Content: ""`。
+
+2. **`msg_id` 与 `event_id` 同时设置违反"二选一"**：API 文档明确 `event_id` 与 `msg_id` 互斥，但代码在 `[CQ:reply]` 设置 `MsgID` 后未清空已有的 `EventID`。已在所有 handler（group/private/channel）的 reply 处理块中，设置 `MsgID` 后增加 `groupMessage.EventID = ""`。
+
+#### 安全修复
+
+3. **`url_video`/`url_videos` 缺少 SSRF 防护**：`url_image`/`url_images`/`url_record`/`url_records` 均有 `isPrivateOrLoopback` 检查，但 `url_video`/`url_videos`（http/https 各 2 处，共 4 处）没有。已按同样模式添加 SSRF 检查。
+
+#### 功能修复
+
+4. **`auto_md` nil 指针解引用风险**：combo 路径（line 320-328）中当 `groupReply` 断言为 `*dto.MessageToCreate` 时 `richMediaMessage` 为 nil，但 `auto_md` 仍被无条件调用，内部直接访问 `richMediaMessage.URL` 会 panic。已增加 `&& richMediaMessage != nil` 条件保护。
+
+5. **群聊图文混合（combo）路径缺失 `[CQ:reply]` 处理**：`send_private_msg.go` 的图文混合路径有 reply 处理，但 `send_group_msg.go` 的 combo 路径（msg_type=7 和 transmd→msg_type=2）完全没有。已补齐。
+
+6. **富媒体消息（纯媒体无文本）缺失 `[CQ:reply]` 处理**：群聊和私聊的 foundItems 循环中，富媒体消息（图片/视频/语音/文件）上传后构造 msg_type=7 消息时没有设置 `MessageReference`。已补齐。
+
+7. **Wakeup handler 图文混合检查缺少 `url_images`**：`local_image`/`url_image`/`base64_image` 都有检查，但 `url_images`（https 图片）遗漏。已补充。
+
+8. **频道纯文本路径缺失 `[CQ:at]` 处理**：频道 handler 的纯文本路径没有调用 `resolvePlainTextAtMentions`，导致 `[CQ:at,qq=xxx]` 原样发送。已在 markdown 处理分支后添加 `else` 分支处理。
+
+#### 错误处理修复
+
+9. **私聊 22009（主动消息频控）错误处理缺失**：群聊有 `PushGlobalStack` 补发机制，但私聊纯文本路径直接 `return ""`、KeyMap 路径只有 `TODO`、RichMediaMessage 路径完全没有检查。已统一添加 22009 日志落盘。
+
+10. **`fmt.Printf` 替换为 `mylog.Printf`**：`send_private_msg_sse.go` 中 2 处使用了标准库 `fmt.Printf` 而非项目统一的 `mylog.Printf`。已替换。
+
+#### 代码优化
+
+11. **keyMap 从循环内提取为包级变量**：`send_group_msg.go` 和 `send_private_msg.go` 的 foundItems 遍历循环中，每次迭代都创建一个新的 map 字面量。已提取为包级变量 `sendGroupMsgKeyMap`/`sendPrivateMsgKeyMap`。
+
 ### GROUP_MESSAGE_CREATE 中 `bot:true` 的提及也注册到 selfAtIDs
 
 **文件：** `Processor/ProcessGroupNormalMessage.go`
@@ -99,6 +135,8 @@ http apilisten: listen tcp 127.0.0.1:5700: bind: An attempt was made to access a
 | `handlers/send_group_msg.go` | 发送前调用 `ResolveKeyboardImages` |
 | `handlers/send_guild_channel_msg.go` | 发送前调用 `ResolveKeyboardImages` |
 | `handlers/send_private_msg.go` | 发送前调用 `ResolveKeyboardImages` |
+| `handlers/send_private_msg_wakeup.go` | 补充 `url_images` 图文混合检查 |
+| `handlers/send_private_msg_sse.go` | `fmt.Printf` → `mylog.Printf` |
 | `main.go` | HTTP API 绑定失败 `log.Fatalf` → `mylog.Printf`；`GroupMessageEventHandler` 日志区分 @Bot 与普通消息 |
 | `AGENTS.md` | `removeAt` 说明补充全量群消息例外 |
 | `docs/本版新增功能.md` | 多处更新 |
