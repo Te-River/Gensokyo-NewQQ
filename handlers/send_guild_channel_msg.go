@@ -304,7 +304,7 @@ func HandleSendGuildChannelMsg(client callapi.Client, api openapi.OpenAPI, apiv2
 		              refID := parts[len(parts)-1]
 		              textMsg.MessageReference = &dto.MessageReference{
 		               MessageID:             refID,
-		               IgnoreGetMessageError: true,
+		               IgnoreGetMessageError: false,
 		              }
 		              // 同时设置 msg_id，确保 v2 API 识别为回复
 		              textMsg.MsgID = refID

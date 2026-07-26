@@ -270,7 +270,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			       refID := parts[len(parts)-1]
 			       groupMessage.MessageReference = &dto.MessageReference{
 			        MessageID:             refID,
-			        IgnoreGetMessageError: true,
+			        IgnoreGetMessageError: false,
 			       }
 			       // 同时设置 msg_id，确保 v2 API 识别为回复
 			       groupMessage.MsgID = refID
@@ -350,7 +350,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			       refID := parts[len(parts)-1]
 			       groupMessage.MessageReference = &dto.MessageReference{
 			        MessageID:             refID,
-			        IgnoreGetMessageError: true,
+			        IgnoreGetMessageError: false,
 			       }
 			       // 同时设置 msg_id，确保 v2 API 识别为回复
 			       groupMessage.MsgID = refID
@@ -420,7 +420,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 						         refID := parts[len(parts)-1]
 						         groupMessage.MessageReference = &dto.MessageReference{
 						          MessageID:             refID,
-						          IgnoreGetMessageError: true,
+						          IgnoreGetMessageError: false,
 						         }
 						         groupMessage.MsgID = refID
 						  // msg_id 与 event_id 二选一，清空 event_id
@@ -532,7 +532,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 					  refID := parts[len(parts)-1]
 					  groupMessage.MessageReference = &dto.MessageReference{
 					   MessageID:             refID,
-					   IgnoreGetMessageError: true,
+					   IgnoreGetMessageError: false,
 					  }
 					  groupMessage.MsgID = refID
 					  // msg_id 与 event_id 二选一，清空 event_id
