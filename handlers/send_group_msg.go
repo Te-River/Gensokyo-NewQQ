@@ -585,7 +585,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 							Title:       cardData["title"],
 							Description: cardData["desc"],
 							PicURL:      cardData["pic"],
-							URL:         cardData["url"],
+							URL:         defaultCardURL(cardData["url"]),
 						},
 					}
 					delete(foundItems, "card")
@@ -689,7 +689,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		     Title:       cardData["title"],
 		     Description: cardData["desc"],
 		     PicURL:      cardData["pic"],
-		     URL:         cardData["url"],
+		     URL:         defaultCardURL(cardData["url"]),
 		    },
 		   },
 		  }
@@ -3114,4 +3114,12 @@ func postGroupRichMediaMessageWithRetry(apiv2 openapi.OpenAPI, groupID string, r
 		break
 	}
 	return resp, err
+}
+
+// defaultCardURL 卡片消息 url 为 QQ API 必填字段，空值时使用默认值
+func defaultCardURL(url string) string {
+	if url == "" {
+		return "https://q.qq.com"
+	}
+	return url
 }
