@@ -173,3 +173,42 @@ db900d4 docs: 添加 HTTP API 绑定失败行为变更说明
 8291e4d fix: ConvertToSegmentedMessage 中全量群消息的 @Bot 始终剥离
 81b4078 docs: 更新 CHANGELOG_v009 补充 release008 以来的所有变更
 ```
+
+---
+
+## 🚀 新增功能
+
+### 群聊图文卡片消息（msg_type=8）
+
+**文件：** `botgo/dto/message_create.go`、`handlers/message_parser.go`、`handlers/send_group_msg.go`
+
+新增扩展 CQ 码 `[CQ:card,title=xxx,desc=xxx,pic=xxx,url=xxx]`：
+- botgo SDK 新增 `GroupCard` / `GroupCardContent` 结构体
+- 参数顺序无关，`title` 必填
+- 发送到群聊时自动切换为 `msg_type=8` 卡片消息
+
+### 单聊输入状态通知（msg_type=6）
+
+**文件：** `botgo/dto/message_create.go`、`handlers/message_parser.go`、`handlers/send_private_msg.go`
+
+新增扩展 CQ 码 `[CQ:input_notify,type=1,second=60]`：
+- botgo SDK 新增 `InputNotify` 结构体
+- 在正文发送前先发送"正在输入"状态通知
+
+### 频道消息扩展 CQ 码支持
+
+**文件：** `handlers/send_guild_channel_msg.go`
+
+添加 `sendGuildChannelMsgKeyMap`，释放 `markdown` 和 `qqmusic` 让 `GenerateReplyMessage` 正常处理。
+
+### keyMap 补齐
+
+**文件：** `handlers/send_group_msg.go`、`handlers/send_private_msg.go`、`handlers/send_private_msg_wakeup.go`
+
+同步补全三个 keyMap 中缺失的 `url_record` 和 `url_video` 条目。
+
+### 错误处理优化
+
+**文件：** `handlers/send_private_msg.go`
+
+文本路径增加 `40034025`（event_id 无效）重试和超时重试，修复重试成功后仍无条件 `return nil` 的控制流问题。

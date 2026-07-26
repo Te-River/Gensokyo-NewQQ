@@ -23,6 +23,8 @@
 | 主动标记 | `[CQ:active,type=<值>,sub_type=<值>]` | `-` | 当前只解析并移除该 CQ 码，记录 `type` / `sub_type`；没有后续发送逻辑。见 [CQ active](./cq码/扩展CQ码/扩展cq码-cq-active.md)。 |
 | @ | `[CQ:at,qq=<虚拟用户ID>]` | `q群 (Group Chat)` / `q頻 (QQ Guild)` | 纯文本出站转为 `@用户名 `，Markdown 出站转为 `<qqbot-at-user id="OpenID" />`。见 [CQ at](./cq码/扩展CQ码/扩展cq码-cq-at.md)。 |
 | 消息撤回 | `[CQ:remove,user_id=<虚拟用户ID>,msg_id=<虚拟消息ID>]` | `q群 (Group Chat)` | 在 `send_group_msg` 中携带，撤回指定群消息。需要同时提供 `user_id` 和 `msg_id`。见 [CQ remove](./cq码/扩展CQ码/扩展cq码-cq-remove.md)。 |
+| 卡片消息 | `[CQ:card,title=<标题>,desc=<描述>,pic=<图片URL>,url=<跳转链接>]` | `q群 (Group Chat)` | 群聊图文卡片消息（`msg_type=8`）。参数顺序无关，`title` 必填，其余可选。见 [CQ card](./cq码/扩展CQ码/扩展cq码-cq-card.md)。 |
+| 输入状态 | `[CQ:input_notify,type=<类型>,second=<秒数>]` | `私聊 (C2C)` | 在发送正文前先发送"正在输入"状态（`msg_type=6`）。`type` 默认 `1`，`second` 最大 `60`。见 [CQ input_notify](./cq码/扩展CQ码/扩展cq码-cq-input_notify.md)。 |
 
 ## 消息段
 
