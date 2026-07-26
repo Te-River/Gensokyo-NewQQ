@@ -584,7 +584,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 						Content: &dto.GroupCardContent{
 							Title:       cardData["title"],
 							Description: cardData["desc"],
-							PicURL:      cardData["pic"],
+							PicURL:      defaultCardPicURL(cardData["pic"]),
 							URL:         defaultCardURL(cardData["url"]),
 						},
 					}
@@ -688,7 +688,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		    Content: &dto.GroupCardContent{
 		     Title:       cardData["title"],
 		     Description: cardData["desc"],
-		     PicURL:      cardData["pic"],
+		     PicURL:      defaultCardPicURL(cardData["pic"]),
 		     URL:         defaultCardURL(cardData["url"]),
 		    },
 		   },
@@ -3122,4 +3122,12 @@ func defaultCardURL(url string) string {
 		return "https://q.qq.com"
 	}
 	return url
+}
+
+// defaultCardPicURL 卡片消息 pic_url 为 QQ API 必填字段，空值时使用默认值
+func defaultCardPicURL(pic string) string {
+	if pic == "" {
+		return "https://q.qq.com"
+	}
+	return pic
 }
