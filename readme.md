@@ -475,6 +475,7 @@ settings:
 
 ## 引用
 
+- [`QQ 机器人官方文档`](https://bot.q.qq.com/wiki/)：本项目许多处理均参考该文档
 - [`tencent-connect/botgo`](https://github.com/tencent-connect/botgo): 本项目引用了此项目并做了一些改动
 - [`ElainaCore/ElainaBot_v2`](https://github.com/ElainaCore/ElainaBot_v2)：本项目的图床服务部分基于其相关源代码修改
 
