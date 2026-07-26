@@ -22,6 +22,7 @@ import (
 	"github.com/hoshinonyaruko/gensokyo/config"
 	"github.com/hoshinonyaruko/gensokyo/echo"
 	"github.com/hoshinonyaruko/gensokyo/idmap"
+	"github.com/hoshinonyaruko/gensokyo/imagehosting"
 	"github.com/hoshinonyaruko/gensokyo/images"
 	"github.com/hoshinonyaruko/gensokyo/mdutil"
 	"github.com/hoshinonyaruko/gensokyo/messagequeue"
@@ -577,19 +578,24 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			if cardItems, ok := foundItems["card"]; ok && len(cardItems) > 0 && groupMessage.MsgType != 2 {
 				var cardData map[string]string
 				if err := json.Unmarshal([]byte(cardItems[0]), &cardData); err == nil {
-					groupMessage.MsgType = 8
-					groupMessage.Content = ""
-					groupMessage.Card = &dto.GroupCard{
-						Type: "tuwen",
-						Content: &dto.GroupCardContent{
-							Title:       cardData["title"],
-							Description: cardData["desc"],
-							PicURL:      defaultCardPicURL(cardData["pic"]),
-							URL:         defaultCardURL(cardData["url"]),
-						},
+					if cardData["pic"] == "" || cardData["url"] == "" {
+						mylog.Printf("[CQ:card] pic 或 url 为空，跳过卡片消息发送")
+						delete(foundItems, "card")
+					} else {
+						groupMessage.MsgType = 8
+						groupMessage.Content = ""
+						groupMessage.Card = &dto.GroupCard{
+							Type: "tuwen",
+							Content: &dto.GroupCardContent{
+								Title:       cardData["title"],
+								Description: cardData["desc"],
+								PicURL:      resolveCardPic(cardData["pic"]),
+								URL:         cardData["url"],
+							},
+						}
+						delete(foundItems, "card")
+						mylog.Printf("[CQ:card] 将消息类型切换为卡片消息")
 					}
-					delete(foundItems, "card")
-					mylog.Printf("[CQ:card] 将消息类型切换为卡片消息")
 				}
 			}
 
@@ -674,28 +680,32 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 
 		}
 		// 纯卡片消息（无文本内容）处理
-		if cardItems, ok := foundItems["card"]; ok && len(cardItems) > 0 {
-		 var cardData map[string]string
-		 if err := json.Unmarshal([]byte(cardItems[0]), &cardData); err == nil {
-		  cardMsg := &dto.MessageToCreate{
-		   MsgType: 8,
-		   Content: "",
-		   MsgID:   messageID,
-		   EventID: eventID,
-		   MsgSeq:  echo.GetMappingSeq(messageID),
-		   Card: &dto.GroupCard{
-		    Type: "tuwen",
-		    Content: &dto.GroupCardContent{
-		     Title:       cardData["title"],
-		     Description: cardData["desc"],
-		     PicURL:      defaultCardPicURL(cardData["pic"]),
-		     URL:         defaultCardURL(cardData["url"]),
-		    },
-		   },
-		  }
-		  cardMsg.Timestamp = time.Now().Unix()
-		  delete(foundItems, "card")
-		  resp, err := apiv2.PostGroupMessage(context.TODO(), message.Params.GroupID.(string), cardMsg)
+		  if cardItems, ok := foundItems["card"]; ok && len(cardItems) > 0 {
+		   var cardData map[string]string
+		   if err := json.Unmarshal([]byte(cardItems[0]), &cardData); err == nil {
+		    if cardData["pic"] == "" || cardData["url"] == "" {
+		     mylog.Printf("[CQ:card] pic 或 url 为空，跳过纯卡片消息发送")
+		     delete(foundItems, "card")
+		    } else {
+		     cardMsg := &dto.MessageToCreate{
+		      MsgType: 8,
+		      Content: "",
+		      MsgID:   messageID,
+		      EventID: eventID,
+		      MsgSeq:  echo.GetMappingSeq(messageID),
+		      Card: &dto.GroupCard{
+		       Type: "tuwen",
+		       Content: &dto.GroupCardContent{
+		        Title:       cardData["title"],
+		        Description: cardData["desc"],
+		        PicURL:      resolveCardPic(cardData["pic"]),
+		        URL:         cardData["url"],
+		       },
+		      },
+		     }
+		     cardMsg.Timestamp = time.Now().Unix()
+		     delete(foundItems, "card")
+		     resp, err := apiv2.PostGroupMessage(context.TODO(), message.Params.GroupID.(string), cardMsg)
 		  if err != nil {
 		   mylog.Printf("发送卡片消息失败: %v", err)
 		  } else {
@@ -710,6 +720,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		   }
 		  }
 		 }
+		}
 		}
 		var resp *dto.GroupMessageResponse
 		// 遍历foundItems并发送每种信息
@@ -3116,18 +3127,24 @@ func postGroupRichMediaMessageWithRetry(apiv2 openapi.OpenAPI, groupID string, r
 	return resp, err
 }
 
-// defaultCardURL 卡片消息 url 为 QQ API 必填字段，空值时使用默认值
-func defaultCardURL(url string) string {
-	if url == "" {
-		return "https://q.qq.com"
+// resolveCardPic 处理卡片消息的 pic_url：
+// - 已经是 http(s) 链接 → 直接返回
+// - 本地文件路径 → 读取后通过 OSS 图床上传，返回 CDN URL
+// 出错时返回原值并在日志中记录
+func resolveCardPic(pic string) string {
+	if pic == "" || strings.HasPrefix(pic, "http://") || strings.HasPrefix(pic, "https://") {
+		return pic
 	}
+	data, err := os.ReadFile(pic)
+	if err != nil {
+		mylog.Printf("[CQ:card] 读取本地图片失败: %v", err)
+		return pic
+	}
+	url, err := imagehosting.UploadBytes(data, filepath.Base(pic))
+	if err != nil {
+		mylog.Printf("[CQ:card] OSS 上传图片失败: %v", err)
+		return pic
+	}
+	mylog.Printf("[CQ:card] 本地图片已上传至 OSS: %s", url)
 	return url
-}
-
-// defaultCardPicURL 卡片消息 pic_url 为 QQ API 必填字段，空值时使用透明占位图
-func defaultCardPicURL(pic string) string {
-	if pic == "" {
-		return "https://pubminishare-30161.picsz.qpic.cn/preview_placeholder.png"
-	}
-	return pic
 }
