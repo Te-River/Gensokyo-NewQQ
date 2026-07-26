@@ -340,14 +340,15 @@ func (o *openAPIv2) PostC2CMessageSSE(ctx context.Context, userID string, msg dt
 // PostC2CStreamMessage 发送C2C流式消息
 func (o *openAPIv2) PostC2CStreamMessage(ctx context.Context, userID string, chunk *dto.StreamChunk) (*dto.C2CMessageResponse, error) {
 	resp, err := o.request(ctx).
-		SetResult(dto.C2CMessageResponse{}).
+		SetResult(dto.Message{}).
 		SetPathParam("user_id", userID).
 		SetBody(chunk).
 		Post(o.getURL(c2cStreamMessagesURI))
 	if err != nil {
 		return nil, err
 	}
-	result := resp.Result().(*dto.C2CMessageResponse)
+	result := &dto.C2CMessageResponse{}
+	result.Message = resp.Result().(*dto.Message)
 	return result, nil
 }
 
