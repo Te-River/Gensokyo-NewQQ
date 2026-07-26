@@ -673,6 +673,44 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			}
 
 		}
+		// 纯卡片消息（无文本内容）处理
+		if cardItems, ok := foundItems["card"]; ok && len(cardItems) > 0 {
+		 var cardData map[string]string
+		 if err := json.Unmarshal([]byte(cardItems[0]), &cardData); err == nil {
+		  cardMsg := &dto.MessageToCreate{
+		   MsgType: 8,
+		   Content: "",
+		   MsgID:   messageID,
+		   EventID: eventID,
+		   MsgSeq:  echo.GetMappingSeq(messageID),
+		   Card: &dto.GroupCard{
+		    Type: "tuwen",
+		    Content: &dto.GroupCardContent{
+		     Title:       cardData["title"],
+		     Description: cardData["desc"],
+		     PicURL:      cardData["pic"],
+		     URL:         cardData["url"],
+		    },
+		   },
+		  }
+		  cardMsg.Timestamp = time.Now().Unix()
+		  delete(foundItems, "card")
+		  resp, err := apiv2.PostGroupMessage(context.TODO(), message.Params.GroupID.(string), cardMsg)
+		  if err != nil {
+		   mylog.Printf("发送卡片消息失败: %v", err)
+		  } else {
+		   mylog.Printf("[CQ:card] 纯卡片消息发送成功")
+		   rememberLatestBotGroupMessageInGroup(message.Params.GroupID.(string), resp)
+		   if !config.GetNoRetMsg() {
+		    if config.GetThreadsRetMsg() {
+		     go SendResponse(client, err, &message, resp, api, apiv2)
+		    } else {
+		     retmsg, _ = SendResponse(client, err, &message, resp, api, apiv2)
+		    }
+		   }
+		  }
+		 }
+		}
 		var resp *dto.GroupMessageResponse
 		// 遍历foundItems并发送每种信息
 		   for key, urls := range foundItems {
