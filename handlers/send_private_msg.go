@@ -308,31 +308,34 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 		// 优先发送文本信息
 		// 如果存在 [CQ:input_notify]，先发送输入状态通知
 		if notifyItems, ok := foundItems["input_notify"]; ok && len(notifyItems) > 0 {
-			var notifyData map[string]string
-			if err := json.Unmarshal([]byte(notifyItems[0]), &notifyData); err == nil {
-				inputType := 1
-				inputSecond := 60
-				if t, err := strconv.Atoi(notifyData["type"]); err == nil {
-					inputType = t
-				}
-				if s, err := strconv.Atoi(notifyData["second"]); err == nil {
-					inputSecond = s
-				}
-				notifyMsg := &dto.MessageToCreate{
-					MsgType: 6,
-					InputNotify: &dto.InputNotify{
-						InputType:   inputType,
-						InputSecond: inputSecond,
-					},
-					MsgID:  messageID,
-					MsgSeq: echo.GetMappingSeq(messageID),
-				}
-				if _, err := apiv2.PostC2CMessage(context.TODO(), UserID, notifyMsg); err != nil {
-					mylog.Printf("发送输入状态通知失败: %v", err)
-				}
-				delete(foundItems, "input_notify")
-				mylog.Printf("[CQ:input_notify] 已发送输入状态通知")
-			}
+		 var notifyData map[string]string
+		 if err := json.Unmarshal([]byte(notifyItems[0]), &notifyData); err == nil {
+		  inputType := 1
+		  inputSecond := 60
+		  if t, err := strconv.Atoi(notifyData["type"]); err == nil {
+		   inputType = t
+		  }
+		  if s, err := strconv.Atoi(notifyData["second"]); err == nil {
+		   inputSecond = s
+		  }
+		  notifyMsg := &dto.MessageToCreate{
+		   MsgType: 6,
+		   InputNotify: &dto.InputNotify{
+		    InputType:   inputType,
+		    InputSecond: inputSecond,
+		   },
+		   MsgID:  messageID,
+		   MsgSeq: echo.GetMappingSeq(messageID),
+		  }
+		  resp, err := apiv2.PostC2CMessage(context.TODO(), UserID, notifyMsg)
+		  if err != nil {
+		   mylog.Printf("发送输入状态通知失败: %v", err)
+		  } else {
+		   mylog.Printf("[CQ:input_notify] 已发送输入状态通知")
+		  }
+		  retmsg, _ = SendC2CResponse(client, err, &message, resp)
+		  delete(foundItems, "input_notify")
+		 }
 		}
 
 		// 流式消息处理 [CQ:stream]
@@ -373,8 +376,8 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 						info.Index = 0
 						streamCache.Store(qq, info)
 						mylog.Printf("[CQ:stream] 首片发送成功, stream_msg_id=%s", info.StreamMsgID)
-						retmsg, _ = SendC2CResponse(client, nil, &message, resp)
 					}
+					retmsg, _ = SendC2CResponse(client, err, &message, resp)
 
 				case "mid":
 					if info.StreamMsgID == "" {
@@ -385,12 +388,13 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 						chunk.InputState = 1
 						chunk.Index = info.Index
 						streamCache.Store(qq, info)
-						if resp, err := apiv2.PostC2CStreamMessage(context.TODO(), UserID, chunk); err != nil {
-						 mylog.Printf("流式消息续片发送失败: %v", err)
+						resp, err := apiv2.PostC2CStreamMessage(context.TODO(), UserID, chunk)
+						if err != nil {
+							mylog.Printf("流式消息续片发送失败: %v", err)
 						} else {
-						 mylog.Printf("[CQ:stream] 续片发送成功, index=%d", info.Index)
-						 retmsg, _ = SendC2CResponse(client, nil, &message, resp)
+							mylog.Printf("[CQ:stream] 续片发送成功, index=%d", info.Index)
 						}
+						retmsg, _ = SendC2CResponse(client, err, &message, resp)
 					}
 
 				case "finish":
@@ -401,12 +405,13 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 						chunk.StreamMsgID = info.StreamMsgID
 						chunk.InputState = 10
 						chunk.Index = info.Index
-						if resp, err := apiv2.PostC2CStreamMessage(context.TODO(), UserID, chunk); err != nil {
+						resp, err := apiv2.PostC2CStreamMessage(context.TODO(), UserID, chunk)
+						if err != nil {
 							mylog.Printf("流式消息终片发送失败: %v", err)
 						} else {
 							mylog.Printf("[CQ:stream] 终片发送成功")
-							retmsg, _ = SendC2CResponse(client, nil, &message, resp)
 						}
+						retmsg, _ = SendC2CResponse(client, err, &message, resp)
 					}
 					streamCache.Delete(qq)
 				}
