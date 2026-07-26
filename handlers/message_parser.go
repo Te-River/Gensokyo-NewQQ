@@ -852,6 +852,24 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 					}
 				}
 
+			case "input_notify":
+				dataMap, ok := segmentMap["data"].(map[string]interface{})
+				if ok && dataMap != nil {
+					notifyData := make(map[string]string)
+					if t, ok := dataMap["type"].(string); ok {
+						notifyData["type"] = t
+					}
+					if s, ok := dataMap["second"].(string); ok {
+						notifyData["second"] = s
+					}
+					if len(notifyData) > 0 {
+						encoded, err := json.Marshal(notifyData)
+						if err == nil {
+							foundItems["input_notify"] = append(foundItems["input_notify"], string(encoded))
+						}
+					}
+				}
+
 			case "markdown":
 				mdContent, ok := segmentMap["data"].(map[string]interface{})["data"]
 				if ok {
@@ -1113,6 +1131,24 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 		      encoded, err := json.Marshal(cardData)
 		      if err == nil {
 		       foundItems["card"] = append(foundItems["card"], string(encoded))
+		      }
+		     }
+		    }
+
+		   case "input_notify":
+		    dataMap, _ := message["data"].(map[string]interface{})
+		    if dataMap != nil {
+		     notifyData := make(map[string]string)
+		     if t, ok := dataMap["type"].(string); ok {
+		      notifyData["type"] = t
+		     }
+		     if s, ok := dataMap["second"].(string); ok {
+		      notifyData["second"] = s
+		     }
+		     if len(notifyData) > 0 {
+		      encoded, err := json.Marshal(notifyData)
+		      if err == nil {
+		       foundItems["input_notify"] = append(foundItems["input_notify"], string(encoded))
 		      }
 		     }
 		    }
