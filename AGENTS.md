@@ -149,6 +149,7 @@ func init() {
 | `qqmusic` | 媒体 | QQ 音乐 |
 | `card` | 媒体 | JSON 编码的图文卡片参数（群聊 msg_type=8） |
 | `input_notify` | 控制 | JSON 编码的输入状态参数（单聊 msg_type=6） |
+| `stream` | 控制 | JSON 编码的流式消息参数（单聊，type=start/mid/finish） |
 | `local_file` / `url_file` / `url_files` / `base64_file` | 媒体 | 文件 |
 | `file_name` | 媒体 | 文件名（配合文件 key） |
 | `unknown_image` / `unknown_record` / `unknown_file` | 回退 | 无法识别的媒体 |

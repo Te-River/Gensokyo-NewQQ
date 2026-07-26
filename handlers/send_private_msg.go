@@ -7,6 +7,7 @@ import (
   "fmt"
   "strconv"
   "strings"
+  "sync"
   "time"
 
   "github.com/hoshinonyaruko/gensokyo/callapi"
@@ -42,6 +43,9 @@ var sendPrivateMsgKeyMap = map[string]bool{
 	"url_files":     true,
 	"base64_file":   true,
 }
+
+// streamCache 存储流式消息的 stream_msg_id 和 index，key = qq
+var streamCache sync.Map
 
 func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, message callapi.ActionMessage) (string, error) {
 	// 使用 message.Echo 作为key来获取消息类型
@@ -329,6 +333,85 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 				delete(foundItems, "input_notify")
 				mylog.Printf("[CQ:input_notify] 已发送输入状态通知")
 			}
+		}
+
+		// 流式消息处理 [CQ:stream]
+		if streamItems, ok := foundItems["stream"]; ok && len(streamItems) > 0 {
+			var streamData map[string]string
+			if err := json.Unmarshal([]byte(streamItems[0]), &streamData); err == nil {
+				streamType := streamData["type"]
+				qq := streamData["qq"]
+				delete(foundItems, "stream")
+
+				// 从缓存读取 stream_msg_id 和 index
+				type streamInfo struct {
+					StreamMsgID string
+					Index       int
+				}
+				info := &streamInfo{}
+				if cached, ok := streamCache.Load(qq); ok {
+					info = cached.(*streamInfo)
+				}
+
+				chunk := &dto.StreamChunk{
+					ContentType: "text",
+					ContentRaw:  messageText,
+					MsgID:       messageID,
+					MsgSeq:      echo.GetMappingSeq(messageID),
+				}
+
+				switch streamType {
+				case "start":
+					chunk.InputMode = "replace"
+					chunk.InputState = 1
+					chunk.Index = 0
+					resp, err := apiv2.PostC2CStreamMessage(context.TODO(), UserID, chunk)
+					if err != nil {
+						mylog.Printf("流式消息首片发送失败: %v", err)
+					} else if resp != nil && resp.Message != nil {
+						info.StreamMsgID = resp.Message.ID
+						info.Index = 0
+						streamCache.Store(qq, info)
+						mylog.Printf("[CQ:stream] 首片发送成功, stream_msg_id=%s", info.StreamMsgID)
+						retmsg, _ = SendC2CResponse(client, nil, &message, resp)
+					}
+
+				case "mid":
+					if info.StreamMsgID == "" {
+						mylog.Printf("[CQ:stream] 续片缺少 stream_msg_id，跳过")
+					} else {
+						info.Index++
+						chunk.StreamMsgID = info.StreamMsgID
+						chunk.InputState = 1
+						chunk.Index = info.Index
+						streamCache.Store(qq, info)
+						if _, err := apiv2.PostC2CStreamMessage(context.TODO(), UserID, chunk); err != nil {
+							mylog.Printf("流式消息续片发送失败: %v", err)
+						} else {
+							mylog.Printf("[CQ:stream] 续片发送成功, index=%d", info.Index)
+						}
+					}
+
+				case "finish":
+					if info.StreamMsgID == "" {
+						mylog.Printf("[CQ:stream] 终片缺少 stream_msg_id，跳过")
+					} else {
+						info.Index++
+						chunk.StreamMsgID = info.StreamMsgID
+						chunk.InputState = 10
+						chunk.Index = info.Index
+						if resp, err := apiv2.PostC2CStreamMessage(context.TODO(), UserID, chunk); err != nil {
+							mylog.Printf("流式消息终片发送失败: %v", err)
+						} else {
+							mylog.Printf("[CQ:stream] 终片发送成功")
+							retmsg, _ = SendC2CResponse(client, nil, &message, resp)
+						}
+					}
+					streamCache.Delete(qq)
+				}
+			}
+			// 流式消息处理完毕后返回，不再走普通文本发送路径
+			return retmsg, nil
 		}
 
 		if messageText != "" {

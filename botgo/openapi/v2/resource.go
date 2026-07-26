@@ -34,6 +34,8 @@ const (
 	c2cMessagesURI  uri = "/v2/users/{user_id}/messages"
 	c2cRichMediaURI uri = "/v2/users/{user_id}/files"
 
+	c2cStreamMessagesURI uri = "/v2/users/{user_id}/stream_messages"
+
 	c2cUploadPrepareURI uri = "/v2/users/{user_id}/upload_prepare"
 	c2cUploadPartFinishURI uri = "/v2/users/{user_id}/upload_part_finish"
 

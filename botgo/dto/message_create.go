@@ -201,6 +201,20 @@ type FileUploadRequest struct {
 	UploadID    string `json:"upload_id,omitempty"`
 }
 
+// StreamChunk 流式消息分片
+type StreamChunk struct {
+	InputMode    string `json:"input_mode,omitempty"`
+	InputState   int    `json:"input_state"`
+	Index        int    `json:"index"`
+	ContentType  string `json:"content_type,omitempty"`
+	ContentRaw   string `json:"content_raw,omitempty"`
+	StreamMsgID  string `json:"stream_msg_id,omitempty"`
+	MsgID        string `json:"msg_id,omitempty"`
+	EventID      string `json:"event_id,omitempty"`
+	MsgSeq       int    `json:"msg_seq,omitempty"`
+	IsWakeup     bool   `json:"is_wakeup,omitempty"`
+}
+
 // 仅供测试
 
 type MessageSSE struct {

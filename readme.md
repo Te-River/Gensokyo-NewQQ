@@ -91,6 +91,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 -  `[CQ:active]` 主动消息标记，强制走主动推送通道
 -  `[CQ:card]` 群聊图文卡片消息（msg_type=8）
 -  `[CQ:input_notify]` 单聊输入状态通知（msg_type=6）
+-  `[CQ:stream]` 单聊流式消息（打字机效果）
 -  支持文字、图片、语音、视频、Markdown 等多种消息类型
 -  主动信息失败自动转被动
 -  完善的重连机制
@@ -121,6 +122,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 > - **[CQ:file,file=...,file_name=...]** 文件上传
 > - **[CQ:card,title=...,desc=...,pic=...,url=...]** 群聊图文卡片消息
 > - **[CQ:input_notify,type=...,second=...]** 单聊输入状态通知
+> - **[CQ:stream,type:start,qq:...]** 单聊流式消息（start→mid→finish）
 
 #### 符合 OneBot 标准的 CQ 码
 
@@ -153,6 +155,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 | [CQ:file]      | [文件上传]                        |
 | [CQ:card]      | [群聊图文卡片消息]                  |
 | [CQ:input_notify] | [单聊输入状态通知]               |
+| [CQ:stream]      | [单聊流式消息]                    |
 
 
 </details>

@@ -352,3 +352,8 @@ func (o *openAPI) FileUploadPartFinish(ctx context.Context, id string, isGroup b
 func (o *openAPI) FileUploadMerge(ctx context.Context, id string, isGroup bool, req *dto.FileUploadRequest) (*dto.MediaResponse, error) {
 	return nil, fmt.Errorf("FileUploadMerge not supported in v1 API")
 }
+
+// PostC2CStreamMessage v1 不支持流式消息
+func (o *openAPI) PostC2CStreamMessage(ctx context.Context, userID string, chunk *dto.StreamChunk) (*dto.C2CMessageResponse, error) {
+	return nil, fmt.Errorf("PostC2CStreamMessage not supported in v1 API")
+}

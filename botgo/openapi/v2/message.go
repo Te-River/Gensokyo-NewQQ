@@ -337,6 +337,20 @@ func (o *openAPIv2) PostC2CMessageSSE(ctx context.Context, userID string, msg dt
 	return result, nil
 }
 
+// PostC2CStreamMessage 发送C2C流式消息
+func (o *openAPIv2) PostC2CStreamMessage(ctx context.Context, userID string, chunk *dto.StreamChunk) (*dto.C2CMessageResponse, error) {
+	resp, err := o.request(ctx).
+		SetResult(dto.C2CMessageResponse{}).
+		SetPathParam("user_id", userID).
+		SetBody(chunk).
+		Post(o.getURL(c2cStreamMessagesURI))
+	if err != nil {
+		return nil, err
+	}
+	result := resp.Result().(*dto.C2CMessageResponse)
+	return result, nil
+}
+
 // GenerateURLLink 获取机器人资料页分享链接
 // 实现文档: https://bot.q.qq.com/wiki/develop/api-v2/server-inter/user/share_url.html
 func (o *openAPIv2) GenerateURLLink(ctx context.Context, params *dto.GenerateURLLinkToCreate) (*dto.GenerateURLLink, error) {

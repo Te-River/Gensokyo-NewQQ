@@ -59,6 +59,7 @@ var (
 	qqMusicPattern       = regexp.MustCompile(`\[CQ:music,type=qq,id=(\d+)\]`)
 	cardPattern          = regexp.MustCompile(`\[CQ:card[^\]]*\]`)
 	inputNotifyPattern  = regexp.MustCompile(`\[CQ:input_notify,type=(\d+)(?:,second=(\d+))?\]`)
+	streamPattern        = regexp.MustCompile(`\[CQ:stream,type:(\w+),qq:(\d+)\]`)
 	replyRe              = regexp.MustCompile(`\[CQ:reply,id=(\d+)\]`)
 	localImagePattern    *regexp.Regexp
 	localRecordPattern    *regexp.Regexp
@@ -870,6 +871,24 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 					}
 				}
 
+			case "stream":
+				dataMap, ok := segmentMap["data"].(map[string]interface{})
+				if ok && dataMap != nil {
+					streamData := make(map[string]string)
+					if t, ok := dataMap["type"].(string); ok {
+						streamData["type"] = t
+					}
+					if q, ok := dataMap["qq"].(string); ok {
+						streamData["qq"] = q
+					}
+					if len(streamData) > 0 {
+						encoded, err := json.Marshal(streamData)
+						if err == nil {
+							foundItems["stream"] = append(foundItems["stream"], string(encoded))
+						}
+					}
+				}
+
 			case "markdown":
 				mdContent, ok := segmentMap["data"].(map[string]interface{})["data"]
 				if ok {
@@ -1153,8 +1172,26 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 		     }
 		    }
 
-		case "markdown":
-			mdContent, ok := message["data"].(map[string]interface{})["data"]
+		    case "stream":
+		     dataMap, _ := message["data"].(map[string]interface{})
+		     if dataMap != nil {
+		      streamData := make(map[string]string)
+		      if t, ok := dataMap["type"].(string); ok {
+		       streamData["type"] = t
+		      }
+		      if q, ok := dataMap["qq"].(string); ok {
+		       streamData["qq"] = q
+		      }
+		      if len(streamData) > 0 {
+		       encoded, err := json.Marshal(streamData)
+		       if err == nil {
+		        foundItems["stream"] = append(foundItems["stream"], string(encoded))
+		       }
+		      }
+		     }
+
+		 case "markdown":
+		  mdContent, ok := message["data"].(map[string]interface{})["data"]
 			if ok {
 				var mdContentEncoded string
 				if mdContentMap, isMap := mdContent.(map[string]interface{}); isMap {
@@ -1315,6 +1352,21 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 		  encoded, err := json.Marshal(notifyData)
 		  if err == nil {
 		   foundItems["input_notify"] = append(foundItems["input_notify"], string(encoded))
+		  }
+		 }
+		 return ""
+		})
+
+		// 处理 [CQ:stream,...]：提取 type 和 qq 后存入 foundItems["stream"]
+		messageText = streamPattern.ReplaceAllStringFunc(messageText, func(match string) string {
+		 if submatch := streamPattern.FindStringSubmatch(match); len(submatch) > 2 {
+		  streamData := map[string]string{
+		   "type": submatch[1],
+		   "qq":   submatch[2],
+		  }
+		  encoded, err := json.Marshal(streamData)
+		  if err == nil {
+		   foundItems["stream"] = append(foundItems["stream"], string(encoded))
 		  }
 		 }
 		 return ""
