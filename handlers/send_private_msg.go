@@ -385,10 +385,11 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 						chunk.InputState = 1
 						chunk.Index = info.Index
 						streamCache.Store(qq, info)
-						if _, err := apiv2.PostC2CStreamMessage(context.TODO(), UserID, chunk); err != nil {
-							mylog.Printf("流式消息续片发送失败: %v", err)
+						if resp, err := apiv2.PostC2CStreamMessage(context.TODO(), UserID, chunk); err != nil {
+						 mylog.Printf("流式消息续片发送失败: %v", err)
 						} else {
-							mylog.Printf("[CQ:stream] 续片发送成功, index=%d", info.Index)
+						 mylog.Printf("[CQ:stream] 续片发送成功, index=%d", info.Index)
+						 retmsg, _ = SendC2CResponse(client, nil, &message, resp)
 						}
 					}
 
