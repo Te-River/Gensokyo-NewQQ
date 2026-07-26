@@ -414,7 +414,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			return retmsg, nil
 		}
 
-		if messageText != "" {
+		if strings.TrimSpace(messageText) != "" {
 			msgseq := echo.GetMappingSeq(messageID)
 			echo.AddMappingSeq(messageID, msgseq+1)
 			groupReply := generatePrivateMessage(messageID, eventID, nil, messageText, msgseq+1, apiv2, UserID)
