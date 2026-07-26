@@ -92,10 +92,14 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 		imageUrl = imageURLs[0]
 		imageCount++
 	} else if imageURLs, ok := foundItems["url_image"]; ok && len(imageURLs) == 1 {
-		imageType = "url_image"
-		imageUrl = imageURLs[0]
-		imageCount++
-	} else if base64Images, ok := foundItems["base64_image"]; ok && len(base64Images) == 1 {
+	  imageType = "url_image"
+	  imageUrl = imageURLs[0]
+	  imageCount++
+	 } else if imageURLs, ok := foundItems["url_images"]; ok && len(imageURLs) == 1 {
+	  imageType = "url_images"
+	  imageUrl = imageURLs[0]
+	  imageCount++
+	 } else if base64Images, ok := foundItems["base64_image"]; ok && len(base64Images) == 1 {
 		imageType = "base64_image"
 		imageUrl = base64Images[0]
 		imageCount++

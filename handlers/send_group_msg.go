@@ -52,6 +52,24 @@ func init() {
 	callapi.RegisterHandler("send_to_group", HandleSendGroupMsg)
 }
 
+// sendGroupMsgKeyMap 定义 foundItems 中需要按 MessageToCreate 路径发送的 key 集合
+var sendGroupMsgKeyMap = map[string]bool{
+	"markdown":      true,
+	"qqmusic":       true,
+	"local_image":   true,
+	"local_record":  true,
+	"url_image":     true,
+	"url_images":    true,
+	"base64_record": true,
+	"base64_image":  true,
+	"local_video":   true,
+	"base64_video":  true,
+	"local_file":    true,
+	"url_file":      true,
+	"url_files":     true,
+	"base64_file":   true,
+}
+
 func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, message callapi.ActionMessage) (string, error) {
 	// 使用 message.Echo 作为key来获取消息类型
 	var msgType string
@@ -331,7 +349,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			var md *dto.Markdown
 			var kb *keyboard.MessageKeyboard
 			//判断是否需要自动转换md
-			if config.GetTwoWayEcho() {
+			if config.GetTwoWayEcho() && richMediaMessage != nil {
 				md, kb, transmd = auto_md(message, messageText, richMediaMessage)
 			}
 			// 如果groupMessage是nil 说明groupReply是richMediaMessage类型 如果groupMessage不是nil 说明groupReply是MessageToCreate
@@ -358,21 +376,59 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 						MsgType: 7, // 假设7是组合消息类型
 					}
 					groupMessage.Timestamp = time.Now().Unix() // 设置时间戳
+
+					// 处理 [CQ:reply,id=数字] → message_reference + msg_id
+					if replyIDs, ok := foundItems["reply_msg_id"]; ok && len(replyIDs) > 0 {
+					 if messageText != "" {
+					  realReplyID, err := idmap.RetrieveRowByCachev2(replyIDs[0])
+					  if err == nil && realReplyID != "" {
+					   parts := strings.Split(realReplyID, " ")
+					   refID := parts[len(parts)-1]
+					   groupMessage.MessageReference = &dto.MessageReference{
+					    MessageID:             refID,
+					    IgnoreGetMessageError: true,
+					   }
+					   groupMessage.MsgID = refID
+					   // msg_id 与 event_id 二选一，清空 event_id
+					   groupMessage.EventID = ""
+					   mylog.Printf("[CQ:reply] 设置群聊图文混合回复消息: msg_id=%s", refID)
+					  }
+					 }
+					}
 				} else {
 					//将kb和md组合成groupMessage并用MsgType=2发送
 
 					msgseq = echo.GetMappingSeq(messageID)
 					echo.AddMappingSeq(messageID, msgseq+1)
 					groupMessage = &dto.MessageToCreate{
-						Content:  "markdown", // 添加文本内容
-						MsgID:    messageID,
-						EventID:  eventID,
-						MsgSeq:   msgseq,
-						Markdown: md,
-						Keyboard: kb,
-						MsgType:  2, // 假设7是组合消息类型
+					 Content:  "", // 添加文本内容
+					 MsgID:    messageID,
+					 EventID:  eventID,
+					 MsgSeq:   msgseq,
+					 Markdown: md,
+					 Keyboard: kb,
+					 MsgType:  2, // 假设7是组合消息类型
 					}
 					groupMessage.Timestamp = time.Now().Unix() // 设置时间戳
+
+					// 处理 [CQ:reply,id=数字] → message_reference + msg_id (transmd 路径)
+					if replyIDs, ok := foundItems["reply_msg_id"]; ok && len(replyIDs) > 0 {
+					 if messageText != "" {
+					  realReplyID, err := idmap.RetrieveRowByCachev2(replyIDs[0])
+					  if err == nil && realReplyID != "" {
+					   parts := strings.Split(realReplyID, " ")
+					   refID := parts[len(parts)-1]
+					   groupMessage.MessageReference = &dto.MessageReference{
+					    MessageID:             refID,
+					    IgnoreGetMessageError: true,
+					   }
+					   groupMessage.MsgID = refID
+					   // msg_id 与 event_id 二选一，清空 event_id
+					   groupMessage.EventID = ""
+					   mylog.Printf("[CQ:reply] 设置群聊图文混合 transmd 回复消息: msg_id=%s", refID)
+					  }
+					 }
+					}
 
 				}
 			} else {
@@ -529,6 +585,8 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			       }
 			       // 同时设置 msg_id，确保 v2 API 识别为回复
 			       groupMessage.MsgID = refID
+			       // msg_id 与 event_id 二选一，清空 event_id
+			       groupMessage.EventID = ""
 			       mylog.Printf("[CQ:reply] 设置回复消息: msg_id=%s", refID)
 			      } else {
 			       mylog.Printf("[CQ:reply] 虚拟 ID %s 反查失败: %v", replyIDs[0], err)
@@ -614,25 +672,8 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				// 进行类型断言
 				richMediaMessage, ok := groupReply.(*dto.RichMediaMessage)
 				if !ok {
-					// 定义一个map来存储关键字
-						keyMap := map[string]bool{
-						       "markdown":      true,
-						       "qqmusic":       true,
-						       "local_image":   true,
-							"local_record":  true,
-							"url_image":     true,
-							"url_images":    true,
-							"base64_record": true,
-							"base64_image":  true,
-						       "local_video":   true,
-						       "base64_video": true,
-							"local_file":    true,
-							"url_file":      true,
-							"url_files":     true,
-							"base64_file":   true,
-						}
-						// key是 for key, urls := range foundItems { 这里的key
-						if _, exists := keyMap[key]; exists {
+				 // key是 for key, urls := range foundItems { 这里的key
+				  if _, exists := sendGroupMsgKeyMap[key]; exists {
 						// 进行类型断言
 						groupMessage, ok := groupReply.(*dto.MessageToCreate)
 						if !ok {
@@ -650,7 +691,9 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 						          IgnoreGetMessageError: true,
 						         }
 						         groupMessage.MsgID = refID
-						         mylog.Printf("[CQ:reply] 设置 markdown 回复消息: msg_id=%s", refID)
+						  // msg_id 与 event_id 二选一，清空 event_id
+						  groupMessage.EventID = ""
+						  mylog.Printf("[CQ:reply] 设置 markdown 回复消息: msg_id=%s", refID)
 						        }
 						       }
 						//重新为err赋值
@@ -744,6 +787,24 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 						Media:   &media,
 					}
 					groupMessage.Timestamp = time.Now().Unix() // 设置时间戳
+
+					// 处理 [CQ:reply,id=数字] → message_reference + msg_id (富媒体消息)
+					if replyIDs, ok := foundItems["reply_msg_id"]; ok && len(replyIDs) > 0 {
+						realReplyID, err := idmap.RetrieveRowByCachev2(replyIDs[0])
+						if err == nil && realReplyID != "" {
+							parts := strings.Split(realReplyID, " ")
+							refID := parts[len(parts)-1]
+							groupMessage.MessageReference = &dto.MessageReference{
+								MessageID:             refID,
+								IgnoreGetMessageError: true,
+							}
+							groupMessage.MsgID = refID
+							// msg_id 与 event_id 二选一，清空 event_id
+							groupMessage.EventID = ""
+							mylog.Printf("[CQ:reply] 设置群聊富媒体回复消息: msg_id=%s", refID)
+						}
+					}
+
 					//重新为err赋值
 					resp, err = apiv2.PostGroupMessage(context.TODO(), message.Params.GroupID.(string), groupMessage)
 					if err != nil {
@@ -1408,7 +1469,7 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 		}
 
 		return &dto.MessageToCreate{
-			Content:  "markdown",
+			Content:  "",
 			MsgID:    id,
 			EventID:  eventid,
 			MsgSeq:   msgseq,
@@ -1426,7 +1487,7 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 		}
 		if markdown != nil {
 			return &dto.MessageToCreate{
-				Content:  "markdown",
+				Content:  "",
 				MsgID:    id,
 				EventID:  eventid,
 				MsgSeq:   msgseq,
@@ -1436,7 +1497,7 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 			}
 		} else {
 			return &dto.MessageToCreate{
-				Content:  "markdown",
+				Content:  "",
 				MsgID:    id,
 				EventID:  eventid,
 				MsgSeq:   msgseq,
@@ -1446,6 +1507,11 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 		}
 	} else if videoURL, ok := foundItems["url_video"]; ok && len(videoURL) > 0 {
 		newvideolink := "http://" + videoURL[0]
+		// SSRF 防护：检查是否为私有地址
+		if isPrivateOrLoopback(newvideolink) {
+			mylog.Printf("SSRF 阻止: 目标地址为私有地址: %s", newvideolink)
+			return nil
+		}
 		// 发链接视频 http
 		return &dto.RichMediaMessage{
 			EventID:    id,
@@ -1456,6 +1522,11 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 		}
 	} else if videoURLs, ok := foundItems["url_videos"]; ok && len(videoURLs) > 0 {
 		newvideolink := "https://" + videoURLs[0]
+		// SSRF 防护：检查是否为私有地址
+		if isPrivateOrLoopback(newvideolink) {
+			mylog.Printf("SSRF 阻止: 目标地址为私有地址: %s", newvideolink)
+			return nil
+		}
 		// 发链接视频 https
 		return &dto.RichMediaMessage{
 			EventID:    id,
@@ -2139,7 +2210,7 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 		}
 
 		return &dto.MessageToCreate{
-			Content:  "markdown",
+			Content:  "",
 			MsgID:    id,
 			EventID:  eventid,
 			MsgSeq:   msgseq,
@@ -2157,7 +2228,7 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 		}
 		if markdown != nil {
 			return &dto.MessageToCreate{
-				Content:  "markdown",
+				Content:  "",
 				MsgID:    id,
 				EventID:  eventid,
 				MsgSeq:   msgseq,
@@ -2167,7 +2238,7 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 			}
 		} else {
 			return &dto.MessageToCreate{
-				Content:  "markdown",
+				Content:  "",
 				MsgID:    id,
 				EventID:  eventid,
 				MsgSeq:   msgseq,
@@ -2177,6 +2248,11 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 		}
 	} else if videoURL, ok := foundItems["url_video"]; ok && len(videoURL) > 0 {
 		newvideolink := "http://" + videoURL[0]
+		// SSRF 防护：检查是否为私有地址
+		if isPrivateOrLoopback(newvideolink) {
+			mylog.Printf("SSRF 阻止: 目标地址为私有地址: %s", newvideolink)
+			return nil
+		}
 		// 发链接视频 http
 		return &dto.RichMediaMessage{
 			EventID:    id,
@@ -2187,6 +2263,11 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 		}
 	} else if videoURLs, ok := foundItems["url_videos"]; ok && len(videoURLs) > 0 {
 		newvideolink := "https://" + videoURLs[0]
+		// SSRF 防护：检查是否为私有地址
+		if isPrivateOrLoopback(newvideolink) {
+			mylog.Printf("SSRF 阻止: 目标地址为私有地址: %s", newvideolink)
+			return nil
+		}
 		// 发链接视频 https
 		return &dto.RichMediaMessage{
 			EventID:    id,

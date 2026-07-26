@@ -21,6 +21,24 @@ func init() {
 	callapi.RegisterHandler("send_private_msg", HandleSendPrivateMsg)
 }
 
+// sendPrivateMsgKeyMap 定义 foundItems 中需要按 MessageToCreate 路径发送的 key 集合
+var sendPrivateMsgKeyMap = map[string]bool{
+	"markdown":      true,
+	"qqmusic":       true,
+	"local_image":   true,
+	"local_record":  true,
+	"url_image":     true,
+	"url_images":    true,
+	"base64_record": true,
+	"base64_image":  true,
+	"local_video":   true,
+	"base64_video":  true,
+	"local_file":    true,
+	"url_file":      true,
+	"url_files":     true,
+	"base64_file":   true,
+}
+
 func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, message callapi.ActionMessage) (string, error) {
 	// 使用 message.Echo 作为key来获取消息类型
 	var msgType string
@@ -256,6 +274,8 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			       }
 			       // 同时设置 msg_id，确保 v2 API 识别为回复
 			       groupMessage.MsgID = refID
+			       // msg_id 与 event_id 二选一，清空 event_id
+			       groupMessage.EventID = ""
 			       mylog.Printf("[CQ:reply] 设置私聊回复消息: msg_id=%s", refID)
 			      } else {
 			       mylog.Printf("[CQ:reply] 虚拟 ID %s 反查失败: %v", replyIDs[0], err)
@@ -334,6 +354,8 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			       }
 			       // 同时设置 msg_id，确保 v2 API 识别为回复
 			       groupMessage.MsgID = refID
+			       // msg_id 与 event_id 二选一，清空 event_id
+			       groupMessage.EventID = ""
 			       mylog.Printf("[CQ:reply] 设置私聊回复消息: msg_id=%s", refID)
 			      } else {
 			       mylog.Printf("[CQ:reply] 虚拟 ID %s 反查失败: %v", replyIDs[0], err)
@@ -372,25 +394,8 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 				// 进行类型断言
 				richMediaMessage, ok := groupReply.(*dto.RichMediaMessage)
 				if !ok {
-					// 定义一个map来存储关键字
-						keyMap := map[string]bool{
-						     "markdown":      true,
-						     "qqmusic":       true,
-						     "local_image":   true,
-						     "local_record":  true,
-						     "url_image":     true,
-						     "url_images":    true,
-						     "base64_record": true,
-						     "base64_image":  true,
-						     "local_video":   true,
-						     "base64_video": true,
-						     "local_file":    true,
-						     "url_file":      true,
-						     "url_files":     true,
-						     "base64_file":   true,
-						    }
-						// key 是 for key, urls := range foundItems { 这里的 key
-						if _, exists := keyMap[key]; exists {
+				 // key 是 for key, urls := range foundItems { 这里的 key
+				 if _, exists := sendPrivateMsgKeyMap[key]; exists {
 						// 进行类型断言
 						groupMessage, ok := groupReply.(*dto.MessageToCreate)
 						       if !ok {
@@ -409,7 +414,9 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 						          IgnoreGetMessageError: true,
 						         }
 						         groupMessage.MsgID = refID
-						         mylog.Printf("[CQ:reply] 设置私聊 markdown 回复消息: msg_id=%s", refID)
+						  // msg_id 与 event_id 二选一，清空 event_id
+						  groupMessage.EventID = ""
+						  mylog.Printf("[CQ:reply] 设置私聊 markdown 回复消息: msg_id=%s", refID)
 						        }
 						       }
 
@@ -493,6 +500,24 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 						Media:   &media,
 					}
 					groupMessage.Timestamp = time.Now().Unix() // 设置时间戳
+
+					// 处理 [CQ:reply,id=数字] → message_reference + msg_id (富媒体消息)
+					if replyIDs, ok := foundItems["reply_msg_id"]; ok && len(replyIDs) > 0 {
+					 realReplyID, err := idmap.RetrieveRowByCachev2(replyIDs[0])
+					 if err == nil && realReplyID != "" {
+					  parts := strings.Split(realReplyID, " ")
+					  refID := parts[len(parts)-1]
+					  groupMessage.MessageReference = &dto.MessageReference{
+					   MessageID:             refID,
+					   IgnoreGetMessageError: true,
+					  }
+					  groupMessage.MsgID = refID
+					  // msg_id 与 event_id 二选一，清空 event_id
+					  groupMessage.EventID = ""
+					  mylog.Printf("[CQ:reply] 设置私聊富媒体回复消息: msg_id=%s", refID)
+					 }
+					}
+
 					//重新为err赋值
 					resp, err = apiv2.PostC2CMessage(context.TODO(), UserID, groupMessage)
 					if err != nil {

@@ -283,14 +283,17 @@ func HandleSendGuildChannelMsg(client callapi.Client, api openapi.OpenAPI, apiv2
 		    textMsg, _ := GenerateReplyMessage(messageID, nil, messageText, msgseq+1, nil)
 
 		    // 如果有 markdown，改为 markdown 消息
-		    if md != nil {
-		     textMsg.Markdown = md
-		     textMsg.Keyboard = kb
-		     textMsg.MsgType = 2
-		     textMsg.Content = ""
-		     delete(foundItems, "markdown")
-		     mylog.Printf("[CQ:markdown] 将频道消息类型切换为 markdown")
-		    }
+		        if md != nil {
+		         textMsg.Markdown = md
+		         textMsg.Keyboard = kb
+		         textMsg.MsgType = 2
+		         textMsg.Content = ""
+		         delete(foundItems, "markdown")
+		         mylog.Printf("[CQ:markdown] 将频道消息类型切换为 markdown")
+		        } else {
+		         // 没有 markdown 时，纯文本消息转换 [CQ:at] 为 @用户名
+		         textMsg.Content = resolvePlainTextAtMentions(textMsg.Content)
+		        }
 
 		    // 处理 [CQ:reply,id=数字] → message_reference + msg_id
 		           if replyIDs, ok := foundItems["reply_msg_id"]; ok && len(replyIDs) > 0 {
@@ -305,6 +308,8 @@ func HandleSendGuildChannelMsg(client callapi.Client, api openapi.OpenAPI, apiv2
 		              }
 		              // 同时设置 msg_id，确保 v2 API 识别为回复
 		              textMsg.MsgID = refID
+		              // msg_id 与 event_id 二选一，清空 event_id
+		              textMsg.EventID = ""
 		              mylog.Printf("[CQ:reply] 设置频道回复消息: msg_id=%s", refID)
 		             } else {
 		              mylog.Printf("[CQ:reply] 虚拟 ID %s 反查失败: %v", replyIDs[0], err)
