@@ -366,6 +366,15 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			    resp, err := apiv2.PostC2CMessage(context.TODO(), UserID, groupMessage)
 			if err != nil {
 				mylog.Printf("发送文本私聊信息失败: %v", err)
+				// 22009: 主动消息超过频控限制，记录日志 (被动回复场景无需补偿)
+				if strings.Contains(err.Error(), `"code":22009`) {
+					mylog.Printf("私聊主动消息受限(code:22009)，消息被丢弃: %s", messageText)
+					if config.GetSaveError() {
+						mylog.ErrLogToFile("type", "PostC2CMessage-22009")
+						mylog.ErrInterfaceToFile("request", groupMessage)
+						mylog.ErrLogToFile("error", err.Error())
+					}
+				}
 				//如果失败 防止进入递归
 				return "", nil
 			}
@@ -433,8 +442,12 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 						}
 
 						if err != nil && strings.Contains(err.Error(), `"code":22009`) {
-							mylog.Printf("私信主动转被动待实现")
-							// TODO: 私聊 22009 转被动逻辑
+						 mylog.Printf("私聊主动消息受限(code:22009)，消息被丢弃")
+						 if config.GetSaveError() {
+						  mylog.ErrLogToFile("type", "PostC2CMessage-22009")
+						  mylog.ErrInterfaceToFile("request", groupMessage)
+						  mylog.ErrLogToFile("error", err.Error())
+						 }
 
 						} else if err != nil && strings.Contains(err.Error(), `"code":40034025`) {
 							// 请求参数 event_id 无效，清空后重试一次
@@ -470,6 +483,16 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 					// 错误保存到本地
 					if config.GetSaveError() {
 						mylog.ErrLogToFile("type", "PostC2CMessage")
+						mylog.ErrInterfaceToFile("request", richMediaMessage)
+						mylog.ErrLogToFile("error", err.Error())
+					}
+				}
+
+				// 22009: 主动消息超过频控限制
+				if err != nil && strings.Contains(err.Error(), `"code":22009`) {
+					mylog.Printf("私聊富媒体主动消息受限(code:22009): %s", key)
+					if config.GetSaveError() {
+						mylog.ErrLogToFile("type", "PostC2CMessage-22009")
 						mylog.ErrInterfaceToFile("request", richMediaMessage)
 						mylog.ErrLogToFile("error", err.Error())
 					}
