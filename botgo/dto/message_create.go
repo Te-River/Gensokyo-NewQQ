@@ -151,6 +151,56 @@ type InputNotify struct {
 	InputSecond int `json:"input_second"`
 }
 
+// ---------- 文件分片上传结构体 ----------
+
+// UploadPrepareRequest 分片上传预上传请求
+type UploadPrepareRequest struct {
+	FileType int    `json:"file_type,omitempty"`
+	FileSize string `json:"file_size,omitempty"`
+	FileName string `json:"file_name,omitempty"`
+	MD5      string `json:"md5,omitempty"`
+	SHA1     string `json:"sha1,omitempty"`
+	MD510m   string `json:"md5_10m,omitempty"`
+}
+
+// UploadPrepareResponse 分片上传预上传响应
+type UploadPrepareResponse struct {
+	UploadID    string            `json:"upload_id"`
+	BlockSize   string            `json:"block_size"`
+	Parts       []UploadPart      `json:"parts"`
+	UploadCfg   *UploadConfig     `json:"upload_config,omitempty"`
+}
+
+// UploadPart 分片信息
+type UploadPart struct {
+	Index        int    `json:"index"`
+	PresignedURL string `json:"presigned_url"`
+	BlockSize    string `json:"block_size"`
+}
+
+// UploadConfig 上传配置
+type UploadConfig struct {
+	Concurrency   int `json:"concurrency"`
+	RetryTimeout  int `json:"retry_timeout"`
+	RetryDelay    int `json:"retry_delay"`
+}
+
+// UploadPartFinishRequest 分片上传完成请求
+type UploadPartFinishRequest struct {
+	UploadID   string `json:"upload_id,omitempty"`
+	PartIndex  int    `json:"part_index,omitempty"`
+	BlockSize  string `json:"block_size,omitempty"`
+	MD5        string `json:"md5,omitempty"`
+}
+
+// FileUploadRequest 文件上传合并请求（用于分片上传最后一步：合并）
+type FileUploadRequest struct {
+	FileType    int    `json:"file_type,omitempty"`
+	FileName    string `json:"file_name,omitempty"`
+	SrvSendMsg  bool   `json:"srv_send_msg,omitempty"`
+	UploadID    string `json:"upload_id,omitempty"`
+}
+
 // 仅供测试
 
 type MessageSSE struct {

@@ -34,6 +34,12 @@ const (
 	c2cMessagesURI  uri = "/v2/users/{user_id}/messages"
 	c2cRichMediaURI uri = "/v2/users/{user_id}/files"
 
+	c2cUploadPrepareURI uri = "/v2/users/{user_id}/upload_prepare"
+	c2cUploadPartFinishURI uri = "/v2/users/{user_id}/upload_part_finish"
+
+	groupUploadPrepareURI uri = "/v2/groups/{group_id}/upload_prepare"
+	groupUploadPartFinishURI uri = "/v2/groups/{group_id}/upload_part_finish"
+
 	messageURI       uri = "/channels/{channel_id}/messages/{message_id}"
 	groupMessagesURL uri = "/v2/groups/{group_id}/messages/{message_id}"
 
