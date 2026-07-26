@@ -828,6 +828,30 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 					}
 				}
 
+			case "card":
+				dataMap, ok := segmentMap["data"].(map[string]interface{})
+				if ok && dataMap != nil {
+					cardData := make(map[string]string)
+					if title, ok := dataMap["title"].(string); ok {
+						cardData["title"] = title
+					}
+					if desc, ok := dataMap["desc"].(string); ok {
+						cardData["desc"] = desc
+					}
+					if pic, ok := dataMap["pic"].(string); ok {
+						cardData["pic"] = pic
+					}
+					if url, ok := dataMap["url"].(string); ok {
+						cardData["url"] = url
+					}
+					if len(cardData) > 0 {
+						encoded, err := json.Marshal(cardData)
+						if err == nil {
+							foundItems["card"] = append(foundItems["card"], string(encoded))
+						}
+					}
+				}
+
 			case "markdown":
 				mdContent, ok := segmentMap["data"].(map[string]interface{})["data"]
 				if ok {
@@ -1065,6 +1089,30 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 		       foundItems["url_image"] = append(foundItems["url_image"], strings.TrimPrefix(url, "http://"))
 		      } else {
 		       foundItems["unknown_image"] = append(foundItems["unknown_image"], url)
+		      }
+		     }
+		    }
+
+		   case "card":
+		    dataMap, _ := message["data"].(map[string]interface{})
+		    if dataMap != nil {
+		     cardData := make(map[string]string)
+		     if title, ok := dataMap["title"].(string); ok {
+		      cardData["title"] = title
+		     }
+		     if desc, ok := dataMap["desc"].(string); ok {
+		      cardData["desc"] = desc
+		     }
+		     if pic, ok := dataMap["pic"].(string); ok {
+		      cardData["pic"] = pic
+		     }
+		     if url, ok := dataMap["url"].(string); ok {
+		      cardData["url"] = url
+		     }
+		     if len(cardData) > 0 {
+		      encoded, err := json.Marshal(cardData)
+		      if err == nil {
+		       foundItems["card"] = append(foundItems["card"], string(encoded))
 		      }
 		     }
 		    }
