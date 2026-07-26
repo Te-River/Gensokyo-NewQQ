@@ -3124,10 +3124,10 @@ func defaultCardURL(url string) string {
 	return url
 }
 
-// defaultCardPicURL 卡片消息 pic_url 为 QQ API 必填字段，空值时使用默认值
+// defaultCardPicURL 卡片消息 pic_url 为 QQ API 必填字段，空值时使用透明占位图
 func defaultCardPicURL(pic string) string {
 	if pic == "" {
-		return "https://q.qq.com"
+		return "https://pubminishare-30161.picsz.qpic.cn/preview_placeholder.png"
 	}
 	return pic
 }
