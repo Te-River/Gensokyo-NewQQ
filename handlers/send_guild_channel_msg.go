@@ -27,6 +27,22 @@ func init() {
 	callapi.RegisterHandler("send_guild_channel_msg", HandleSendGuildChannelMsg)
 }
 
+// sendGuildChannelMsgKeyMap 定义 foundItems 中可通过 channel API 发送的 key 集合
+// 频道 API 支持：文本(content)、图片(image)、Markdown(markdown)、Embed(embed)、Ark(ark)
+// 文件类型（local_file/url_file/url_files/base64_file）频道不支持，保持跳过
+// 视频类型（url_video/url_videos）频道不支持富媒体视频，保持跳过
+var sendGuildChannelMsgKeyMap = map[string]bool{
+	"markdown":      true,
+	"qqmusic":       true,
+	"local_image":   true,
+	"url_image":     true,
+	"url_images":    true,
+	"base64_image":  true,
+	"base64_record": true,
+	"local_video":   true,
+	"base64_video":  true,
+}
+
 func HandleSendGuildChannelMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, message callapi.ActionMessage) (string, error) {
 	// 使用 message.Echo 作为key来获取消息类型
 	var msgType string
@@ -326,12 +342,21 @@ func HandleSendGuildChannelMsg(client callapi.Client, api openapi.OpenAPI, apiv2
 
 		   // 遍历foundItems并发送每种信息
 		   for key, urls := range foundItems {
-		    // 跳过控制型 key 和频道不支持的媒体类型
+		    // 跳过控制型 key
 		    if key == "active" || key == "active_type" || key == "active_sub_type" ||
-		     key == "reply_msg_id" || key == "file_name" ||
-		     key == "markdown" || key == "qqmusic" ||
-		     key == "local_file" || key == "url_file" || key == "url_files" || key == "base64_file" ||
-		     key == "url_video" || key == "url_videos" {
+		     key == "reply_msg_id" || key == "file_name" {
+		     continue
+		    }
+		    // 频道 API 不支持文件类型，跳过
+		    if key == "local_file" || key == "url_file" || key == "url_files" || key == "base64_file" {
+		     continue
+		    }
+		    // 频道 API 不支持直接发送视频 URL，跳过（视频富媒体需通过 multipart 上传）
+		    if key == "url_video" || key == "url_videos" {
+		     continue
+		    }
+		    // 仅处理 keyMap 中声明的媒体类型（与 sendGroupMsgKeyMap / sendPrivateMsgKeyMap 模式对齐）
+		    if _, ok := sendGuildChannelMsgKeyMap[key]; !ok {
 		     continue
 		    }
 		    for _, url := range urls {

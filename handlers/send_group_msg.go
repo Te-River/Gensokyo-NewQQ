@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
@@ -60,9 +61,11 @@ var sendGroupMsgKeyMap = map[string]bool{
 	"local_record":  true,
 	"url_image":     true,
 	"url_images":    true,
+	"url_record":    true,
 	"base64_record": true,
 	"base64_image":  true,
 	"local_video":   true,
+	"url_video":     true,
 	"base64_video":  true,
 	"local_file":    true,
 	"url_file":      true,
@@ -568,6 +571,26 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				// 从 foundItems 中移除 markdown，避免下方循环重复发送
 				delete(foundItems, "markdown")
 				mylog.Printf("[CQ:markdown] 将消息类型切换为 markdown")
+			}
+
+			// 如果有 [CQ:card]，改为卡片消息 (msg_type=8)
+			if cardItems, ok := foundItems["card"]; ok && len(cardItems) > 0 && groupMessage.MsgType != 2 {
+				var cardData map[string]string
+				if err := json.Unmarshal([]byte(cardItems[0]), &cardData); err == nil {
+					groupMessage.MsgType = 8
+					groupMessage.Content = ""
+					groupMessage.Card = &dto.GroupCard{
+						Type: "tuwen",
+						Content: &dto.GroupCardContent{
+							Title:       cardData["title"],
+							Description: cardData["desc"],
+							PicURL:      cardData["pic"],
+							URL:         cardData["url"],
+						},
+					}
+					delete(foundItems, "card")
+					mylog.Printf("[CQ:card] 将消息类型切换为卡片消息")
+				}
 			}
 
 			// 处理 [CQ:reply,id=数字] → message_reference + msg_id

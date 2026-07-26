@@ -62,6 +62,13 @@ type MessageToCreate struct {
 	// [新增] 互动召回消息标记
 	// 指明发送消息为互动召回消息，与 msg_id，event_id 互斥使用
 	IsWakeup bool `json:"is_wakeup,omitempty"`
+
+	// Card 卡片消息（msg_type=8），群聊专用
+	// type="tuwen" 时含 title/description/pic_url/url
+	Card *GroupCard `json:"card,omitempty"`
+
+	// InputNotify 输入状态通知（msg_type=6），仅单聊可用
+	InputNotify *InputNotify `json:"input_notify,omitempty"`
 }
 
 // FourmToCreate 发送帖子结构体定义
@@ -121,6 +128,27 @@ type SettingGuideToCreate struct {
 type SettingGuide struct {
 	// 频道ID, 当通过私信发送设置引导消息时，需要指定guild_id
 	GuildID string `json:"guild_id"`
+}
+
+// GroupCard 群聊卡片消息（msg_type=8）
+// type="tuwen" 时发送图文卡片，含标题、描述、图片和跳转链接
+type GroupCard struct {
+	Type    string         `json:"type"`
+	Content *GroupCardContent `json:"content,omitempty"`
+}
+
+// GroupCardContent 卡片消息正文
+type GroupCardContent struct {
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+	PicURL      string `json:"pic_url,omitempty"`
+	URL         string `json:"url,omitempty"`
+}
+
+// InputNotify 输入状态通知（msg_type=6），仅单聊可用
+type InputNotify struct {
+	InputType   int `json:"input_type"`
+	InputSecond int `json:"input_second"`
 }
 
 // 仅供测试
