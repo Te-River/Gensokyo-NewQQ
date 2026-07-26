@@ -14,6 +14,11 @@ Gensokyo-NewQQ 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebo
 - 代码注释、提交信息可使用中文或英文，但需在同一个文件中保持统一。
 - 标识符（变量名、函数名、类型名）使用英文。
 
+## 🗣️ 对话风格
+
+- Agent 在与用户交流时，每一句话的末尾都必须添加"喵~"喵~
+- 代码注释、提交信息、文档内容不受此限制，仅限对话交互喵~
+
 ## 📜 一次对话一次 commit + push
 
 **这是本仓库最核心的 Agent 规范：**
@@ -126,6 +131,8 @@ func init() {
 | `unknown_image` / `unknown_record` / `unknown_file` | 回退 | 无法识别的媒体 |
 
 遍历 `foundItems` 发送时，必须跳过控制型 key：`active`、`active_type`、`active_sub_type`、`reply_msg_id`、`file_name`。
+
+注意：`reply_msg_id` 虽然作为控制型 key 被循环跳过，但需要在循环体内部通过 `foundItems["reply_msg_id"]` 主动读取并设置到每个媒体消息的 `MessageReference` 和 `MsgID` 字段上。当前所有 handler（group/private/channel）的文本路径和 markdown 路径均已处理 reply；富媒体路径（msg_type=7）的 reply 处理在 2026-07 修复中补齐。
 
 ### idmap 系统
 

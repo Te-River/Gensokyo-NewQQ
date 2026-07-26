@@ -99,7 +99,7 @@ func HandleSendPrivateMsgSSE(client callapi.Client, api openapi.OpenAPI, apiv2 o
 	// 首先，将message.Params.Message序列化成JSON字符串
 	messageJSON, err := json.Marshal(message.Params.Message)
 	if err != nil {
-		fmt.Printf("Error marshalling message: %v\n", err)
+		mylog.Printf("Error marshalling message: %v", err)
 		return "", nil
 	}
 
@@ -107,7 +107,7 @@ func HandleSendPrivateMsgSSE(client callapi.Client, api openapi.OpenAPI, apiv2 o
 	var messageBody structs.InterfaceBody
 	err = json.Unmarshal(messageJSON, &messageBody)
 	if err != nil {
-		fmt.Printf("Error unmarshalling to InterfaceBody: %v\n", err)
+		mylog.Printf("Error unmarshalling to InterfaceBody: %v", err)
 		return "", nil
 	}
 
