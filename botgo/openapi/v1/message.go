@@ -337,3 +337,18 @@ func (o *openAPI) GenerateURLLink(ctx context.Context, params *dto.GenerateURLLi
 	// 类型断言并返回结果
 	return resp.Result().(*dto.GenerateURLLink), nil
 }
+
+// FileUploadPrepare v1 不支持分片上传
+func (o *openAPI) FileUploadPrepare(ctx context.Context, id string, isGroup bool, req *dto.UploadPrepareRequest) (*dto.UploadPrepareResponse, error) {
+	return nil, fmt.Errorf("FileUploadPrepare not supported in v1 API")
+}
+
+// FileUploadPartFinish v1 不支持分片上传
+func (o *openAPI) FileUploadPartFinish(ctx context.Context, id string, isGroup bool, req *dto.UploadPartFinishRequest) error {
+	return fmt.Errorf("FileUploadPartFinish not supported in v1 API")
+}
+
+// FileUploadMerge v1 不支持分片上传
+func (o *openAPI) FileUploadMerge(ctx context.Context, id string, isGroup bool, req *dto.FileUploadRequest) (*dto.MediaResponse, error) {
+	return nil, fmt.Errorf("FileUploadMerge not supported in v1 API")
+}

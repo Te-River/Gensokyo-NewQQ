@@ -89,6 +89,13 @@ type MessageAPI interface {
 	// 如果你有 UserAPI interface，加在这里；如果没有，加在你汇总的 API interface 里
 	// GenerateURLLink 获取机器人资料页分享链接
 	GenerateURLLink(ctx context.Context, params *dto.GenerateURLLinkToCreate) (*dto.GenerateURLLink, error)
+
+	// FileUploadPrepare 单聊/群聊文件分片上传 — 预上传
+	FileUploadPrepare(ctx context.Context, id string, isGroup bool, req *dto.UploadPrepareRequest) (*dto.UploadPrepareResponse, error)
+	// FileUploadPartFinish 单聊/群聊文件分片上传 — 通知分片完成
+	FileUploadPartFinish(ctx context.Context, id string, isGroup bool, req *dto.UploadPartFinishRequest) error
+	// FileUploadMerge 单聊/群聊文件分片上传 — 合并分片（返回 file_info）
+	FileUploadMerge(ctx context.Context, id string, isGroup bool, req *dto.FileUploadRequest) (*dto.MediaResponse, error)
 }
 
 // GuildAPI guild 相关接口

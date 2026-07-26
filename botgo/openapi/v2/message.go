@@ -379,3 +379,59 @@ func (o *openAPIv2) GenerateURLLink(ctx context.Context, params *dto.GenerateURL
 		URL: url,
 	}, nil
 }
+
+// FileUploadPrepare 单聊/群聊文件分片上传 — 预上传
+func (o *openAPIv2) FileUploadPrepare(ctx context.Context, id string, isGroup bool, req *dto.UploadPrepareRequest) (*dto.UploadPrepareResponse, error) {
+	var targetURI uri
+	if isGroup {
+		targetURI = groupUploadPrepareURI
+	} else {
+		targetURI = c2cUploadPrepareURI
+	}
+	resp, err := o.request(ctx).
+		SetResult(dto.UploadPrepareResponse{}).
+		SetPathParam("user_id", id).
+		SetPathParam("group_id", id).
+		SetBody(req).
+		Post(o.getURL(targetURI))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Result().(*dto.UploadPrepareResponse), nil
+}
+
+// FileUploadPartFinish 单聊/群聊文件分片上传 — 通知分片完成
+func (o *openAPIv2) FileUploadPartFinish(ctx context.Context, id string, isGroup bool, req *dto.UploadPartFinishRequest) error {
+	var targetURI uri
+	if isGroup {
+		targetURI = groupUploadPartFinishURI
+	} else {
+		targetURI = c2cUploadPartFinishURI
+	}
+	_, err := o.request(ctx).
+		SetPathParam("user_id", id).
+		SetPathParam("group_id", id).
+		SetBody(req).
+		Post(o.getURL(targetURI))
+	return err
+}
+
+// FileUploadMerge 单聊/群聊文件分片上传 — 合并分片（返回 file_info）
+func (o *openAPIv2) FileUploadMerge(ctx context.Context, id string, isGroup bool, req *dto.FileUploadRequest) (*dto.MediaResponse, error) {
+	var targetURI uri
+	if isGroup {
+		targetURI = groupRichMediaURI
+	} else {
+		targetURI = c2cRichMediaURI
+	}
+	resp, err := o.request(ctx).
+		SetResult(dto.MediaResponse{}).
+		SetPathParam("user_id", id).
+		SetPathParam("group_id", id).
+		SetBody(req).
+		Post(o.getURL(targetURI))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Result().(*dto.MediaResponse), nil
+}

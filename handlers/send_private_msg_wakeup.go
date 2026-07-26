@@ -66,20 +66,22 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 
 	// 定义 KeyMap (对齐 HandleSendPrivateMsg)
 	keyMap := map[string]bool{
-		"markdown":      true,
-		"qqmusic":       true,
-		"local_image":   true,
-		"local_record":  true,
-		"url_image":     true,
-		"url_images":    true,
-		"base64_record": true,
-		"base64_image":  true,
-		"local_video":   true,
-		"base64_video": true,
-		"local_file":    true,
-		"url_file":      true,
-		"url_files":     true,
-		"base64_file":   true,
+	 "markdown":      true,
+	 "qqmusic":       true,
+	 "local_image":   true,
+	 "local_record":  true,
+	 "url_image":     true,
+	 "url_images":    true,
+	 "url_record":    true,
+	 "base64_record": true,
+	 "base64_image":  true,
+	 "local_video":   true,
+	 "url_video":     true,
+	 "base64_video":  true,
+	 "local_file":    true,
+	 "url_file":      true,
+	 "url_files":     true,
+	 "base64_file":   true,
 	}
 
 	var singleItem = make(map[string][]string)

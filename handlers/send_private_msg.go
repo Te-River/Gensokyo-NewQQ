@@ -2,6 +2,8 @@ package handlers
 
 import (
   "context"
+  "encoding/base64"
+  "encoding/json"
   "fmt"
   "strconv"
   "strings"
@@ -29,9 +31,11 @@ var sendPrivateMsgKeyMap = map[string]bool{
 	"local_record":  true,
 	"url_image":     true,
 	"url_images":    true,
+	"url_record":    true,
 	"base64_record": true,
 	"base64_image":  true,
 	"local_video":   true,
+	"url_video":     true,
 	"base64_video":  true,
 	"local_file":    true,
 	"url_file":      true,
@@ -298,6 +302,35 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 		}
 
 		// 优先发送文本信息
+		// 如果存在 [CQ:input_notify]，先发送输入状态通知
+		if notifyItems, ok := foundItems["input_notify"]; ok && len(notifyItems) > 0 {
+			var notifyData map[string]string
+			if err := json.Unmarshal([]byte(notifyItems[0]), &notifyData); err == nil {
+				inputType := 1
+				inputSecond := 60
+				if t, err := strconv.Atoi(notifyData["type"]); err == nil {
+					inputType = t
+				}
+				if s, err := strconv.Atoi(notifyData["second"]); err == nil {
+					inputSecond = s
+				}
+				notifyMsg := &dto.MessageToCreate{
+					MsgType: 6,
+					InputNotify: &dto.InputNotify{
+						InputType:   inputType,
+						InputSecond: inputSecond,
+					},
+					MsgID:  messageID,
+					MsgSeq: echo.GetMappingSeq(messageID),
+				}
+				if _, err := apiv2.PostC2CMessage(context.TODO(), UserID, notifyMsg); err != nil {
+					mylog.Printf("发送输入状态通知失败: %v", err)
+				}
+				delete(foundItems, "input_notify")
+				mylog.Printf("[CQ:input_notify] 已发送输入状态通知")
+			}
+		}
+
 		if messageText != "" {
 			msgseq := echo.GetMappingSeq(messageID)
 			echo.AddMappingSeq(messageID, msgseq+1)
@@ -374,9 +407,25 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 						mylog.ErrInterfaceToFile("request", groupMessage)
 						mylog.ErrLogToFile("error", err.Error())
 					}
+					//如果失败 防止进入递归
+					return "", nil
 				}
-				//如果失败 防止进入递归
-				return "", nil
+				// 请求参数 event_id 无效，清空后重试一次
+				if strings.Contains(err.Error(), `"code":40034025`) {
+					groupMessage.EventID = ""
+					resp, err = apiv2.PostC2CMessage(context.TODO(), UserID, groupMessage)
+					if err != nil {
+						mylog.Printf("发送文本私聊信息失败 on code 40034025: %v", err)
+						return "", nil
+					}
+				}
+				// 超时重试
+				if strings.Contains(err.Error(), "context deadline exceeded") {
+					resp, err = postC2CMessageWithRetry(apiv2, UserID, groupMessage)
+					if err != nil {
+						return "", nil
+					}
+				}
 			}
 			//发送成功回执
 			retmsg, _ = SendC2CResponse(client, err, &message, resp)
@@ -645,8 +694,18 @@ func getGuildIDFromMessagev2(message callapi.ActionMessage) (string, string, err
 }
 
 // uploadMedia 上传媒体并返回FileInfo
+// 智能选择：小文件走 URL 直传，大文件自动切到分片上传
 func uploadMediaPrivate(ctx context.Context, UserID string, richMediaMessage *dto.RichMediaMessage, apiv2 openapi.OpenAPI) (string, error) {
-	// 调用API来上传媒体
+	// 如果有 base64 文件数据且超过软限制，走分片上传
+	if richMediaMessage.FileData != "" {
+		decoded, err := base64.StdEncoding.DecodeString(richMediaMessage.FileData)
+		if err == nil && needsChunkedUpload(int64(len(decoded)), int(richMediaMessage.FileType)) {
+			mylog.Printf("文件超过软限制，自动切换到分片上传 (type=%d, size=%d)",
+				richMediaMessage.FileType, len(decoded))
+			return chunkedUpload(ctx, apiv2, UserID, false, decoded, int(richMediaMessage.FileType), richMediaMessage.FileName)
+		}
+	}
+	// URL 直传（默认路径）
 	messageReturn, err := apiv2.PostC2CMessage(ctx, UserID, richMediaMessage)
 	if err != nil {
 		return "", err

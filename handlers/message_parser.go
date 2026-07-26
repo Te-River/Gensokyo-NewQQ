@@ -57,6 +57,8 @@ var (
 	  mdPattern            = regexp.MustCompile(`\[CQ:markdown,data=base64://(.+?)\]`)
 	mdJSONPattern        = regexp.MustCompile(`\[CQ:markdown,data=(\{.*\})\]`)
 	qqMusicPattern       = regexp.MustCompile(`\[CQ:music,type=qq,id=(\d+)\]`)
+	cardPattern          = regexp.MustCompile(`\[CQ:card[^\]]*\]`)
+	inputNotifyPattern  = regexp.MustCompile(`\[CQ:input_notify,type=(\d+)(?:,second=(\d+))?\]`)
 	replyRe              = regexp.MustCompile(`\[CQ:reply,id=(\d+)\]`)
 	localImagePattern    *regexp.Regexp
 	localRecordPattern    *regexp.Regexp
@@ -1191,12 +1193,47 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 		compilePatternsOnce.Do(initPlatformPatterns)
 
 		// 处理 [CQ:markdown,data={...}] JSON 格式：base64 编码后存入 foundItems["markdown"]
-		messageText = mdJSONPattern.ReplaceAllStringFunc(messageText, func(match string) string {
-			if submatch := mdJSONPattern.FindStringSubmatch(match); len(submatch) > 1 {
-				encoded := base64.StdEncoding.EncodeToString([]byte(submatch[1]))
-				foundItems["markdown"] = append(foundItems["markdown"], encoded)
-			}
-			return ""
+		 messageText = mdJSONPattern.ReplaceAllStringFunc(messageText, func(match string) string {
+		  if submatch := mdJSONPattern.FindStringSubmatch(match); len(submatch) > 1 {
+		   encoded := base64.StdEncoding.EncodeToString([]byte(submatch[1]))
+		   foundItems["markdown"] = append(foundItems["markdown"], encoded)
+		  }
+		  return ""
+		 })
+
+		 // 处理 [CQ:card,...]：提取参数并 JSON 编码后存入 foundItems["card"]
+		 messageText = cardPattern.ReplaceAllStringFunc(messageText, func(match string) string {
+		  cardData := make(map[string]string)
+		  kvRe := regexp.MustCompile(`(\w+)=([^,\]]+)`)
+		  for _, kv := range kvRe.FindAllStringSubmatch(match, -1) {
+		   if len(kv) == 3 {
+		    cardData[kv[1]] = kv[2]
+		   }
+		  }
+		  if len(cardData) > 0 {
+		   encoded, err := json.Marshal(cardData)
+		   if err == nil {
+		    foundItems["card"] = append(foundItems["card"], string(encoded))
+		   }
+		  }
+		  return ""
+		 })
+
+		// 处理 [CQ:input_notify,...]：提取参数后存入 foundItems["input_notify"]
+		messageText = inputNotifyPattern.ReplaceAllStringFunc(messageText, func(match string) string {
+		 if submatch := inputNotifyPattern.FindStringSubmatch(match); len(submatch) > 1 {
+		  notifyData := map[string]string{
+		   "type": submatch[1],
+		  }
+		  if len(submatch) > 2 && submatch[2] != "" {
+		   notifyData["second"] = submatch[2]
+		  }
+		  encoded, err := json.Marshal(notifyData)
+		  if err == nil {
+		   foundItems["input_notify"] = append(foundItems["input_notify"], string(encoded))
+		  }
+		 }
+		 return ""
 		})
 
 		patterns := []struct {

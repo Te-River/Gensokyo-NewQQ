@@ -80,6 +80,27 @@ Co-Authored-By: Agent <noreply@example.com>
 - 强烈建议开启 GPG/SSH 签名提交（`git commit -S`）。
 - 如环境不支持签名，仍需保证提交作者信息真实可追踪。
 
+## 🌿 大更改 → 提 PR
+
+**跨多个文件、涉及架构变更、或改动面较大的修改，必须走分支 → PR 流程：**
+
+1. **分支名固定为 `Pr-Edit`**：所有大更改统一使用此分支名，不因改动内容不同而建新分支
+2. **分支上开发**：所有相关 commit 全部落在 `Pr-Edit` 分支上，不要在 `main` 直接提交
+3. **提 PR**：完成后向 `main` 创建 Pull Request，PR 描述需包含：
+   - 变更摘要（改了什么、为什么改）
+   - 涉及的文件列表
+   - 验证结果（编译检查、测试通过截图/日志）
+4. **合并前 Review**：PR 需经 Code Review 确认无回归后再合并
+5. **内容体现在 commit 与 PR 中**：分支名固定为 `Pr-Edit`，不承载内容信息；本次改动的具体内容通过 **commit message** 和 **PR 描述** 来表达
+
+**判断标准**：只要满足以下任一条件，就应走分支 → PR 流程：
+- 改动涉及 3 个以上文件
+- 修改了 `botgo/`（QQ Bot SDK Fork）
+- 新增/修改了 API 调用逻辑（handler 注册、消息类型等）
+- 改动可能影响现有功能的兼容性
+
+**小改动**（单文件、1-2 行修复、纯文档更新）仍可直接在 `main` 提交。
+
 ## ⛔ 禁止的破坏性操作
 
 以下操作须用户明确授权后方可执行：
@@ -126,6 +147,8 @@ func init() {
 | `local_record` / `url_record` / `url_records` / `base64_record` | 媒体 | 语音 |
 | `local_video` / `url_video` / `url_videos` / `base64_video` | 媒体 | 视频 |
 | `qqmusic` | 媒体 | QQ 音乐 |
+| `card` | 媒体 | JSON 编码的图文卡片参数（群聊 msg_type=8） |
+| `input_notify` | 控制 | JSON 编码的输入状态参数（单聊 msg_type=6） |
 | `local_file` / `url_file` / `url_files` / `base64_file` | 媒体 | 文件 |
 | `file_name` | 媒体 | 文件名（配合文件 key） |
 | `unknown_image` / `unknown_record` / `unknown_file` | 回退 | 无法识别的媒体 |
@@ -199,7 +222,7 @@ func init() {
 - **`removeAt` 与 `convertOtherAt`**：`GetRemoveAt()` 控制入站时是否剥离 @bot（仅对 `GROUP_AT_MESSAGE_CREATE` 事件生效；`GROUP_MESSAGE_CREATE` 全量群消息中的 @Bot 始终剥离，不依赖此配置），`GetConvertOtherAt()` 控制是否将 @其他人 转为 CQ 码
 - **`addAtGroup`**：`GetAddAtGroup()` 在出站群消息前自动添加 `[CQ:at,qq=AppID]`，注意这会与 `transformMessageTextAt` 中的 `[CQ:at]` 处理产生交互
 - **`arrayValue` 模式**：`GetArrayValue()` 控制消息以消息段数组（`[]interface{}`）还是字符串形式上报，影响 `ConvertToSegmentedMessage` 的调用
-- **`msg_type` 字段**：`MsgType=2` 是 Markdown，`MsgType=7` 是图文混合，`MsgType=0` 是普通文本
+- **`msg_type` 字段**：`MsgType=0` 是普通文本，`MsgType=2` 是 Markdown，`MsgType=6` 是输入状态（仅单聊），`MsgType=7` 是图文混合，`MsgType=8` 是卡片消息（仅群聊）
 - **`IsWakeup` 字段**：`send_private_msg_wakeup` 的 `MessageToCreate` 必须设置 `IsWakeup=true` 且 `MsgID`/`EventID` 为空（互斥）
 
 ## 📁 关键目录结构
