@@ -1,4 +1,6 @@
-# Gensokyo-NewQQ Agent Guide
+# AGENTS.md
+
+This file provides guidance to Qoder (qoder.com) when working with code in this repository.
 
 > 本文件供 AI 编码助手（Agent）使用，定义了与本仓库交互时的行为规范。
 
@@ -6,7 +8,7 @@
 
 ## 🎯 项目简介
 
-Gensokyo-NewQQ 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 标准的 QQ 机器人服务端，将 QQ 官方 API 和 WebSocket 事件转换为 OneBot V11 协议。使用 Go 语言开发（Go 1.25）。
+Gensokyo-NewQQ 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 标准的 QQ 机器人服务端，将 QQ 官方 API 和 WebSocket 事件转换为 OneBot V11 协议。使用 Go 语言开发（Go 1.25）。模块路径：`github.com/hoshinonyaruko/gensokyo`。
 
 ## 🌐 语言
 
@@ -122,6 +124,35 @@ OneBot 后端 → handlers/ (出站 API 调用) → parseMessageContent → foun
 - **入站**（QQ API → 后端）：`Processor/` 目录处理各类事件，将 `<@OpenID>` 转换为 `[CQ:at,qq=虚拟ID]`，建立 idmap 映射
 - **出站**（后端 → QQ API）：`handlers/` 目录处理 OneBot 请求，核心入口 `parseMessageContent()` 解析消息，产出 `foundItems` map 供后续发送
 
+### 连接模式与 Processor 初始化
+
+支持四种 OneBot 连接方式（可组合使用）：
+
+| 模式 | 配置项 | 说明 |
+|------|--------|------|
+| 反向 WS | `ws_address[]` | Gensokyo 主动连接下游框架的 WS 服务端 |
+| 正向 WS | `enable_ws_server` | Gensokyo 作为 WS 服务端等待连接 |
+| HTTP API | `http_address` | 正向 HTTP API（独立端口） |
+| HTTP POST | `webhook_path` | 反向 HTTP 回调 |
+
+Processor 有两种初始化方式：
+- `NewProcessor(api, apiV2, settings, wsClients)` — 有反向 WS 连接时使用，持有 `[]*wsclient.WebSocketClient`
+- `NewProcessorV2(api, apiV2, settings)` — 无反向 WS 时使用（仅正向 WS/HTTP），后续通过 `WsServerClients` 字段动态添加正向 WS 客户端
+
+`callapi.Client` 接口（`SendMessage(map[string]interface{}) error`）是消息发送的统一抽象，`wsclient.WebSocketClient` 和正向 WS 客户端均实现此接口，避免循环依赖。
+
+### 本地 Fork 依赖（go.mod replace）
+
+```
+replace github.com/tencent-connect/botgo => ./botgo
+replace github.com/wdvxdr1123/go-silk => ./go-silk
+```
+
+- `botgo/`：QQ Bot SDK 的 Fork，包含自定义事件类型（群消息、C2C、好友等官方 SDK 未暴露的事件）
+- `go-silk/`：Silk 音频编码 SDK 的 Fork
+
+修改这两个目录等同于修改外部依赖，需谨慎。
+
 ### Handler 注册模式
 
 每个 handler 文件通过 `init()` 函数注册自身：
@@ -133,6 +164,12 @@ func init() {
 ```
 
 同一 handler 可注册多个 action 名称（如 `send_group_msg` 和 `send_to_group` 指向同一函数）。
+
+Handler 签名：`func(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, message callapi.ActionMessage) (string, error)`
+
+- `api`：QQ OpenAPI v1 实例（频道相关）
+- `apiv2`：QQ OpenAPI v2 实例（群聊/C2C 相关）
+- 返回值为 JSON 字符串，直接回传给 OneBot 客户端
 
 ### foundItems 机制
 
@@ -201,12 +238,26 @@ func init() {
 
 ## 🔧 构建与验证
 
-- **编译检查**：`go build ./...`（修改代码后必须运行）
-- **静态分析**：`go vet ./...`（如环境支持）
-- **测试**：仅 1 个测试文件 `handlers/delete_group_msg_test.go`，运行 `go test ./handlers/`
-- **构建脚本**：`build.ps1`（Windows PowerShell），支持 `-All`、`-LinuxOnly`、`-NoWebUI`、`-NoUPX`
+### 常用命令
+
+| 操作 | 命令 |
+|------|------|
+| 编译检查（修改代码后必须运行） | `go build ./...` |
+| 静态分析 | `go vet ./...` |
+| 运行全部测试 | `go test ./handlers/` |
+| 运行单个测试 | `go test ./handlers/ -run TestFunctionName -v` |
+| 构建当前平台（默认） | `.\build.ps1` |
+| 构建指定平台 | `.\build.ps1 linux amd64` |
+| 构建所有平台（双版本） | `.\build.ps1 -All` |
+| 仅 Linux 平台 | `.\build.ps1 -LinuxOnly` |
+| 无 WebUI 精简版 | `.\build.ps1 -NoWebUI`（使用 `-tags=small`） |
+| 跳过 UPX 压缩 | `.\build.ps1 -NoUPX` |
+
+### 构建注意事项
+
+- **构建产物**输出到 `release/` 目录，命名格式 `gensokyo-{os}-{arch}[-noWebui][.exe]`
 - **构建标签**：`-tags=small` 会移除 WebUI、gRPC、QR 码、OSS 后端（阿里云/百度云/腾讯云），通过 `//go:build !small` 控制
-- **`go:embed` 要求**：`webui/dist/` 目录必须存在（含占位文件），否则 `go build` 因 `go:embed` 失败。`build.ps1` 的 `Ensure-WebUIDist` 会自动创建占位文件
+- **`go:embed` 要求**：`webui/dist/` 目录必须存在（含占位文件），否则 `go build` 因 `go:embed` 失败。`build.ps1` 的 `Ensure-WebUIDist` 会自动创建占位文件；手动 `go build` 前需确保该目录存在
 - **CGO**：`CGO_ENABLED=0`（交叉编译）
 - **循环依赖**：注意 `imagehosting` 依赖 `config`，`images` 依赖两者，不要引入新循环
 - **纯文档更新**（README、docs/、CHANGELOG、AGENTS.md 等）：无需构建测试
@@ -214,10 +265,20 @@ func init() {
 
 ## ⚠️ 非显而易见的陷阱
 
-- **`go-silk/` 是 fork 依赖**：不是 Go module 依赖，是直接放在仓库里的 silk 音频编码 SDK，修改需谨慎
-- **`silk/` 目录**： silk 音频编码的 Go 封装，使用 `//go:embed exec/*` 嵌入二进制文件，`mp3_real.go`/`mp3_stub.go` 通过 `//go:build !small`/`small` 切换
-- **配置系统**：`structs.Settings` 定义配置结构体（YAML 标签），`config/config.go` 提供 `GetXxx()` 访问器，部分配置项修改后需要重启（`restartRequiredFields` 列表）
+### Fork 与嵌入资源
+
+- **`go-silk/` 是 fork 依赖**：通过 `go.mod replace` 引用，不是普通 module 依赖，修改需谨慎
+- **`silk/` 目录**：silk 音频编码的 Go 封装，使用 `//go:embed exec/*` 嵌入二进制文件，`mp3_real.go`/`mp3_stub.go` 通过 `//go:build !small`/`small` 切换
+- **`webui/dist/`**：通过 `//go:embed` 嵌入前端构建产物，目录不存在时编译失败
+
+### 配置系统
+
+- **结构**：`structs.Settings` 定义配置结构体（YAML 标签），`config/config.go` 提供 `GetXxx()` 访问器（内部 `sync.RWMutex` 保护单例）
+- **热重载**：`fsnotify` 监听 `config.yml` 变动自动重载，但 `restartRequiredFields` 列表中的字段修改后需要重启
 - **`StringOb11` 模式**：`config.GetStringOb11()` 控制消息 ID 类型（string vs int64），影响大量 ID 转换逻辑
+
+### 消息系统特殊机制
+
 - **`LazyMessageId` 系统**：`config.GetLazyMessageId()` 启用被动转主动消息，`messageID == "2000"` 是特殊值表示主动推送
 - **`SSM`（Send Stack Messages）**：当消息发送失败（`code:22009`）时，消息会入队等待下次被动回复时补发
 - **`removeAt` 与 `convertOtherAt`**：`GetRemoveAt()` 控制入站时是否剥离 @bot（仅对 `GROUP_AT_MESSAGE_CREATE` 事件生效；`GROUP_MESSAGE_CREATE` 全量群消息中的 @Bot 始终剥离，不依赖此配置），`GetConvertOtherAt()` 控制是否将 @其他人 转为 CQ 码
@@ -230,30 +291,31 @@ func init() {
 
 ```
 ├── Processor/        # 入站事件处理（QQ API → OneBot）
-├── handlers/         # 出站 API 处理（OneBot → QQ API）+ 消息解析
-├── config/           # 配置加载与 GetXxx() 访问器
-├── structs/          # 配置结构体定义（Settings）
+├── handlers/         # 出站 API 处理（OneBot → QQ API）+ 消息解析（message_parser.go 2800+ 行）
+├── config/           # 配置加载与 GetXxx() 访问器（3100+ 行，含热重载逻辑）
+├── structs/          # 配置结构体定义（Settings，YAML 标签）
 ├── idmap/            # 虚拟 ID ↔ OpenID 双向映射（bbolt + gRPC）
 ├── echo/             # 消息 ID 映射、事件缓存、递归计数
-├── callapi/          # Handler 注册框架 + ActionMessage 定义
+├── callapi/          # Handler 注册框架 + ActionMessage 定义 + Client 接口
 ├── imagehosting/     # 统一图床后端（oss_type 4~10）
-├── images/           # 图片上传 API
-├── botgo/            # QQ Bot SDK（Tencent 官方 Fork）
-├── go-silk/          # Silk 音频编码 SDK（Fork，直接放在仓库中）
-├── silk/             # Silk 音频编码 Go 封装
-├── mylog/            # 自定义日志库
-├── webui/            # WebUI 前端构建产物（go:embed）
+├── images/           # 图片上传 API + 压缩
+├── botgo/            # QQ Bot SDK Fork（replace 引用，含自定义事件类型）
+├── go-silk/          # Silk 音频编码 SDK Fork（replace 引用）
+├── silk/             # Silk 音频编码 Go 封装（go:embed exec/*）
+├── mylog/            # 自定义日志库 + Prometheus 指标计数
+├── webui/            # WebUI API + go:embed 前端产物
 ├── frontend/         # WebUI 前端源码（Vue3 + Quasar）
-├── template/         # 配置模板
-├── docs/             # 文档
-├── release_log/      # 变更日志
-├── acnode/           # 敏感词过滤
-├── mdutil/           # Markdown 工具
-├── oss/              # OSS 存储后端（阿里云/百度云/腾讯云，通过 build tag 切换）
-├── proto/            # gRPC 协议定义
-├── server/           # HTTP 服务
-├── wsclient/         # WebSocket 客户端
-├── httpapi/          # HTTP API 接口
+├── template/         # 配置模板（首次运行生成 config.yml）
+├── server/           # HTTP 路由（图片上传、webhook、正向WS、getid）
+├── wsclient/         # 反向 WebSocket 客户端（含重连、写通道）
+├── httpapi/          # 正向 HTTP API 中间件
+├── acnode/           # AC 自动机敏感词过滤
+├── mdutil/           # Markdown @ 替换工具
+├── oss/              # OSS 存储后端（阿里云/百度云/腾讯云，build tag 切换）
+├── proto/            # gRPC 协议定义（idmap 远程模式）
+├── messagequeue/     # 消息队列 + 速率限制
+├── botstats/         # 机器人统计（bbolt）
+└── buildinfo/        # 构建版本信息（ldflags 注入）
 ```
 
 ## 📢 本文件
