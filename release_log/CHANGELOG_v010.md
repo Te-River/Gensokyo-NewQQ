@@ -46,6 +46,14 @@
 
 10. **`PostC2CStreamMessage` 反序列化错误**：`SetResult(dto.C2CMessageResponse{})` 无法解析 API 响应（该结构体无 json tag），`resp.Message` 始终为 nil，`stream_msg_id` 无法存储。已改为 `SetResult(dto.Message{})` + 手动构造，对齐现有模式。
 
+### /me 命令修复
+
+**文件：** `Processor/Processor.go`、`Processor/processor_test.go`、`config/config.go`
+
+13. **`/me` 命令误报错误**：`HandleFrameworkCommand` 中 `/me` 命令路径包含不必要的 `err != nil` 检查，ID 映射失败时（如 idmaps-pro 模式下无映射）会错误地发送错误信息并退出。`/me` 是状态查询命令，映射失败不应阻断命令执行。已移除多余检查。
+
+14. **新增 `/me` 命令自动化测试**：添加 `Processor/processor_test.go`，覆盖命令匹配、数据提取、前缀配置、边界情况等场景。`config` 包新增测试辅助 setter 函数（`SetMePrefix`、`SetIdmapPro`、`SetStatusPrefix`、`SetBroadcastPrefix`）。
+
 ### 其他修复
 
 **文件：** `handlers/message_parser.go`、`handlers/send_guild_channel_msg.go`
@@ -109,6 +117,11 @@
 - 分支名固定为 `Pr-Edit`，内容体现在 commit 与 PR 中
 - `foundItems` 表格新增 `card`、`input_notify`、`stream` key
 - `msg_type` 陷阱说明补充 `MsgType=6`、`MsgType=8`
+- 新增连接模式与 Processor 初始化章节（四种 OneBot 连接方式）
+- 新增本地 Fork 依赖（go.mod replace）说明
+- 补充 Handler 签名和参数含义
+- 重构构建章节为命令表格，补充单测运行方式和产物路径
+- 重组陷阱章节为分类子章节（Fork/配置/消息系统）
 
 ### 文档更新
 
@@ -139,4 +152,8 @@ b2aa5a9 fix: 卡片 pic_url 默认值改为真实图片 URL
 aaa2d94 fix: [CQ:stream] mid 续片缺少回执
 17f6324 fix: 所有 stream/input_notify 路径统一补 SendC2CResponse
 1df8256 docs: Release010 CHANGELOG 独立
+5d88c4c docs: 重写 CHANGELOG_v010 对齐 v009 格式
+e7efa02 docs: readme 补充 QQ 机器人官方文档引用
+b95be7a5 docs: 改进 AGENTS.md 架构文档与构建指南
+1a1d5cd fix: 修复 /me 命令报错问题并添加自动化测试
 ```
