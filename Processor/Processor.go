@@ -604,14 +604,9 @@ func (p *Processors) HandleFrameworkCommand(messageText string, data interface{}
 		}
 	}
 
-	// me指令处理逻辑
+	// me 指令处理逻辑
 	if commandMatch(cleanedMessage, config.GetMePrefix()) {
-		if err != nil {
-			// 发送错误信息
-			SendMessage(err.Error(), data, Type, p.Api, p.Apiv2)
-			return err
-		}
-		// 发送成功信息
+		// idmaps-pro 模式下不需要检查错误，直接返回状态信息
 		if config.GetIdmapPro() {
 			// 构造清晰的对应关系信息
 			userMapping := fmt.Sprintf("当前真实值（用户）/当前虚拟值（用户） = [%s/%s]", realid, newpro2)
