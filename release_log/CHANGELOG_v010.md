@@ -58,6 +58,8 @@
 
 **文件：** `handlers/message_parser.go`、`handlers/send_guild_channel_msg.go`
 
+15. **纯文本 `[CQ:at]` 用户名缓存失效时原样发送 CQ 码**：`resolvePlainTextAtMentions` 在 `idmap.GetUserName()` 返回空时直接保留原始 `[CQ:at,qq=...]` 文本，导致 QQ API 收到未解析的 CQ 码。已修复：缓存失效时回退为 `<@OpenID>` 格式（QQ API 原生 @ 语法），ID 映射也失败时移除该标记。
+
 11. **`cardPattern` 正则参数顺序依赖**：使用固定位置分组捕获，用户传入不同顺序时静默失败。已改为顺序无关的 `key=value` 提取。
 
 12. **`sendGuildChannelMsgKeyMap` 死代码**：声明了但未在循环中使用。已在 foundItems 循环中添加 keyMap 检查，使其实际生效。
