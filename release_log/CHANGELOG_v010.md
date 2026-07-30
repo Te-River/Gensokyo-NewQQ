@@ -123,6 +123,12 @@
 - 重构构建章节为命令表格，补充单测运行方式和产物路径
 - 重组陷阱章节为分类子章节（Fork/配置/消息系统）
 
+### 配置模板变更
+
+**文件：** `template/config_template.go`
+
+- `FriendAddEventHandler` 和 `FriendDelEventHandler` 默认启用（取消注释），新安装自动订阅好友添加/删除事件并转发给下游 OneBot 客户端
+
 ### 文档更新
 
 - 新建 `docs/cq码/扩展CQ码/扩展cq码-cq-card.md`
@@ -156,4 +162,5 @@ aaa2d94 fix: [CQ:stream] mid 续片缺少回执
 e7efa02 docs: readme 补充 QQ 机器人官方文档引用
 b95be7a5 docs: 改进 AGENTS.md 架构文档与构建指南
 1a1d5cd fix: 修复 /me 命令报错问题并添加自动化测试
+7983e84 docs: 同步更新 CHANGELOG 和文档反映 /me 修复与测试
 ```

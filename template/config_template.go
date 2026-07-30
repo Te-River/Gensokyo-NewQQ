@@ -37,8 +37,8 @@ settings:
     # - "GroupMessageEventHandler"                   # 普通群消息（无需@机器人）
     # - "C2CMessageEventHandler"                     # 群私聊 仅频道机器人时候需要注释
     # - "ThreadEventHandler"                         # 频道发帖事件 仅频道私域机器人可用
-    # - "FriendAddEventHandler"                      # 用户添加机器人(成为好友)
-    # - "FriendDelEventHandler"                      # 用户删除机器人(解除好友)
+    - "FriendAddEventHandler"                        # 用户添加机器人(成为好友)
+    - "FriendDelEventHandler"                        # 用户删除机器人(解除好友)
     # - "C2CMsgRejectHandler"                        # 用户拒绝(关闭)C2C消息推送
     # - "C2CMsgReceiveHandler"                       # 用户开启(接收)C2C消息推送
     # - "GroupMemberAddEventHandler"                 # 群成员新增（非文档化事件）
