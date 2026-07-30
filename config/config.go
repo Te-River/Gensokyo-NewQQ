@@ -3114,3 +3114,39 @@ func GetLogSlowEventThresholdMS() int {
 	}
 	return instance.Settings.LogSlowEventThresholdMS
 }
+
+// SetMePrefix 设置 me 命令前缀（用于测试）
+func SetMePrefix(prefix string) {
+	mu.Lock()
+	defer mu.Unlock()
+	if instance != nil {
+		instance.Settings.MePrefix = prefix
+	}
+}
+
+// SetDisableWebUI 设置是否禁用 WebUI（用于测试）
+func SetDisableWebUI(disabled bool) {
+	mu.Lock()
+	defer mu.Unlock()
+	if instance != nil {
+		instance.Settings.DisableWebui = disabled
+	}
+}
+
+// SetMasterIDs 设置 master ID 列表（用于测试）
+func SetMasterIDs(ids []string) {
+	mu.Lock()
+	defer mu.Unlock()
+	if instance != nil {
+		instance.Settings.MasterID = ids
+	}
+}
+
+// SetBindPrefix 设置 bind 命令前缀（用于测试）
+func SetBindPrefix(prefix string) {
+	mu.Lock()
+	defer mu.Unlock()
+	if instance != nil {
+		instance.Settings.BindPrefix = prefix
+	}
+}
