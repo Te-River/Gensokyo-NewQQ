@@ -219,3 +219,17 @@ b95be7a5 docs: 改进 AGENTS.md 架构文档与构建指南
 - `docs/idmap.md`：迁移阻塞式说明、`ForceUnbindID` / type=18 强制解绑说明、`UpdateVirtualValue` 解绑行为变化说明
 - `readme.md`：功能亮点新增"QQ API 错误码中文提示"
 - 删除错误的 `release_log/CHANGELOG_v011.md`（当前仍在 Release010）
+
+### ForceUnbindID 支持虚拟 ID 入参（2026-08-01 修复）
+
+**文件：** `idmap/service.go`
+
+**问题：** 用户反馈 `getid type=18` 和 `type=5` 都返回 false，且会阻塞消息一会才返回。
+
+**根因：** `ForceUnbindID` 原仅接受 OpenID 入参，但用户实际常传虚拟 ID（row 值），导致 `b.Get([]byte(key))` 查正向 `uin:<虚拟ID>` 找不到直接返回 `unboundCount=0`（表现为返回 false）。"卡一会"的阻塞来自 `identityDB.Update` 里的 `c.Cursor()` 全桶扫描，1200 万条计数器扫一遍很慢。
+
+**修复：**
+1. `ForceUnbindID` 支持双形式入参：纯数字视为虚拟 ID，先通过逆向条目 `uin:row-<N>` 反查 OpenID（新库+旧库回退），再按 OpenID 清理；非纯数字视为 OpenID 直接清理
+2. 去掉"正向条目存在检查"的提前 `return nil`：即便正向已被其他路径删除，也要扫删残留逆向条目，确保彻底清理重复映射
+
+**验证：** `go build ./...` 编译通过 + `go vet ./idmap/ ./server/` 静态分析通过

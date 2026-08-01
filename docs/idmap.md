@@ -127,11 +127,13 @@ BindIdentityToVuin(ruin:QQ:0:2870338968, 10001)
 
 | 工具 | 调用方式 | 行为 |
 |------|---------|------|
-| `ForceUnbindID(openID)` | Go 内部 | 删正向 `uin:<OpenID>` + 扫删所有指向同一 OpenID 的逆向条目 `uin:row-*`（新库+旧库），返回清理条数 |
-| `getid type=18` | HTTP API | `GET /getid?type=18&id=<OpenID>`，返回 `{"status":"success","unbound_count":N}` |
+| `ForceUnbindID(id)` | Go 内部 | 入参支持**OpenID 字符串**或**虚拟 ID**两种形式。OpenID 时直接删正向 `uin:<OpenID>` + 扫删所有指向同一 OpenID 的逆向条目 `uin:row-*`（新库+旧库）；虚拟 ID 时先通过逆向条目 `uin:row-<N>` 反查 OpenID（新库+旧库回退），再按 OpenID 清理。返回清理条数 |
+| `getid type=18` | HTTP API | `GET /getid?type=18&id=<OpenID或虚拟ID>`，返回 `{"status":"success","unbound_count":N}` |
 | `UpdateVirtualValue(old, 0)` | `getid type=5` | `newRowValue=0` 解绑时已同步彻底清理：删正向 + 扫删所有指向同一 OpenID 的重复逆向条目（2026-08-01 修复，此前只删单条逆向不删正向，导致解绑失效） |
 
 解绑后该 OpenID 彻底无映射，下次 `storeIdentity` 会重新分配唯一虚拟 ID。
+
+> **2026-08-01 修复：** `ForceUnbindID` 原仅接受 OpenID 入参，但用户实际常传虚拟 ID（row 值），导致查正向 `uin:<虚拟ID>` 找不到直接返回，`unboundCount=0`（表现为 `getid type=18` 返回 false）。现已支持双形式入参：纯数字视为虚拟 ID，先反查 OpenID 再清理；非纯数字视为 OpenID 直接清理。同时去掉"正向条目存在检查"的提前返回，即便正向已被其他路径删除，也要扫删残留逆向条目，确保彻底清理。
 
 ## msgid-map
 
