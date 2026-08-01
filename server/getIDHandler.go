@@ -348,6 +348,20 @@ func GetIDHandler(c *gin.Context) {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"id": id})
+	case 18:
+		// 强制解绑指定 OpenID 的所有映射
+		// 用途：迁移期间双写导致 2 个虚拟 ID 指向同一 OpenID 时，按 OpenID 直接清理全部映射
+		openID := c.Query("id")
+		if openID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "id parameter is required for type 18"})
+			return
+		}
+		unboundCount, err := idmap.ForceUnbindID(openID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "success", "unbound_count": unboundCount})
 	}
 
 }

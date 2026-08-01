@@ -166,3 +166,56 @@ b95be7a5 docs: 改进 AGENTS.md 架构文档与构建指南
 1a1d5cd fix: 修复 /me 命令报错问题并添加自动化测试
 7983e84 docs: 同步更新 CHANGELOG 和文档反映 /me 修复与测试
 ```
+
+---
+
+## 🔨 后续追加变更（2026-08-01）
+
+### idmap 迁移重复映射修复
+
+**文件：** `idmap/service.go`、`idmap/new_service.go`、`server/getIDHandler.go`
+
+**问题：** 用户迁移 idmap 后出现 2 个虚拟 ID 对应同一 OpenID 的重复映射，`getid` 的 `type=5`（`UpdateVirtualValue`）无法更新，`newRowValue=0` 也无法解绑。
+
+**根因：**
+1. `StartMigration` 内部 `go backgroundMigration()` 非阻塞，迁移与消息接收并行
+2. 迁移期间 `storeIdentity` 双写新库 + `backgroundMigration` 迁入并发，`writeBatchToNewDB` 按 key 去重但不按 value 去重
+3. `UpdateVirtualValue` 的 `newRowValue=0` 解绑分支只删单条逆向映射，不删正向映射，不扫重复逆向条目
+
+**修复：**
+1. **`UpdateVirtualValue` 解绑分支彻底清理**：`newRowValue=0` 时删正向 `uin:<OpenID>` + 扫删所有指向同一 OpenID 的重复逆向条目 `uin:row-*`（新库+旧库）
+2. **新增 `ForceUnbindID(openID)`**：按 OpenID 直接定位并清理全部映射，返回清理条数，适合批量清理重复映射
+3. **`getIDHandler.go` 新增 `case 18`**：调 `ForceUnbindID`，返回 `{"status":"success","unbound_count":N}`
+4. **`StartMigration` 改阻塞式迁移**：去 `go`，迁移完成才返回，确保 `main.go` 调用点之后才连 WS / 启动 HTTP
+5. **`writeBatchToNewDB` 按 value 呱重**：逆向条目 `uin:row-*` 迁入前查正向 `uin:<OpenID>` 是否已存在，若已存在则跳过（双保险）
+
+### 图文混合消息 `[CQ:at]` 原文显示
+
+**文件：** `handlers/send_group_msg.go`、`handlers/send_group_msg_raw.go`、`handlers/send_private_msg.go`、`handlers/send_guild_channel_msg.go`
+
+**问题：** 全量群消息下图文混合消息（msg_type=7）时 `[CQ:at,qq=数字]` 未转换，原文显示为 `图片[CQ:at,qq=123456]`。
+
+**修复：** 四个 handler 的图文混合路径构造 `MessageToCreate` 前补 `resolvePlainTextAtMentions(messageText)`，与纯文本路径对齐。
+
+**关联 Issue：** [Te-River/Gensokyo-NewQQ#15](https://github.com/Te-River/Gensokyo-NewQQ/issues/15)
+
+### QQ API 错误码中文提示
+
+**文件：** `handlers/qq_error_codes.go`（新增）、`handlers/send_group_msg.go`、`handlers/send_group_msg_raw.go`、`handlers/send_private_msg.go`、`handlers/send_guild_channel_msg.go`、`handlers/send_private_msg_wakeup.go`
+
+**功能：** QQ API 调用失败时，控制台输出错误码对应的中文描述和排查建议。新增 `qqErrorCodes` 映射表（数据来源：QQ 官方错误码文档）、`ExtractQQErrorCode`、`FormatQQError`，在 5 个 handler 的错误分支非侵入式追加一行提示。
+
+**示例：**
+```
+发送文本群组信息失败: {"code":22009,"message":"频控"}
+[QQ API 错误码 22009] 主动消息频控超限。排查建议：降低发送频率或等待配额恢复
+```
+
+### 文档同步
+
+- `docs/cq码/扩展CQ码/扩展cq码-cq-at.md`：新增"图文混合消息（msg_type=7）"章节
+- `docs/本版新增功能.md`：出站 @ 补图文混合路径说明；新增"错误码提示"章节；idmap 章节追加强制解绑工具和迁移阻塞式说明
+- `docs/Gensokyo语法参考.md`、`docs/cq码/扩展CQ码汇总.md`：`[CQ:at]` 补图文混合转换说明
+- `docs/idmap.md`：迁移阻塞式说明、`ForceUnbindID` / type=18 强制解绑说明、`UpdateVirtualValue` 解绑行为变化说明
+- `readme.md`：功能亮点新增"QQ API 错误码中文提示"
+- 删除错误的 `release_log/CHANGELOG_v011.md`（当前仍在 Release010）

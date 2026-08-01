@@ -1505,8 +1505,18 @@ func UpdateVirtualValue(oldRowValue, newRowValue int64) error {
 		if newRowValue != 0 {
 			b.Put([]byte(key), newRowBytes)
 			b.Put([]byte(revPrefix+strconv.FormatInt(newRowValue, 10)), []byte(key))
+		} else {
+			// newRowValue == 0：彻底解绑
+			// 1. 删除正向映射 uin:<OpenID>，否则下次查 row 仍能反查到 OpenID，等于没解绑
+			b.Delete([]byte(key))
+			// 2. 扫删所有指向同一 OpenID 的重复逆向条目 uin:row-*（迁移期间双写可能产生 2 row → 1 OpenID）
+			c := b.Cursor()
+			for k, v := c.Seek([]byte(revPrefix)); k != nil && strings.HasPrefix(string(k), revPrefix); k, v = c.Next() {
+				if string(v) == string([]byte(key)) {
+					b.Delete(k)
+				}
+			}
 		}
-		// newRowValue == 0：只删旧逆向映射以释放占位，不修改正向映射也不创建 row-0
 		return nil
 	})
 
@@ -1519,6 +1529,17 @@ func UpdateVirtualValue(oldRowValue, newRowValue int64) error {
 			if newRowValue != 0 {
 				b.Put([]byte(id), newRowBytes)
 				b.Put([]byte(fmt.Sprintf("row-%d", newRowValue)), []byte(id))
+			} else {
+				// newRowValue == 0：旧库同步彻底解绑
+				// 1. 删正向映射 <OpenID>
+				b.Delete([]byte(id))
+				// 2. 扫删所有指向同一 OpenID 的重复逆向条目 row-*（旧库格式 row-<N>）
+				c := b.Cursor()
+				for k, v := c.Seek([]byte("row-")); k != nil && strings.HasPrefix(string(k), "row-"); k, v = c.Next() {
+					if string(v) == string([]byte(id)) {
+						b.Delete(k)
+					}
+				}
 			}
 			return nil
 		})
@@ -2345,4 +2366,68 @@ func ResolveOriginalIDInText(text string) string {
 		tokens[i] = resolved
 	}
 	return strings.Join(tokens, " ")
+}
+
+// ForceUnbindID 强制解绑指定 OpenID 的所有映射
+//
+// 用途：迁移期间双写导致 2 个虚拟 ID 指向同一 OpenID 时，按 OpenID 直接清理全部映射。
+// 与 UpdateVirtualValue 的区别：UpdateVirtualValue 按"旧 row 值"定位，
+// ForceUnbindID 直接按 OpenID 定位并清理全部——更适合批量清理重复映射。
+//
+// 清理动作：
+//   1. 删除正向映射 uin:<OpenID>
+//   2. 扫删所有指向同一 OpenID 的逆向条目 uin:row-*（新库）
+//   3. 旧库若有，同步清理 row-* 逆向 + 正向 <OpenID>
+//
+// 返回：清理掉的逆向条目数（正向不计数），err 为查找/写入错误
+//
+// 解绑后该 OpenID 彻底无映射，下次 storeIdentity 会重新分配唯一虚拟 ID。
+func ForceUnbindID(openID string) (int, error) {
+	if openID == "" {
+		return 0, fmt.Errorf("openID 不能为空")
+	}
+	initNewDBs()
+
+	key := uinKey(openID)
+	revPrefix := uinRowKey("")
+	unboundCount := 0
+
+	// 新库：删正向 + 扫删所有指向同一 OpenID 的逆向条目
+	_ = identityDB.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(IdentityBucketName))
+		// 先确认正向条目存在，不存在则无需清理
+		if b.Get([]byte(key)) == nil {
+			return nil
+		}
+		// 删正向映射 uin:<OpenID>
+		b.Delete([]byte(key))
+		// 扫删所有指向同一 OpenID 的重复逆向条目 uin:row-*
+		c := b.Cursor()
+		for k, v := c.Seek([]byte(revPrefix)); k != nil && strings.HasPrefix(string(k), revPrefix); k, v = c.Next() {
+			if string(v) == string([]byte(key)) {
+				b.Delete(k)
+				unboundCount++
+			}
+		}
+		return nil
+	})
+
+	// 旧库：同步清理（迁移期间双写残留）
+	if hasOldDB() && !isMigrationComplete() {
+		_ = db.Update(func(tx *bbolt.Tx) error {
+			b := tx.Bucket([]byte(BucketName))
+			// 删正向映射 <OpenID>（旧库格式无 uin: 前缀）
+			b.Delete([]byte(openID))
+			// 扫删所有指向同一 OpenID 的重复逆向条目 row-*
+			c := b.Cursor()
+			for k, v := c.Seek([]byte("row-")); k != nil && strings.HasPrefix(string(k), "row-"); k, v = c.Next() {
+				if string(v) == string([]byte(openID)) {
+					b.Delete(k)
+				}
+			}
+			return nil
+		})
+	}
+
+	return unboundCount, nil
 }

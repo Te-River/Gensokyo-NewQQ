@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -100,7 +101,9 @@ func StartMigration() {
 		mylog.Printf("  └─ %s  ── 临时消息 ID 缓存", MsgDBName)
 		mylog.Printf("=======================================")
 		syncMigrationCounters()
-		go backgroundMigration()
+		// 阻塞式迁移：迁移完成才返回，确保 main.go 调用点之后才连 WS / 启动 HTTP
+		// 否则迁移期间 storeIdentity 双写与 backgroundMigration 迁入并发，产生 2 row → 1 OpenID 重复映射
+		backgroundMigration()
 	}
 }
 
@@ -523,12 +526,23 @@ func readOldDBBatch(bucketName string, cursorKey *[]byte, limit int) ([]entry, b
 }
 
 // writeBatchToNewDB 将一批条目写入新库（跳过已存在的）
+// 按 key 去重（已存在则跳过）+ 按 value 委重（逆向条目 uin:row-* 若其 OpenID 已有正向映射则跳过）
+// 后者防止迁移期间 storeIdentity 已为某 OpenID 分配了新虚拟 ID，迁移又把旧库的逆向条目迁入，
+// 导致 2 个虚拟 ID 指向同一 OpenID
 func writeBatchToNewDB(newDB *bbolt.DB, bucketName string, entries []entry) int {
 	written := 0
 	_ = newDB.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(bucketName))
 		for _, e := range entries {
 			if b.Get([]byte(e.key)) == nil {
+				// 双保险：逆向条目 uin:row-<N> 迁入前，查其指向的 OpenID 是否已有正向映射 uin:<OpenID>
+				// 若已有，说明 storeIdentity 已为该 OpenID 分配了新虚拟 ID，跳过此逆向条目避免重复映射
+				if strings.HasPrefix(e.key, "uin:row-") {
+					forwardKey := "uin:" + string(e.value)
+					if b.Get([]byte(forwardKey)) != nil {
+						continue
+					}
+				}
 				b.Put([]byte(e.key), []byte(e.value))
 				written++
 			}

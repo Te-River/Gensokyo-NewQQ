@@ -119,6 +119,20 @@ BindIdentityToVuin(ruin:QQ:0:2870338968, 10001)
 
 迁移完成后热路径只访问新库，不再惰性复制旧库内容。旧 `idmap.db` 不会被自动删除，确认稳定后可手动备份或删除。
 
+> **2026-08-01 修复：** `StartMigration` 已改为**阻塞式迁移**（此前为 `go backgroundMigration()` 非阻塞）。迁移完成才返回，确保 `main.go` 调用点之后才连 WS / 启动 HTTP，避免迁移期间 `storeIdentity` 双写与 `backgroundMigration` 迁入并发产生 2 row → 1 OpenID 重复映射。同时 `writeBatchToNewDB` 追加按 value 委重（逆向条目 `uin:row-*` 迁入前查正向 `uin:<OpenID>` 是否已存在，若已有则跳过）。
+
+## 强制解绑工具
+
+迁移异常或历史数据残留导致 2 个虚拟 ID 指向同一 OpenID 时，可用强制解绑工具按 OpenID 直接清理全部映射：
+
+| 工具 | 调用方式 | 行为 |
+|------|---------|------|
+| `ForceUnbindID(openID)` | Go 内部 | 删正向 `uin:<OpenID>` + 扫删所有指向同一 OpenID 的逆向条目 `uin:row-*`（新库+旧库），返回清理条数 |
+| `getid type=18` | HTTP API | `GET /getid?type=18&id=<OpenID>`，返回 `{"status":"success","unbound_count":N}` |
+| `UpdateVirtualValue(old, 0)` | `getid type=5` | `newRowValue=0` 解绑时已同步彻底清理：删正向 + 扫删所有指向同一 OpenID 的重复逆向条目（2026-08-01 修复，此前只删单条逆向不删正向，导致解绑失效） |
+
+解绑后该 OpenID 彻底无映射，下次 `storeIdentity` 会重新分配唯一虚拟 ID。
+
 ## msgid-map
 
 `msgid-map.db` 专门保存 message_id 映射，默认 TTL 为 1 小时：
