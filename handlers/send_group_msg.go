@@ -446,6 +446,9 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				}
 			} else {
 				// 为groupMessage附加内容 变成图文信息
+		        mylog.Println("CQat转换前:", messageText)
+			    messageText = resolvePlainTextAtMentions(messageText)
+			    mylog.Println("CQat转换后:", messageText)
 				groupMessage.Content = messageText
 				groupMessage.Timestamp = time.Now().Unix() // 设置时间戳
 			}
