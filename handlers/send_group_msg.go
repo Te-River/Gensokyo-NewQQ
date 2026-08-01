@@ -2774,6 +2774,10 @@ func auto_md(message callapi.ActionMessage, messageText string, richMediaMessage
 				messageText = strings.ReplaceAll(messageText, "\r", " ")
 			}
 
+			// 图文混合走 Markdown 路径时，同样需要转换 [CQ:at] 为 <qqbot-at-user> 标签
+			// 否则 QQ 官方 Markdown 渲染会把 [CQ:at,qq=数字] 当纯文本显示（变形为 [CO:at,qq=数字]）
+			messageText = ResolveMarkdownAtMentions(messageText)
+
 			// 根据配置决定如何生成Markdown内容
 			if !config.GetNativeMD() {
 				// 创建 MarkdownParams 的实例
