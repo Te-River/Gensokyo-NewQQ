@@ -175,6 +175,9 @@ func HandleSendGuildChannelMsg(client callapi.Client, api openapi.OpenAPI, apiv2
 			echo.AddMappingSeq(messageID, msgseq+1)
 			Reply, isbase64 := GenerateReplyMessage(messageID, singleItem, "", msgseq+1, nil)
 			if !isbase64 {
+				// 图文混合消息同样需要转换 [CQ:at] 为 @用户名，与纯文本路径对齐
+				// 否则 QQ 官方 API 不识别 CQ 码，会原文显示 [CQ:at,qq=数字]
+				messageText = resolvePlainTextAtMentions(messageText)
 				// 创建包含文本和base64图像信息的消息
 				msgseq = echo.GetMappingSeq(messageID)
 				echo.AddMappingSeq(messageID, msgseq+1)
@@ -244,6 +247,9 @@ func HandleSendGuildChannelMsg(client callapi.Client, api openapi.OpenAPI, apiv2
 					}
 				}
 			} else {
+				// 图文混合消息同样需要转换 [CQ:at] 为 @用户名，与纯文本路径对齐
+				// 否则 QQ 官方 API 不识别 CQ 码，会原文显示 [CQ:at,qq=数字]
+				messageText = resolvePlainTextAtMentions(messageText)
 				// 将base64内容从reply的Content转换回字节
 				fileImageData, err := base64.StdEncoding.DecodeString(Reply.Content)
 				if err != nil {

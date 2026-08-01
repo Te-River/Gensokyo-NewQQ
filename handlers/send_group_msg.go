@@ -358,27 +358,30 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			}
 			// 如果groupMessage是nil 说明groupReply是richMediaMessage类型 如果groupMessage不是nil 说明groupReply是MessageToCreate
 			if groupMessage == nil {
-				//如果没有转换成md发送
-				if !transmd {
-					// 上传图片并获取FileInfo
-					fileInfo, err := uploadMedia(context.TODO(), message.Params.GroupID.(string), richMediaMessage, apiv2)
-					if err != nil {
-						mylog.Printf("上传图片失败: %v", err)
-						return "", nil // 或其他错误处理
-					}
-					// 创建包含文本和图像信息的消息
-					msgseq = echo.GetMappingSeq(messageID)
-					echo.AddMappingSeq(messageID, msgseq+1)
-					groupMessage = &dto.MessageToCreate{
-						Content: messageText, // 添加文本内容
-						Media: &dto.Media{
-							FileInfo: fileInfo, // 添加图像信息
-						},
-						MsgID:   messageID,
-						EventID: eventID,
-						MsgSeq:  msgseq,
-						MsgType: 7, // 假设7是组合消息类型
-					}
+			 //如果没有转换成md发送
+			 if !transmd {
+			  // 上传图片并获取FileInfo
+			  fileInfo, err := uploadMedia(context.TODO(), message.Params.GroupID.(string), richMediaMessage, apiv2)
+			  if err != nil {
+			   mylog.Printf("上传图片失败: %v", err)
+			   return "", nil // 或其他错误处理
+			  }
+			  // 图文混合消息同样需要转换 [CQ:at] 为 @用户名，与纯文本路径对齐
+			  // 否则 QQ 官方 API 不识别 CQ 码，会原文显示 [CQ:at,qq=数字]
+			  messageText = resolvePlainTextAtMentions(messageText)
+			  // 创建包含文本和图像信息的消息
+			  msgseq = echo.GetMappingSeq(messageID)
+			  echo.AddMappingSeq(messageID, msgseq+1)
+			  groupMessage = &dto.MessageToCreate{
+			   Content: messageText, // 添加文本内容
+			   Media: &dto.Media{
+			    FileInfo: fileInfo, // 添加图像信息
+			   },
+			   MsgID:   messageID,
+			   EventID: eventID,
+			   MsgSeq:  msgseq,
+			   MsgType: 7, // 假设7是组合消息类型
+			  }
 					groupMessage.Timestamp = time.Now().Unix() // 设置时间戳
 
 					// 处理 [CQ:reply,id=数字] → message_reference + msg_id

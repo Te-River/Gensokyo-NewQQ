@@ -254,6 +254,9 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 				mylog.Printf("上传图片失败: %v", err)
 				return "", nil // 或其他错误处理
 			}
+			// 图文混合消息同样需要转换 [CQ:at] 为 @用户名，与纯文本路径对齐
+			// 否则 QQ 官方 API 不识别 CQ 码，会原文显示 [CQ:at,qq=数字]
+			messageText = resolvePlainTextAtMentions(messageText)
 			// 创建包含文本和图像信息的消息
 			msgseq = echo.GetMappingSeq(messageID)
 			echo.AddMappingSeq(messageID, msgseq+1)
