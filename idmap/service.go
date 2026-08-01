@@ -2374,32 +2374,64 @@ func ResolveOriginalIDInText(text string) string {
 // 与 UpdateVirtualValue 的区别：UpdateVirtualValue 按"旧 row 值"定位，
 // ForceUnbindID 直接按 OpenID 定位并清理全部——更适合批量清理重复映射。
 //
+// 入参 openID 支持两种形式：
+//   - OpenID 字符串（推荐）：直接删正向 uin:<OpenID> + 扫删所有指向同一 OpenID 的逆向条目
+//   - 虚拟 ID（row 值）：先通过逆向条目 uin:row-<N> 反查 OpenID，再按 OpenID 清理
+//
 // 清理动作：
-//   1. 删除正向映射 uin:<OpenID>
-//   2. 扫删所有指向同一 OpenID 的逆向条目 uin:row-*（新库）
-//   3. 旧库若有，同步清理 row-* 逆向 + 正向 <OpenID>
+//  1. 删除正向映射 uin:<OpenID>
+//  2. 扫删所有指向同一 OpenID 的逆向条目 uin:row-*（新库）
+//  3. 旧库若有，同步清理 row-* 逆向 + 正向 <OpenID>
 //
 // 返回：清理掉的逆向条目数（正向不计数），err 为查找/写入错误
 //
 // 解绑后该 OpenID 彻底无映射，下次 storeIdentity 会重新分配唯一虚拟 ID。
-func ForceUnbindID(openID string) (int, error) {
-	if openID == "" {
-		return 0, fmt.Errorf("openID 不能为空")
+func ForceUnbindID(openIDOrRow string) (int, error) {
+	if openIDOrRow == "" {
+		return 0, fmt.Errorf("id 不能为空")
 	}
 	initNewDBs()
 
-	key := uinKey(openID)
+	// 判断入参是虚拟 ID（纯数字）还是 OpenID（32 位 hex 字符串）
+	// 虚拟 ID：先通过逆向条目 uin:row-<N> 反查 OpenID
+	resolvedOpenID := openIDOrRow
+	if _, err := strconv.ParseInt(openIDOrRow, 10, 64); err == nil {
+		// 入参是纯数字，视为虚拟 ID，反查 OpenID
+		revKey := uinRowKey(openIDOrRow)
+		_ = identityDB.View(func(tx *bbolt.Tx) error {
+			b := tx.Bucket([]byte(IdentityBucketName))
+			idBytes := b.Get([]byte(revKey))
+			if idBytes != nil {
+				resolvedOpenID = stripUinPrefix(string(idBytes))
+			}
+			return nil
+		})
+		if resolvedOpenID == openIDOrRow {
+			// 新库查不到，回退旧库
+			if hasOldDB() {
+				_ = db.View(func(tx *bbolt.Tx) error {
+					b := tx.Bucket([]byte(BucketName))
+					idBytes := b.Get([]byte(fmt.Sprintf("row-%s", openIDOrRow)))
+					if idBytes != nil {
+						resolvedOpenID = stripUinPrefix(string(idBytes))
+					}
+					return nil
+				})
+			}
+		}
+		if resolvedOpenID == openIDOrRow {
+			return 0, fmt.Errorf("虚拟 ID %s 未找到对应 OpenID", openIDOrRow)
+		}
+	}
+
+	key := uinKey(resolvedOpenID)
 	revPrefix := uinRowKey("")
 	unboundCount := 0
 
 	// 新库：删正向 + 扫删所有指向同一 OpenID 的逆向条目
 	_ = identityDB.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(IdentityBucketName))
-		// 先确认正向条目存在，不存在则无需清理
-		if b.Get([]byte(key)) == nil {
-			return nil
-		}
-		// 删正向映射 uin:<OpenID>
+		// 删正向映射 uin:<OpenID>（不存在也无妨，幂等）
 		b.Delete([]byte(key))
 		// 扫删所有指向同一 OpenID 的重复逆向条目 uin:row-*
 		c := b.Cursor()
@@ -2417,11 +2449,11 @@ func ForceUnbindID(openID string) (int, error) {
 		_ = db.Update(func(tx *bbolt.Tx) error {
 			b := tx.Bucket([]byte(BucketName))
 			// 删正向映射 <OpenID>（旧库格式无 uin: 前缀）
-			b.Delete([]byte(openID))
+			b.Delete([]byte(resolvedOpenID))
 			// 扫删所有指向同一 OpenID 的重复逆向条目 row-*
 			c := b.Cursor()
 			for k, v := c.Seek([]byte("row-")); k != nil && strings.HasPrefix(string(k), "row-"); k, v = c.Next() {
-				if string(v) == string([]byte(openID)) {
+				if string(v) == string([]byte(resolvedOpenID)) {
 					b.Delete(k)
 				}
 			}
