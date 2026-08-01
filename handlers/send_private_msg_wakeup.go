@@ -206,6 +206,7 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 					// 错误处理逻辑复刻
 					if err != nil {
 						mylog.Printf("发送 MessageToCreate 召回信息失败: %v", err)
+						mylog.Printf("%s", FormatQQError(err))
 						if config.GetSaveError() {
 							mylog.ErrLogToFile("type", "PostC2CWakeup-Special")
 							mylog.ErrInterfaceToFile("request", groupMessage)

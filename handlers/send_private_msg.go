@@ -298,6 +298,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			resp, err = apiv2.PostC2CMessage(context.TODO(), UserID, groupMessage)
 			if err != nil {
 				mylog.Printf("发送组合消息失败: %v", err)
+				mylog.Printf("%s", FormatQQError(err))
 				return "", nil // 或其他错误处理
 			}
 
@@ -333,6 +334,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 		  resp, err := apiv2.PostC2CMessage(context.TODO(), UserID, notifyMsg)
 		  if err != nil {
 		   mylog.Printf("发送输入状态通知失败: %v", err)
+		   mylog.Printf("%s", FormatQQError(err))
 		  } else {
 		   mylog.Printf("[CQ:input_notify] 已发送输入状态通知")
 		  }
@@ -491,6 +493,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			    resp, err := apiv2.PostC2CMessage(context.TODO(), UserID, groupMessage)
 			if err != nil {
 				mylog.Printf("发送文本私聊信息失败: %v", err)
+				mylog.Printf("%s", FormatQQError(err))
 				// 22009: 主动消息超过频控限制，记录日志 (被动回复场景无需补偿)
 				if strings.Contains(err.Error(), `"code":22009`) {
 					mylog.Printf("私聊主动消息受限(code:22009)，消息被丢弃: %s", messageText)
@@ -574,6 +577,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 						resp, err = apiv2.PostC2CMessage(context.TODO(), UserID, groupMessage)
 						if err != nil {
 							mylog.Printf("发送 MessageToCreate 私聊信息失败: %v", err)
+							mylog.Printf("%s", FormatQQError(err))
 							// 错误保存到本地
 							if config.GetSaveError() {
 								mylog.ErrLogToFile("type", "PostC2CMessage")

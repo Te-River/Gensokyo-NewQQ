@@ -209,10 +209,12 @@ func HandleSendGuildChannelMsg(client callapi.Client, api openapi.OpenAPI, apiv2
 					newMessage.MsgType = 2 //md信息
 					if _, err = api.PostMessage(context.TODO(), channelID.(string), newMessage); err != nil {
 						mylog.Printf("发送图文混合信息失败: %v", err)
+						mylog.Printf("%s", FormatQQError(err))
 					}
 				} else {
 					if _, err = api.PostMessage(context.TODO(), channelID.(string), newMessage); err != nil {
 						mylog.Printf("发送图文混合信息失败: %v", err)
+						mylog.Printf("%s", FormatQQError(err))
 					}
 				}
 
@@ -341,6 +343,7 @@ func HandleSendGuildChannelMsg(client callapi.Client, api openapi.OpenAPI, apiv2
 
 		    if resp, err = api.PostMessage(context.TODO(), channelID.(string), textMsg); err != nil {
 		     mylog.Printf("发送文本信息失败: %v", err)
+		     mylog.Printf("%s", FormatQQError(err))
 		    }
 		    //发送成功回执
 		    retmsg, _ = SendGuildResponse(client, err, &message, resp)

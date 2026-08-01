@@ -92,6 +92,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 -  `[CQ:card]` 群聊图文卡片消息（msg_type=8）
 -  `[CQ:input_notify]` 单聊输入状态通知（msg_type=6）
 -  `[CQ:stream]` 单聊流式消息（打字机效果）
+-  QQ API 错误码中文提示（控制台直接输出错误码含义和排查建议）
 -  支持文字、图片、语音、视频、Markdown 等多种消息类型
 -  主动信息失败自动转被动
 -  完善的重连机制

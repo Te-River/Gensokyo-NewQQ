@@ -449,6 +449,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			resp, err = apiv2.PostGroupMessage(context.TODO(), message.Params.GroupID.(string), groupMessage)
 			if err != nil {
 				mylog.Printf("发送组合消息失败: %v", err)
+				mylog.Printf("%s", FormatQQError(err))
 				// 错误保存到本地
 				if config.GetSaveError() {
 					mylog.ErrLogToFile("type", "PostGroupMessage")
@@ -468,6 +469,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				resp, err = apiv2.PostGroupMessage(context.TODO(), message.Params.GroupID.(string), groupMessage)
 				if err != nil {
 					mylog.Printf("发送组合消息失败: %v", err)
+					mylog.Printf("%s", FormatQQError(err))
 					// 错误保存到本地
 					if config.GetSaveError() {
 						mylog.ErrLogToFile("type", "PostGroupMessage")
@@ -632,6 +634,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			resp, err = apiv2.PostGroupMessage(context.TODO(), targetGroupID, groupMessage)
 			if err != nil {
 				mylog.Printf("发送文本群组信息失败: %v", err)
+				mylog.Printf("%s", FormatQQError(err))
 				// 错误保存到本地
 				if config.GetSaveError() {
 					mylog.ErrLogToFile("type", "PostGroupMessage")
@@ -711,6 +714,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		     resp, err := apiv2.PostGroupMessage(context.TODO(), message.Params.GroupID.(string), cardMsg)
 		  if err != nil {
 		   mylog.Printf("发送卡片消息失败: %v", err)
+		   mylog.Printf("%s", FormatQQError(err))
 		  } else {
 		   mylog.Printf("[CQ:card] 纯卡片消息发送成功")
 		   rememberLatestBotGroupMessageInGroup(message.Params.GroupID.(string), resp)
@@ -775,6 +779,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 						resp, err = apiv2.PostGroupMessage(context.TODO(), message.Params.GroupID.(string), groupMessage)
 						if err != nil {
 							mylog.Printf("发送 MessageToCreate 信息失败: %v", err)
+							mylog.Printf("%s", FormatQQError(err))
 							// 错误保存到本地
 							if config.GetSaveError() {
 								mylog.ErrLogToFile("type", "PostGroupMessage")
@@ -831,6 +836,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				message_return, err := apiv2.PostGroupMessage(context.TODO(), message.Params.GroupID.(string), richMediaMessage)
 				if err != nil {
 					mylog.Printf("发送 richMediaMessage 信息失败: %v", err)
+					mylog.Printf("%s", FormatQQError(err))
 					// 错误保存到本地
 					if config.GetSaveError() {
 						mylog.ErrLogToFile("type", "PostGroupMessage-richMediaMessage")
@@ -884,6 +890,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 					resp, err = apiv2.PostGroupMessage(context.TODO(), message.Params.GroupID.(string), groupMessage)
 					if err != nil {
 						mylog.Printf("发送图片失败: %v", err)
+						mylog.Printf("%s", FormatQQError(err))
 						// 错误保存到本地
 						if config.GetSaveError() {
 							mylog.ErrLogToFile("type", "PostGroupMessage")

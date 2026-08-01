@@ -291,6 +291,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 			resp, err := apiv2.PostGroupMessage(context.TODO(), message.Params.GroupID.(string), groupMessage)
 			if err != nil {
 				mylog.Printf("发送组合消息失败: %v", err)
+				mylog.Printf("%s", FormatQQError(err))
 			}
 			if err != nil && strings.Contains(err.Error(), `"code":22009`) {
 				mylog.Printf("信息发送失败,加入到队列中,下次被动信息进行发送")
@@ -335,6 +336,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 			resp, err := apiv2.PostGroupMessage(context.TODO(), message.Params.GroupID.(string), groupMessage)
 			if err != nil {
 				mylog.Printf("发送文本群组信息失败: %v", err)
+				mylog.Printf("%s", FormatQQError(err))
 			}
 			if err != nil && strings.Contains(err.Error(), `"code":22009`) {
 				mylog.Printf("信息发送失败,加入到队列中,下次被动信息进行发送")
@@ -380,6 +382,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 						resp, err := apiv2.PostGroupMessage(context.TODO(), message.Params.GroupID.(string), groupMessage)
 						if err != nil {
 							mylog.Printf("发送md信息失败: %v", err)
+							mylog.Printf("%s", FormatQQError(err))
 						}
 						if err != nil && strings.Contains(err.Error(), `"code":22009`) {
 							mylog.Printf("信息发送失败,加入到队列中,下次被动信息进行发送")
@@ -406,6 +409,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 				message_return, err := apiv2.PostGroupMessage(context.TODO(), message.Params.GroupID.(string), richMediaMessage)
 				if err != nil {
 					mylog.Printf("发送 richMediaMessage 信息失败: %v", err)
+					mylog.Printf("%s", FormatQQError(err))
 					// 错误保存到本地
 					if config.GetSaveError() {
 						mylog.ErrLogToFile("type", "PostGroupMessage-richMediaMessage")
