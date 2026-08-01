@@ -333,6 +333,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		if imageCount == 1 && messageText != "" {
 			var groupMessage *dto.MessageToCreate
 			mylog.Printf("发图文混合信息-群")
+			mylog.Printf("test")
 			// 创建包含单个图片的 singleItem
 			singleItem[imageType] = []string{imageUrl}
 			msgseq := echo.GetMappingSeq(messageID)
