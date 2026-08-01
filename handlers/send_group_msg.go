@@ -333,7 +333,6 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		if imageCount == 1 && messageText != "" {
 			var groupMessage *dto.MessageToCreate
 			mylog.Printf("发图文混合信息-群")
-			mylog.Printf("test")
 			// 创建包含单个图片的 singleItem
 			singleItem[imageType] = []string{imageUrl}
 			msgseq := echo.GetMappingSeq(messageID)
@@ -342,7 +341,6 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			// 进行类型断言
 			richMediaMessage, ok := groupReply.(*dto.RichMediaMessage)
 			// 如果断言为RichMediaMessage失败
-			mylog.Printf("test1")
 			if !ok {
 				// 尝试断言为MessageToCreate
 				groupMessage, ok = groupReply.(*dto.MessageToCreate)
@@ -359,7 +357,6 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				md, kb, transmd = auto_md(message, messageText, richMediaMessage)
 			}
 			// 如果groupMessage是nil 说明groupReply是richMediaMessage类型 如果groupMessage不是nil 说明groupReply是MessageToCreate
-			mylog.Printf("test2")
 			if groupMessage == nil {
 			 //如果没有转换成md发送
 			 if !transmd {
@@ -371,10 +368,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			  }
 			  // 图文混合消息同样需要转换 [CQ:at] 为 @用户名，与纯文本路径对齐
 			  // 否则 QQ 官方 API 不识别 CQ 码，会原文显示 [CQ:at,qq=数字]
-			  mylog.Printf("test3")
-		      mylog.Println("CQat转换前:", messageText)
 			  messageText = resolvePlainTextAtMentions(messageText)
-			  mylog.Println("CQat转换后:", messageText)
 			  // 创建包含文本和图像信息的消息
 			  msgseq = echo.GetMappingSeq(messageID)
 			  echo.AddMappingSeq(messageID, msgseq+1)
@@ -446,13 +440,10 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				}
 			} else {
 				// 为groupMessage附加内容 变成图文信息
-		        mylog.Println("CQat转换前:", messageText)
 			    messageText = resolvePlainTextAtMentions(messageText)
-			    mylog.Println("CQat转换后:", messageText)
 				groupMessage.Content = messageText
 				groupMessage.Timestamp = time.Now().Unix() // 设置时间戳
 			}
-			mylog.Printf("test4")
 
 			var resp *dto.GroupMessageResponse
 			// 发送组合消息
