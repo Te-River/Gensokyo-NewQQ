@@ -233,3 +233,15 @@ b95be7a5 docs: 改进 AGENTS.md 架构文档与构建指南
 2. 去掉"正向条目存在检查"的提前 `return nil`：即便正向已被其他路径删除，也要扫删残留逆向条目，确保彻底清理重复映射
 
 **验证：** `go build ./...` 编译通过 + `go vet ./idmap/ ./server/` 静态分析通过
+
+### 图文混合走 Markdown 路径（auto_md）未转换 `[CQ:at]`（2026-08-02 修复）
+
+**文件：** `handlers/send_group_msg.go`（`auto_md` 函数）
+
+**问题：** 图文混合消息走 `transmd=true` 的 Markdown 路径时，`[CQ:at,qq=数字]` 未被转换，QQ 官方 Markdown 渲染把它当纯文本显示，变形为 `[CO:at,qq=数字]`（用户截图所见）。
+
+**根因：** `auto_md()` 把含 `[CQ:at]` 的 `messageText` 塞进 Markdown 参数（`text_end` 或原生 `content`），从未调用 `ResolveMarkdownAtMentions`。此前修复只覆盖了 `!transmd` 分支（MsgType=7），漏了 `transmd=true` 的 Markdown 分支（MsgType=2）。
+
+**修复：** 在 `auto_md()` 内 `messageText` 塞进 Markdown 前调 `ResolveMarkdownAtMentions(messageText)`，将 `[CQ:at,qq=数字]` 转为 `<qqbot-at-user id="OpenID" />` 标签。修在 `auto_md` 内部一处即可覆盖三个共用 handler（`send_group_msg`、`send_group_msg_raw`、`send_guild_channel_msg`）。
+
+**验证：** `go build ./...` 编译通过 + `go vet ./handlers/` 静态分析通过
