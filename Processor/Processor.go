@@ -876,13 +876,6 @@ func SendMessage(messageText string, data interface{}, messageType string, api o
 		msg = (*dto.Message)(v)
 	case *dto.WSGroupMessageData:
 		msg = (*dto.Message)(v)
-	case *dto.WSATMessageData:
-		msg = (*dto.Message)(v)
-	case *dto.WSMessageData:
-		msg = (*dto.Message)(v)
-	case *dto.WSDirectMessageData:
-		msg = (*dto.Message)(v)
-	case *dto.WSC2CMessageData:
 		msg = (*dto.Message)(v)
 	default:
 		return fmt.Errorf("不支持的消息事件类型 %T", data)
@@ -927,13 +920,6 @@ func SendMessageMd(md *dto.Markdown, kb *keyboard.MessageKeyboard, data interfac
 	switch v := data.(type) {
 	case *dto.WSGroupATMessageData:
 		msg = (*dto.Message)(v)
-	case *dto.WSGroupMessageData:
-		msg = (*dto.Message)(v)
-	case *dto.WSATMessageData:
-		msg = (*dto.Message)(v)
-	case *dto.WSMessageData:
-		msg = (*dto.Message)(v)
-	case *dto.WSDirectMessageData:
 		msg = (*dto.Message)(v)
 	case *dto.WSC2CMessageData:
 		msg = (*dto.Message)(v)

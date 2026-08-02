@@ -470,7 +470,6 @@ func main() {
 	      r.GET("/metrics", uploadAuth, MetricsHandler)
 	  r.POST("/uploadpic", uploadAuth, server.UploadBase64ImageHandler(rateLimiter))
 	  r.POST("/uploadpicv2", uploadAuth, server.UploadBase64ImageHandlerV2(rateLimiter, apiV2))
-	  r.POST("/uploadpicv3", uploadAuth, server.UploadBase64ImageHandlerV3(rateLimiter, api))
 	  r.POST("/uploadrecord", uploadAuth, server.UploadBase64RecordHandler(rateLimiter))
 	// 使用 CreateHandleValidation，传入 WebhookHandler 实例
 	server.InitPrivateKey(conf.Settings.ClientSecret)

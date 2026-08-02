@@ -1576,11 +1576,6 @@ func RevertTransformedText(data interface{}, msgtype string, api openapi.OpenAPI
 	case *dto.WSGroupMessageData:
 		msg = (*dto.Message)(v)
 		isFullGroupMsg = true
-	case *dto.WSATMessageData:
-		msg = (*dto.Message)(v)
-	case *dto.WSMessageData:
-		msg = (*dto.Message)(v)
-	case *dto.WSDirectMessageData:
 		msg = (*dto.Message)(v)
 	case *dto.WSC2CMessageData:
 		msg = (*dto.Message)(v)
@@ -1936,12 +1931,6 @@ func ConvertToSegmentedMessage(data interface{}) []map[string]interface{} {
 		msg = (*dto.Message)(v)
 	case *dto.WSGroupMessageData:
 		msg = (*dto.Message)(v)
-		isFullGroupMsg = true
-	case *dto.WSATMessageData:
-		msg = (*dto.Message)(v)
-	case *dto.WSMessageData:
-		msg = (*dto.Message)(v)
-	case *dto.WSDirectMessageData:
 		msg = (*dto.Message)(v)
 	case *dto.WSC2CMessageData:
 		msg = (*dto.Message)(v)
@@ -2072,13 +2061,7 @@ func SendMessage(messageText string, data interface{}, messageType string, api o
 	switch v := data.(type) {
 	case *dto.WSGroupATMessageData:
 		msg = (*dto.Message)(v)
-	case *dto.WSGroupMessageData:
 		msg = (*dto.Message)(v)
-	case *dto.WSATMessageData:
-		msg = (*dto.Message)(v)
-	case *dto.WSMessageData:
-		msg = (*dto.Message)(v)
-	case *dto.WSDirectMessageData:
 		msg = (*dto.Message)(v)
 	case *dto.WSC2CMessageData:
 		msg = (*dto.Message)(v)

@@ -21,8 +21,6 @@ type Message struct {
 	MentionEveryone bool `json:"mention_everyone"`
 	// 消息发送方
 	Author *User `json:"author"`
-	// 消息发送方Author的member属性，只是部分属性
-	Member *Member `json:"member"`
 	// 附件
 	Attachments []*MessageAttachment `json:"attachments"`
 	// 结构化消息-embeds
@@ -31,14 +29,8 @@ type Message struct {
 	Mentions []*User `json:"mentions"`
 	// ark 消息
 	Ark *Ark `json:"ark"`
-	// 私信消息
-	DirectMessage bool `json:"direct_message"`
-	// 子频道 seq，用于消息间的排序，seq 在同一子频道中按从先到后的顺序递增，不同的子频道之前消息无法排序
-	SeqInChannel string `json:"seq_in_channel"`
 	// 引用的消息
 	MessageReference *MessageReference `json:"message_reference,omitempty"`
-	// 私信场景下，该字段用来标识从哪个频道发起的私信
-	SrcGuildID string `json:"src_guild_id"`
 	//返回的ret 超过主动限制会返回22009
 	Ret int `json:"ret,omitempty"`
 }

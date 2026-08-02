@@ -84,18 +84,6 @@ func TestMeCommandDataExtraction(t *testing.T) {
 			expectedID2: "group456",
 		},
 		{
-			name:        "guild AT message",
-			data:        &dto.WSATMessageData{Author: &dto.User{ID: "user789"}, ChannelID: "channel123", GuildID: "guild456"},
-			expectedID:  "user789",
-			expectedID2: "channel123",
-		},
-		{
-			name:        "direct message",
-			data:        &dto.WSDirectMessageData{Author: &dto.User{ID: "user999"}, ChannelID: "channel888"},
-			expectedID:  "user999",
-			expectedID2: "channel888",
-		},
-		{
 			name:        "C2C message",
 			data:        &dto.WSC2CMessageData{Author: &dto.User{ID: "user777"}},
 			expectedID:  "user777",
@@ -111,11 +99,6 @@ func TestMeCommandDataExtraction(t *testing.T) {
 			case *dto.WSGroupMessageData:
 				realid = v.Author.ID
 				realid2 = v.GroupID
-			case *dto.WSATMessageData:
-				realid = v.Author.ID
-				realid2 = v.ChannelID
-			case *dto.WSDirectMessageData:
-				realid = v.Author.ID
 				realid2 = v.ChannelID
 			case *dto.WSC2CMessageData:
 				realid = v.Author.ID

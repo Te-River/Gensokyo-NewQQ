@@ -1,7 +1,6 @@
 package webui
 
 import (
-	"context"
 	"embed"
 	"fmt"
 	"net/http"
@@ -15,7 +14,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/hoshinonyaruko/gensokyo/config"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
-	"github.com/tencent-connect/botgo/dto"
 	"github.com/tencent-connect/botgo/openapi"
 )
 
@@ -126,20 +124,11 @@ func CombinedMiddleware(api openapi.OpenAPI, apiV2 openapi.OpenAPI) gin.HandlerF
 			}
 			// 根据api名称处理请求
 			if c.Param("filepath") == "/api/"+appIDStr+"/api" && c.Request.Method == http.MethodPost {
-				apiName := c.Query("name")
-				switch apiName {
-				case "get_guild_list":
-					// 处理获取群组列表的请求
-					handleGetGuildList(c, api, apiV2)
-				case "get_channel_list":
-					// 处理获取频道列表的请求
-					handleGetChannelList(c, api, apiV2)
-				case "send_guild_channel_message":
-					// 调用处理发送消息的函数
-					handleSendGuildChannelMessage(c, api, apiV2)
-				default:
-					// 处理其他或未知的api名称
-					c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid API name"})
+			 apiName := c.Query("name")
+			 switch apiName {
+			 default:
+			  // 处理其他或未知的api名称
+			  c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid API name"})
 				}
 				return
 			}
@@ -174,143 +163,6 @@ func CombinedMiddleware(api openapi.OpenAPI, apiV2 openapi.OpenAPI) gin.HandlerF
 type SendMessageRequest struct {
 	Message string `json:"message"`
 	ID      string `json:"id"`
-}
-
-// handleSendGuildChannelMessage 处理发送消息到公会频道的请求
-func handleSendGuildChannelMessage(c *gin.Context, api openapi.OpenAPI, apiV2 openapi.OpenAPI) {
-	var req SendMessageRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
-		return
-	}
-
-	// 创建MessageToCreate实例
-	msgToCreate := &dto.MessageToCreate{
-		Content: req.Message,
-		MsgType: 0,      // 文本消息
-		MsgID:   "1000", // 固定MsgID
-	}
-
-	// 假设我们有一个上下文
-	ctx := context.TODO()
-
-	// 使用提供的channelID和msgToCreate发送消息
-	message, err := api.PostMessage(ctx, req.ID, msgToCreate)
-	if err != nil {
-		// 信息发送失败，返回失败原因
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "Failed to send message",
-			"details": err.Error(),
-		})
-		return
-	}
-
-	// 如果消息发送成功，返回一个成功的响应
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Message sent successfully",
-		"data":    message,
-	})
-}
-
-// handleGetGuildList 处理获取群组列表的请求
-func handleGetGuildList(c *gin.Context, api openapi.OpenAPI, apiV2 openapi.OpenAPI) {
-	// 提取前端发来的 pager 数据
-	var pager dto.GuildPager
-	if err := c.ShouldBindJSON(&pager); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// 调用后端SDK的 MeGuilds 方法
-	guilds, err := api.MeGuilds(c.Request.Context(), &pager)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	// 如果 after 是空字符串，则设置为 "0"
-	if pager.After == "" {
-		pager.After = "0"
-	}
-	// 将后端数据转换为前端需要的格式
-	guildList := make([]map[string]interface{}, len(guilds))
-	for i, guild := range guilds {
-		guildList[i] = map[string]interface{}{
-			"id":             guild.ID,
-			"name":           guild.Name,
-			"icon":           guild.Icon,
-			"owner_id":       guild.OwnerID,
-			"owner":          guild.IsOwner,
-			"member_count":   guild.MemberCount,
-			"max_members":    guild.MaxMembers,
-			"description":    guild.Desc,
-			"joined_at":      guild.JoinedAt,
-			"channels":       guild.Channels,
-			"union_world_id": guild.UnionWorldID,
-			"union_org_id":   guild.UnionOrgID,
-			// ... 其他需要的字段
-		}
-	}
-
-	// 假设可以从 somewhere 获取 totalPages
-	totalPages := 1000
-
-	// 返回数据给前端，匹配前端期望的结构
-	c.JSON(http.StatusOK, gin.H{
-		"data":       guildList,
-		"totalPages": totalPages, // 需要后端提供或计算出总页数
-	})
-}
-
-// handleGetChannelList 处理获取子频道列表的请求
-func handleGetChannelList(c *gin.Context, api openapi.OpenAPI, apiV2 openapi.OpenAPI) {
-	// 提取前端发来的 pager 数据，其中after参数作为channelID使用
-	var pager dto.GuildPager
-	if err := c.ShouldBindJSON(&pager); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// 如果after是空字符串，则设置为默认值（如"0"，或者可适当调整）
-	if pager.After == "" {
-		pager.After = "0"
-	}
-
-	// 调用后端SDK的Channels方法
-	channels, err := api.Channels(c.Request.Context(), pager.After) // 这里的pager.After实际上作为guildID
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	// 将后端数据转换为前端需要的格式
-	channelList := make([]map[string]interface{}, len(channels))
-	for i, channel := range channels {
-		channelList[i] = map[string]interface{}{
-			"id":               channel.ID,
-			"name":             channel.Name,
-			"type":             channel.Type,
-			"position":         channel.Position,
-			"parent_id":        channel.ParentID,
-			"owner_id":         channel.OwnerID,
-			"sub_type":         channel.SubType,
-			"private_type":     channel.PrivateType,
-			"private_user_ids": channel.PrivateUserIDs,
-			"speak_permission": channel.SpeakPermission,
-			"application_id":   channel.ApplicationID,
-			"permissions":      channel.Permissions,
-			"op_user_id":       channel.OpUserID,
-			// ... 其他需要的字段
-		}
-	}
-
-	// 假设可以从 somewhere 获取 totalPages
-	totalPages := 100
-
-	// 返回数据给前端，匹配前端期望的结构
-	c.JSON(http.StatusOK, gin.H{
-		"data":       channelList,
-		"totalPages": totalPages, // 总页数可以是后端提供或计算出的
-	})
 }
 
 func getContentType(path string) string {
