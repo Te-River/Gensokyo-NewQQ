@@ -696,10 +696,6 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 				retmsg, _ = SendC2CResponse(client, err, &message, resp)
 			}
 		}
-		//这里是pr上来的,我也不明白为什么私聊会出现guild类型
-	case "guild_private", "guild":
-		//当收到发私信调用 并且来源是频道
-		retmsg, _ = HandleSendGuildChannelPrivateMsg(client, api, apiv2, message, nil, nil)
 	default:
 		mylog.Printf("Unknown message type: %s", msgType)
 	}
@@ -714,7 +710,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 
 		//递归3次枚举类型
 		if echo.GetMapping(idInt64) > 0 {
-			tryMessageTypes := []string{"group", "guild", "guild_private"}
+			tryMessageTypes := []string{"group"}
 			messageCopy := message // 创建message的副本
 			echo.AddMsgType(config.GetAppIDStr(), idInt64, tryMessageTypes[echo.GetMapping(idInt64)-1])
 			delay := config.GetSendDelay()

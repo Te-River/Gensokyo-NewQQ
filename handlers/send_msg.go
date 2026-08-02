@@ -115,49 +115,9 @@ func HandleSendMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.Ope
 	case "group":
 		//复用处理逻辑
 		retmsg, _ = HandleSendGroupMsg(client, api, apiv2, message)
-	case "guild":
-		//用GroupID给ChannelID赋值,因为我们是把频道虚拟成了群
-		message.Params.ChannelID = message.Params.GroupID.(string)
-		var RChannelID string
-		if message.Params.UserID != nil && config.GetIdmapPro() && message.Params.UserID.(string) != "" && message.Params.UserID.(string) != "0" {
-			RChannelID, _, err = idmap.RetrieveRowByIDv2Pro(message.Params.ChannelID.(string), message.Params.UserID.(string))
-			mylog.Printf("测试,通过Proid获取的RChannelID:%v", RChannelID)
-		}
-		if RChannelID == "" {
-			// 使用RetrieveRowByIDv2还原真实的ChannelID
-			RChannelID, err = idmap.RetrieveRowByIDv2(message.Params.ChannelID.(string))
-		}
-		if err != nil {
-			mylog.Printf("error retrieving real RChannelID: %v", err)
-		}
-		message.Params.ChannelID = RChannelID
-		retmsg, _ = HandleSendGuildChannelMsg(client, api, apiv2, message)
-	case "guild_private":
-		//send_msg比具体的send_xxx少一层,其包含的字段类型在虚拟化场景已经失去作用
-		//根据userid绑定得到的具体真实事件类型,这里也有多种可能性
-		//1,私聊(但虚拟成了群),这里用群号取得需要的id
-		//2,频道私聊(但虚拟成了私聊)这里传递2个nil,用user_id去推测channel_id和guild_id
-		retmsg, _ = HandleSendGuildChannelPrivateMsg(client, api, apiv2, message, nil, nil)
 	case "group_private":
 		//私聊信息
 		retmsg, _ = HandleSendPrivateMsg(client, api, apiv2, message)
-	case "forum":
-		//用GroupID给ChannelID赋值,因为我们是把频道虚拟成了群
-		message.Params.ChannelID = message.Params.GroupID.(string)
-		var RChannelID string
-		if message.Params.UserID != nil && config.GetIdmapPro() && message.Params.UserID.(string) != "" && message.Params.UserID.(string) != "0" {
-			RChannelID, _, err = idmap.RetrieveRowByIDv2Pro(message.Params.ChannelID.(string), message.Params.UserID.(string))
-			mylog.Printf("测试,通过Proid获取的RChannelID:%v", RChannelID)
-		}
-		if RChannelID == "" {
-			// 使用RetrieveRowByIDv2还原真实的ChannelID
-			RChannelID, err = idmap.RetrieveRowByIDv2(message.Params.ChannelID.(string))
-		}
-		if err != nil {
-			mylog.Printf("error retrieving real RChannelID: %v", err)
-		}
-		message.Params.ChannelID = RChannelID
-		retmsg, _ = HandleSendGuildChannelForum(client, api, apiv2, message)
 	default:
 		mylog.Printf("1Unknown message type: %s", msgType)
 	}

@@ -940,77 +940,12 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 
 			}
 		}
-	case "guild":
-		//用GroupID给ChannelID赋值,因为我们是把频道虚拟成了群
-		message.Params.ChannelID = message.Params.GroupID.(string)
-		var RChannelID string
-		if message.Params.UserID != nil && config.GetIdmapPro() && message.Params.UserID.(string) != "" && message.Params.UserID.(string) != "0" {
-			RChannelID, _, err = idmap.RetrieveRowByIDv2Pro(message.Params.ChannelID.(string), message.Params.UserID.(string))
-			mylog.Printf("测试,通过Proid获取的RChannelID:%v", RChannelID)
-		}
-		if RChannelID == "" {
-			// 使用RetrieveRowByIDv2还原真实的ChannelID
-			RChannelID, err = idmap.RetrieveRowByIDv2(message.Params.ChannelID.(string))
-		}
-		if err != nil {
-			mylog.Printf("error retrieving real RChannelID: %v", err)
-		}
-		message.Params.ChannelID = RChannelID
-		//这一句是group_private的逻辑,发频道信息用的是channelid
-		//message.Params.GroupID = value
-		retmsg, _ = HandleSendGuildChannelMsg(client, api, apiv2, message)
-	case "guild_private":
-		//用group_id还原出channelid 这是虚拟成群的私聊信息
-		var RChannelID string
-		var Vuserid string
-		message.Params.ChannelID = message.Params.GroupID.(string)
-		Vuserid, ok := message.Params.UserID.(string)
-		if !ok {
-			mylog.Printf("Error illegal UserID")
-			return "", nil
-		}
-		if Vuserid != "" && config.GetIdmapPro() {
-			RChannelID, _, err = idmap.RetrieveRowByIDv2Pro(message.Params.ChannelID.(string), Vuserid)
-			mylog.Printf("测试,通过Proid获取的RChannelID:%v", RChannelID)
-		} else {
-			// 使用RetrieveRowByIDv2还原真实的ChannelID
-			RChannelID, err = idmap.RetrieveRowByIDv2(message.Params.ChannelID.(string))
-		}
-		if err != nil {
-			mylog.Printf("error retrieving real ChannelID: %v", err)
-		}
-		//读取ini 通过ChannelID取回之前储存的guild_id
-		value, err := idmap.ReadConfigv2(RChannelID, "guild_id")
-		if err != nil {
-			mylog.Printf("Error reading config: %v", err)
-			return "", nil
-		}
-		retmsg, _ = HandleSendGuildChannelPrivateMsg(client, api, apiv2, message, &value, &RChannelID)
 	case "group_private":
 		//用userid还原出openid 这是虚拟成群的群聊私聊信息
 		if message.Params.GroupID != nil && message.Params.GroupID.(string) != "" {
 			message.Params.UserID = message.Params.GroupID.(string)
 		}
 		retmsg, _ = HandleSendPrivateMsg(client, api, apiv2, message)
-	case "forum":
-		//用GroupID给ChannelID赋值,因为我们是把频道虚拟成了群
-		message.Params.ChannelID = message.Params.GroupID.(string)
-		var RChannelID string
-		if message.Params.UserID != nil && config.GetIdmapPro() && message.Params.UserID.(string) != "" && message.Params.UserID.(string) != "0" {
-			RChannelID, _, err = idmap.RetrieveRowByIDv2Pro(message.Params.ChannelID.(string), message.Params.UserID.(string))
-			mylog.Printf("测试,通过Proid获取的RChannelID:%v", RChannelID)
-		}
-		if RChannelID == "" {
-			// 使用RetrieveRowByIDv2还原真实的ChannelID
-			RChannelID, err = idmap.RetrieveRowByIDv2(message.Params.ChannelID.(string))
-		}
-		if err != nil {
-			mylog.Printf("error retrieving real RChannelID: %v", err)
-		}
-		message.Params.ChannelID = RChannelID
-		//这一句是group_private的逻辑,发频道信息用的是channelid
-		//message.Params.GroupID = value
-		retmsg, _ = HandleSendGuildChannelForum(client, api, apiv2, message)
 	default:
 		mylog.Printf("Unknown message type: %s", msgType)
 	}
@@ -1029,7 +964,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 
 			//递归3次枚举类型
 			if echo.GetMapping(idInt64) > 0 {
-				tryMessageTypes := []string{"group", "guild", "guild_private"}
+				tryMessageTypes := []string{"group"}
 				messageCopy := message // 创建message的副本
 				echo.AddMsgType(config.GetAppIDStr(), idInt64, tryMessageTypes[echo.GetMapping(idInt64)-1])
 				delay := config.GetSendDelay()
