@@ -239,9 +239,8 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			mylog.Printf("发私聊图文混合信息")
 			// 创建包含单个图片的 singleItem
 			singleItem[imageType] = []string{imageUrl}
-			msgseq := echo.GetMappingSeq(messageID)
-			echo.AddMappingSeq(messageID, msgseq+1)
-			groupReply := generatePrivateMessage(messageID, eventID, singleItem, "", msgseq+1, apiv2, UserID)
+			msgseq := echo.IncrementMappingSeq(messageID)
+			groupReply := generatePrivateMessage(messageID, eventID, singleItem, "", msgseq, apiv2, UserID)
 			// 进行类型断言
 			richMediaMessage, ok := groupReply.(*dto.RichMediaMessage)
 			if !ok {
@@ -258,8 +257,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			// 否则 QQ 官方 API 不识别 CQ 码，会原文显示 [CQ:at,qq=数字]
 			messageText = resolvePlainTextAtMentions(messageText)
 			// 创建包含文本和图像信息的消息
-			msgseq = echo.GetMappingSeq(messageID)
-			echo.AddMappingSeq(messageID, msgseq+1)
+			msgseq = echo.IncrementMappingSeq(messageID)
 			groupMessage := &dto.MessageToCreate{
 				Content: messageText, // 添加文本内容
 				Media: &dto.Media{
@@ -410,9 +408,8 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 		}
 
 		if strings.TrimSpace(messageText) != "" {
-			msgseq := echo.GetMappingSeq(messageID)
-			echo.AddMappingSeq(messageID, msgseq+1)
-			groupReply := generatePrivateMessage(messageID, eventID, nil, messageText, msgseq+1, apiv2, UserID)
+			msgseq := echo.IncrementMappingSeq(messageID)
+			groupReply := generatePrivateMessage(messageID, eventID, nil, messageText, msgseq, apiv2, UserID)
 
 			// 进行类型断言
 			groupMessage, ok := groupReply.(*dto.MessageToCreate)
@@ -506,9 +503,8 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 					singleItem["file_name"] = []string{fileNames[i]}
 				}
 				//mylog.Println("singleItem:", singleItem)
-				msgseq := echo.GetMappingSeq(messageID)
-				echo.AddMappingSeq(messageID, msgseq+1)
-				groupReply := generatePrivateMessage(messageID, eventID, singleItem, "", msgseq+1, apiv2, UserID)
+				msgseq := echo.IncrementMappingSeq(messageID)
+				groupReply := generatePrivateMessage(messageID, eventID, singleItem, "", msgseq, apiv2, UserID)
 				// 进行类型断言
 				richMediaMessage, ok := groupReply.(*dto.RichMediaMessage)
 				if !ok {
@@ -602,8 +598,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 				}
 
 				if message_return != nil && message_return.MediaResponse != nil && message_return.MediaResponse.FileInfo != "" {
-					msgseq := echo.GetMappingSeq(messageID)
-					echo.AddMappingSeq(messageID, msgseq+1)
+					msgseq := echo.IncrementMappingSeq(messageID)
 					media := dto.Media{
 						FileInfo: message_return.MediaResponse.FileInfo,
 					}
@@ -665,30 +660,33 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 
 // applyPrivateReply 将虚拟 reply ID 反查为真实 QQ API msg_id 并设置到私聊消息上。
 // 关键：私聊场景只能引用私聊自身的 msg_id，若反查得到的真实 ID 归属其他场景
-// （如群聊），QQ API 会返回 40034024 越权。因此反查后校验其归属 UserID 是否
-// 与当前私聊目标 UserID 一致，不一致则跳过 reply，避免越权。
+// （如群聊），QQ API 会返回 40034024 越权。因此反查前先用 RetrieveRowByIDv2 校验
+// 虚拟 ID 的归属真实 ID 是否为当前私聊目标 UserID，不一致则跳过 reply 避免越权。
 func applyPrivateReply(groupMessage *dto.MessageToCreate, replyIDs []string, privateUserID string) {
 	if len(replyIDs) == 0 {
 		return
 	}
+	// 反查前校验：虚拟 reply ID 的归属真实 ID 是否为当前私聊目标 UserID。
+	// 私聊虚拟 ID 对应私聊 UserID，群聊虚拟 ID 对应群聊 GroupID，二者归属不同。
+	ownerRealID, err := idmap.RetrieveRowByIDv2(replyIDs[0])
+	if err != nil || ownerRealID == "" {
+		mylog.Printf("[CQ:reply] 虚拟 ID %s 归属反查失败: %v", replyIDs[0], err)
+		return
+	}
+	if ownerRealID != privateUserID {
+		mylog.Printf("[CQ:reply] 跳过私聊reply：归属 %s 与私聊目标 %s 不一致（跨场景越权）",
+			ownerRealID, privateUserID)
+		return
+	}
+	// 归属校验通过，反查真实 msg_id 并设置 reply
 	realReplyID, err := idmap.RetrieveRowByCachev2(replyIDs[0])
 	if err != nil || realReplyID == "" {
 		mylog.Printf("[CQ:reply] 虚拟 ID %s 反查失败: %v", replyIDs[0], err)
 		return
 	}
-	// echo 缓存中的 ID 格式为 "UserID MessageID"，取后半段为真实 msg_id
+	// echo 缓存中的真实 ID 格式可能为 "UserID MessageID" 或纯 msg_id，取后半段
 	parts := strings.Split(realReplyID, " ")
 	refID := parts[len(parts)-1]
-	// 场景校验：私聊只能引用私聊自身的消息。若前半段（归属 UserID）与当前私聊
-	// 目标不一致，说明引用的是群聊等跨场景消息，直接使用会触发 40034024 越权。
-	if len(parts) > 1 {
-		ownerID := parts[0]
-		if ownerID != privateUserID {
-			mylog.Printf("[CQ:reply] 跳过私聊reply：归属UserID %s 与私聊目标 %s 不一致（跨场景越权）",
-				ownerID, privateUserID)
-			return
-		}
-	}
 	groupMessage.MessageReference = &dto.MessageReference{
 		MessageID:             refID,
 		IgnoreGetMessageError: false,

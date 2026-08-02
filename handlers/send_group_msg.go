@@ -335,9 +335,8 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			mylog.Printf("发图文混合信息-群")
 			// 创建包含单个图片的 singleItem
 			singleItem[imageType] = []string{imageUrl}
-			msgseq := echo.GetMappingSeq(messageID)
-			echo.AddMappingSeq(messageID, msgseq+1)
-			groupReply := generateGroupMessage(messageID, eventID, singleItem, "", msgseq+1, apiv2, message.Params.GroupID.(string))
+			msgseq := echo.IncrementMappingSeq(messageID)
+			groupReply := generateGroupMessage(messageID, eventID, singleItem, "", msgseq, apiv2, message.Params.GroupID.(string))
 			// 进行类型断言
 			richMediaMessage, ok := groupReply.(*dto.RichMediaMessage)
 			// 如果断言为RichMediaMessage失败
@@ -370,8 +369,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			  // 否则 QQ 官方 API 不识别 CQ 码，会原文显示 [CQ:at,qq=数字]
 			  messageText = resolvePlainTextAtMentions(messageText)
 			  // 创建包含文本和图像信息的消息
-			  msgseq = echo.GetMappingSeq(messageID)
-			  echo.AddMappingSeq(messageID, msgseq+1)
+			  msgseq = echo.IncrementMappingSeq(messageID)
 			  groupMessage = &dto.MessageToCreate{
 			   Content: messageText, // 添加文本内容
 			   Media: &dto.Media{
@@ -405,8 +403,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				} else {
 					//将kb和md组合成groupMessage并用MsgType=2发送
 
-					msgseq = echo.GetMappingSeq(messageID)
-					echo.AddMappingSeq(messageID, msgseq+1)
+					msgseq = echo.IncrementMappingSeq(messageID)
 					groupMessage = &dto.MessageToCreate{
 					 Content:  "", // 添加文本内容
 					 MsgID:    messageID,
@@ -534,24 +531,27 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			}
 
 					var md *dto.Markdown
-					    var kb *keyboard.MessageKeyboard
-					    if mdItems, ok := foundItems["markdown"]; ok && len(mdItems) > 0 {
-					     md, kb = parseMarkdownFromMessage(mdItems[0])
-					     // 步骤 1: 转换 markdown 内部和 messageText 中的 [CQ:at] 为 <qqbot-at-user>
-					     if md != nil && md.Content != "" {
-					      md.Content = ResolveMarkdownAtMentions(md.Content)
-					      md.Content = ResolveMarkdownImages(md.Content, apiv2)
-					              }
-					              if kb != nil {
-					               ResolveKeyboardImages(kb, apiv2)
-					              }
-					     messageText = ResolveMarkdownAtMentions(messageText)
-					     // 步骤 2: 将整个 messageText 合并到 markdown 内容头部（qq 官方 md 整个消息以 md 语法渲染）
-					     md.Content = messageText + "\n" + md.Content
-					     // 步骤 3: 清理 messageText 中的 [CQ:markdown] 标记
-					     mdRe := regexp.MustCompile(`\[CQ:markdown,[^\]]*\]`)
-					     messageText = mdRe.ReplaceAllString(messageText, "")
-					    }
+					var kb *keyboard.MessageKeyboard
+					if mdItems, ok := foundItems["markdown"]; ok && len(mdItems) > 0 {
+					 md, kb = parseMarkdownFromMessage(mdItems[0])
+					 // 步骤 1: 转换 markdown 内部和 messageText 中的 [CQ:at] 为 <qqbot-at-user>
+					 if md != nil && md.Content != "" {
+					  md.Content = ResolveMarkdownAtMentions(md.Content)
+					  md.Content = ResolveMarkdownImages(md.Content, apiv2)
+					 }
+					 if kb != nil {
+					  ResolveKeyboardImages(kb, apiv2)
+					 }
+					 messageText = ResolveMarkdownAtMentions(messageText)
+					 // 步骤 2: 将整个 messageText 合并到 markdown 内容头部（qq 官方 md 整个消息以 md 语法渲染）
+					 // 仅当 md 非 nil 时才合并，避免 parseMarkdownFromMessage 解析失败返回 nil 时触发 panic
+					 if md != nil {
+					  md.Content = messageText + "\n" + md.Content
+					 }
+					 // 步骤 3: 清理 messageText 中的 [CQ:markdown] 标记
+					 mdRe := regexp.MustCompile(`\[CQ:markdown,[^\]]*\]`)
+					 messageText = mdRe.ReplaceAllString(messageText, "")
+					}
 
 					    // 没有 markdown 时，纯文本消息转换 [CQ:at] 为 @用户名
 					    if md == nil {
@@ -560,9 +560,8 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 
 			// message.Params.GroupID 已在前面转换为真实 OpenID，直接使用
 
-			msgseq := echo.GetMappingSeq(messageID)
-			echo.AddMappingSeq(messageID, msgseq+1)
-			groupReply := generateGroupMessage(messageID, eventID, nil, messageText, msgseq+1, apiv2, targetGroupID)
+			msgseq := echo.IncrementMappingSeq(messageID)
+			groupReply := generateGroupMessage(messageID, eventID, nil, messageText, msgseq, apiv2, targetGroupID)
 
 			// 进行类型断言
 			groupMessage, ok := groupReply.(*dto.MessageToCreate)
@@ -748,9 +747,8 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 					singleItem["file_name"] = []string{fileNames[i]}
 				}
 				//mylog.Println("singleItem:", singleItem)
-				msgseq := echo.GetMappingSeq(messageID)
-				echo.AddMappingSeq(messageID, msgseq+1)
-				groupReply := generateGroupMessage(messageID, eventID, singleItem, "", msgseq+1, apiv2, message.Params.GroupID.(string))
+				msgseq := echo.IncrementMappingSeq(messageID)
+				groupReply := generateGroupMessage(messageID, eventID, singleItem, "", msgseq, apiv2, message.Params.GroupID.(string))
 				// 进行类型断言
 				richMediaMessage, ok := groupReply.(*dto.RichMediaMessage)
 				if !ok {
@@ -852,8 +850,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				}
 
 				if message_return != nil && message_return.MediaResponse != nil && message_return.MediaResponse.FileInfo != "" {
-					msgseq := echo.GetMappingSeq(messageID)
-					echo.AddMappingSeq(messageID, msgseq+1)
+					msgseq := echo.IncrementMappingSeq(messageID)
 					media := dto.Media{
 						FileInfo: message_return.MediaResponse.FileInfo,
 					}

@@ -90,6 +90,7 @@ type Int64ToIntMapping struct {
 // StringToIntMappingSeq 用于存储 string 到 int 的映射(seq对应)
 type StringToIntMappingSeq struct {
 	mapping sync.Map
+	mu      sync.Mutex // 保护 seq 原子递增，避免多段回复读-改-写竞态触发 QQ 40054005 去重
 }
 
 // MessageGroupPair 用于存储 group 和 groupMessage
@@ -254,6 +255,29 @@ func GetMappingSeq(key string) int {
 		return 0 // 或者根据需要返回默认值或者进行错误处理
 	}
 	return value.(int)
+}
+
+// IncrementMappingSeq 原子递增 seq 并返回递增后的值。
+// 多段回复快速调用时，GetMappingSeq+AddMappingSeq 两步模式存在读-改-写竞态，
+// 两段可能拿到相同 seq 导致 QQ 侧 40054005 去重。用互斥锁保护递增：
+// 多个 goroutine 并发调用时每段拿到独立递增的 seq，彻底消除竞态。
+func IncrementMappingSeq(key string) int {
+	globalStringToIntMappingSeq.mu.Lock()
+	defer globalStringToIntMappingSeq.mu.Unlock()
+	old, ok := globalStringToIntMappingSeq.mapping.Load(key)
+	var newVal int
+	if !ok {
+		if config.GetRamDomSeq() {
+			rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+			newVal = rng.Intn(10000) + 1
+		} else {
+			newVal = 1
+		}
+	} else {
+		newVal = old.(int) + 1
+	}
+	globalStringToIntMappingSeq.mapping.Store(key, newVal)
+	return newVal
 }
 
 // PushGlobalStack 向全局栈中添加一个新的 MessageGroupPair
