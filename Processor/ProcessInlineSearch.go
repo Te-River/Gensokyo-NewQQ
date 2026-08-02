@@ -36,13 +36,8 @@ func (p *Processors) ProcessInlineSearch(data *dto.WSInteractionData) error {
 	var LongUserID64 int64
 	var err error
 	var fromgid, fromuid string
-	if data.GroupOpenID != "" {
-		fromgid = data.GroupOpenID
-		fromuid = data.GroupMemberOpenID
-	} else {
-		fromgid = data.ChannelID
-		fromuid = data.GuildID
-	}
+	fromgid = data.GroupOpenID
+	fromuid = data.GroupMemberOpenID
 
 	// 获取s
 	s := client.GetGlobalS()
@@ -637,63 +632,6 @@ func (p *Processors) ProcessInlineSearch(data *dto.WSInteractionData) error {
 				//上报信息到onebotv11应用端(正反ws)
 				go p.BroadcastMessageToAll(noticeMap, p.Apiv2, data)
 			}
-		} else {
-			// TODO: 区分频道和频道私信 如果有人提需求
-			// 频道回调
-			// 处理onebot_channel_message逻辑
-			newdata := ConvertInteractionToMessage(data)
-
-			// 如果在Array模式下, 则处理Message为Segment格式
-			var segmentedMessages interface{} = data.Data.Resolved.ButtonData
-			if config.GetArrayValue() {
-				segmentedMessages = handlers.ConvertToSegmentedMessage(newdata)
-			}
-
-			var selfid64 int64
-			if config.GetUseUin() {
-				selfid64 = config.GetUinint64()
-			} else {
-				selfid64 = int64(p.Settings.AppID)
-			}
-			onebotMsg := OnebotChannelMessage{
-				ChannelID:   data.ChannelID,
-				GuildID:     data.GuildID,
-				Message:     segmentedMessages,
-				RawMessage:  data.Data.Resolved.ButtonData,
-				MessageID:   data.ID,
-				MessageType: "guild",
-				PostType:    "message",
-				SelfID:      selfid64,
-				UserID:      userid64,
-				SelfTinyID:  "0",
-				Sender: Sender{
-					Nickname: "频道按钮回调",
-					TinyID:   "0",
-					UserID:   userid64,
-					Card:     "频道按钮回调",
-					Sex:      "0",
-					Age:      0,
-					Area:     "0",
-					Level:    "0",
-				},
-				SubType: "channel",
-				Time:    time.Now().Unix(),
-				Avatar:  "",
-			}
-			//增强配置
-			if !config.GetNativeOb11() {
-				onebotMsg.RealMessageType = "interaction"
-			}
-			//调试
-			PrintStructWithFieldNames(onebotMsg)
-
-			// 将 onebotMsg 结构体转换为 map[string]interface{}
-			msgMap := structToMap(onebotMsg)
-
-			//上报信息到onebotv11应用端(正反ws)
-			go p.BroadcastMessageToAll(msgMap, p.Apiv2, data)
-
-			// TODO: 实现eventid
 		}
 	}
 
@@ -706,13 +644,10 @@ func ConvertInteractionToMessage(interaction *dto.WSInteractionData) *dto.Messag
 
 	// 直接映射的字段
 	message.ID = interaction.ID
-	message.ChannelID = interaction.ChannelID
-	message.GuildID = interaction.GuildID
 	message.GroupID = interaction.GroupOpenID
 
 	// 特殊处理的字段
 	message.Content = interaction.Data.Resolved.ButtonData
-	message.DirectMessage = interaction.ChatType == 2
 
 	return &message
 }

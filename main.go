@@ -691,96 +691,11 @@ func ErrorNotifyHandler() event.ErrorNotifyHandler {
 	}
 }
 
-// ATMessageEventHandler 实现处理 频道at 消息的回调
-func ATMessageEventHandler() event.ATMessageEventHandler {
-	return func(event *dto.WSPayload, data *dto.WSATMessageData) error {
-		botstats.RecordMessageReceived()
-		if config.GetEnableChangeWord() {
-			data.Content = acnode.CheckWordIN(data.Content)
-			if data.Author.Username != "" {
-				data.Author.Username = acnode.CheckWordIN(data.Author.Username)
-			}
-		}
-
-		runWithTimer("ATMessage", func() {
-			p.ProcessGuildATMessage(data)
-		})
-		return nil
-	}
-}
-
-// GuildEventHandler 处理频道事件
-func GuildEventHandler() event.GuildEventHandler {
-	return func(event *dto.WSPayload, data *dto.WSGuildData) error {
-		log.Println(data)
-		return nil
-	}
-}
-
-// ChannelEventHandler 处理子频道事件
-func ChannelEventHandler() event.ChannelEventHandler {
-	return func(event *dto.WSPayload, data *dto.WSChannelData) error {
-		log.Println(data)
-		return nil
-	}
-}
-
-// MemberEventHandler 处理成员变更事件
-func MemberEventHandler() event.GuildMemberEventHandler {
-	return func(event *dto.WSPayload, data *dto.WSGuildMemberData) error {
-		go p.ProcessGuildMember(data, string(event.Type))
-		return nil
-	}
-}
-
-// DirectMessageHandler 处理私信事件
-func DirectMessageHandler() event.DirectMessageEventHandler {
-	return func(event *dto.WSPayload, data *dto.WSDirectMessageData) error {
-		botstats.RecordMessageReceived()
-		if config.GetEnableChangeWord() {
-			data.Content = acnode.CheckWordIN(data.Content)
-			if data.Author.Username != "" {
-				data.Author.Username = acnode.CheckWordIN(data.Author.Username)
-			}
-		}
-		runWithTimer("DirectMessage", func() {
-			p.ProcessChannelDirectMessage(data)
-		})
-		return nil
-	}
-}
-
-// CreateMessageHandler 处理消息事件 私域的事件 不at信息
-func CreateMessageHandler() event.MessageEventHandler {
-	return func(event *dto.WSPayload, data *dto.WSMessageData) error {
-		botstats.RecordMessageReceived()
-		if config.GetEnableChangeWord() {
-			data.Content = acnode.CheckWordIN(data.Content)
-			if data.Author.Username != "" {
-				data.Author.Username = acnode.CheckWordIN(data.Author.Username)
-			}
-		}
-		runWithTimer("CreateMessage", func() {
-			p.ProcessGuildNormalMessage(data)
-		})
-		return nil
-	}
-}
-
 // InteractionHandler 处理内联交互事件
 func InteractionHandler() event.InteractionEventHandler {
 	return func(event *dto.WSPayload, data *dto.WSInteractionData) error {
 		mylog.Printf("收到按钮回调:%v", data)
 		go p.ProcessInlineSearch(data)
-		return nil
-	}
-}
-
-// ThreadEventHandler 处理帖子事件
-func ThreadEventHandler() event.ThreadEventHandler {
-	return func(event *dto.WSPayload, data *dto.WSThreadData) error {
-		mylog.Printf("收到帖子事件:%v", data)
-		go p.ProcessThreadMessage(data)
 		return nil
 	}
 }
@@ -917,22 +832,8 @@ func getHandlerByName(handlerName string) (interface{}, bool) {
 		return ReadyHandler(), true
 	case "ErrorNotifyHandler": //连接关闭
 		return ErrorNotifyHandler(), true
-	case "ATMessageEventHandler": //频道at信息
-		return ATMessageEventHandler(), true
-	case "GuildEventHandler": //频道事件
-		return GuildEventHandler(), true
-	case "MemberEventHandler": //频道成员新增
-		return MemberEventHandler(), true
-	case "ChannelEventHandler": //频道事件
-		return ChannelEventHandler(), true
-	case "DirectMessageHandler": //私域频道私信(dms)
-		return DirectMessageHandler(), true
-	case "CreateMessageHandler": //频道不at信息
-		return CreateMessageHandler(), true
 	case "InteractionHandler": //添加频道互动回应
 		return InteractionHandler(), true
-	case "ThreadEventHandler": //发帖事件
-		return ThreadEventHandler(), true
 	case "GroupATMessageEventHandler": //群at信息
 		return GroupATMessageEventHandler(), true
 	case "C2CMessageEventHandler": //群私聊
@@ -979,14 +880,6 @@ func applyDisallowedIntentPolicy(intent dto.Intent, enabledHandlers map[string]b
 		if intent&groupMemberIntent != 0 {
 			intent &^= groupMemberIntent
 			suppressed = append(suppressed, fmt.Sprintf("GroupMemberAdd/Remove=%d", groupMemberIntent))
-		}
-	}
-
-	guildMessageIntent := dto.EventToIntent(dto.EventMessageCreate, dto.EventMessageDelete)
-	if enabledHandlers["CreateMessageHandler"] {
-		if intent&guildMessageIntent != 0 {
-			intent &^= guildMessageIntent
-			suppressed = append(suppressed, fmt.Sprintf("CreateMessageHandler/IntentGuildMessages=%d", guildMessageIntent))
 		}
 	}
 
