@@ -273,25 +273,9 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			groupMessage.Timestamp = time.Now().Unix() // 设置时间戳
 
 			// 处理 [CQ:reply,id=数字] → message_reference + msg_id
-			    if replyIDs, ok := foundItems["reply_msg_id"]; ok && len(replyIDs) > 0 {
-			     if messageText != "" {
-			      realReplyID, err := idmap.RetrieveRowByCachev2(replyIDs[0])
-			      if err == nil && realReplyID != "" {
-			       parts := strings.Split(realReplyID, " ")
-			       refID := parts[len(parts)-1]
-			       groupMessage.MessageReference = &dto.MessageReference{
-			        MessageID:             refID,
-			        IgnoreGetMessageError: false,
-			       }
-			       // 同时设置 msg_id，确保 v2 API 识别为回复
-			       groupMessage.MsgID = refID
-			       // msg_id 与 event_id 二选一，清空 event_id
-			       groupMessage.EventID = ""
-			       mylog.Printf("[CQ:reply] 设置私聊回复消息: msg_id=%s", refID)
-			      } else {
-			       mylog.Printf("[CQ:reply] 虚拟 ID %s 反查失败: %v", replyIDs[0], err)
-			      }
-			     }
+			    // 处理 [CQ:reply,id=数字] → message_reference + msg_id（私聊场景校验避免越权）
+			    if replyIDs, ok := foundItems["reply_msg_id"]; ok && len(replyIDs) > 0 && messageText != "" {
+			        applyPrivateReply(groupMessage, replyIDs, UserID)
 			    }
 
 			// 发送组合消息
@@ -466,28 +450,9 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			         groupMessage.Content = resolvePlainTextAtMentions(groupMessage.Content)
 			        }
 
-			        // 处理 [CQ:reply,id=数字] → message_reference + msg_id
-			    if replyIDs, ok := foundItems["reply_msg_id"]; ok && len(replyIDs) > 0 {
-			     if messageText != "" {
-			      // 虚拟 reply ID → 真实 QQ API message_id
-			      realReplyID, err := idmap.RetrieveRowByCachev2(replyIDs[0])
-			      if err == nil && realReplyID != "" {
-			       // echo 缓存中的 ID 格式为 "UserID MessageID"，取后半段
-			       parts := strings.Split(realReplyID, " ")
-			       refID := parts[len(parts)-1]
-			       groupMessage.MessageReference = &dto.MessageReference{
-			        MessageID:             refID,
-			        IgnoreGetMessageError: false,
-			       }
-			       // 同时设置 msg_id，确保 v2 API 识别为回复
-			       groupMessage.MsgID = refID
-			       // msg_id 与 event_id 二选一，清空 event_id
-			       groupMessage.EventID = ""
-			       mylog.Printf("[CQ:reply] 设置私聊回复消息: msg_id=%s", refID)
-			      } else {
-			       mylog.Printf("[CQ:reply] 虚拟 ID %s 反查失败: %v", replyIDs[0], err)
-			      }
-			     }
+			        // 处理 [CQ:reply,id=数字] → message_reference + msg_id（私聊场景校验避免越权）
+			    if replyIDs, ok := foundItems["reply_msg_id"]; ok && len(replyIDs) > 0 && messageText != "" {
+			        applyPrivateReply(groupMessage, replyIDs, UserID)
 			    }
 
 			    resp, err := apiv2.PostC2CMessage(context.TODO(), UserID, groupMessage)
@@ -556,21 +521,9 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 						        return "", nil // 或其他错误处理
 						       }
 
-						       // 将 reply 引用合并到 markdown 消息中
+						       // 将 reply 引用合并到 markdown 消息中（私聊场景校验避免越权）
 						       if replyIDs, ok := foundItems["reply_msg_id"]; ok && len(replyIDs) > 0 && key == "markdown" {
-						        realReplyID, err := idmap.RetrieveRowByCachev2(replyIDs[0])
-						        if err == nil && realReplyID != "" {
-						         parts := strings.Split(realReplyID, " ")
-						         refID := parts[len(parts)-1]
-						         groupMessage.MessageReference = &dto.MessageReference{
-						          MessageID:             refID,
-						          IgnoreGetMessageError: false,
-						         }
-						         groupMessage.MsgID = refID
-						  // msg_id 与 event_id 二选一，清空 event_id
-						  groupMessage.EventID = ""
-						  mylog.Printf("[CQ:reply] 设置私聊 markdown 回复消息: msg_id=%s", refID)
-						        }
+						        applyPrivateReply(groupMessage, replyIDs, UserID)
 						       }
 
 						       // 首次发送私聊 MessageToCreate
@@ -669,21 +622,9 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 					}
 					groupMessage.Timestamp = time.Now().Unix() // 设置时间戳
 
-					// 处理 [CQ:reply,id=数字] → message_reference + msg_id (富媒体消息)
+					// 处理 [CQ:reply,id=数字] → message_reference + msg_id (富媒体消息，私聊场景校验避免越权)
 					if replyIDs, ok := foundItems["reply_msg_id"]; ok && len(replyIDs) > 0 {
-					 realReplyID, err := idmap.RetrieveRowByCachev2(replyIDs[0])
-					 if err == nil && realReplyID != "" {
-					  parts := strings.Split(realReplyID, " ")
-					  refID := parts[len(parts)-1]
-					  groupMessage.MessageReference = &dto.MessageReference{
-					   MessageID:             refID,
-					   IgnoreGetMessageError: false,
-					  }
-					  groupMessage.MsgID = refID
-					  // msg_id 与 event_id 二选一，清空 event_id
-					  groupMessage.EventID = ""
-					  mylog.Printf("[CQ:reply] 设置私聊富媒体回复消息: msg_id=%s", refID)
-					 }
+					 applyPrivateReply(groupMessage, replyIDs, UserID)
 					}
 
 					//重新为err赋值
@@ -720,6 +661,42 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 	}
 
 	return retmsg, nil
+}
+
+// applyPrivateReply 将虚拟 reply ID 反查为真实 QQ API msg_id 并设置到私聊消息上。
+// 关键：私聊场景只能引用私聊自身的 msg_id，若反查得到的真实 ID 归属其他场景
+// （如群聊），QQ API 会返回 40034024 越权。因此反查后校验其归属 UserID 是否
+// 与当前私聊目标 UserID 一致，不一致则跳过 reply，避免越权。
+func applyPrivateReply(groupMessage *dto.MessageToCreate, replyIDs []string, privateUserID string) {
+	if len(replyIDs) == 0 {
+		return
+	}
+	realReplyID, err := idmap.RetrieveRowByCachev2(replyIDs[0])
+	if err != nil || realReplyID == "" {
+		mylog.Printf("[CQ:reply] 虚拟 ID %s 反查失败: %v", replyIDs[0], err)
+		return
+	}
+	// echo 缓存中的 ID 格式为 "UserID MessageID"，取后半段为真实 msg_id
+	parts := strings.Split(realReplyID, " ")
+	refID := parts[len(parts)-1]
+	// 场景校验：私聊只能引用私聊自身的消息。若前半段（归属 UserID）与当前私聊
+	// 目标不一致，说明引用的是群聊等跨场景消息，直接使用会触发 40034024 越权。
+	if len(parts) > 1 {
+		ownerID := parts[0]
+		if ownerID != privateUserID {
+			mylog.Printf("[CQ:reply] 跳过私聊reply：归属UserID %s 与私聊目标 %s 不一致（跨场景越权）",
+				ownerID, privateUserID)
+			return
+		}
+	}
+	groupMessage.MessageReference = &dto.MessageReference{
+		MessageID:             refID,
+		IgnoreGetMessageError: false,
+	}
+	groupMessage.MsgID = refID
+	// msg_id 与 event_id 二选一，清空 event_id
+	groupMessage.EventID = ""
+	mylog.Printf("[CQ:reply] 设置私聊回复消息: msg_id=%s", refID)
 }
 
 // 这个函数可以通过int类型的虚拟userid反推真实的guild_id和channel_id
