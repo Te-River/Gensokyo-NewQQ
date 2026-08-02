@@ -189,6 +189,20 @@ QQ API 调用失败时，控制台输出错误码对应的中文描述和排查�
 1. `ForceUnbindID` 支持双形式入参：纯数字视为虚拟 ID，先通过逆向条目 `uin:row-<N>` 反查 OpenID（新库+旧库回退），再按 OpenID 清理；非纯数字视为 OpenID 直接清理
 2. 去掉"正向条目存在检查"的提前 `return nil`：即便正向已被其他路径删除，也要扫删残留逆向条目，确保彻底清理重复映射
 
+### lazy_message_id 多段回复偶发 40054005 msgseq 去重
+
+**文件：** `echo/messageidmap.go`
+
+19. **`lazy_message_id=true` 下多段回复偶发 `40054005`**：一条命令触发多段独立回复时，偶发某一段发送失败，QQ API 返回 `{"message":"消息被去重，请检查请求msgseq","code":40054005}`。不限于单一事件类型，`GROUP_AT_MESSAGE_CREATE` 和 `GROUP_MESSAGE_CREATE` 场景均出现过。
+
+**根因：** `GetLazyMessagesId` / `GetLazyMessagesIdv2` 选中一条 record 后执行 `usageCount++`，导致同一条命令的多段回复每次调用都选中**不同的 record**（下次该条 `usageCount!=0`，选中另一条），两段拿到不同 `msg_id`。但 QQ API 视两 `msg_id` 为同一回复链（都回复同一 event），要求 `msg_seq` 在同一回复链内连续递增。`GetMappingSeq` 按 `msg_id` 字符串做 key 存 seq，两段拿到不同 `msg_id` 时第二段查不到第一段的 seq，seq 与第一段冲突，判去重 `40054005`。
+
+**修复：** 移除 `GetLazyMessagesId` / `GetLazyMessagesIdv2` 选中后的 `usageCount++`，让同一回复链的多段回复都拿到同一 `msg_id`，配合 `GetMappingSeq` / `AddMappingSeq` 在该 `msg_id` 上连续递增 `msg_seq`。
+
+**关联 Issue：** [Te-River/Gensokyo-NewQQ#19](https://github.com/Te-River/Gensokyo-NewQQ/issues/19)
+
+**验证：** `go build ./...` 编译通过 + `go vet ./echo/` 静态分析通过
+
 ---
 
 ## 🔧 改进

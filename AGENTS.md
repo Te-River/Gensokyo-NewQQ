@@ -279,7 +279,7 @@ Handler 签名：`func(client callapi.Client, api openapi.OpenAPI, apiv2 openapi
 
 ### 消息系统特殊机制
 
-- **`LazyMessageId` 系统**：`config.GetLazyMessageId()` 启用被动转主动消息，`messageID == "2000"` 是特殊值表示主动推送
+- **`LazyMessageId` 系统**：`config.GetLazyMessageId()` 启用被动转主动消息，`messageID == "2000"` 是特殊值表示主动推送。2026-08-02 修复：`GetLazyMessagesId`/`GetLazyMessagesIdv2` 移除选中后的 `usageCount++`，让同一回复链的多段回复复用同一 `msg_id`，配合 `GetMappingSeq`/`AddMappingSeq` 连续递增 `msg_seq`，避免偶发 `40054005 msgseq 去重`（Issue #19）
 - **`SSM`（Send Stack Messages）**：当消息发送失败（`code:22009`）时，消息会入队等待下次被动回复时补发
 - **`removeAt` 与 `convertOtherAt`**：`GetRemoveAt()` 控制入站时是否剥离 @bot（仅对 `GROUP_AT_MESSAGE_CREATE` 事件生效；`GROUP_MESSAGE_CREATE` 全量群消息中的 @Bot 始终剥离，不依赖此配置），`GetConvertOtherAt()` 控制是否将 @其他人 转为 CQ 码
 - **`addAtGroup`**：`GetAddAtGroup()` 在出站群消息前自动添加 `[CQ:at,qq=AppID]`，注意这会与 `transformMessageTextAt` 中的 `[CQ:at]` 处理产生交互
