@@ -439,6 +439,9 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 
 				}
 			} else {
+				// 图文混合消息同样需要转换 [CQ:at] 为 @用户名，与纯文本路径对齐
+			    // 否则 QQ 官方 API 不识别 CQ 码，会原文显示 [CQ:at,qq=数字]
+			    messageText = resolvePlainTextAtMentions(messageText)
 				// 为groupMessage附加内容 变成图文信息
 				groupMessage.Content = messageText
 				groupMessage.Timestamp = time.Now().Unix() // 设置时间戳
