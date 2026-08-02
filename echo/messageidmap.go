@@ -2,7 +2,6 @@ package echo
 
 import (
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -203,9 +202,7 @@ func generateDefaultMessageID(groupID string) string {
 		return "2000"
 	}
 	msgType := GetMessageTypeByGroupidv2(config.GetAppIDStr(), groupIDint64)
-	if strings.HasPrefix(msgType, "guild") {
-		return "1000"
-	}
+	_ = msgType
 	return "2000"
 }
 
