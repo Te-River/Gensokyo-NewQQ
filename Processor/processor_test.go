@@ -99,7 +99,6 @@ func TestMeCommandDataExtraction(t *testing.T) {
 			case *dto.WSGroupMessageData:
 				realid = v.Author.ID
 				realid2 = v.GroupID
-				realid2 = v.ChannelID
 			case *dto.WSC2CMessageData:
 				realid = v.Author.ID
 				realid2 = "group_private"
