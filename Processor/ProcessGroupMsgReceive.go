@@ -228,7 +228,6 @@ func ConvertReceiveToMessage(r *dto.GroupMsgReceiveEvent) *dto.Message {
 
 	// 特殊处理的字段
 	message.Content = config.GetGlobalGroupMsgReceiveMessage()
-	message.DirectMessage = false
 
 	return &message
 }

@@ -304,7 +304,6 @@ func ConvertC2CRejectToMessage(r *dto.WSC2CMsgRejectData) *dto.Message {
 	// 特殊处理的字段: 这里的文本需要从 config 获取
 	// 请在 config 包中定义 GetGlobalC2CMsgRejectMessage()，例如返回 "关闭主动消息"
 	message.Content = config.GetGlobalC2CMsgRejectMessage()
-	message.DirectMessage = true // 标记为私信
 
 	return &message
 }
@@ -318,7 +317,6 @@ func ConvertC2CReceiveToMessage(r *dto.WSC2CMsgReceiveData) *dto.Message {
 
 	// 请在 config 包中定义 GetGlobalC2CMsgReceiveMessage()，例如返回 "开启主动消息"
 	message.Content = config.GetGlobalC2CMsgReceiveMessage()
-	message.DirectMessage = true
 
 	return &message
 }

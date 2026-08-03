@@ -1952,18 +1952,6 @@ func GetWhiteBypassRevers() bool {
 	return instance.Settings.WhiteBypassRevers
 }
 
-// 获取GetGuildUrlImageToBase64的值
-func GetGuildUrlImageToBase64() bool {
-	mu.RLock()
-	defer mu.RUnlock()
-
-	if instance == nil {
-		fmt.Println("Warning: instance is nil when trying to GuildUrlImageToBase64 value.")
-		return false
-	}
-	return instance.Settings.GuildUrlImageToBase64
-}
-
 // GetTencentBucketURL 获取 TencentBucketURL
 func GetTencentBucketURL() string {
 	mu.RLock()
@@ -2516,54 +2504,6 @@ func GetLotusWithoutIdmaps() bool {
 	return instance.Settings.LotusWithoutIdmaps
 }
 
-// 获取GetGroupListAllGuilds开关
-func GetGroupListAllGuilds() bool {
-	mu.RLock()
-	defer mu.RUnlock()
-
-	if instance == nil {
-		fmt.Println("Warning: instance is nil when trying to GetGroupListAllGuilds value.")
-		return false
-	}
-	return instance.Settings.GetGroupListAllGuilds
-}
-
-// 获取 GetGroupListGuilds  数量
-func GetGetGroupListGuilds() string {
-	mu.RLock()
-	defer mu.RUnlock()
-
-	if instance == nil {
-		fmt.Println("Warning: instance is nil when trying to get GetGroupListGuilds.")
-		return "10"
-	}
-	return instance.Settings.GetGroupListGuilds
-}
-
-// 获取GetGroupListReturnGuilds开关
-func GetGroupListReturnGuilds() bool {
-	mu.RLock()
-	defer mu.RUnlock()
-
-	if instance == nil {
-		fmt.Println("Warning: instance is nil when trying to GetGroupListReturnGuilds value.")
-		return false
-	}
-	return instance.Settings.GetGroupListReturnGuilds
-}
-
-// 获取 GetGroupListGuidsType  数量
-func GetGroupListGuidsType() int {
-	mu.RLock()
-	defer mu.RUnlock()
-
-	if instance == nil {
-		fmt.Println("Warning: instance is nil when trying to get GetGroupListGuidsType.")
-		return 0
-	}
-	return instance.Settings.GetGroupListGuidsType
-}
-
 // 获取 GetGroupListDelay  数量
 func GetGroupListDelay() int {
 	mu.RLock()
@@ -2574,18 +2514,6 @@ func GetGroupListDelay() int {
 		return 0
 	}
 	return instance.Settings.GetGroupListDelay
-}
-
-// 获取GetGlobalServerTempQQguild开关
-func GetGlobalServerTempQQguild() bool {
-	mu.RLock()
-	defer mu.RUnlock()
-
-	if instance == nil {
-		fmt.Println("Warning: instance is nil when trying to GlobalServerTempQQguild value.")
-		return false
-	}
-	return instance.Settings.GlobalServerTempQQguild
 }
 
 // ---------- 图床配置 ----------
@@ -2669,29 +2597,6 @@ func GetImageHostingNature() structs.ImageHostingSimple {
 	}
 	return instance.Settings.Nature
 }
-
-// 获取ServerTempQQguild
-func GetServerTempQQguild() string {
-	mu.RLock()
-	defer mu.RUnlock()
-
-	if instance == nil {
-		fmt.Println("Warning: instance is nil when trying to ServerTempQQguild value.")
-		return "0"
-	}
-	return instance.Settings.ServerTempQQguild
-}
-
-// 获取ServerTempQQguildPool
-func GetServerTempQQguildPool() []string {
-	mu.RLock()
-	defer mu.RUnlock()
-	if instance != nil {
-		return instance.Settings.ServerTempQQguildPool
-	}
-	return nil // 返回nil，如果instance为nil
-}
-
 
 // 获取 AutoWithdraw 数组
 func GetAutoWithdraw() []string {

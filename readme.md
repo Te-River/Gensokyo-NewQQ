@@ -184,7 +184,6 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 | ------------------------ | ---------------------- |
 | /send_private_msg | [发送私聊 (C2C) 消息] |
 | /send_group_msg | [发送 q群 (Group Chat) 消息] |
-| /send_guild_channel_msg | [发送 q頻 (QQ Guild) 消息] |
 | /send_msg | [发送消息] |
 | /delete_msg              | [撤回信息]             |
 | /delete_group_msg        | [撤回QQ群用户或Bot消息] |
@@ -201,7 +200,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 | /get_login_info | [获取登录号信息] |
 | /get_stranger_info | [获取陌生人信息] |
 | /get_friend_list | [获取好友列表] |
-| /get_group_info | [获取群聊/频道信息] |
+| /get_group_info | [获取群聊信息] |
 | /get_group_list | [获取群列表] |
 | /get_group_member_info | [获取群成员信息] |
 | /get_group_member_list | [获取群成员列表] |
@@ -302,19 +301,9 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 
 | 事件名称                   | 代表含义                         |
 | --------------------------- | ------------------------------- |
-| ATmessageEventHandler      | [频道@ 消息]                       |
-| DirectMessageHandler       | [频道私信 dms]                     |
-| ReadyHandler               | [连接成功]                         |
-| ErrorNotifyHandler         | [连接关闭]                         |
-| GuildEventHandler          | [频道事件]                         |
-| MemberEventHandler         | [频道成员新增]                     |
-| ChannelEventHandler        | [频道子频道事件]                   |
-| CreateMessageHandler       | [频道非@ 消息]                    |
-| InteractionHandler         | [频道卡片按钮 data 回调事件]       |
 | GroupATMessageEventHandler | [群聊@ 消息]                       |
 | GroupMessageEventHandler   | [群聊普通消息]                     |
 | C2CMessageEventHandler     | [私聊 (C2C)]                       |
-| ThreadEventHandler         | [频道发帖事件]                     |
 | FriendAddEventHandler      | [被添加好友]                       |
 | FriendDelEventHandler      | [被删除好友]                       |
 | GroupAddRobotEventHandler  | [群聊机器人新增]                   |
@@ -352,20 +341,12 @@ settings:
   post_url: [""]                                       # 反向 HTTP POST
 
   #── 事件订阅 ────────────────────────────────────────
-  text_intent:                                       # 按需开启，错误 intent 会导致连接失败
-    - "ATMessageEventHandler"                        # 频道 @ 消息
-    - "DirectMessageHandler"                         # 频道私信
     # - "ReadyHandler"                               # 连接成功
     # - "ErrorNotifyHandler"                         # 连接关闭
-    # - "GuildEventHandler"                          # 频道事件
-    # - "MemberEventHandler"                         # 频道成员新增
-    # - "ChannelEventHandler"                        # 子频道事件
-    # - "CreateMessageHandler"                       # 频道不 @ 消息（私域可用，公域会失败）
     # - "InteractionHandler"                         # 按钮回调事件
     - "GroupATMessageEventHandler"                   # 群 @ 消息
     - "GroupMessageEventHandler"                     # 群普通消息（需开放平台申请）
     - "C2CMessageEventHandler"                       # 私聊（需开放平台申请）
-    # - "ThreadEventHandler"                         # 频道发帖事件
     # - "FriendAddEventHandler"                      # 用户添加机器人
     # - "FriendDelEventHandler"                      # 用户删除机器人
     # - "C2CMsgRejectHandler"                        # 用户拒绝 C2C 推送
@@ -376,7 +357,6 @@ settings:
     # - "GroupMemberRemoveEventHandler"              # 群成员移除
 
   #── 消息转换 ────────────────────────────────────────
-  global_channel_to_group: true       # 频道转群事件
   hash_id: true                       # 使用 hash 生成虚拟 ID
   op_userid_type: "vuin"             # user_id 来源
   array: false                        # segment 数组格式上报
