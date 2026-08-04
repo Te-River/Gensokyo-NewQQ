@@ -39,6 +39,21 @@
 
 > 2026-08 修复：此前图文混合路径未调用 `resolvePlainTextAtMentions`，导致 `[CQ:at,qq=数字]` 原文显示。
 
+### 图文混合消息走 Markdown 路径（auto_md，msg_type=2）
+
+当图文混合消息触发 `auto_md`（`transmd=true`，`MsgType=2`）时，`messageText` 会在塞进 Markdown 参数前经过 `ResolveMarkdownAtMentions` 转换，将 `[CQ:at,qq=数字]` 转为 `<qqbot-at-user id="OpenID" />` 标签，与纯 Markdown 消息行为一致。
+
+覆盖范围（共用 `auto_md`）：
+- `send_group_msg` / `send_to_group`（群聊图文混合 → Markdown）
+- `send_group_msg_raw`（raw 变体图文混合 → Markdown）
+- `send_guild_channel_msg`（频道图文混合 → Markdown）
+
+```text
+图文混合 Markdown 出站: 图片[CQ:at,qq=123213]你好 → 图片<qqbot-at-user id="OpenID" />你好
+```
+
+> 2026-08 修复：此前 `auto_md` 把含 `[CQ:at]` 的 `messageText` 直接塞进 Markdown 参数，从未调用 `ResolveMarkdownAtMentions`，导致 QQ 官方 Markdown 渲染把 `[CQ:at,qq=数字]` 当纯文本显示（变形为 `[CO:at,qq=数字]`）。
+
 ## 写法
 
 ```text

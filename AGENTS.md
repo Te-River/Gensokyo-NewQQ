@@ -70,7 +70,7 @@ Co-Authored-By: Agent <noreply@example.com>
 ```
 feat: 将图床后端合并到 oss_type 枚举
 
-将所有 imagehosting 后端（COS 自签、Bilibili、QQ 频道、ChatGLM、
+将所有 imagehosting 后端（COS 自签、Bilibili、ChatGLM、
 Ukaka、星野、Nature）统一为 oss_type 的枚举值（4~10），
 移除 image_hosting 段中的 enabled 字段，防止用户误配置多个图床。
 
@@ -167,7 +167,7 @@ func init() {
 
 Handler 签名：`func(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, message callapi.ActionMessage) (string, error)`
 
-- `api`：QQ OpenAPI v1 实例（频道相关）
+- `api`：QQ OpenAPI v1 实例（通用接口）
 - `apiv2`：QQ OpenAPI v2 实例（群聊/C2C 相关）
 - 返回值为 JSON 字符串，直接回传给 OneBot 客户端
 
@@ -193,7 +193,7 @@ Handler 签名：`func(client callapi.Client, api openapi.OpenAPI, apiv2 openapi
 
 遍历 `foundItems` 发送时，必须跳过控制型 key：`active`、`active_type`、`active_sub_type`、`reply_msg_id`、`file_name`。
 
-注意：`reply_msg_id` 虽然作为控制型 key 被循环跳过，但需要在循环体内部通过 `foundItems["reply_msg_id"]` 主动读取并设置到每个媒体消息的 `MessageReference` 和 `MsgID` 字段上。当前所有 handler（group/private/channel）的文本路径和 markdown 路径均已处理 reply；富媒体路径（msg_type=7）的 reply 处理在 2026-07 修复中补齐。
+注意：`reply_msg_id` 虽然作为控制型 key 被循环跳过，但需要在循环体内部通过 `foundItems["reply_msg_id"]` 主动读取并设置到每个媒体消息的 `MessageReference` 和 `MsgID` 字段上。当前所有 handler（group/private）的文本路径和 markdown 路径均已处理 reply；富媒体路径（msg_type=7）的 reply 处理在 2026-07 修复中补齐。
 
 ### idmap 系统
 
@@ -279,7 +279,7 @@ Handler 签名：`func(client callapi.Client, api openapi.OpenAPI, apiv2 openapi
 
 ### 消息系统特殊机制
 
-- **`LazyMessageId` 系统**：`config.GetLazyMessageId()` 启用被动转主动消息，`messageID == "2000"` 是特殊值表示主动推送
+- **`LazyMessageId` 系统**：`config.GetLazyMessageId()` 启用被动转主动消息，`messageID == "2000"` 是特殊值表示主动推送。2026-08-02 修复：`GetLazyMessagesId`/`GetLazyMessagesIdv2` 移除选中后的 `usageCount++`，让同一回复链的多段回复复用同一 `msg_id`，配合 `GetMappingSeq`/`AddMappingSeq` 连续递增 `msg_seq`，避免偶发 `40054005 msgseq 去重`（Issue #19）
 - **`SSM`（Send Stack Messages）**：当消息发送失败（`code:22009`）时，消息会入队等待下次被动回复时补发
 - **`removeAt` 与 `convertOtherAt`**：`GetRemoveAt()` 控制入站时是否剥离 @bot（仅对 `GROUP_AT_MESSAGE_CREATE` 事件生效；`GROUP_MESSAGE_CREATE` 全量群消息中的 @Bot 始终剥离，不依赖此配置），`GetConvertOtherAt()` 控制是否将 @其他人 转为 CQ 码
 - **`addAtGroup`**：`GetAddAtGroup()` 在出站群消息前自动添加 `[CQ:at,qq=AppID]`，注意这会与 `transformMessageTextAt` 中的 `[CQ:at]` 处理产生交互

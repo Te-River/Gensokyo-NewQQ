@@ -31,26 +31,12 @@
 | `mark_msg_as_read` | mark_msg_as_read.go | `-` | 标记消息已读。 |
 
 > **delete_msg 差异说明：**
-> QQ 官方 API 的撤回需要 `message_id` 及对应的 `user_id`/`group_id`/`channel_id`/`guild_id` 来定位消息所属场景。
 >
 > | 参数 | 类型 | 说明 |
 > |------|------|------|
 > | `message_id` | int32 | 消息 ID |
 > | `user_id` | int64/string | 私聊 (C2C) 时需要 |
 > | `group_id` | int64/string | q群 (Group Chat) 时需要 |
-> | `channel_id` | int64/string | q頻 (QQ Guild) 子频道消息时需要 |
-> | `guild_id` | int64/string | q頻 (QQ Guild) 私信时需要 |
-
-## q頻 (QQ Guild) 扩展 API
-
-| Action | 文件 | 场景 | 行为 |
-|--------|------|------|------|
-| `send_guild_channel_msg` | send_guild_channel_msg.go | `q頻 (QQ Guild)` | 向指定子频道发送消息。 |
-| `send_guild_channel_forum` | send_guild_channel_forum.go | `q頻 (QQ Guild)` | 向论坛/帖子入口发送内容。 |
-| ~~`send_guild_private_msg`~~ | ~~send_guild_private_msg.go~~ | `q頻 (QQ Guild)` | 已废弃，使用 `send_private_msg`。 |
-| `get_guild_list` | get_guild_list.go | `q頻 (QQ Guild)` | 获取列表。 |
-| `get_guild_channel_list` | get_guild_channel_list.go | `q頻 (QQ Guild)` | 获取子频道列表。 |
-| `get_guild_service_profile` | get_guild_service_profile.go | `q頻 (QQ Guild)` | 获取服务信息。 |
 
 ## Gensokyo 扩展 API
 

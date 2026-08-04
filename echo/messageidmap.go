@@ -2,7 +2,6 @@ package echo
 
 import (
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -123,10 +122,12 @@ func GetLazyMessagesId(groupID string) string {
 		}
 	}
 
-	// 如果找到合适的记录，更新其 usageCount
-	if selectedRecord != nil {
-		selectedRecord.usageCount++
-	}
+	// 如果找到合适的记录，不再递增 usageCount
+	// lazy_message_id 模式下，同一条命令的多段回复需要复用同一 msg_id，
+	// 让 GetMappingSeq/AddMappingSeq 在该 msg_id 上连续递增 msg_seq，
+	// 避免 QQ API 视不同 msg_id 为同一回复链却 seq 冲突，返回 40054005
+	// （此前 usageCount++ 导致下次调用选中另一条 record，两段拿到不同 msg_id）
+	_ = selectedRecord
 
 	// 更新有效记录到 sync.Map（仅更新一次）
 	store.records.Store(groupID, validRecords)
@@ -180,10 +181,12 @@ func GetLazyMessagesIdv2(groupID, userID string) string {
 		}
 	}
 
-	// 如果找到合适的记录，更新其 usageCount
-	if selectedRecord != nil {
-		selectedRecord.usageCount++ // 更新选中记录的 usageCount
-	}
+	// 如果找到合适的记录，不再递增 usageCount
+	// lazy_message_id 模式下，同一条命令的多段回复需要复用同一 msg_id，
+	// 让 GetMappingSeq/AddMappingSeq 在该 msg_id 上连续递增 msg_seq，
+	// 避免 QQ API 视不同 msg_id 为同一回复链却 seq 冲突，返回 40054005
+	// （此前 usageCount++ 导致下次调用选中另一条 record，两段拿到不同 msg_id）
+	_ = selectedRecord
 
 	// 更新有效记录到 sync.Map（仅更新一次）
 	store.records.Store(key, validRecords)
@@ -203,9 +206,7 @@ func generateDefaultMessageID(groupID string) string {
 		return "2000"
 	}
 	msgType := GetMessageTypeByGroupidv2(config.GetAppIDStr(), groupIDint64)
-	if strings.HasPrefix(msgType, "guild") {
-		return "1000"
-	}
+	_ = msgType
 	return "2000"
 }
 

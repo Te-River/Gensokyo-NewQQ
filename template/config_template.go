@@ -24,19 +24,12 @@ settings:
 
   #事件订阅
   text_intent:                                       # 请根据公域 私域来选择intent,错误的intent将连接失败
-    - "ATMessageEventHandler"                        # 频道at信息
-    - "DirectMessageHandler"                         # 私域频道私信(dms)
     # - "ReadyHandler"                               # 连接成功
     # - "ErrorNotifyHandler"                         # 连接关闭
-    # - "GuildEventHandler"                          # 频道事件
-    # - "MemberEventHandler"                         # 频道成员新增
-    # - "ChannelEventHandler"                        # 频道事件
-    # - "CreateMessageHandler"                       # 频道不at信息 私域机器人需要开启 公域机器人开启会连接失败
     # - "InteractionHandler"                         # 添加频道互动回应 卡片按钮data回调事件
-    # - "GroupATMessageEventHandler"                 # 群at信息 仅频道机器人时候需要注释
+    # - "GroupATMessageEventHandler"                 # 群at信息
     # - "GroupMessageEventHandler"                   # 普通群消息（无需@机器人）
-    # - "C2CMessageEventHandler"                     # 群私聊 仅频道机器人时候需要注释
-    # - "ThreadEventHandler"                         # 频道发帖事件 仅频道私域机器人可用
+    # - "C2CMessageEventHandler"                     # 群私聊
     - "FriendAddEventHandler"                        # 用户添加机器人(成为好友)
     - "FriendDelEventHandler"                        # 用户删除机器人(解除好友)
     # - "C2CMsgRejectHandler"                        # 用户拒绝(关闭)C2C消息推送
@@ -44,9 +37,6 @@ settings:
     # - "GroupMemberAddEventHandler"                 # 群成员新增（非文档化事件）
     # - "GroupMemberRemoveEventHandler"              # 群成员移除（非文档化事件）
   #转换类
-  global_channel_to_group: true                      # 是否将频道转换成群 默认true
-  global_private_to_channel: false                   # 是否将私聊转换成频道 如果是群场景 会将私聊转为群(方便提审\测试)
-  global_forum_to_channel: false                     # 是否将频道帖子信息转化为频道 子频道信息 如果开启global_channel_to_group会进一步转换为群信息
   global_interaction_to_message : false              # 是否将按钮和表态回调转化为消息 仅在设置了按钮回调中的message时有效
   global_group_msg_rre_to_message : false            # 是否将用户开关机器人资料页的机器人推送开关 产生的事件转换为文本信息并发送给应用端.false将使用onebotv11的notice类型上报.
   global_group_msg_reject_message : "机器人主动消息被关闭"  # 开启 global_group_msg_rre_to_message 时自动订阅，无需手动添加 intent
@@ -87,12 +77,8 @@ settings:
   oss_type : 0                      #请完善后方具体配置; 同时只能选择一个,避免多个图床同时启用导致错误
   image_sizelimit : 0               #代表kb 腾讯api要求图片1500ms完成传输 如果图片发不出 请提升上行或设置此值 默认为0 不压缩
   image_limit : 100                 #每分钟上传的最大图片数量,可自行增加
-  guild_url_image_to_base64 : false #解决频道发不了某些url图片,报错40003问题
   url_pic_transfer : false          #把图片url(任意来源图链)变成你备案的白名单url 需要较高上下行+ssl+自备案域名+设置白名单域名(暂时不需要)
   uploadpicv2_b64: true             #uploadpicv2接口使用base64直接上传 https://www.yuque.com/km57bt/hlhnxg/ig2nk88fccykn6dm
-  global_server_temp_qqguild : false                     #需设置server_temp_qqguild,公域私域均可用,以频道为底层发图,速度快,该接口为进阶接口,使用有一定难度.
-  server_temp_qqguild : "0"            #在v3图片接口采用固定的子频道号,可以是帖子子频道 https://www.yuque.com/km57bt/hlhnxg/uqmnsno3vx1ytp2q
-  server_temp_qqguild_pool : []      #填写v3发图接口的endpoint http://127.0.0.1:12345/uploadpicv3 当填写多个时采用循环方式负载均衡,注,不包括自身,如需要自身也要填写
 
   #正向ws设置
   ws_server_path : "ws"             #默认监听0.0.0.0:port/ws_server_path 若有安全需求,可不放通port到公网,或设置ws_server_token 若想监听/ 可改为"",若想监听到不带/地址请写nil
@@ -176,11 +162,7 @@ settings:
 
 
   #API修改
-  get_g_list_all_guilds : false     #在获取群列表api时,轮询获取全部的频道列表(api一次只能获取100个),建议仅在广播公告通知等特别场景时开启.
   get_g_list_delay : 500            #轮询时的延迟时间,毫秒数.
-  get_g_list_guilds_type : 0        #0=全部返回,1=获取第1个子频道.以此类推.可以缩减返回值的大小.
-  get_g_list_guilds : "10"          #在获取群列表api时,一次返回的频道数量.这里是string,不要去掉引号.最大100(5分钟内连续请求=翻页),获取全部请开启get_g_list_return_guilds.
-  get_g_list_return_guilds : true   #获取群列表时是否返回频道列表.
   forward_msg_limit : 3             #发送折叠转发信息时的最大限制条数 若要发转发信息 请设置lazy_message_id为true
   custom_bot_name : "Gensokyo全域机器人"   #自定义api返回的机器人名字,会在api调用中返回,默认Gensokyo全域机器人
   transform_api_ids : true          #对get_group_menmber_list\get_group_member_info\get_group_list生效,是否在其中返回转换后的值(默认转换,不转换请自行处理插件逻辑,比如调用gsk的http api转换)

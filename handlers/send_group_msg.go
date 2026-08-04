@@ -335,9 +335,8 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			mylog.Printf("发图文混合信息-群")
 			// 创建包含单个图片的 singleItem
 			singleItem[imageType] = []string{imageUrl}
-			msgseq := echo.GetMappingSeq(messageID)
-			echo.AddMappingSeq(messageID, msgseq+1)
-			groupReply := generateGroupMessage(messageID, eventID, singleItem, "", msgseq+1, apiv2, message.Params.GroupID.(string))
+			msgseq := echo.IncrementMappingSeq(messageID)
+			groupReply := generateGroupMessage(messageID, eventID, singleItem, "", msgseq, apiv2, message.Params.GroupID.(string))
 			// 进行类型断言
 			richMediaMessage, ok := groupReply.(*dto.RichMediaMessage)
 			// 如果断言为RichMediaMessage失败
@@ -370,8 +369,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			  // 否则 QQ 官方 API 不识别 CQ 码，会原文显示 [CQ:at,qq=数字]
 			  messageText = resolvePlainTextAtMentions(messageText)
 			  // 创建包含文本和图像信息的消息
-			  msgseq = echo.GetMappingSeq(messageID)
-			  echo.AddMappingSeq(messageID, msgseq+1)
+			  msgseq = echo.IncrementMappingSeq(messageID)
 			  groupMessage = &dto.MessageToCreate{
 			   Content: messageText, // 添加文本内容
 			   Media: &dto.Media{
@@ -405,8 +403,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				} else {
 					//将kb和md组合成groupMessage并用MsgType=2发送
 
-					msgseq = echo.GetMappingSeq(messageID)
-					echo.AddMappingSeq(messageID, msgseq+1)
+					msgseq = echo.IncrementMappingSeq(messageID)
 					groupMessage = &dto.MessageToCreate{
 					 Content:  "", // 添加文本内容
 					 MsgID:    messageID,
@@ -439,6 +436,9 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 
 				}
 			} else {
+				// 图文混合消息同样需要转换 [CQ:at] 为 @用户名，与纯文本路径对齐
+			    // 否则 QQ 官方 API 不识别 CQ 码，会原文显示 [CQ:at,qq=数字]
+			    messageText = resolvePlainTextAtMentions(messageText)
 				// 为groupMessage附加内容 变成图文信息
 			    messageText = resolvePlainTextAtMentions(messageText)
 				groupMessage.Content = messageText
@@ -532,24 +532,27 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			}
 
 					var md *dto.Markdown
-					    var kb *keyboard.MessageKeyboard
-					    if mdItems, ok := foundItems["markdown"]; ok && len(mdItems) > 0 {
-					     md, kb = parseMarkdownFromMessage(mdItems[0])
-					     // 步骤 1: 转换 markdown 内部和 messageText 中的 [CQ:at] 为 <qqbot-at-user>
-					     if md != nil && md.Content != "" {
-					      md.Content = ResolveMarkdownAtMentions(md.Content)
-					      md.Content = ResolveMarkdownImages(md.Content, apiv2)
-					              }
-					              if kb != nil {
-					               ResolveKeyboardImages(kb, apiv2)
-					              }
-					     messageText = ResolveMarkdownAtMentions(messageText)
-					     // 步骤 2: 将整个 messageText 合并到 markdown 内容头部（qq 官方 md 整个消息以 md 语法渲染）
-					     md.Content = messageText + "\n" + md.Content
-					     // 步骤 3: 清理 messageText 中的 [CQ:markdown] 标记
-					     mdRe := regexp.MustCompile(`\[CQ:markdown,[^\]]*\]`)
-					     messageText = mdRe.ReplaceAllString(messageText, "")
-					    }
+					var kb *keyboard.MessageKeyboard
+					if mdItems, ok := foundItems["markdown"]; ok && len(mdItems) > 0 {
+					 md, kb = parseMarkdownFromMessage(mdItems[0])
+					 // 步骤 1: 转换 markdown 内部和 messageText 中的 [CQ:at] 为 <qqbot-at-user>
+					 if md != nil && md.Content != "" {
+					  md.Content = ResolveMarkdownAtMentions(md.Content)
+					  md.Content = ResolveMarkdownImages(md.Content, apiv2)
+					 }
+					 if kb != nil {
+					  ResolveKeyboardImages(kb, apiv2)
+					 }
+					 messageText = ResolveMarkdownAtMentions(messageText)
+					 // 步骤 2: 将整个 messageText 合并到 markdown 内容头部（qq 官方 md 整个消息以 md 语法渲染）
+					 // 仅当 md 非 nil 时才合并，避免 parseMarkdownFromMessage 解析失败返回 nil 时触发 panic
+					 if md != nil {
+					  md.Content = messageText + "\n" + md.Content
+					 }
+					 // 步骤 3: 清理 messageText 中的 [CQ:markdown] 标记
+					 mdRe := regexp.MustCompile(`\[CQ:markdown,[^\]]*\]`)
+					 messageText = mdRe.ReplaceAllString(messageText, "")
+					}
 
 					    // 没有 markdown 时，纯文本消息转换 [CQ:at] 为 @用户名
 					    if md == nil {
@@ -558,9 +561,8 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 
 			// message.Params.GroupID 已在前面转换为真实 OpenID，直接使用
 
-			msgseq := echo.GetMappingSeq(messageID)
-			echo.AddMappingSeq(messageID, msgseq+1)
-			groupReply := generateGroupMessage(messageID, eventID, nil, messageText, msgseq+1, apiv2, targetGroupID)
+			msgseq := echo.IncrementMappingSeq(messageID)
+			groupReply := generateGroupMessage(messageID, eventID, nil, messageText, msgseq, apiv2, targetGroupID)
 
 			// 进行类型断言
 			groupMessage, ok := groupReply.(*dto.MessageToCreate)
@@ -746,9 +748,8 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 					singleItem["file_name"] = []string{fileNames[i]}
 				}
 				//mylog.Println("singleItem:", singleItem)
-				msgseq := echo.GetMappingSeq(messageID)
-				echo.AddMappingSeq(messageID, msgseq+1)
-				groupReply := generateGroupMessage(messageID, eventID, singleItem, "", msgseq+1, apiv2, message.Params.GroupID.(string))
+				msgseq := echo.IncrementMappingSeq(messageID)
+				groupReply := generateGroupMessage(messageID, eventID, singleItem, "", msgseq, apiv2, message.Params.GroupID.(string))
 				// 进行类型断言
 				richMediaMessage, ok := groupReply.(*dto.RichMediaMessage)
 				if !ok {
@@ -850,8 +851,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				}
 
 				if message_return != nil && message_return.MediaResponse != nil && message_return.MediaResponse.FileInfo != "" {
-					msgseq := echo.GetMappingSeq(messageID)
-					echo.AddMappingSeq(messageID, msgseq+1)
+					msgseq := echo.IncrementMappingSeq(messageID)
 					media := dto.Media{
 						FileInfo: message_return.MediaResponse.FileInfo,
 					}
@@ -938,77 +938,12 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 
 			}
 		}
-	case "guild":
-		//用GroupID给ChannelID赋值,因为我们是把频道虚拟成了群
-		message.Params.ChannelID = message.Params.GroupID.(string)
-		var RChannelID string
-		if message.Params.UserID != nil && config.GetIdmapPro() && message.Params.UserID.(string) != "" && message.Params.UserID.(string) != "0" {
-			RChannelID, _, err = idmap.RetrieveRowByIDv2Pro(message.Params.ChannelID.(string), message.Params.UserID.(string))
-			mylog.Printf("测试,通过Proid获取的RChannelID:%v", RChannelID)
-		}
-		if RChannelID == "" {
-			// 使用RetrieveRowByIDv2还原真实的ChannelID
-			RChannelID, err = idmap.RetrieveRowByIDv2(message.Params.ChannelID.(string))
-		}
-		if err != nil {
-			mylog.Printf("error retrieving real RChannelID: %v", err)
-		}
-		message.Params.ChannelID = RChannelID
-		//这一句是group_private的逻辑,发频道信息用的是channelid
-		//message.Params.GroupID = value
-		retmsg, _ = HandleSendGuildChannelMsg(client, api, apiv2, message)
-	case "guild_private":
-		//用group_id还原出channelid 这是虚拟成群的私聊信息
-		var RChannelID string
-		var Vuserid string
-		message.Params.ChannelID = message.Params.GroupID.(string)
-		Vuserid, ok := message.Params.UserID.(string)
-		if !ok {
-			mylog.Printf("Error illegal UserID")
-			return "", nil
-		}
-		if Vuserid != "" && config.GetIdmapPro() {
-			RChannelID, _, err = idmap.RetrieveRowByIDv2Pro(message.Params.ChannelID.(string), Vuserid)
-			mylog.Printf("测试,通过Proid获取的RChannelID:%v", RChannelID)
-		} else {
-			// 使用RetrieveRowByIDv2还原真实的ChannelID
-			RChannelID, err = idmap.RetrieveRowByIDv2(message.Params.ChannelID.(string))
-		}
-		if err != nil {
-			mylog.Printf("error retrieving real ChannelID: %v", err)
-		}
-		//读取ini 通过ChannelID取回之前储存的guild_id
-		value, err := idmap.ReadConfigv2(RChannelID, "guild_id")
-		if err != nil {
-			mylog.Printf("Error reading config: %v", err)
-			return "", nil
-		}
-		retmsg, _ = HandleSendGuildChannelPrivateMsg(client, api, apiv2, message, &value, &RChannelID)
 	case "group_private":
 		//用userid还原出openid 这是虚拟成群的群聊私聊信息
 		if message.Params.GroupID != nil && message.Params.GroupID.(string) != "" {
 			message.Params.UserID = message.Params.GroupID.(string)
 		}
 		retmsg, _ = HandleSendPrivateMsg(client, api, apiv2, message)
-	case "forum":
-		//用GroupID给ChannelID赋值,因为我们是把频道虚拟成了群
-		message.Params.ChannelID = message.Params.GroupID.(string)
-		var RChannelID string
-		if message.Params.UserID != nil && config.GetIdmapPro() && message.Params.UserID.(string) != "" && message.Params.UserID.(string) != "0" {
-			RChannelID, _, err = idmap.RetrieveRowByIDv2Pro(message.Params.ChannelID.(string), message.Params.UserID.(string))
-			mylog.Printf("测试,通过Proid获取的RChannelID:%v", RChannelID)
-		}
-		if RChannelID == "" {
-			// 使用RetrieveRowByIDv2还原真实的ChannelID
-			RChannelID, err = idmap.RetrieveRowByIDv2(message.Params.ChannelID.(string))
-		}
-		if err != nil {
-			mylog.Printf("error retrieving real RChannelID: %v", err)
-		}
-		message.Params.ChannelID = RChannelID
-		//这一句是group_private的逻辑,发频道信息用的是channelid
-		//message.Params.GroupID = value
-		retmsg, _ = HandleSendGuildChannelForum(client, api, apiv2, message)
 	default:
 		mylog.Printf("Unknown message type: %s", msgType)
 	}
@@ -1027,7 +962,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 
 			//递归3次枚举类型
 			if echo.GetMapping(idInt64) > 0 {
-				tryMessageTypes := []string{"group", "guild", "guild_private"}
+				tryMessageTypes := []string{"group"}
 				messageCopy := message // 创建message的副本
 				echo.AddMsgType(config.GetAppIDStr(), idInt64, tryMessageTypes[echo.GetMapping(idInt64)-1])
 				delay := config.GetSendDelay()

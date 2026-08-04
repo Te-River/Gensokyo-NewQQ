@@ -229,7 +229,6 @@ func ConvertRejectToMessage(r *dto.GroupMsgRejectEvent) *dto.Message {
 
 	// 特殊处理的字段
 	message.Content = config.GetGlobalGroupMsgRejectMessage()
-	message.DirectMessage = false
 
 	return &message
 }

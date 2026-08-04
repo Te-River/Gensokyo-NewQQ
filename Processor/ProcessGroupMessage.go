@@ -139,10 +139,10 @@ func (p *Processors) ProcessGroupMessage(data *dto.WSGroupATMessageData) error {
 
 	}
 
-	//群没有at,但用户可以选择加一个
-	if config.GetAddAtGroup() {
-		messageText = "[CQ:at,qq=" + config.GetAppIDStr() + "] " + messageText
-	}
+	// 被动消息（GROUP_AT_MESSAGE_CREATE）中，消息本身已包含 @bot，
+	// 不需要再添加 [CQ:at,qq=AppID]，否则会导致重复 @。
+	// add_at_group 仅在全量群消息（GROUP_MESSAGE_CREATE）中生效，
+	// 因为全量消息中的 @bot 始终被剥离，需要 add_at_group 补回。
 
 	var messageID int
 	//映射str的messageID到int

@@ -27,9 +27,6 @@ type Settings struct {
 	//事件订阅类
 	TextIntent []string `yaml:"text_intent"`
 	//转换类
-	GlobalChannelToGroup                     bool   `yaml:"global_channel_to_group"`
-	GlobalPrivateToChannel                   bool   `yaml:"global_private_to_channel"`
-	GlobalForumToChannel                     bool   `yaml:"global_forum_to_channel"`
 	GlobalInteractionToMessage               bool   `yaml:"global_interaction_to_message"`
 	GlobalGroupMsgRejectReciveEventToMessage bool   `yaml:"global_group_msg_rre_to_message"`
 	GlobalGroupMsgRejectMessage              string `yaml:"global_group_msg_reject_message"`
@@ -60,12 +57,8 @@ type Settings struct {
 	OssType                 int      `yaml:"oss_type"`
 	ImageLimit              int      `yaml:"image_sizelimit"`
 	ImageLimitB             int      `yaml:"image_limit"`
-	GuildUrlImageToBase64   bool     `yaml:"guild_url_image_to_base64"`
 	UrlPicTransfer          bool     `yaml:"url_pic_transfer"`
 	UploadPicV2Base64       bool     `yaml:"uploadpicv2_b64"`
-	GlobalServerTempQQguild bool     `yaml:"global_server_temp_qqguild"`
-	ServerTempQQguild       string   `yaml:"server_temp_qqguild"`
-	ServerTempQQguildPool   []string `yaml:"server_temp_qqguild_pool"`
 	//图床相关（原 image_hosting 嵌套已展平至 Settings 顶层）
 	COS       ImageHostingCOS       `yaml:"cos"`
 	Bilibili  ImageHostingBilibili  `yaml:"bilibili"`
@@ -138,10 +131,6 @@ type Settings struct {
 	//增长营销类
 	SelfIntroduce []string `yaml:"self_introduce"`
 	//api修改
-	GetGroupListAllGuilds    bool     `yaml:"get_g_list_all_guilds"`
-	GetGroupListGuilds       string   `yaml:"get_g_list_guilds"`
-	GetGroupListReturnGuilds bool     `yaml:"get_g_list_return_guilds"`
-	GetGroupListGuidsType    int      `yaml:"get_g_list_guilds_type"`
 	GetGroupListDelay        int      `yaml:"get_g_list_delay"`
 	ForwardMsgLimit          int      `yaml:"forward_msg_limit"`
 	CustomBotName            string   `yaml:"custom_bot_name"`

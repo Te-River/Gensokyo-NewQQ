@@ -58,26 +58,6 @@ type Sender struct {
 	Title    string `json:"title,omitempty"`
 }
 
-// 频道信息事件
-type OnebotChannelMessage struct {
-	ChannelID       string      `json:"channel_id"`
-	GuildID         string      `json:"guild_id"`
-	Message         interface{} `json:"message"`
-	MessageID       string      `json:"message_id"`
-	MessageType     string      `json:"message_type"`
-	PostType        string      `json:"post_type"`
-	SelfID          int64       `json:"self_id"`
-	SelfTinyID      string      `json:"self_tiny_id"`
-	Sender          Sender      `json:"sender"`
-	SubType         string      `json:"sub_type"`
-	Time            int64       `json:"time"`
-	Avatar          string      `json:"avatar,omitempty"`
-	UserID          int64       `json:"user_id"`
-	RawMessage      string      `json:"raw_message"`
-	Echo            string      `json:"echo,omitempty"`
-	RealMessageType string      `json:"real_message_type,omitempty"` //当前信息的真实类型 表情表态
-}
-
 // 群信息事件
 type OnebotGroupMessage struct {
 	RawMessage      string      `json:"raw_message"`
@@ -367,30 +347,6 @@ func (p *Processors) BroadcastMessageToAll(message map[string]interface{}, api o
 					MsgType: 0, // 默认文本类型
 				}
 				api.PostGroupMessage(context.Background(), v.GroupID, msgtocreate)
-			case *dto.WSATMessageData:
-				msgtocreate := &dto.MessageToCreate{
-					Content: downtimemessgae,
-					MsgID:   v.ID,
-					MsgSeq:  1,
-					MsgType: 0, // 默认文本类型
-				}
-				api.PostMessage(context.Background(), v.ChannelID, msgtocreate)
-			case *dto.WSMessageData:
-				msgtocreate := &dto.MessageToCreate{
-					Content: downtimemessgae,
-					MsgID:   v.ID,
-					MsgSeq:  1,
-					MsgType: 0, // 默认文本类型
-				}
-				api.PostMessage(context.Background(), v.ChannelID, msgtocreate)
-			case *dto.WSDirectMessageData:
-				msgtocreate := &dto.MessageToCreate{
-					Content: downtimemessgae,
-					MsgID:   v.ID,
-					MsgSeq:  1,
-					MsgType: 0, // 默认文本类型
-				}
-				api.PostMessage(context.Background(), v.GuildID, msgtocreate)
 			case *dto.WSC2CMessageData:
 				msgtocreate := &dto.MessageToCreate{
 					Content: downtimemessgae,
@@ -509,21 +465,10 @@ func (p *Processors) HandleFrameworkCommand(messageText string, data interface{}
 	var now, new, newpro1, newpro2 string
 	var nowgroup, newgroup string
 	var realid, realid2 string
-	var guildid, guilduserid string
 	switch v := data.(type) {
 	case *dto.WSGroupATMessageData:
 		realid = v.Author.ID
 	case *dto.WSGroupMessageData:
-		realid = v.Author.ID
-	case *dto.WSATMessageData:
-		realid = v.Author.ID
-		guildid = v.GuildID
-		guilduserid = v.Author.ID
-	case *dto.WSMessageData:
-		realid = v.Author.ID
-		guildid = v.GuildID
-		guilduserid = v.Author.ID
-	case *dto.WSDirectMessageData:
 		realid = v.Author.ID
 	case *dto.WSC2CMessageData:
 		realid = v.Author.ID
@@ -534,12 +479,6 @@ func (p *Processors) HandleFrameworkCommand(messageText string, data interface{}
 		realid2 = v.GroupID
 	case *dto.WSGroupMessageData:
 		realid2 = v.GroupID
-	case *dto.WSATMessageData:
-		realid2 = v.ChannelID
-	case *dto.WSMessageData:
-		realid2 = v.ChannelID
-	case *dto.WSDirectMessageData:
-		realid2 = v.ChannelID
 	case *dto.WSC2CMessageData:
 		realid2 = "group_private"
 	}
@@ -583,26 +522,6 @@ func (p *Processors) HandleFrameworkCommand(messageText string, data interface{}
 		virtualValueIncluded = contains(masterIDs, new)
 	}
 
-	//unlock指令
-	if Type == "guild" && commandMatch(cleanedMessage, config.GetUnlockPrefix()) {
-		dm := &dto.DirectMessageToCreate{
-			SourceGuildID: guildid,
-			RecipientID:   guilduserid,
-		}
-		cdm, err := p.Api.CreateDirectMessage(context.TODO(), dm)
-		if err != nil {
-			mylog.Printf("unlock指令创建dm失败:%v", err)
-		}
-		msg := &dto.MessageToCreate{
-			Content: "欢迎使用Gensokyo框架部署QQ机器人",
-			MsgType: 0,
-			MsgID:   "",
-		}
-		_, err = p.Api.PostDirectMessage(context.TODO(), cdm, msg)
-		if err != nil {
-			mylog.Printf("unlock指令发送失败:%v", err)
-		}
-	}
 
 	// me 指令处理逻辑
 	if commandMatch(cleanedMessage, config.GetMePrefix()) {
@@ -687,37 +606,13 @@ func (p *Processors) HandleFrameworkCommand(messageText string, data interface{}
 			return SendMessage("广播内容不能为空。用法: "+broadcastPrefix+" <内容>", data, Type, p.Api, p.Apiv2)
 		}
 
-		// 获取虚拟群组 (channel)
-		var channelIDs []string
-		guilds, err := p.Api.MeGuilds(context.TODO(), &dto.GuildPager{Limit: "100"})
-		if err == nil {
-			for _, guild := range guilds {
-				channels, err := p.Api.Channels(context.TODO(), guild.ID)
-				if err == nil {
-					for _, ch := range channels {
-						if ch.Type == dto.ChannelTypeText {
-							channelIDs = append(channelIDs, ch.ID)
-						}
-					}
-				}
-			}
-		}
-
 		// 获取常规群组 ID
 		groupIDs, err := idmap.FindKeysBySubAndType("group", "type")
 		if err != nil {
 			mylog.Printf("Broadcast: find keys in idmap failed: %v", err)
 		}
 
-		// 异步并发广播到频道和群聊
-		for _, chID := range channelIDs {
-			go func(cID string) {
-				_, _ = p.Api.PostMessage(context.TODO(), cID, &dto.MessageToCreate{
-					Content: broadcastMsg,
-					MsgType: 0,
-				})
-			}(chID)
-		}
+		// 异步并发广播到群聊
 		for _, grpID := range groupIDs {
 			go func(gID string) {
 				_, _ = p.Apiv2.PostGroupMessage(context.TODO(), gID, &dto.MessageToCreate{
@@ -727,7 +622,7 @@ func (p *Processors) HandleFrameworkCommand(messageText string, data interface{}
 			}(grpID)
 		}
 
-		return SendMessage(fmt.Sprintf("已向 %d 个频道和 %d 个群聊提交广播请求。", len(channelIDs), len(groupIDs)), data, Type, p.Api, p.Apiv2)
+		return SendMessage(fmt.Sprintf("已向 %d 个群聊提交广播请求。", len(groupIDs)), data, Type, p.Api, p.Apiv2)
 	}
 
 	//link指令
@@ -981,28 +876,11 @@ func SendMessage(messageText string, data interface{}, messageType string, api o
 		msg = (*dto.Message)(v)
 	case *dto.WSGroupMessageData:
 		msg = (*dto.Message)(v)
-	case *dto.WSATMessageData:
-		msg = (*dto.Message)(v)
-	case *dto.WSMessageData:
-		msg = (*dto.Message)(v)
-	case *dto.WSDirectMessageData:
-		msg = (*dto.Message)(v)
-	case *dto.WSC2CMessageData:
 		msg = (*dto.Message)(v)
 	default:
 		return fmt.Errorf("不支持的消息事件类型 %T", data)
 	}
 	switch messageType {
-	case "guild":
-		// 处理公会消息
-		msgseq := echo.GetMappingSeq(msg.ID)
-		echo.AddMappingSeq(msg.ID, msgseq+1)
-		textMsg, _ := handlers.GenerateReplyMessage(msg.ID, nil, messageText, msgseq+1, nil)
-		if _, err := api.PostMessage(context.TODO(), msg.ChannelID, textMsg); err != nil {
-			mylog.Printf("发送文本信息失败: %v", err)
-			return err
-		}
-
 	case "group":
 		// 处理群组消息
 		msgseq := echo.GetMappingSeq(msg.ID)
@@ -1015,23 +893,6 @@ func SendMessage(messageText string, data interface{}, messageType string, api o
 		}
 		if response != nil && response.Message != nil {
 			idmap.StoreLatestBotMsgID(msg.GroupID, response.Message.ID)
-		}
-
-	case "guild_private":
-		// 处理私信
-		timestamp := time.Now().Unix()
-		timestampStr := fmt.Sprintf("%d", timestamp)
-		dm := &dto.DirectMessage{
-			GuildID:    msg.GuildID,
-			ChannelID:  msg.ChannelID,
-			CreateTime: timestampStr,
-		}
-		msgseq := echo.GetMappingSeq(msg.ID)
-		echo.AddMappingSeq(msg.ID, msgseq+1)
-		textMsg, _ := handlers.GenerateReplyMessage(msg.ID, nil, messageText, msgseq+1, nil)
-		if _, err := apiv2.PostDirectMessage(context.TODO(), dm, textMsg); err != nil {
-			mylog.Printf("发送文本信息失败: %v", err)
-			return err
 		}
 
 	case "group_private":
@@ -1059,13 +920,6 @@ func SendMessageMd(md *dto.Markdown, kb *keyboard.MessageKeyboard, data interfac
 	switch v := data.(type) {
 	case *dto.WSGroupATMessageData:
 		msg = (*dto.Message)(v)
-	case *dto.WSGroupMessageData:
-		msg = (*dto.Message)(v)
-	case *dto.WSATMessageData:
-		msg = (*dto.Message)(v)
-	case *dto.WSMessageData:
-		msg = (*dto.Message)(v)
-	case *dto.WSDirectMessageData:
 		msg = (*dto.Message)(v)
 	case *dto.WSC2CMessageData:
 		msg = (*dto.Message)(v)
@@ -1073,23 +927,6 @@ func SendMessageMd(md *dto.Markdown, kb *keyboard.MessageKeyboard, data interfac
 		return fmt.Errorf("不支持的消息事件类型 %T", data)
 	}
 	switch messageType {
-	case "guild":
-		// 处理公会消息
-		msgseq := echo.GetMappingSeq(msg.ID)
-		echo.AddMappingSeq(msg.ID, msgseq+1)
-		Message := &dto.MessageToCreate{
-			MsgID:    msg.ID,
-			MsgSeq:   msgseq,
-			Markdown: md,
-			Keyboard: kb,
-			MsgType:  2, //md信息
-		}
-		Message.Timestamp = time.Now().Unix() // 设置时间戳
-		if _, err := api.PostMessage(context.TODO(), msg.ChannelID, Message); err != nil {
-			mylog.Printf("发送文本信息失败: %v", err)
-			return err
-		}
-
 	case "group":
 		// 处理群组消息
 		msgseq := echo.GetMappingSeq(msg.ID)
@@ -1110,30 +947,6 @@ func SendMessageMd(md *dto.Markdown, kb *keyboard.MessageKeyboard, data interfac
 		}
 		if response != nil && response.Message != nil {
 			idmap.StoreLatestBotMsgID(msg.GroupID, response.Message.ID)
-		}
-
-	case "guild_private":
-		// 处理私信
-		timestamp := time.Now().Unix()
-		timestampStr := fmt.Sprintf("%d", timestamp)
-		dm := &dto.DirectMessage{
-			GuildID:    msg.GuildID,
-			ChannelID:  msg.ChannelID,
-			CreateTime: timestampStr,
-		}
-		msgseq := echo.GetMappingSeq(msg.ID)
-		echo.AddMappingSeq(msg.ID, msgseq+1)
-		Message := &dto.MessageToCreate{
-			MsgID:    msg.ID,
-			MsgSeq:   msgseq,
-			Markdown: md,
-			Keyboard: kb,
-			MsgType:  2, //md信息
-		}
-		Message.Timestamp = time.Now().Unix() // 设置时间戳
-		if _, err := apiv2.PostDirectMessage(context.TODO(), dm, Message); err != nil {
-			mylog.Printf("发送文本信息失败: %v", err)
-			return err
 		}
 
 	case "group_private":

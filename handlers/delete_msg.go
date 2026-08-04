@@ -40,34 +40,6 @@ func DeleteMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI
 
 	//重新赋值
 	message.Params.MessageID = RealMsgID
-	//撤回频道信息
-	if message.Params.ChannelID != nil && message.Params.ChannelID != "" {
-		var RChannelID string
-		var err error
-		// 使用RetrieveRowByIDv2还原真实的ChannelID
-		RChannelID, err = idmap.RetrieveRowByIDv2(message.Params.ChannelID.(string))
-		if err != nil {
-			mylog.Printf("error retrieving real RChannelID: %v", err)
-		}
-		message.Params.ChannelID = RChannelID
-		err = api.RetractMessage(context.TODO(), message.Params.ChannelID.(string), message.Params.MessageID.(string), openapi.RetractMessageOptionHidetip)
-		if err != nil {
-			fmt.Println("Error retracting channel message:", err)
-		}
-
-	}
-
-	//撤回频道私信
-	if message.Params.GuildID != nil && message.Params.GuildID != "" {
-		//这里很复杂 要取的话需要调用internal-api 根据情况还原，虚拟成群就用群（channel-id）还原完整channel-id，
-		//然后internal-api读配置获取guild-id ，虚拟成私信就用userid还原完整userid，然后读channel-id然后读guild-id
-		//因为GuildID本身不直接出现在ob11事件里。
-		err := api.RetractDMMessage(context.TODO(), message.Params.GuildID.(string), message.Params.MessageID.(string), openapi.RetractMessageOptionHidetip)
-		if err != nil {
-			fmt.Println("Error retracting DM message:", err)
-		}
-
-	}
 
 	//撤回群信息
 	if message.Params.GroupID != nil && message.Params.GroupID != "" {

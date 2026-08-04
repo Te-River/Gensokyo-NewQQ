@@ -1442,9 +1442,13 @@ func transformMessageTextAt(messageText string, groupid string) string {
 	replyRE := regexp.MustCompile(`\[CQ:reply,id=\d+\]`)
 	messageText = replyRE.ReplaceAllString(messageText, "")
 
-	// 使用正则表达式来查找所有[CQ:at,qq=数字]的模式
-	re := regexp.MustCompile(`\[CQ:at,qq=(\d+)\]`)
+	// 使用正则表达式来查找所有[CQ:at,qq=AppID]的模式（仅匹配 bot 自身）
+	re := regexp.MustCompile(`\[CQ:at,qq=` + AppID + `\]`)
 	messageText = re.ReplaceAllStringFunc(messageText, func(m string) string {
+		// 如果 remove_bot_at_group 开启，移除 bot 自己的 @，避免重复
+		if config.GetRemoveBotAtGroup() {
+			return ""
+		}
 		return m
 	})
 	// 如果内容为空且原始内容仅含 at（不含 reply），退回原始 at 文本
@@ -1576,11 +1580,6 @@ func RevertTransformedText(data interface{}, msgtype string, api openapi.OpenAPI
 	case *dto.WSGroupMessageData:
 		msg = (*dto.Message)(v)
 		isFullGroupMsg = true
-	case *dto.WSATMessageData:
-		msg = (*dto.Message)(v)
-	case *dto.WSMessageData:
-		msg = (*dto.Message)(v)
-	case *dto.WSDirectMessageData:
 		msg = (*dto.Message)(v)
 	case *dto.WSC2CMessageData:
 		msg = (*dto.Message)(v)
@@ -1936,12 +1935,6 @@ func ConvertToSegmentedMessage(data interface{}) []map[string]interface{} {
 		msg = (*dto.Message)(v)
 	case *dto.WSGroupMessageData:
 		msg = (*dto.Message)(v)
-		isFullGroupMsg = true
-	case *dto.WSATMessageData:
-		msg = (*dto.Message)(v)
-	case *dto.WSMessageData:
-		msg = (*dto.Message)(v)
-	case *dto.WSDirectMessageData:
 		msg = (*dto.Message)(v)
 	case *dto.WSC2CMessageData:
 		msg = (*dto.Message)(v)
@@ -2072,13 +2065,7 @@ func SendMessage(messageText string, data interface{}, messageType string, api o
 	switch v := data.(type) {
 	case *dto.WSGroupATMessageData:
 		msg = (*dto.Message)(v)
-	case *dto.WSGroupMessageData:
 		msg = (*dto.Message)(v)
-	case *dto.WSATMessageData:
-		msg = (*dto.Message)(v)
-	case *dto.WSMessageData:
-		msg = (*dto.Message)(v)
-	case *dto.WSDirectMessageData:
 		msg = (*dto.Message)(v)
 	case *dto.WSC2CMessageData:
 		msg = (*dto.Message)(v)
@@ -2086,16 +2073,6 @@ func SendMessage(messageText string, data interface{}, messageType string, api o
 		return fmt.Errorf("不支持的消息事件类型 %T", data)
 	}
 	switch messageType {
-	case "guild":
-		// 处理公会消息
-		msgseq := echo.GetMappingSeq(msg.ID)
-		echo.AddMappingSeq(msg.ID, msgseq+1)
-		textMsg, _ := GenerateReplyMessage(msg.ID, nil, messageText, msgseq+1, nil)
-		if _, err := api.PostMessage(context.TODO(), msg.ChannelID, textMsg); err != nil {
-			mylog.Printf("发送文本信息失败: %v", err)
-			return err
-		}
-
 	case "group":
 		// 处理群组消息
 		msgseq := echo.GetMappingSeq(msg.ID)
@@ -2108,23 +2085,6 @@ func SendMessage(messageText string, data interface{}, messageType string, api o
 		}
 		if response != nil && response.Message != nil {
 			idmap.StoreLatestBotMsgID(msg.GroupID, response.Message.ID)
-		}
-
-	case "guild_private":
-		// 处理私信
-		timestamp := time.Now().Unix()
-		timestampStr := fmt.Sprintf("%d", timestamp)
-		dm := &dto.DirectMessage{
-			GuildID:    msg.GuildID,
-			ChannelID:  msg.ChannelID,
-			CreateTime: timestampStr,
-		}
-		msgseq := echo.GetMappingSeq(msg.ID)
-		echo.AddMappingSeq(msg.ID, msgseq+1)
-		textMsg, _ := GenerateReplyMessage(msg.ID, nil, messageText, msgseq+1, nil)
-		if _, err := apiv2.PostDirectMessage(context.TODO(), dm, textMsg); err != nil {
-			mylog.Printf("发送文本信息失败: %v", err)
-			return err
 		}
 
 	case "group_private":

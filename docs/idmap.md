@@ -41,7 +41,7 @@
 | OAuth/GitHub rUIN | `ruin:OAuth_Github:<index>:<id>` |
 | 旧版或未分类原始值 | `raw:<value>` |
 
-QQ OpenID 的身份键只包含 `QQ`、`AppID` 和 OpenID 本体，不再按群聊、私聊或群成员事件拆分。QQ 平台下同一个 QQ 号在同一个 AppID 内应复用同一个 OpenID，因此群聊、C2C、好友事件、群成员事件都会落到同一个 vUIN。频道相关 ID 暂不纳入本轮重构，继续沿用现有逻辑。
+QQ OpenID 的身份键只包含 `QQ`、`AppID` 和 OpenID 本体，不再按群聊、私聊或群成员事件拆分。QQ 平台下同一个 QQ 号在同一个 AppID 内应复用同一个 OpenID，因此群聊、C2C、好友事件、群成员事件都会落到同一个 vUIN。
 
 对外传递 rUIN 时使用：
 
