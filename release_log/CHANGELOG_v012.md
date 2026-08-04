@@ -40,6 +40,17 @@
 | #23 | `google.golang.org/grpc` | 1.65.0 → 1.82.1 | Go 模块（跨多个大版本） |
 | #20 | `golang.org/x/net` | → 0.55.0 | `botgo/examples` 嵌套模块 |
 
+## 📦 依赖升级（第二批 Dependabot PR）
+
+| PR | 依赖 | 版本变化 | 说明 |
+|----|------|---------|------|
+| #26 | `golang.org/x/image` | 2019-02 版 → 0.41.0 | `botgo` 嵌套模块 |
+| #28 | `actions/setup-node` | 6 → 7 | GitHub Actions |
+| #29 | `actions/setup-go` | 6 → 7 | GitHub Actions |
+| #30 | go_modules minor-and-patch 组（14 项） | 升级 | 根模块依赖 |
+
+> 注：CodeQL `Analyze` 检查失败为 CI 基础设施问题（default setup 与 advanced 配置冲突），与 PR 内容无关；前端 major 版本升级 PR（#24/#31-#39）因 ERESOLVE 依赖冲突或 Quasar 构建失败暂未合并。
+
 ---
 
 ## 🧪 验证
@@ -64,4 +75,9 @@
 0b43e2e  Merge branch 'Pr-Edit'
 59a8455  chore: gitignore 新增 .qoder/ 忽略项
 0b4ee93  ci: 新增 Dependabot 配置覆盖 Go/npm/GitHub Actions 依赖
+3e7bb6d  docs: 新建 CHANGELOG_v012 记录 Dependabot 依赖更新
+6377d85  Add CodeQL analysis workflow configuration
+c06ce56  chore(deps): bump golang.org/x/image in /botgo (#26)
+8c0cf7c  chore(deps): bump actions/setup-node from 6 to 7 (#28)
+2aa3c52  chore(deps): bump actions/setup-go from 6 to 7 (#29)
 ```
