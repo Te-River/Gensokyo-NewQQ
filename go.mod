@@ -19,7 +19,7 @@ require (
 	github.com/tencentyun/cos-go-sdk-v5 v0.7.45
 	go.etcd.io/bbolt v1.3.9
 	golang.org/x/time v0.15.0
-	google.golang.org/grpc v1.65.0
+	google.golang.org/grpc v1.82.1
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -35,7 +35,7 @@ require (
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect
 	github.com/yusufpapurcu/wmi v1.2.3 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20240528184218-531527333157 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
 	gopkg.in/ini.v1 v1.66.2 // indirect
 )
 
@@ -68,10 +68,10 @@ require (
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.2.11 // indirect
 	golang.org/x/arch v0.3.0 // indirect
-	golang.org/x/crypto v0.23.0 // indirect
-	golang.org/x/net v0.25.0
-	golang.org/x/sys v0.20.0
-	golang.org/x/text v0.15.0 // indirect
-	google.golang.org/protobuf v1.34.1
+	golang.org/x/crypto v0.52.0 // indirect
+	golang.org/x/net v0.54.0
+	golang.org/x/sys v0.45.0
+	golang.org/x/text v0.37.0 // indirect
+	google.golang.org/protobuf v1.36.11
 	mvdan.cc/xurls v1.1.0
 )
