@@ -53,6 +53,25 @@
 
 ---
 
+## 🧰 前端依赖协调修复
+
+手动升级前端依赖，解决 Dependabot major 升级 PR 的 peer 依赖冲突（本地验证通过后直接合并到 main）：
+
+| 依赖 | 版本变化 | 说明 |
+|------|---------|------|
+| `@typescript-eslint/parser` | 5.62.0 → 8.66.0 | 与 eslint-plugin 配对升级（对应 PR #34） |
+| `@typescript-eslint/eslint-plugin` | 5.62.0 → 8.66.0 | 与 parser 配对升级（对应 PR #37） |
+| `eslint` | 8.52.0 → 8.57.1 | 兼容 @typescript-eslint 8.x（不升 10.x，避免 flat config 迁移） |
+
+配套修复：
+
+- `.eslintrc.js`：新增 `@typescript-eslint/no-unused-vars` 下划线前缀忽略配置（`argsIgnorePattern`/`varsIgnorePattern`/`caughtErrorsIgnorePattern: '^_'`）
+- 修复升级后新增的 12 处 lint 错误（`no-unused-vars` / `no-explicit-any`）：`ChannelView.vue`、`GroupView.vue`、`ChannelList.vue`、`GroupList.vue`、`LoginView.vue`
+- 前端构建验证通过（`npm ci` + `quasar build`）
+- 已关闭被覆盖的 Dependabot PR #34/#37（目标版本已落后于 main）
+
+---
+
 ## 🧪 验证
 
 | 命令 | 结果 |
@@ -80,4 +99,5 @@
 c06ce56  chore(deps): bump golang.org/x/image in /botgo (#26)
 8c0cf7c  chore(deps): bump actions/setup-node from 6 to 7 (#28)
 2aa3c52  chore(deps): bump actions/setup-go from 6 to 7 (#29)
+3735fe9  fix: 升级前端 @typescript-eslint 并修复 lint 构建失败
 ```
