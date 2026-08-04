@@ -51,6 +51,16 @@
 
 > 注：CodeQL `Analyze` 检查失败为 CI 基础设施问题（default setup 与 advanced 配置冲突），与 PR 内容无关；前端 major 版本升级 PR（#24/#31-#39）因 ERESOLVE 依赖冲突或 Quasar 构建失败暂未合并。
 
+## 📦 依赖升级（第三批 Dependabot PR）
+
+| PR | 依赖 | 版本变化 | 说明 |
+|----|------|---------|------|
+| #43 | go_modules 组（3 项） | 升级 | `botgo`/`botgo/examples`/根模块（替代冲突的 #42） |
+| #44 | go_modules 组（2 项） | 升级 | `botgo`/根模块 |
+| #40 | `@types/node` | 20.8.10 → 26.1.2 | 前端 devDependencies |
+
+> 前端 major 升级 PR（#24/#31/#32/#33/#35/#38/#39/#41/#45）因 ERESOLVE 依赖冲突或构建失败已全部关闭，等待 Dependabot 基于最新 main 重新生成。
+
 ---
 
 ## 🧰 前端依赖协调修复
@@ -100,4 +110,8 @@ c06ce56  chore(deps): bump golang.org/x/image in /botgo (#26)
 8c0cf7c  chore(deps): bump actions/setup-node from 6 to 7 (#28)
 2aa3c52  chore(deps): bump actions/setup-go from 6 to 7 (#29)
 3735fe9  fix: 升级前端 @typescript-eslint 并修复 lint 构建失败
+6d7e45a  docs: 更新 CHANGELOG_v012 记录前端依赖协调修复
+53d88c5  chore(deps): bump the go_modules group across 2 directories with 3 updates (#43)
+8ffe2af  chore(deps): bump the go_modules group across 2 directories with 2 updates (#44)
+7a631cb  deps(deps-dev): bump @types/node from 20.8.10 to 26.1.2 in /frontend (#40)
 ```
