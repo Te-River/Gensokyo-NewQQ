@@ -227,7 +227,6 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 
 		if imageCount == 1 && messageText != "" {
 			mylog.Printf("发图文混合信息-群")
-			mylog.Printf("test——raw")
 			// 创建包含单个图片的 singleItem
 			singleItem[imageType] = []string{imageUrl}
 			msgseq := echo.GetMappingSeq(messageID)
