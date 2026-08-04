@@ -94,32 +94,20 @@
 
 ---
 
-## ⚠️ 已知安全告警（Dependabot CVE，截至 2026-08-04）
+## ⚠️ 已知安全告警（Dependabot CVE）
 
-仓库默认分支存在 **99 条未解决的 Dependabot 安全告警**（2 critical / 43 high / 42 medium / 12 low），全部位于前端 `frontend/package-lock.json` 的传递依赖。其中 critical/high 按受影响包汇总如下：
+### 修复结果（2026-08-04）
 
-### Critical
+通过升级直接依赖 + `overrides` 强制升级传递依赖，前端漏洞从 **51 个降至 2 个 moderate**（均为 `@quasar/app-webpack` 内部开发期依赖，需升级到 4.x breaking change 才能消除，暂保留）：
 
-| CVE (GHSA) | 包 | 说明 |
-|------------|----|------|
-| GHSA-xv26-6w52-cph6 | `websocket-driver` | < 0.7.5，WebSocket 帧处理拒绝服务 |
-| GHSA-w7jw-789q-3m8p | `shell-quote` | <= 1.8.3，命令注入（开发依赖） |
+| 操作 | 内容 |
+|------|------|
+| 升级 `axios` | 1.5.0 → 1.19.0（消除 29 个 high/critical 告警，含 SSRF/拒绝服务/原型污染） |
+| 升级 `quasar` | 2.12.7 → 2.23.5 |
+| `npm audit fix` | 自动升级 `@quasar/app-webpack` 3.11.3 → 3.15.1 等，消除 critical（websocket-driver/shell-quote）与大部分 high |
+| `overrides` | `serialize-javascript` ^7.0.7、`tmp` ^0.2.7、`uuid` ^11.1.1、`yaml` ^2.8.1、`cookie` ^0.7.2 强制升级传递依赖 |
 
-### High（按包去重）
-
-| 包 | 告警数 | 说明 |
-|----|--------|------|
-| `axios` | 13 | 多种 SSRF/请求走私/拒绝服务（< 1.16.0 等） |
-| `node-forge` | 4 | RSA/签名相关漏洞 |
-| `ws` | 4 | WebSocket 拒绝服务（< 8.21.0 / < 7.5.11） |
-| `minimatch` | 4 | 正则表达式拒绝服务 |
-| `brace-expansion` | 3 | 拒绝服务 |
-| `svgo` | 2 | 任意代码执行风险 |
-| `shell-quote` | 1 | 命令注入 |
-| `postcss` | 2 | 解析器拒绝服务 |
-| `serialize-javascript` / `lodash` / `tmp` / `flatted` / `braces` / `body-parser` / `launch-editor` / `webpack-dev-middleware` / `@babel/plugin-transform-modules-systemjs` / `websocket-driver` | 各 1 | 详见 GitHub 安全页 |
-
-> 说明：以上均为**前端构建期/开发期依赖**（部分为运行时依赖 `axios`），不直接影响 Go 后端服务；本轮依赖升级 PR 因 ERESOLVE 冲突已关闭，待后续逐项升级解析。跟踪地址：https://github.com/Te-River/Gensokyo-NewQQ/security/dependabot
+> 说明：修复前存在 **99 条告警**（2 critical / 43 high / 42 medium / 12 low），全部位于前端 `frontend/package-lock.json`；修复后仅剩 2 moderate，不影响 Go 后端服务。跟踪地址：https://github.com/Te-River/Gensokyo-NewQQ/security/dependabot
 
 ---
 
