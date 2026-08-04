@@ -37,7 +37,7 @@
     "@quasar/app-webpack": "^3.11.2",
     "@types/node": ">=20",
     "@typescript-eslint/eslint-plugin": "^5",
-    "@typescript-eslint/parser": "^5",
+    "@typescript-eslint/parser": "^8",
     "ansi_up": "^6.0.2",
     "apexcharts": "^3.40.0",
     "eslint": "^8",
