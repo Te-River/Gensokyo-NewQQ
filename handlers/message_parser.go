@@ -1305,7 +1305,7 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 		messageText = transformMessageTextAtNoGroupID(messageText)
 	} else {
 		//处理at
-		messageText = transformMessageTextAt(messageText, paramsMessage.GroupID.(string), , paramsMessage.UserId.(string))
+		messageText = transformMessageTextAt(messageText, paramsMessage.GroupID.(string), paramsMessage.UserId.(string))
 	}
 
 	// 当匹配到复古cq码上报类型,使用低效率正则.
