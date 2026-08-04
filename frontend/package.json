@@ -16,7 +16,7 @@
     "@codemirror/lang-javascript": "^6.2.1",
     "@codemirror/lang-markdown": "^6.2.2",
     "@codemirror/view": "^6.21.4",
-    "@quasar/extras": "^1.16.7",
+    "@quasar/extras": "^2.0.2",
     "axios": "^1.5.0",
     "base16384": "^1.0.0",
     "codemirror": "^6.0.1",
