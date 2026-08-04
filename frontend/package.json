@@ -34,7 +34,7 @@
     "@babel/eslint-parser": "^7",
     "@fontsource/dseg14": "^4.5.3",
     "@fontsource/roboto-mono": "^5.0.5",
-    "@quasar/app-webpack": "^3.11.2",
+    "@quasar/app-webpack": "^4.4.5",
     "@types/node": ">=26",
     "@typescript-eslint/eslint-plugin": "^8.66.0",
     "@typescript-eslint/parser": "^8.66.0",
