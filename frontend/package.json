@@ -35,7 +35,7 @@
     "@fontsource/dseg14": "^4.5.3",
     "@fontsource/roboto-mono": "^5.0.5",
     "@quasar/app-webpack": "^3.11.2",
-    "@types/node": ">=20",
+    "@types/node": ">=26",
     "@typescript-eslint/eslint-plugin": "^8.66.0",
     "@typescript-eslint/parser": "^8.66.0",
     "ansi_up": "^6.0.2",
