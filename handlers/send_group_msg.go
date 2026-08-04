@@ -440,7 +440,6 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			    // 否则 QQ 官方 API 不识别 CQ 码，会原文显示 [CQ:at,qq=数字]
 			    messageText = resolvePlainTextAtMentions(messageText)
 				// 为groupMessage附加内容 变成图文信息
-			    messageText = resolvePlainTextAtMentions(messageText)
 				groupMessage.Content = messageText
 				groupMessage.Timestamp = time.Now().Unix() // 设置时间戳
 			}
