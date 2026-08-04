@@ -139,8 +139,10 @@ func (p *Processors) ProcessGroupMessage(data *dto.WSGroupATMessageData) error {
 
 	}
 
-	//群没有at,但用户可以选择加一个
-	if config.GetAddAtGroup() {
+	// 群没有at,但用户可以选择加一个
+	// 被动消息（GROUP_AT_MESSAGE_CREATE）中，@bot 剥离依赖 remove_at 配置
+	// 如果 remove_at 未开启，消息文本本身已包含 @bot，再加 [CQ:at,qq=AppID] 会导致重复 @
+	if config.GetAddAtGroup() && config.GetRemoveAt() {
 		messageText = "[CQ:at,qq=" + config.GetAppIDStr() + "] " + messageText
 	}
 
