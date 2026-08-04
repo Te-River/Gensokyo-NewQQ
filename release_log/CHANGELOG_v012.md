@@ -49,7 +49,7 @@
 | #29 | `actions/setup-go` | 6 → 7 | GitHub Actions |
 | #30 | go_modules minor-and-patch 组（14 项） | 升级 | 根模块依赖 |
 
-> 注：CodeQL `Analyze` 检查失败为 CI 基础设施问题（default setup 与 advanced 配置冲突），与 PR 内容无关；前端 major 版本升级 PR（#24/#31-#39）因 ERESOLVE 依赖冲突或 Quasar 构建失败暂未合并。
+> 注：CodeQL 已统一到 GitHub default setup（删除 Advanced workflow，见下方「🛡 CodeQL 扫描统一」）；前端 major 版本升级 PR（#24/#31-#39）因 ERESOLVE 依赖冲突或 Quasar 构建失败暂未合并。
 
 ## 📦 依赖升级（第三批 Dependabot PR）
 
@@ -79,6 +79,20 @@
 - 修复升级后新增的 12 处 lint 错误（`no-unused-vars` / `no-explicit-any`）：`ChannelView.vue`、`GroupView.vue`、`ChannelList.vue`、`GroupList.vue`、`LoginView.vue`
 - 前端构建验证通过（`npm ci` + `quasar build`）
 - 已关闭被覆盖的 Dependabot PR #34/#37（目标版本已落后于 main）
+
+---
+
+## 🛡 CodeQL 扫描统一
+
+**文件：** `.github/workflows/codeql.yml`（删除）
+
+原先仓库同时存在 CodeQL **Advanced workflow** 与 GitHub **default setup**，两者冲突导致所有 PR 的 `Analyze` 检查失败（报错 `CodeQL analyses from advanced configurations cannot be processed when the default setup is enabled`），属于 CI 基础设施问题而非代码问题。
+
+处理方式（方案 A）：
+
+- 删除 `.github/workflows/codeql.yml`（Advanced workflow）
+- 统一使用 GitHub **default setup** 托管扫描（当前已配置语言：`go` + `javascript-typescript`，query_suite: default，每周扫描）
+- 消除所有 PR 上的红色 Analyze 失败噪音，扫描由 GitHub 自动维护
 
 ---
 
@@ -131,4 +145,6 @@ c06ce56  chore(deps): bump golang.org/x/image in /botgo (#26)
 53d88c5  chore(deps): bump the go_modules group across 2 directories with 3 updates (#43)
 8ffe2af  chore(deps): bump the go_modules group across 2 directories with 2 updates (#44)
 7a631cb  deps(deps-dev): bump @types/node from 20.8.10 to 26.1.2 in /frontend (#40)
+845fbe9  fix: 修复前端依赖安全漏洞（CVE 51 → 2）
+826477f  style: 关闭 no-require-imports 规则适配 CommonJS 配置文件
 ```
