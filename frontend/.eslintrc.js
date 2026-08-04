@@ -84,6 +84,8 @@ module.exports = {
       'error',
       { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_' },
     ],
+    // quasar.conf.js / babel.config.js 等 Node 配置文件使用 CommonJS require
+    '@typescript-eslint/no-require-imports': 'off',
 
     // allow debugger during development only
     'no-debugger': process.env.NODE_ENV === 'production' ? 'error' : 'off'
