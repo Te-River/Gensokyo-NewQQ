@@ -1442,13 +1442,11 @@ func transformMessageTextAt(messageText string, groupid string) string {
 	replyRE := regexp.MustCompile(`\[CQ:reply,id=\d+\]`)
 	messageText = replyRE.ReplaceAllString(messageText, "")
 
-	// 使用正则表达式来查找所有[CQ:at,qq=数字]的模式
-	re := regexp.MustCompile(`\[CQ:at,qq=(\d+)\]`)
+	// 使用正则表达式来查找所有[CQ:at,qq=AppID]的模式（仅匹配 bot 自身）
+	re := regexp.MustCompile(`\[CQ:at,qq=` + AppID + `\]`)
 	messageText = re.ReplaceAllStringFunc(messageText, func(m string) string {
-		// 如果 remove_bot_at_group 开启，且 at 的是 bot 自己，则移除
-		// 避免因 add_at_group 等机制导致的重复 @（非全量群被动消息场景）
-		submatches := re.FindStringSubmatch(m)
-		if len(submatches) > 1 && config.GetRemoveBotAtGroup() && submatches[1] == AppID {
+		// 如果 remove_bot_at_group 开启，移除 bot 自己的 @，避免重复
+		if config.GetRemoveBotAtGroup() {
 			return ""
 		}
 		return m
