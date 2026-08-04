@@ -63,7 +63,6 @@
 import { ref, watch, reactive, computed, onMounted } from 'vue';
 import { api } from 'src/boot/axios';
 import GroupList from 'src/components/GroupList.vue';
-import ChannelList from 'src/components/ChannelList.vue';
 import { useRouter } from 'vue-router';
 
 const $router = useRouter();
@@ -104,7 +103,7 @@ async function fetchDataByType(type: string): Promise<void> {
 
     // 从响应中解构 data 和 totalPages
     const { data } = response;
-    groupList.value = (data as { data: any[] }).data;
+    groupList.value = (data as { data: unknown[] }).data;
     console.error(groupList.value);
     totalPages.value = 1000; // 假设后端会返回总页数
   } catch (e) {
@@ -123,7 +122,7 @@ interface Row {
   // ...其他属性，根据您的实际需要来定义
 }
 
-function handleRowClick(evt: MouseEvent, row: Row, index: number): void {
+function handleRowClick(evt: MouseEvent, row: Row, _index: number): void {
   // 使用row对象的属性
   console.log(row.description); // 这应该正常工作，并且现在类型是安全的
 

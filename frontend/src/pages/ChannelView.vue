@@ -42,14 +42,12 @@
 </template>
 <script setup lang="ts">
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
-import { ref, watch, reactive, computed, onMounted } from 'vue';
+import { ref, reactive, computed, onMounted } from 'vue';
 import { api } from 'src/boot/axios';
-import GroupList from 'src/components/GroupList.vue';
 import ChannelList from 'src/components/ChannelList.vue';
 import { useQuasar } from 'quasar';
 const props = defineProps<{ uin: number; channelid: string }>();
 // Reactive state
-const groupList = ref([]);
 const channelList = ref([]);
 const selectedItems = ref<string[]>([]);
 const message = ref('');
@@ -85,7 +83,7 @@ async function fetchData(): Promise<void> {
     // 从响应中解构 data 和 totalPages
     const { data } = response;
     // 设置频道列表
-    channelList.value = (data as { data: any[] }).data;
+    channelList.value = (data as { data: unknown[] }).data;
     console.error(channelList.value);
 
     totalPages.value = 1000; // 假设后端会返回总页数
@@ -98,7 +96,7 @@ async function fetchData(): Promise<void> {
 }
 
 // 更新pager以获取下一页
-const getNextPage = async (lastItemId: string) => {
+const getNextPage = async (_lastItemId: string) => {
   // 设置after为最后一个item的id，before清空
   pager.After = props.channelid;
   pager.Before = props.channelid;
@@ -107,7 +105,7 @@ const getNextPage = async (lastItemId: string) => {
 };
 
 // 更新pager以获取上一页
-const getPreviousPage = async (firstItemId: string) => {
+const getPreviousPage = async (_firstItemId: string) => {
   // 设置before为第一个item的id，after清空
   pager.Before = props.channelid;
   pager.After = props.channelid;

@@ -120,7 +120,7 @@
           icon: 'report_problem'
         });
       }
-    } catch (err) {
+    } catch (_err) {
       $q.notify({
         color: 'negative',
         position: 'top',
