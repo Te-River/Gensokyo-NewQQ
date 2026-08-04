@@ -1442,10 +1442,10 @@ func transformMessageTextAt(messageText string, groupid string) string {
 	replyRE := regexp.MustCompile(`\[CQ:reply,id=\d+\]`)
 	messageText = replyRE.ReplaceAllString(messageText, "")
 
-	// 使用正则表达式来查找所有[CQ:at,qq=AppID]的模式（仅匹配 bot 自身）
-	re := regexp.MustCompile(`\[CQ:at,qq=` + AppID + `\]`)
+	// 使用正则表达式来查找所有[CQ:at,qq=UserID]的模式（仅匹配 用户 自身）
+	re := regexp.MustCompile(`\[CQ:at,qq=` + message.Params.UserID + `\]`)
 	messageText = re.ReplaceAllStringFunc(messageText, func(m string) string {
-		// 如果 remove_bot_at_group 开启，移除 bot 自己的 @，避免重复
+		// 如果 remove_bot_at_group 开启，移除 触发被动消息@用户，避免重复
 		if config.GetRemoveBotAtGroup() {
 			return ""
 		}
