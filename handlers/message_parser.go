@@ -1305,7 +1305,7 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 		messageText = transformMessageTextAtNoGroupID(messageText)
 	} else {
 		//处理at
-		messageText = transformMessageTextAt(messageText, paramsMessage.GroupID.(string))
+		messageText = transformMessageTextAt(messageText, paramsMessage.GroupID.(string), paramsMessage.UserID.(string))
 	}
 
 	// 当匹配到复古cq码上报类型,使用低效率正则.
@@ -1418,7 +1418,7 @@ func isIPAddress(address string) bool {
 }
 
 // at处理
-func transformMessageTextAt(messageText string, groupid string) string {
+func transformMessageTextAt(messageText string, groupid string, userid string) string {
 	// 保存原始内容，用于纯 at 消息回退
 	originalText := messageText
 	// DoNotReplaceAppid=false(默认频道bot,需要自己at自己时,否则改成true)
@@ -1442,10 +1442,10 @@ func transformMessageTextAt(messageText string, groupid string) string {
 	replyRE := regexp.MustCompile(`\[CQ:reply,id=\d+\]`)
 	messageText = replyRE.ReplaceAllString(messageText, "")
 
-	// 使用正则表达式来查找所有[CQ:at,qq=AppID]的模式（仅匹配 bot 自身）
-	re := regexp.MustCompile(`\[CQ:at,qq=` + AppID + `\]`)
+	// 使用正则表达式来查找所有[CQ:at,qq=UserID]的模式（仅匹配 用户 自身）
+	re := regexp.MustCompile(`\[CQ:at,qq=` + userid + `\]`)
 	messageText = re.ReplaceAllStringFunc(messageText, func(m string) string {
-		// 如果 remove_bot_at_group 开启，移除 bot 自己的 @，避免重复
+		// 如果 remove_bot_at_group 开启，移除 触发被动消息@用户，避免重复
 		if config.GetRemoveBotAtGroup() {
 			return ""
 		}
