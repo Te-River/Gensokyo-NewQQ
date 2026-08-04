@@ -59,7 +59,7 @@
 | #44 | go_modules 组（2 项） | 升级 | `botgo`/根模块 |
 | #40 | `@types/node` | 20.8.10 → 26.1.2 | 前端 devDependencies |
 
-> 前端 major 升级 PR（#24/#31/#32/#33/#35/#38/#39/#41/#45）因 ERESOLVE 依赖冲突或构建失败已全部关闭，等待 Dependabot 基于最新 main 重新生成。
+> 前端 major 升级 PR（#24/#31/#32/#33/#35/#38/#39/#41/#45/#46）因 ERESOLVE 依赖冲突或构建失败已全部关闭，等待 Dependabot 基于最新 main 重新生成。其中 #46（webpack-dev-server 4→5）因 `@quasar/app-webpack` 3.15.1 固定依赖 4.11.1 无法解析 5.x 而关闭。
 
 ---
 
