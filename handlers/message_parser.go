@@ -1625,7 +1625,11 @@ func RevertTransformedText(data interface{}, msgtype string, api openapi.OpenAPI
 			if !ok {
 				return m
 			}
-			if IsSelfAtID(userID) {
+			// 判断是否为 @Bot 自身：
+			// 1) IsSelfAtID 检查原始 ID（BotID/AppID/selfAtIDs）
+			// 2) 解析后的 atID 等于 bot 的 UIN 或 AppID（兼容 QQ 平台不同场景使用不同 ID 格式）
+			isSelf := IsSelfAtID(userID) || atID == config.GetUinStr() || atID == config.GetAppIDStr()
+			if isSelf {
 				// 全量群消息(GROUP_MESSAGE_CREATE)中的 @Bot 始终剥离，不依赖 remove_at 配置
 				if isFullGroupMsg || config.GetRemoveAt() {
 					return ""
@@ -1987,7 +1991,9 @@ func ConvertToSegmentedMessage(data interface{}) []map[string]interface{} {
 				"qq": atID,
 			},
 		}
-		if IsSelfAtID(userID) && (isFullGroupMsg || config.GetRemoveAt()) {
+		// 判断是否为 @Bot 自身（兼容 QQ 平台不同 ID 格式）
+		isSelf := IsSelfAtID(userID) || atID == config.GetUinStr() || atID == config.GetAppIDStr()
+		if isSelf && (isFullGroupMsg || config.GetRemoveAt()) {
 		    msg.Content = strings.Replace(msg.Content, match[0], "", 1)
 		    continue
 		   }
