@@ -130,7 +130,7 @@ func RememberSelfAtID(id string) {
 	selfAtMu.Unlock()
 }
 
-func isSelfAtID(id string) bool {
+func IsSelfAtID(id string) bool {
 	if id == "" {
 		return false
 	}
@@ -144,7 +144,7 @@ func isSelfAtID(id string) bool {
 }
 
 func resolveIncomingAtID(id string) (string, bool) {
-	if isSelfAtID(id) {
+	if IsSelfAtID(id) {
 		// 与消息 SelfID 字段保持一致：use_uin=true 时用 UIN，否则用 AppID。
 		// 否则下游会因 [CQ:at] 的 qq 与 self_id 不匹配而无法识别 @ 的是自己。
 		if config.GetUseUin() {
@@ -1625,7 +1625,7 @@ func RevertTransformedText(data interface{}, msgtype string, api openapi.OpenAPI
 			if !ok {
 				return m
 			}
-			if isSelfAtID(userID) {
+			if IsSelfAtID(userID) {
 				// 全量群消息(GROUP_MESSAGE_CREATE)中的 @Bot 始终剥离，不依赖 remove_at 配置
 				if isFullGroupMsg || config.GetRemoveAt() {
 					return ""
@@ -1987,7 +1987,7 @@ func ConvertToSegmentedMessage(data interface{}) []map[string]interface{} {
 				"qq": atID,
 			},
 		}
-		if isSelfAtID(userID) && (isFullGroupMsg || config.GetRemoveAt()) {
+		if IsSelfAtID(userID) && (isFullGroupMsg || config.GetRemoveAt()) {
 		    msg.Content = strings.Replace(msg.Content, match[0], "", 1)
 		    continue
 		   }
