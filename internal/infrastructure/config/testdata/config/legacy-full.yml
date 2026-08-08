@@ -1,0 +1,33 @@
+settings:
+  app_id: 12345
+  uin: 10001
+  token: "legacy-token"
+  client_secret: "legacy-secret"
+  shard_count: 2
+  shard_id: 0
+  use_uin: true
+  idmap_isolation: true
+  idmap_legacy_compat: true
+  ws_address:
+    - "ws://127.0.0.1:6700"
+    - "ws://127.0.0.1:6701"
+  reconnect_times: 100
+  heart_beat_interval: 5
+  launch_reconnect_times: 1
+  text_intent:
+    - "GroupATMessageEventHandler"
+    - "C2CMessageEventHandler"
+  http_address: "0.0.0.0:5700"
+  http_version: 11
+  http_timeout: 5
+  post_url:
+    - "http://127.0.0.1:8080/onebot"
+  ws_server_path: "/ws"
+  enable_ws_server: true
+  ws_server_token: "ws-secret"
+  webhook_path: "/webhook"
+  oss_type: 0
+  lotus: false
+  lotus_grpc_port: 0
+  use_self_crt: false
+  title: "Gensokyo-Legacy"

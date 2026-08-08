@@ -1,0 +1,9 @@
+version: 1
+settings:
+  app_id: 12345
+  some_future_field: "x"
+  nested:
+    foo: bar
+  extra_list:
+    - "a"
+    - "b"
