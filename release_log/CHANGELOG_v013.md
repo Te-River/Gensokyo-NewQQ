@@ -114,6 +114,17 @@ String/Array 一致性 + canonical 比较，覆盖率 96.9%。
 
 ---
 
+## ⏳ 队列与 WebSocket 生命周期（P7）
+
+**新增 `internal/application/queue/`：**
+
+- 有界队列：容量均分分区、session hash 分区保证顺序
+- 背压必须显式选择：Block / Drop / Reject（Drop 有计数，不静默丢）
+- 重试走 delay scheduler（不占 worker Sleep）
+- Close/Wait 可预测 shutdown；Metrics（Capacity/Depth/Rejected/Processed/Active）
+
+---
+
 ## 🧪 验证
 
 | 命令 | 结果 |
@@ -126,6 +137,7 @@ String/Array 一致性 + canonical 比较，覆盖率 96.9%。
 | `go test ./internal/domain/message/` | ✅ 通过（96.9% coverage） |
 | `go test ./internal/application/media/` | ✅ 通过（69.6% coverage） |
 | `go test ./internal/application/outbound/` | ✅ 通过（90.9% coverage） |
+| `go test ./internal/application/queue/` | ✅ 通过（86.1% coverage） |
 | `go test ./...` | ✅ 通过 |
 
 ---
@@ -139,4 +151,5 @@ String/Array 一致性 + canonical 比较，覆盖率 96.9%。
 <commit hash>（P4）
 <commit hash>（P5）
 <commit hash>（P6）
+<commit hash>（P7）
 ```
