@@ -14,6 +14,7 @@ import (
   "github.com/hoshinonyaruko/gensokyo/config"
   "github.com/hoshinonyaruko/gensokyo/echo"
   "github.com/hoshinonyaruko/gensokyo/idmap"
+  "github.com/hoshinonyaruko/gensokyo/internal/domain/identity"
   "github.com/hoshinonyaruko/gensokyo/mylog"
   "github.com/tencent-connect/botgo/dto"
   "github.com/tencent-connect/botgo/dto/keyboard"
@@ -83,7 +84,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 		}
 	}
 
-	if message.Params.UserID != nil && len(message.Params.UserID.(string)) != 32 {
+	if message.Params.UserID != nil && !identity.IsOpenID(message.Params.UserID.(string)) {
 		if msgType == "" && message.Params.UserID != nil && checkZeroUserID(message.Params.UserID) {
 			msgType = GetMessageTypeByUserid(config.GetAppIDStr(), message.Params.UserID)
 		}
@@ -108,7 +109,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 	var idInt64 int64
 	var err error
 
-	if message.Params.UserID != nil && len(message.Params.UserID.(string)) == 32 {
+	if message.Params.UserID != nil && identity.IsOpenID(message.Params.UserID.(string)) {
 		idInt64, err = idmap.GenerateRowID(message.Params.UserID.(string), 9)
 		// 临时的
 		msgType = "group_private"
@@ -143,7 +144,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 	case "group_private", "group":
 		//私聊信息
 		var UserID string
-		if len(message.Params.UserID.(string)) != 32 {
+		if !identity.IsOpenID(message.Params.UserID.(string)) {
 			if config.GetIdmapPro() {
 				//还原真实的userid
 				//mylog.Printf("group_private:%v", message.Params.UserID.(string))
@@ -192,7 +193,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 		if messageID == "2000" {
 			messageID = ""
 			mylog.Println("通过lazymsgid发送群私聊主动信息,每月可发送1次")
-			if len(message.Params.UserID.(string)) != 32 {
+			if !identity.IsOpenID(message.Params.UserID.(string)) {
 				eventID = GetEventIDByUseridOrGroupid(config.GetAppIDStr(), message.Params.UserID)
 			} else {
 				eventID = GetEventIDByUseridOrGroupidv2(config.GetAppIDStr(), message.Params.UserID)
@@ -457,7 +458,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 				mylog.Printf("发送文本私聊信息失败: %v", err)
 				mylog.Printf("%s", FormatQQError(err))
 				// 22009: 主动消息超过频控限制，记录日志 (被动回复场景无需补偿)
-				if strings.Contains(err.Error(), `"code":22009`) {
+    if IsQQError(err, 22009) {
 					mylog.Printf("私聊主动消息受限(code:22009)，消息被丢弃: %s", messageText)
 					if config.GetSaveError() {
 						mylog.ErrLogToFile("type", "PostC2CMessage-22009")
@@ -468,7 +469,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 					return "", nil
 				}
 				// 请求参数 event_id 无效，清空后重试一次
-				if strings.Contains(err.Error(), `"code":40034025`) {
+    if IsQQError(err, 40034025) {
 					groupMessage.EventID = ""
 					resp, err = apiv2.PostC2CMessage(context.TODO(), UserID, groupMessage)
 					if err != nil {
@@ -477,7 +478,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 					}
 				}
 				// 超时重试
-				if strings.Contains(err.Error(), "context deadline exceeded") {
+    if IsDeliveryTimeout(err) {
 					resp, err = postC2CMessageWithRetry(apiv2, UserID, groupMessage)
 					if err != nil {
 						return "", nil
@@ -535,7 +536,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 							}
 						}
 
-						if err != nil && strings.Contains(err.Error(), `"code":22009`) {
+      if IsQQError(err, 22009) {
 						 mylog.Printf("私聊主动消息受限(code:22009)，消息被丢弃")
 						 if config.GetSaveError() {
 						  mylog.ErrLogToFile("type", "PostC2CMessage-22009")
@@ -543,7 +544,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 						  mylog.ErrLogToFile("error", err.Error())
 						 }
 
-						} else if err != nil && strings.Contains(err.Error(), `"code":40034025`) {
+      } else if IsQQError(err, 40034025) {
 							// 请求参数 event_id 无效，清空后重试一次
 							groupMessage.EventID = ""
 							//重新为err赋值
@@ -558,7 +559,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 								}
 							}
 
-						} else if err != nil && strings.Contains(err.Error(), "context deadline exceeded") {
+      } else if IsDeliveryTimeout(err) {
 							// 仅对超时做有限次重试
 							resp, err = postC2CMessageWithRetry(apiv2, UserID, groupMessage)
 						}
@@ -583,7 +584,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 				}
 
 				// 22009: 主动消息超过频控限制
-				if err != nil && strings.Contains(err.Error(), `"code":22009`) {
+    if IsQQError(err, 22009) {
 					mylog.Printf("私聊富媒体主动消息受限(code:22009): %s", key)
 					if config.GetSaveError() {
 						mylog.ErrLogToFile("type", "PostC2CMessage-22009")
@@ -593,7 +594,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 				}
 
 				// 仅对超时做重试，使用原始富媒体消息，不再构造错误文本消息
-				if err != nil && (strings.Contains(err.Error(), "context deadline exceeded") || strings.Contains(err.Error(), "富媒体文件上传超时")) {
+    if IsDeliveryTimeout(err) {
 					message_return, err = postC2CRichMediaMessageWithRetry(apiv2, UserID, richMediaMessage)
 				}
 
@@ -792,7 +793,7 @@ func postC2CRichMediaMessageWithRetry(
 	for i := 0; i < retryCount; i++ {
 		resp, err = apiv2.PostC2CMessage(context.TODO(), userID, richMediaMessage)
 
-		if err != nil && strings.Contains(err.Error(), "context deadline exceeded") {
+		if err != nil && defaultRetryPolicy.ShouldRetry(err, i) {
 			// 仅对超时做重试
 			mylog.Printf("私聊富媒体超时重试第 %d 次: %v", i+1, err)
 			if config.GetSaveError() {
@@ -800,7 +801,7 @@ func postC2CRichMediaMessageWithRetry(
 				mylog.ErrInterfaceToFile("request", richMediaMessage)
 				mylog.ErrLogToFile("error", err.Error())
 			}
-			time.Sleep(1 * time.Second) // 重试间隔 1 秒
+			time.Sleep(defaultRetryPolicy.Backoff(i + 1))
 			continue
 		}
 
@@ -827,19 +828,18 @@ func postC2CMessageWithRetry(apiv2 openapi.OpenAPI, userID string, msg *dto.Mess
 	retryCount := 3 // 设置最大重试次数为 3
 	for i := 0; i < retryCount; i++ {
 		// 递增 msgseq（沿用你群聊那套映射逻辑）
-		msgseq := echo.GetMappingSeq(msg.MsgID)
-		echo.AddMappingSeq(msg.MsgID, msgseq+1)
-		msg.MsgSeq = msgseq + 1
+		msgseq := echo.NextMappingSeq(msg.MsgID)
+		msg.MsgSeq = msgseq
 
 		resp, err = apiv2.PostC2CMessage(context.TODO(), userID, msg)
-		if err != nil && (strings.Contains(err.Error(), "context deadline exceeded") || strings.Contains(err.Error(), "富媒体文件上传超时")) {
+		if err != nil && defaultRetryPolicy.ShouldRetry(err, i) {
 			mylog.Printf("私聊超时重试第 %d 次: %v", i+1, err)
 			if config.GetSaveError() {
 				mylog.ErrLogToFile("type", "PostC2CMessage-context-deadline-exceeded-retry-"+strconv.Itoa(i+1))
 				mylog.ErrInterfaceToFile("request", msg)
 				mylog.ErrLogToFile("error", err.Error())
 			}
-			time.Sleep(3 * time.Second) // 重试间隔 3 秒
+			time.Sleep(defaultRetryPolicy.Backoff(i + 1))
 			continue
 		} else {
 			// 成功 或 非超时错误，统一在这里收尾

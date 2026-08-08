@@ -14,6 +14,7 @@ import (
 	"unicode"
 
 	"github.com/hoshinonyaruko/gensokyo/config"
+	ididentity "github.com/hoshinonyaruko/gensokyo/internal/domain/identity"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"go.etcd.io/bbolt"
 )
@@ -446,7 +447,7 @@ func retrieveIdentity(virtualID string) (string, error) {
 			if fallback == "" {
 				fallback = raw
 			}
-			if strings.HasPrefix(key, "openid:") || (len(raw) == 32 && !strings.HasPrefix(raw, "rUIN-")) {
+			if strings.HasPrefix(key, "openid:") || (ididentity.IsOpenID(raw) && !strings.HasPrefix(raw, "rUIN-")) {
 				selected = raw
 				return nil
 			}
@@ -543,7 +544,7 @@ func normalizeIdentity(raw string) normalizedIdentity {
 	if identity, ok := parseRUIN(raw); ok {
 		return identity
 	}
-	if len(raw) == 32 {
+	if ididentity.IsOpenID(raw) {
 		return normalizedIdentity{
 			Key:      "openid:QQ:" + config.GetAppIDStr() + ":" + raw,
 			Raw:      raw,

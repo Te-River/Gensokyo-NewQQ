@@ -2081,9 +2081,8 @@ func SendMessage(messageText string, data interface{}, messageType string, api o
 	switch messageType {
 	case "group":
 		// 处理群组消息
-		msgseq := echo.GetMappingSeq(msg.ID)
-		echo.AddMappingSeq(msg.ID, msgseq+1)
-		textMsg, _ := GenerateReplyMessage(msg.ID, nil, messageText, msgseq+1, nil)
+		msgseq := echo.NextMappingSeq(msg.ID)
+		textMsg, _ := GenerateReplyMessage(msg.ID, nil, messageText, msgseq, nil)
 		response, err := apiv2.PostGroupMessage(context.TODO(), msg.GroupID, textMsg)
 		if err != nil {
 			mylog.Printf("发送文本群组信息失败: %v", err)
@@ -2095,9 +2094,8 @@ func SendMessage(messageText string, data interface{}, messageType string, api o
 
 	case "group_private":
 		// 处理群组私聊消息
-		msgseq := echo.GetMappingSeq(msg.ID)
-		echo.AddMappingSeq(msg.ID, msgseq+1)
-		textMsg, _ := GenerateReplyMessage(msg.ID, nil, messageText, msgseq+1, nil)
+		msgseq := echo.NextMappingSeq(msg.ID)
+		textMsg, _ := GenerateReplyMessage(msg.ID, nil, messageText, msgseq, nil)
 		_, err := apiv2.PostC2CMessage(context.TODO(), msg.Author.ID, textMsg)
 		if err != nil {
 			mylog.Printf("发送文本私聊信息失败: %v", err)
@@ -2566,20 +2564,31 @@ func createMusicKeyboard(jumpURL string) *keyboard.MessageKeyboard {
 
 // FetchTrackInfo 用于根据trackMid获取QQ音乐的track信息
 func FetchTrackInfo(trackMid string) (string, error) {
+	const maxQQMusicResponseBytes int64 = 2 << 20
 	urlTemplate := "https://u.y.qq.com/cgi-bin/musicu.fcg?g_tk=2034008533&uin=0&format=json&data={\"comm\":{\"ct\":23,\"cv\":0},\"url_mid\":{\"module\":\"vkey.GetVkeyServer\",\"method\":\"CgiGetVkey\",\"param\":{\"guid\":\"4311206557\",\"songmid\":[\"%s\"],\"songtype\":[0],\"uin\":\"0\",\"loginflag\":1,\"platform\":\"23\"}}}&_=1599039471576"
 	url := fmt.Sprintf(urlTemplate, trackMid)
 
 	// 发送HTTP GET请求
-	resp, err := http.Get(url)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
 	if err != nil {
 		return "", fmt.Errorf("error making request: %v", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return "", fmt.Errorf("QQ音乐响应 HTTP %d", resp.StatusCode)
+	}
+	if resp.ContentLength > maxQQMusicResponseBytes {
+		return "", fmt.Errorf("QQ音乐响应超过 %d 字节", maxQQMusicResponseBytes)
+	}
 
 	// 读取并解析响应体
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxQQMusicResponseBytes+1))
 	if err != nil {
 		return "", fmt.Errorf("error reading response body: %v", err)
+	}
+	if int64(len(body)) > maxQQMusicResponseBytes {
+		return "", fmt.Errorf("QQ音乐响应超过 %d 字节", maxQQMusicResponseBytes)
 	}
 
 	var result interface{} // 使用interface{}来接收任意的JSON对象
@@ -2592,20 +2601,31 @@ func FetchTrackInfo(trackMid string) (string, error) {
 
 // FetchSongDetail 发送请求到QQ音乐API并获取歌曲详情
 func FetchSongDetail(songID string) (string, error) {
+	const maxQQMusicResponseBytes int64 = 2 << 20
 	// 构建请求URL
 	url := fmt.Sprintf("https://u.y.qq.com/cgi-bin/musicu.fcg?format=json&inCharset=utf8&outCharset=utf-8&notice=0&platform=yqq.json&needNewCode=0&data={\"comm\":{\"ct\":24,\"cv\":0},\"songinfo\":{\"method\":\"get_song_detail_yqq\",\"param\":{\"song_type\":0,\"song_mid\":\"\",\"song_id\":%s},\"module\":\"music.pf_song_detail_svr\"}}", songID)
 
 	// 发送GET请求
-	resp, err := http.Get(url)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
 	if err != nil {
 		return "", fmt.Errorf("error making request: %v", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return "", fmt.Errorf("QQ音乐响应 HTTP %d", resp.StatusCode)
+	}
+	if resp.ContentLength > maxQQMusicResponseBytes {
+		return "", fmt.Errorf("QQ音乐响应超过 %d 字节", maxQQMusicResponseBytes)
+	}
 
 	// 读取响应体
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxQQMusicResponseBytes+1))
 	if err != nil {
 		return "", fmt.Errorf("error reading response body: %v", err)
+	}
+	if int64(len(body)) > maxQQMusicResponseBytes {
+		return "", fmt.Errorf("QQ音乐响应超过 %d 字节", maxQQMusicResponseBytes)
 	}
 
 	return string(body), nil

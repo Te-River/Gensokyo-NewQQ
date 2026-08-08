@@ -13,7 +13,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"hash"
-	"io"
 	"net/http"
 	"time"
 )
@@ -67,12 +66,13 @@ func tryNature(data []byte, filename string) (string, error) {
 	req.Header.Set("Content-Type", mime)
 	req.Header.Set("Authorization", auth)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := providerHTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("上传请求失败: %w", err)
 	}
-	defer resp.Body.Close()
-	io.ReadAll(resp.Body)
+	if _, readErr := readClose(resp); readErr != nil {
+		return "", fmt.Errorf("读取 Nature 响应失败: %w", readErr)
+	}
 
 	if resp.StatusCode != 200 {
 		return "", fmt.Errorf("Nature 返回 HTTP %d", resp.StatusCode)

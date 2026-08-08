@@ -1,4 +1,4 @@
-﻿package handlers
+package handlers
 
 import (
 	"bytes"
@@ -22,6 +22,7 @@ import (
 	"github.com/hoshinonyaruko/gensokyo/config"
 	"github.com/hoshinonyaruko/gensokyo/echo"
 	"github.com/hoshinonyaruko/gensokyo/idmap"
+	"github.com/hoshinonyaruko/gensokyo/internal/domain/identity"
 	"github.com/hoshinonyaruko/gensokyo/imagehosting"
 	"github.com/hoshinonyaruko/gensokyo/images"
 	"github.com/hoshinonyaruko/gensokyo/mdutil"
@@ -109,7 +110,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		}
 	}
 
-	if message.Params.GroupID != nil && len(message.Params.GroupID.(string)) != 32 {
+	if message.Params.GroupID != nil && !identity.IsOpenID(message.Params.GroupID.(string)) {
 		if msgType == "" && message.Params.GroupID != nil && checkZeroGroupID(message.Params.GroupID) {
 			msgType = GetMessageTypeByGroupid(config.GetAppIDStr(), message.Params.GroupID)
 		}
@@ -141,9 +142,9 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 	var err error
 	var retmsg string
 
-	if len(message.Params.GroupID.(string)) == 32 {
+	if identity.IsOpenID(message.Params.GroupID.(string)) {
 		msgType = "group"
-	} else if message.Params.UserID != nil && len(message.Params.UserID.(string)) == 32 {
+	} else if message.Params.UserID != nil && identity.IsOpenID(message.Params.UserID.(string)) {
 		msgType = "group_private"
 	} else {
 		if message.Params.GroupID != "" {
@@ -153,7 +154,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		}
 	}
 
-	if message.Params.GroupID != nil && len(message.Params.GroupID.(string)) != 32 {
+	if message.Params.GroupID != nil && !identity.IsOpenID(message.Params.GroupID.(string)) {
 		// stringob11通过字段判断类型,不需要递归
 		if !config.GetStringOb11() {
 			//设置递归 对直接向gsk发送action时有效果
@@ -212,7 +213,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		}
 
 		var originalGroupID, originalUserID string
-		if len(message.Params.GroupID.(string)) != 32 {
+		if !identity.IsOpenID(message.Params.GroupID.(string)) {
 			// 检查UserID是否为nil
 			if message.Params.UserID != nil && config.GetIdmapPro() && message.Params.UserID.(string) != "" && message.Params.UserID.(string) != "0" {
 				// 如果UserID不是nil且配置为使用Pro版本，则调用RetrieveRowByIDv2Pro
@@ -457,13 +458,13 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 					mylog.ErrLogToFile("error", err.Error())
 				}
 			}
-			if err != nil && strings.Contains(err.Error(), `"code":22009`) {
+   if IsQQError(err, 22009) {
 				mylog.Printf("信息发送失败,加入到队列中,下次被动信息进行发送")
 				var pair echo.MessageGroupPair
 				pair.Group = message.Params.GroupID.(string)
 				pair.GroupMessage = groupMessage
 				echo.PushGlobalStack(pair)
-			} else if err != nil && strings.Contains(err.Error(), `"code":40034025`) {
+   } else if IsQQError(err, 40034025) {
 				// event_id无效的时候
 				groupMessage.EventID = ""
 				resp, err = apiv2.PostGroupMessage(context.TODO(), message.Params.GroupID.(string), groupMessage)
@@ -477,7 +478,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 						mylog.ErrLogToFile("error", err.Error())
 					}
 				}
-			} else if err != nil && strings.Contains(err.Error(), "context deadline exceeded") {
+   } else if IsDeliveryTimeout(err) {
 				postGroupMessageWithRetry(apiv2, message.Params.GroupID.(string), groupMessage)
 			}
 
@@ -644,13 +645,13 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 					mylog.ErrLogToFile("error", err.Error())
 				}
 			}
-			if err != nil && strings.Contains(err.Error(), `"code":22009`) {
+   if IsQQError(err, 22009) {
 				mylog.Printf("信息发送失败,加入到队列中,下次被动信息进行发送")
 				var pair echo.MessageGroupPair
 				pair.Group = targetGroupID
 				pair.GroupMessage = groupMessage
 				echo.PushGlobalStack(pair)
-			} else if err != nil && strings.Contains(err.Error(), `"code":40034025`) {
+   } else if IsQQError(err, 40034025) {
 				groupMessage.EventID = ""
 				resp, err = apiv2.PostGroupMessage(context.TODO(), targetGroupID, groupMessage)
 				if err != nil {
@@ -662,7 +663,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 						mylog.ErrLogToFile("error", err.Error())
 					}
 				}
-			} else if err != nil && strings.Contains(err.Error(), "context deadline exceeded") {
+   } else if IsDeliveryTimeout(err) {
 				postGroupMessageWithRetry(apiv2, targetGroupID, groupMessage)
 			}
 
@@ -788,13 +789,13 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 								mylog.ErrLogToFile("error", err.Error())
 							}
 						}
-						if err != nil && strings.Contains(err.Error(), `"code":22009`) {
+   if IsQQError(err, 22009) {
 							mylog.Printf("信息发送失败,加入到队列中,下次被动信息进行发送")
 							var pair echo.MessageGroupPair
 							pair.Group = message.Params.GroupID.(string)
 							pair.GroupMessage = groupMessage
 							echo.PushGlobalStack(pair)
-						} else if err != nil && strings.Contains(err.Error(), `"code":40034025`) {
+      } else if IsQQError(err, 40034025) {
 							//请求参数event_id无效 重试
 							groupMessage.EventID = ""
 							//重新为err赋值
@@ -808,7 +809,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 									mylog.ErrLogToFile("error", err.Error())
 								}
 							}
-						} else if err != nil && strings.Contains(err.Error(), "context deadline exceeded") {
+      } else if IsDeliveryTimeout(err) {
 							postGroupMessageWithRetry(apiv2, message.Params.GroupID.(string), groupMessage)
 						}
 
@@ -845,7 +846,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 						mylog.ErrLogToFile("error", err.Error())
 					}
 				}
-				if err != nil && (strings.Contains(err.Error(), "context deadline exceeded") || strings.Contains(err.Error(), "富媒体文件上传超时")) {
+    if IsDeliveryTimeout(err) {
 					message_return, err = postGroupRichMediaMessageWithRetry(apiv2, message.Params.GroupID.(string), richMediaMessage)
 				}
 
@@ -898,19 +899,19 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 							mylog.ErrLogToFile("error", err.Error())
 						}
 					}
-					if err != nil && strings.Contains(err.Error(), `"code":22009`) {
+      if IsQQError(err, 22009) {
 						mylog.Printf("信息发送失败,加入到队列中,下次被动信息进行发送")
 						var pair echo.MessageGroupPair
 						pair.Group = message.Params.GroupID.(string)
 						pair.GroupMessage = groupMessage
 						echo.PushGlobalStack(pair)
-					} else if err != nil && strings.Contains(err.Error(), `"code":40034025`) {
+     } else if IsQQError(err, 40034025) {
 						groupMessage.EventID = ""
 						resp, err = apiv2.PostGroupMessage(context.TODO(), message.Params.GroupID.(string), groupMessage)
 						if err != nil {
 							mylog.Printf("发送图片失败: %v", err)
 						}
-					} else if err != nil && strings.Contains(err.Error(), "context deadline exceeded") {
+     } else if IsDeliveryTimeout(err) {
 						postGroupMessageWithRetry(apiv2, message.Params.GroupID.(string), groupMessage)
 					}
 				}
@@ -2620,9 +2621,8 @@ func SendStackMessages(apiv2 openapi.OpenAPI, messageid string, GroupID string) 
 		//mylog.Printf("发送栈中的消息匹配 %v: %v", pair.Group, GroupID)
 		if pair.Group == GroupID {
 			// 发送消息
-			msgseq := echo.GetMappingSeq(messageid)
-			echo.AddMappingSeq(messageid, msgseq+1)
-			pair.GroupMessage.MsgSeq = msgseq + 1
+			msgseq := echo.NextMappingSeq(messageid)
+			pair.GroupMessage.MsgSeq = msgseq
 			pair.GroupMessage.MsgID = messageid
 			mylog.Printf("发送栈中的消息 使用MsgSeq[%v]使用MsgID[%v]", pair.GroupMessage.MsgSeq, pair.GroupMessage.MsgID)
 			_, err := apiv2.PostGroupMessage(context.TODO(), pair.Group, pair.GroupMessage)
@@ -2638,7 +2638,7 @@ func SendStackMessages(apiv2 openapi.OpenAPI, messageid string, GroupID string) 
 				echo.RemoveFromGlobalStack(i)
 			}
 			// 检查错误码
-			if err != nil && strings.Contains(err.Error(), `"code":22009`) {
+     if IsQQError(err, 22009) {
 				mylog.Printf("信息再次发送失败,加入到队列中,下次被动信息进行发送")
 				echo.PushGlobalStack(pair)
 			}
@@ -3005,9 +3005,8 @@ func processImgUrl(input string) string {
 func postGroupMessageWithRetry(apiv2 openapi.OpenAPI, groupID string, groupMessage *dto.MessageToCreate) (resp *dto.GroupMessageResponse, err error) {
 	retryCount := 3
 	for i := 0; i < retryCount; i++ {
-		msgseq := echo.GetMappingSeq(groupMessage.MsgID)
-		echo.AddMappingSeq(groupMessage.MsgID, msgseq+1)
-		groupMessage.MsgSeq = msgseq + 1
+		msgseq := echo.NextMappingSeq(groupMessage.MsgID)
+		groupMessage.MsgSeq = msgseq
 
 		if !messagequeue.GetRateLimiter().WaitWithTimeout(5 * time.Second) {
 			mylog.Printf("[限流] 群消息发送等待超时，重试 %d/%d", i+1, retryCount)
@@ -3015,14 +3014,14 @@ func postGroupMessageWithRetry(apiv2 openapi.OpenAPI, groupID string, groupMessa
 		}
 
 		resp, err = apiv2.PostGroupMessage(context.TODO(), groupID, groupMessage)
-		if err != nil && strings.Contains(err.Error(), "context deadline exceeded") {
+		if err != nil && defaultRetryPolicy.ShouldRetry(err, i) {
 			mylog.Printf("超时重试第 %d 次: %v", i+1, err)
 			if config.GetSaveError() {
 				mylog.ErrLogToFile("type", "PostGroupMessage-context-deadline-exceeded-retry-"+strconv.Itoa(i+1))
 				mylog.ErrInterfaceToFile("request", groupMessage)
 				mylog.ErrLogToFile("error", err.Error())
 			}
-			time.Sleep(1 * time.Second) // 重试间隔1秒
+			time.Sleep(defaultRetryPolicy.Backoff(i + 1))
 			continue
 		} else {
 			mylog.Printf("超时重试第 %d 次成功: %v", i+1, err)
@@ -3045,7 +3044,7 @@ func postGroupRichMediaMessageWithRetry(apiv2 openapi.OpenAPI, groupID string, r
 	retryCount := 3 // 设置最大重试次数为 3
 	for i := 0; i < retryCount; i++ {
 		resp, err = apiv2.PostGroupMessage(context.TODO(), groupID, richMediaMessage)
-		if err != nil && (strings.Contains(err.Error(), "context deadline exceeded") || strings.Contains(err.Error(), "富媒体文件上传超时")) {
+		if err != nil && defaultRetryPolicy.ShouldRetry(err, i) {
 			// 仅对超时做重试
 			mylog.Printf("富媒体超时重试第 %d 次: %v", i+1, err)
 			if config.GetSaveError() {
@@ -3053,7 +3052,7 @@ func postGroupRichMediaMessageWithRetry(apiv2 openapi.OpenAPI, groupID string, r
 				mylog.ErrInterfaceToFile("request", richMediaMessage)
 				mylog.ErrLogToFile("error", err.Error())
 			}
-			time.Sleep(3 * time.Second) // 重试间隔 3 秒
+			time.Sleep(defaultRetryPolicy.Backoff(i + 1))
 			continue
 		}
 

@@ -1,0 +1,22 @@
+settings:
+  app_id: 12345
+  uin: 0
+  token: "test-token"
+  client_secret: "test-secret"
+  shard_count: 1
+  shard_id: 0
+  use_uin: false
+  ws_address:
+    - "ws://127.0.0.1:6700"
+  reconnect_times: 100
+  heart_beat_interval: 5
+  launch_reconnect_times: 1
+  text_intent:
+    - "GroupATMessageEventHandler"
+  http_address: ""
+  http_version: 11
+  http_timeout: 5
+  oss_type: 0
+  lotus: false
+  lotus_grpc_port: 0
+  use_self_crt: false
