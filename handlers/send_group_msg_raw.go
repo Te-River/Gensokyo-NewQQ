@@ -229,9 +229,8 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 			mylog.Printf("发图文混合信息-群")
 			// 创建包含单个图片的 singleItem
 			singleItem[imageType] = []string{imageUrl}
-			msgseq := echo.GetMappingSeq(messageID)
-			echo.AddMappingSeq(messageID, msgseq+1)
-			groupReply := generateGroupMessage(messageID, "", singleItem, "", msgseq+1, apiv2, message.Params.GroupID.(string))
+			msgseq := echo.NextMappingSeq(messageID)
+			groupReply := generateGroupMessage(messageID, "", singleItem, "", msgseq, apiv2, message.Params.GroupID.(string))
 			// 进行类型断言
 			richMediaMessage, ok := groupReply.(*dto.RichMediaMessage)
 			if !ok {
@@ -259,8 +258,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 				// 否则 QQ 官方 API 不识别 CQ 码，会原文显示 [CQ:at,qq=数字]
 				messageText = resolvePlainTextAtMentions(messageText)
 				// 创建包含文本和图像信息的消息
-				msgseq = echo.GetMappingSeq(messageID)
-				echo.AddMappingSeq(messageID, msgseq+1)
+				msgseq = echo.CurrentAndIncrementMappingSeq(messageID)
 				groupMessage = &dto.MessageToCreate{
 					Content: messageText, // 添加文本内容
 					Media: &dto.Media{
@@ -274,8 +272,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 			} else {
 				//将kb和md组合成groupMessage并用MsgType=2发送
 
-				msgseq = echo.GetMappingSeq(messageID)
-				echo.AddMappingSeq(messageID, msgseq+1)
+				msgseq = echo.CurrentAndIncrementMappingSeq(messageID)
 				groupMessage = &dto.MessageToCreate{
 					Content:  "markdown", // 添加文本内容
 					MsgID:    messageID,
@@ -320,9 +317,8 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 		mdRe := regexp.MustCompile(`\[CQ:markdown,[^\]]*\]`)
 		messageText = mdRe.ReplaceAllString(messageText, "")
 		if messageText != "" {
-			msgseq := echo.GetMappingSeq(messageID)
-			echo.AddMappingSeq(messageID, msgseq+1)
-			groupReply := generateGroupMessage(messageID, "", nil, messageText, msgseq+1, apiv2, message.Params.GroupID.(string))
+			msgseq := echo.NextMappingSeq(messageID)
+			groupReply := generateGroupMessage(messageID, "", nil, messageText, msgseq, apiv2, message.Params.GroupID.(string))
 
 			// 进行类型断言
 			groupMessage, ok := groupReply.(*dto.MessageToCreate)
@@ -364,9 +360,8 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 				var singleItem = make(map[string][]string)
 				singleItem[key] = []string{url} // 创建一个只包含一个 URL 的 singleItem
 				//mylog.Println("singleItem:", singleItem)
-				msgseq := echo.GetMappingSeq(messageID)
-				echo.AddMappingSeq(messageID, msgseq+1)
-				groupReply := generateGroupMessage(messageID, "", singleItem, "", msgseq+1, apiv2, message.Params.GroupID.(string))
+				msgseq := echo.NextMappingSeq(messageID)
+				groupReply := generateGroupMessage(messageID, "", singleItem, "", msgseq, apiv2, message.Params.GroupID.(string))
 				// 进行类型断言
 				richMediaMessage, ok := groupReply.(*dto.RichMediaMessage)
 				if !ok {
@@ -422,8 +417,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 				}
 
 				if message_return != nil && message_return.MediaResponse != nil && message_return.MediaResponse.FileInfo != "" {
-					msgseq := echo.GetMappingSeq(messageID)
-					echo.AddMappingSeq(messageID, msgseq+1)
+					msgseq := echo.NextMappingSeq(messageID)
 					media := dto.Media{
 						FileInfo: message_return.MediaResponse.FileInfo,
 					}

@@ -1,4 +1,4 @@
-﻿package handlers
+package handlers
 
 import (
 	"bytes"
@@ -2620,9 +2620,8 @@ func SendStackMessages(apiv2 openapi.OpenAPI, messageid string, GroupID string) 
 		//mylog.Printf("发送栈中的消息匹配 %v: %v", pair.Group, GroupID)
 		if pair.Group == GroupID {
 			// 发送消息
-			msgseq := echo.GetMappingSeq(messageid)
-			echo.AddMappingSeq(messageid, msgseq+1)
-			pair.GroupMessage.MsgSeq = msgseq + 1
+			msgseq := echo.NextMappingSeq(messageid)
+			pair.GroupMessage.MsgSeq = msgseq
 			pair.GroupMessage.MsgID = messageid
 			mylog.Printf("发送栈中的消息 使用MsgSeq[%v]使用MsgID[%v]", pair.GroupMessage.MsgSeq, pair.GroupMessage.MsgID)
 			_, err := apiv2.PostGroupMessage(context.TODO(), pair.Group, pair.GroupMessage)
@@ -3005,9 +3004,8 @@ func processImgUrl(input string) string {
 func postGroupMessageWithRetry(apiv2 openapi.OpenAPI, groupID string, groupMessage *dto.MessageToCreate) (resp *dto.GroupMessageResponse, err error) {
 	retryCount := 3
 	for i := 0; i < retryCount; i++ {
-		msgseq := echo.GetMappingSeq(groupMessage.MsgID)
-		echo.AddMappingSeq(groupMessage.MsgID, msgseq+1)
-		groupMessage.MsgSeq = msgseq + 1
+		msgseq := echo.NextMappingSeq(groupMessage.MsgID)
+		groupMessage.MsgSeq = msgseq
 
 		if !messagequeue.GetRateLimiter().WaitWithTimeout(5 * time.Second) {
 			mylog.Printf("[限流] 群消息发送等待超时，重试 %d/%d", i+1, retryCount)

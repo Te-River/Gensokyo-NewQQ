@@ -827,9 +827,8 @@ func postC2CMessageWithRetry(apiv2 openapi.OpenAPI, userID string, msg *dto.Mess
 	retryCount := 3 // 设置最大重试次数为 3
 	for i := 0; i < retryCount; i++ {
 		// 递增 msgseq（沿用你群聊那套映射逻辑）
-		msgseq := echo.GetMappingSeq(msg.MsgID)
-		echo.AddMappingSeq(msg.MsgID, msgseq+1)
-		msg.MsgSeq = msgseq + 1
+		msgseq := echo.NextMappingSeq(msg.MsgID)
+		msg.MsgSeq = msgseq
 
 		resp, err = apiv2.PostC2CMessage(context.TODO(), userID, msg)
 		if err != nil && (strings.Contains(err.Error(), "context deadline exceeded") || strings.Contains(err.Error(), "富媒体文件上传超时")) {

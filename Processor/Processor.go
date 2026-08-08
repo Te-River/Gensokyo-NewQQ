@@ -435,7 +435,7 @@ func sendPostRequest(jsonString, url string) {
 	req.Header.Set("X-Self-ID", selfid)
 
 	// 发送请求
-	client := &http.Client{}
+	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		mylog.Printf("Error sending POST request to %s: %v", url, err)
@@ -883,9 +883,8 @@ func SendMessage(messageText string, data interface{}, messageType string, api o
 	switch messageType {
 	case "group":
 		// 处理群组消息
-		msgseq := echo.GetMappingSeq(msg.ID)
-		echo.AddMappingSeq(msg.ID, msgseq+1)
-		textMsg, _ := handlers.GenerateReplyMessage(msg.ID, nil, messageText, msgseq+1, nil)
+		msgseq := echo.NextMappingSeq(msg.ID)
+		textMsg, _ := handlers.GenerateReplyMessage(msg.ID, nil, messageText, msgseq, nil)
 		response, err := apiv2.PostGroupMessage(context.TODO(), msg.GroupID, textMsg)
 		if err != nil {
 			mylog.Printf("发送文本群组信息失败: %v", err)
@@ -897,9 +896,8 @@ func SendMessage(messageText string, data interface{}, messageType string, api o
 
 	case "group_private":
 		// 处理群组私聊消息
-		msgseq := echo.GetMappingSeq(msg.ID)
-		echo.AddMappingSeq(msg.ID, msgseq+1)
-		textMsg, _ := handlers.GenerateReplyMessage(msg.ID, nil, messageText, msgseq+1, nil)
+		msgseq := echo.NextMappingSeq(msg.ID)
+		textMsg, _ := handlers.GenerateReplyMessage(msg.ID, nil, messageText, msgseq, nil)
 		_, err := apiv2.PostC2CMessage(context.TODO(), msg.Author.ID, textMsg)
 		if err != nil {
 			mylog.Printf("发送文本私聊信息失败: %v", err)
@@ -929,8 +927,7 @@ func SendMessageMd(md *dto.Markdown, kb *keyboard.MessageKeyboard, data interfac
 	switch messageType {
 	case "group":
 		// 处理群组消息
-		msgseq := echo.GetMappingSeq(msg.ID)
-		echo.AddMappingSeq(msg.ID, msgseq+1)
+		msgseq := echo.CurrentAndIncrementMappingSeq(msg.ID)
 		Message := &dto.MessageToCreate{
 			Content:  "markdown",
 			MsgID:    msg.ID,
@@ -951,8 +948,7 @@ func SendMessageMd(md *dto.Markdown, kb *keyboard.MessageKeyboard, data interfac
 
 	case "group_private":
 		// 处理群组私聊消息
-		msgseq := echo.GetMappingSeq(msg.ID)
-		echo.AddMappingSeq(msg.ID, msgseq+1)
+		msgseq := echo.CurrentAndIncrementMappingSeq(msg.ID)
 		Message := &dto.MessageToCreate{
 			Content:  "markdown",
 			MsgID:    msg.ID,
@@ -979,8 +975,7 @@ func SendMessageMd(md *dto.Markdown, kb *keyboard.MessageKeyboard, data interfac
 func SendMessageMdAddBot(md *dto.Markdown, kb *keyboard.MessageKeyboard, data *dto.GroupAddBotEvent, api openapi.OpenAPI, apiv2 openapi.OpenAPI) error {
 
 	// 处理群组消息
-	msgseq := echo.GetMappingSeq(data.EventID)
-	echo.AddMappingSeq(data.ID, msgseq+1)
+	msgseq := echo.CurrentAndIncrementMappingSeq(data.EventID)
 	Message := &dto.MessageToCreate{
 		Content:  "markdown",
 		EventID:  data.EventID,

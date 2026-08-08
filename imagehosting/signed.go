@@ -5,7 +5,6 @@ package imagehosting
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"mime/multipart"
 	"net/http"
 )
@@ -61,8 +60,9 @@ func signedUpload(data []byte, filename, module string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("星野上传失败: %w", err)
 		}
-		defer resp.Body.Close()
-		io.ReadAll(resp.Body)
+		if _, readErr := readClose(resp); readErr != nil {
+			return "", fmt.Errorf("读取星野响应失败: %w", readErr)
+		}
 		if resp.StatusCode >= 300 {
 			return "", fmt.Errorf("星野返回 HTTP %d", resp.StatusCode)
 		}
@@ -85,12 +85,13 @@ func signedUpload(data []byte, filename, module string) (string, error) {
 		part.Write(data)
 		writer.Close()
 
-		resp, err := http.Post(signData.URL, writer.FormDataContentType(), body)
+		resp, err := providerHTTPClient.Post(signData.URL, writer.FormDataContentType(), body)
 		if err != nil {
 			return "", fmt.Errorf("Ukaka 上传失败: %w", err)
 		}
-		defer resp.Body.Close()
-		io.ReadAll(resp.Body)
+		if _, readErr := readClose(resp); readErr != nil {
+			return "", fmt.Errorf("读取 Ukaka 响应失败: %w", readErr)
+		}
 		if resp.StatusCode >= 300 {
 			return "", fmt.Errorf("Ukaka 返回 HTTP %d", resp.StatusCode)
 		}
@@ -115,10 +116,9 @@ func httpGet(url string, params map[string]string) ([]byte, error) {
 	req.Header.Set("Referer", _signOrigin+"/")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := providerHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
+	return readClose(resp)
 }

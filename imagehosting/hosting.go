@@ -27,10 +27,15 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/hoshinonyaruko/gensokyo/config"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 )
+
+const maxProviderResponseBytes int64 = 4 << 20
+
+var providerHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 // UploadProvider 按指定 provider 上传图片。
 // provider 名称与 config.GetOssTypeName(config.OssTypeXXX) 保持一致。
@@ -136,8 +141,7 @@ func httpPost(url, contentType string, body io.Reader, header map[string]string)
 		req.Header.Set(k, v)
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-	client := &http.Client{}
-	return client.Do(req)
+	return providerHTTPClient.Do(req)
 }
 
 // httpPut 简化的 HTTP PUT 请求
@@ -153,14 +157,23 @@ func httpPut(url, contentType string, body io.Reader, header map[string]string) 
 		req.Header.Set(k, v)
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-	client := &http.Client{}
-	return client.Do(req)
+	return providerHTTPClient.Do(req)
 }
 
 // readClose 读取并关闭响应体
 func readClose(resp *http.Response) ([]byte, error) {
+	if resp == nil || resp.Body == nil {
+		return nil, fmt.Errorf("HTTP response body is nil")
+	}
 	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxProviderResponseBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > maxProviderResponseBytes {
+		return nil, fmt.Errorf("HTTP response body exceeds %d bytes", maxProviderResponseBytes)
+	}
+	return body, nil
 }
 
 // ensureExt 确保文件名有正确的扩展名
