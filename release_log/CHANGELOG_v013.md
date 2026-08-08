@@ -103,6 +103,17 @@ String/Array 一致性 + canonical 比较，覆盖率 96.9%。
 
 ---
 
+## 📤 出站消息模型（P6）
+
+**新增 `internal/application/outbound/`：**
+
+- `OutboundService.Send(ctx, OutboundCommand)`：唯一发送主链（Build→Send→Classify→Retry→fail）
+- `OutboundMessage` / `OutboundCommand` / `DeliveryPolicy`（active/wakeup/fallback）
+- `QQSender` 接口（Application 不 import botgo DTO）
+- `RetryPolicy` + `ErrorClassifier`（解耦 QQ 错误码；P1 legacy 待 P13 收敛）
+
+---
+
 ## 🧪 验证
 
 | 命令 | 结果 |
@@ -114,6 +125,7 @@ String/Array 一致性 + canonical 比较，覆盖率 96.9%。
 | `go test ./internal/domain/identity/ ./adapter/identity/` | ✅ 通过（12 用例） |
 | `go test ./internal/domain/message/` | ✅ 通过（96.9% coverage） |
 | `go test ./internal/application/media/` | ✅ 通过（69.6% coverage） |
+| `go test ./internal/application/outbound/` | ✅ 通过（90.9% coverage） |
 | `go test ./...` | ✅ 通过 |
 
 ---
@@ -126,4 +138,5 @@ String/Array 一致性 + canonical 比较，覆盖率 96.9%。
 <commit hash>（P3）
 <commit hash>（P4）
 <commit hash>（P5）
+<commit hash>（P6）
 ```
