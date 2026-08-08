@@ -14,7 +14,7 @@
 | 7 | ChatGLM | 免费，开箱即用，走本包 `chatglm.go` |
 | 8 | Ukaka | 免费，开箱即用，走本包 `signed.go` |
 | 9 | 星野 | 免费，开箱即用，走本包 `signed.go` |
-| 10 | Nature | 免费，密钥内置，走本包 `nature.go` |
+| 10 | Nature | COS 直传，需配置凭据，走本包 `nature.go` |
 
 > **注意：** `oss_type` 仅控制图片上传路径；语音上传不受此选项影响（仍走本机或 1~3 云OSS）。
 
@@ -50,7 +50,12 @@ qq_channel:                     # QQ频道图床（oss_type=6）
 chatglm:                        # 智谱免费图床（oss_type=7，开箱即用）
 ukaka:                          # Ukaka免费图床（oss_type=8，开箱即用）
 xingye:                         # 星野免费图床（oss_type=9，开箱即用）
-nature:                         # Nature腾讯COS直传（oss_type=10，密钥内置）
+nature:                         # Nature腾讯COS直传（oss_type=10，需配置凭据）
+  secret_id: ""                 # 腾讯云 API SecretId
+  secret_key: ""                # 腾讯云 API SecretKey
+  region: "ap-nanjing"          # 存储桶地域
+  bucket: ""                    # 存储桶名称
+  domain: ""                    # 自定义域名（留空使用COS默认域名）
 ```
 
 ## 集成点
@@ -68,7 +73,7 @@ imagehosting/
 ├── qq_channel.go    # QQ频道图床
 ├── chatglm.go       # 智谱免费图床
 ├── signed.go        # Ukaka + 星野 (签名上传)
-├── nature.go        # Nature 腾讯 COS 直传 (密钥内置)
+├── nature.go        # Nature 腾讯 COS 直传 (凭据配置注入)
 ├── utils.go         # 辅助函数
 └── README.md        # 本文档
 ```
