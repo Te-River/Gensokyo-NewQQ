@@ -71,6 +71,25 @@
 
 ---
 
+## 💬 消息解析类型化（P4）
+
+**背景：** `handlers/message_parser.go` 的 `foundItems map[string][]string` 解析逻辑庞大且无类型。
+
+**新增 `internal/domain/message/`（纯函数，无副作用）：**
+
+- `MessagePart` 类型系统 + `ParsedMessage`（Parts/Reply/DeliveryMode）
+- `ParseOneBotString`（String）与 `ParseOneBotSegments`（Array）输出同一模型
+- CQ 码扫描器（转义感知参数拆分、malformed 容错）
+- `MediaSource`（LocalFile/RemoteURL/Base64/Bytes，P5 复用）
+- compat bridge：`Canonicalize` + `ToLegacyFoundItems`（仅迁移期）
+
+**测试：** golden corpus（text/image/record/video/file/at/reply/markdown/keyboard/music/mixed/escaped/malformed/empty），
+String/Array 一致性 + canonical 比较，覆盖率 96.9%。
+
+**约束：** 冻结 foundItems（不新增 key），新功能一律进入 typed model。
+
+---
+
 ## 🧪 验证
 
 | 命令 | 结果 |
@@ -80,6 +99,7 @@
 | `go test ./imagehosting/ ./config/ ./structs/ ./template/` | ✅ 通过 |
 | `go test ./internal/infrastructure/config/` | ✅ 通过（24 用例） |
 | `go test ./internal/domain/identity/ ./adapter/identity/` | ✅ 通过（12 用例） |
+| `go test ./internal/domain/message/` | ✅ 通过（96.9% coverage） |
 | `go test ./...` | ✅ 通过 |
 
 ---
@@ -90,4 +110,5 @@
 <commit hash>（S0）
 <commit hash>（P2）
 <commit hash>（P3）
+<commit hash>（P4）
 ```
