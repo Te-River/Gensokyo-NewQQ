@@ -136,6 +136,16 @@ String/Array 一致性 + canonical 比较，覆盖率 96.9%。
 
 ---
 
+## 🔀 HTTP/WS/callapi Adapter（P9）
+
+**新增 `internal/application/action/`：**
+
+- `Registry` 显式注册表 + `Dispatcher`（HTTP/WS 共用）
+- `Envelope` / `Handler`（Decode + Handle）/ typed `SendMessageAction`（int/string ID 兼容）
+- JSON → Envelope → DTO → Validate → Handler 的 decoder 流程
+
+---
+
 ## 🧪 验证
 
 | 命令 | 结果 |
@@ -150,6 +160,7 @@ String/Array 一致性 + canonical 比较，覆盖率 96.9%。
 | `go test ./internal/application/outbound/` | ✅ 通过（90.9% coverage） |
 | `go test ./internal/application/queue/` | ✅ 通过（86.1% coverage） |
 | `go test ./internal/application/inbound/ ./adapter/onebot/` | ✅ 通过 |
+| `go test ./internal/application/action/` | ✅ 通过（87.5% coverage） |
 | `go test ./...` | ✅ 通过 |
 
 ---
@@ -165,4 +176,5 @@ String/Array 一致性 + canonical 比较，覆盖率 96.9%。
 <commit hash>（P6）
 <commit hash>（P7）
 <commit hash>（P8）
+<commit hash>（P9）
 ```
