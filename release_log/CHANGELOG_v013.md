@@ -171,7 +171,22 @@ String/Array 一致性 + canonical 比较，覆盖率 96.9%。
 - 新增 fork inventory：`docs/forks/{botgo,go-silk}.md`
 
 ---
+## 🧹 删除兼容层（P13）— 条件未满足，破坏性删除 BLOCKED
 
+- P13.1 删除条件检查：生产路径（handlers/Processor/callapi/idmap/echo）尚未切换到新架构，
+  无真实联调稳定周期 → **不执行破坏性删除**（符合 Stop Conditions）。
+- 已完成非破坏收尾：新架构无 foundItems（仅 compat bridge）、无 config/botgo/go-silk、
+  无 init() 注册/goroutine；ID 长度启发式只剩 legacy adapter。
+
+## ✅ 验证（V1-V5）
+
+- V1 每阶段 build/vet/test：PASS
+- V2 Windows：build/vet/test PASS；`-race` NOT_RUN（windows/386 不支持）；`govulncheck` NOT_RUN（proxy 网络不可达）
+- V3 Linux：NOT_RUN（无环境）
+- V4 Frontend：lint PASS、build PASS、`npm test` = "No test specified" → NOT_IMPLEMENTED（如实记录）
+- V5 真实联调：BLOCKED（需用户侧 QQ/OneBot 环境）
+
+---
 ## �🧪 验证
 
 | 命令 | 结果 |
@@ -207,4 +222,5 @@ String/Array 一致性 + canonical 比较，覆盖率 96.9%。
 <commit hash>（P10）
 <commit hash>（P11）
 <commit hash>（P12）
+<commit hash>（P13/V 报告）
 ```
