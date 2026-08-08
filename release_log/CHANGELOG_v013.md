@@ -125,6 +125,17 @@ String/Array 一致性 + canonical 比较，覆盖率 96.9%。
 
 ---
 
+## 📥 Processor 分层（P8）
+
+**新增 `internal/domain/event/` + `internal/application/inbound/` + `adapter/onebot/`：**
+
+- `DomainEvent`（ID/Time/Source/Actor/Target/Message）+ `EventSource`
+- `EventNormalizer` / `EventPublisher` 接口（QQ Adapter 边界）
+- `IsSelfMention` / `NormalizeMentions`：@Bot 唯一 canonical 实现
+- OneBot serializer：`SerializeString` / `SerializeArray`（纯表示层，无业务判断）
+
+---
+
 ## 🧪 验证
 
 | 命令 | 结果 |
@@ -138,6 +149,7 @@ String/Array 一致性 + canonical 比较，覆盖率 96.9%。
 | `go test ./internal/application/media/` | ✅ 通过（69.6% coverage） |
 | `go test ./internal/application/outbound/` | ✅ 通过（90.9% coverage） |
 | `go test ./internal/application/queue/` | ✅ 通过（86.1% coverage） |
+| `go test ./internal/application/inbound/ ./adapter/onebot/` | ✅ 通过 |
 | `go test ./...` | ✅ 通过 |
 
 ---
@@ -152,4 +164,5 @@ String/Array 一致性 + canonical 比较，覆盖率 96.9%。
 <commit hash>（P5）
 <commit hash>（P6）
 <commit hash>（P7）
+<commit hash>（P8）
 ```
