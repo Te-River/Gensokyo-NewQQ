@@ -3013,14 +3013,14 @@ func postGroupMessageWithRetry(apiv2 openapi.OpenAPI, groupID string, groupMessa
 		}
 
 		resp, err = apiv2.PostGroupMessage(context.TODO(), groupID, groupMessage)
-		if err != nil && strings.Contains(err.Error(), "context deadline exceeded") {
+		if err != nil && defaultRetryPolicy.ShouldRetry(err, i) {
 			mylog.Printf("超时重试第 %d 次: %v", i+1, err)
 			if config.GetSaveError() {
 				mylog.ErrLogToFile("type", "PostGroupMessage-context-deadline-exceeded-retry-"+strconv.Itoa(i+1))
 				mylog.ErrInterfaceToFile("request", groupMessage)
 				mylog.ErrLogToFile("error", err.Error())
 			}
-			time.Sleep(1 * time.Second) // 重试间隔1秒
+			time.Sleep(defaultRetryPolicy.Backoff(i + 1))
 			continue
 		} else {
 			mylog.Printf("超时重试第 %d 次成功: %v", i+1, err)
@@ -3043,7 +3043,7 @@ func postGroupRichMediaMessageWithRetry(apiv2 openapi.OpenAPI, groupID string, r
 	retryCount := 3 // 设置最大重试次数为 3
 	for i := 0; i < retryCount; i++ {
 		resp, err = apiv2.PostGroupMessage(context.TODO(), groupID, richMediaMessage)
-		if err != nil && (strings.Contains(err.Error(), "context deadline exceeded") || strings.Contains(err.Error(), "富媒体文件上传超时")) {
+		if err != nil && defaultRetryPolicy.ShouldRetry(err, i) {
 			// 仅对超时做重试
 			mylog.Printf("富媒体超时重试第 %d 次: %v", i+1, err)
 			if config.GetSaveError() {
@@ -3051,7 +3051,7 @@ func postGroupRichMediaMessageWithRetry(apiv2 openapi.OpenAPI, groupID string, r
 				mylog.ErrInterfaceToFile("request", richMediaMessage)
 				mylog.ErrLogToFile("error", err.Error())
 			}
-			time.Sleep(3 * time.Second) // 重试间隔 3 秒
+			time.Sleep(defaultRetryPolicy.Backoff(i + 1))
 			continue
 		}
 
