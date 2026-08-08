@@ -457,7 +457,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 				mylog.Printf("发送文本私聊信息失败: %v", err)
 				mylog.Printf("%s", FormatQQError(err))
 				// 22009: 主动消息超过频控限制，记录日志 (被动回复场景无需补偿)
-				if strings.Contains(err.Error(), `"code":22009`) {
+    if IsQQError(err, 22009) {
 					mylog.Printf("私聊主动消息受限(code:22009)，消息被丢弃: %s", messageText)
 					if config.GetSaveError() {
 						mylog.ErrLogToFile("type", "PostC2CMessage-22009")
@@ -468,7 +468,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 					return "", nil
 				}
 				// 请求参数 event_id 无效，清空后重试一次
-				if strings.Contains(err.Error(), `"code":40034025`) {
+    if IsQQError(err, 40034025) {
 					groupMessage.EventID = ""
 					resp, err = apiv2.PostC2CMessage(context.TODO(), UserID, groupMessage)
 					if err != nil {
@@ -477,7 +477,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 					}
 				}
 				// 超时重试
-				if strings.Contains(err.Error(), "context deadline exceeded") {
+    if IsDeliveryTimeout(err) {
 					resp, err = postC2CMessageWithRetry(apiv2, UserID, groupMessage)
 					if err != nil {
 						return "", nil
@@ -535,7 +535,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 							}
 						}
 
-						if err != nil && strings.Contains(err.Error(), `"code":22009`) {
+      if IsQQError(err, 22009) {
 						 mylog.Printf("私聊主动消息受限(code:22009)，消息被丢弃")
 						 if config.GetSaveError() {
 						  mylog.ErrLogToFile("type", "PostC2CMessage-22009")
@@ -543,7 +543,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 						  mylog.ErrLogToFile("error", err.Error())
 						 }
 
-						} else if err != nil && strings.Contains(err.Error(), `"code":40034025`) {
+      } else if IsQQError(err, 40034025) {
 							// 请求参数 event_id 无效，清空后重试一次
 							groupMessage.EventID = ""
 							//重新为err赋值
@@ -558,7 +558,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 								}
 							}
 
-						} else if err != nil && strings.Contains(err.Error(), "context deadline exceeded") {
+      } else if IsDeliveryTimeout(err) {
 							// 仅对超时做有限次重试
 							resp, err = postC2CMessageWithRetry(apiv2, UserID, groupMessage)
 						}
@@ -583,7 +583,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 				}
 
 				// 22009: 主动消息超过频控限制
-				if err != nil && strings.Contains(err.Error(), `"code":22009`) {
+    if IsQQError(err, 22009) {
 					mylog.Printf("私聊富媒体主动消息受限(code:22009): %s", key)
 					if config.GetSaveError() {
 						mylog.ErrLogToFile("type", "PostC2CMessage-22009")
@@ -593,7 +593,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 				}
 
 				// 仅对超时做重试，使用原始富媒体消息，不再构造错误文本消息
-				if err != nil && (strings.Contains(err.Error(), "context deadline exceeded") || strings.Contains(err.Error(), "富媒体文件上传超时")) {
+    if IsDeliveryTimeout(err) {
 					message_return, err = postC2CRichMediaMessageWithRetry(apiv2, UserID, richMediaMessage)
 				}
 

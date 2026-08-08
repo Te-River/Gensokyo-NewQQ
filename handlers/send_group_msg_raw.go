@@ -3,7 +3,6 @@ package handlers
 import (
 	"context"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/hoshinonyaruko/gensokyo/callapi"
@@ -290,7 +289,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 				mylog.Printf("发送组合消息失败: %v", err)
 				mylog.Printf("%s", FormatQQError(err))
 			}
-			if err != nil && strings.Contains(err.Error(), `"code":22009`) {
+   if IsQQError(err, 22009) {
 				mylog.Printf("信息发送失败,加入到队列中,下次被动信息进行发送")
 				var pair echo.MessageGroupPair
 				pair.Group = message.Params.GroupID.(string)
@@ -334,7 +333,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 				mylog.Printf("发送文本群组信息失败: %v", err)
 				mylog.Printf("%s", FormatQQError(err))
 			}
-			if err != nil && strings.Contains(err.Error(), `"code":22009`) {
+   if IsQQError(err, 22009) {
 				mylog.Printf("信息发送失败,加入到队列中,下次被动信息进行发送")
 				var pair echo.MessageGroupPair
 				pair.Group = message.Params.GroupID.(string)
@@ -379,7 +378,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 							mylog.Printf("发送md信息失败: %v", err)
 							mylog.Printf("%s", FormatQQError(err))
 						}
-						if err != nil && strings.Contains(err.Error(), `"code":22009`) {
+      if IsQQError(err, 22009) {
 							mylog.Printf("信息发送失败,加入到队列中,下次被动信息进行发送")
 							var pair echo.MessageGroupPair
 							pair.Group = message.Params.GroupID.(string)
@@ -412,7 +411,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 						mylog.ErrLogToFile("error", err.Error())
 					}
 				}
-				if err != nil && strings.Contains(err.Error(), "context deadline exceeded") {
+    if err != nil && IsDeliveryTimeout(err) {
 					postGroupRichMediaMessageWithRetry(apiv2, message.Params.GroupID.(string), richMediaMessage)
 				}
 
@@ -434,7 +433,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 					if err != nil {
 						mylog.Printf("发送图片失败: %v", err)
 					}
-					if err != nil && strings.Contains(err.Error(), `"code":22009`) {
+     if IsQQError(err, 22009) {
 						mylog.Printf("信息发送失败,加入到队列中,下次被动信息进行发送")
 						var pair echo.MessageGroupPair
 						pair.Group = message.Params.GroupID.(string)

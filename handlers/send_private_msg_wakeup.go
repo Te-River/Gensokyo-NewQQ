@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/hoshinonyaruko/gensokyo/callapi"
@@ -235,7 +234,7 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 			}
 
 			// 富媒体上传超时重试 (复刻原逻辑)
-			if err != nil && (strings.Contains(err.Error(), "context deadline exceeded") || strings.Contains(err.Error(), "富媒体文件上传超时")) {
+   if IsDeliveryTimeout(err) {
 				// 注意：这里重试的是上传接口，不是发送接口
 				// postC2CRichMediaMessageWithRetry 是你原有代码中的函数，可以直接复用
 				// 如果那个函数没导出，可能需要复制一份改名，这里假设能调用或者逻辑一致
@@ -299,7 +298,7 @@ func postC2CWakeupMessageWithRetry(apiv2 openapi.OpenAPI, userID string, msg *dt
 		// 召回消息不需要 MsgSeq
 		resp, err = apiv2.PostC2CMessage(context.TODO(), userID, msg)
 
-		if err != nil && (strings.Contains(err.Error(), "context deadline exceeded") || strings.Contains(err.Error(), "富媒体文件上传超时")) {
+  if IsDeliveryTimeout(err) {
 			mylog.Printf("召回消息超时重试第 %d 次: %v", i+1, err)
 			if config.GetSaveError() {
 				mylog.ErrLogToFile("type", "PostC2CWakeup-Retry-"+strconv.Itoa(i+1))
