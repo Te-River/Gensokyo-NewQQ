@@ -41,8 +41,8 @@ STATUS: PASS
   全部基于 yaml.Node 结构化操作，无字符串 contains / 行号 / 缩进 / 手工 append。
 - **Schema 校验错误带路径**：如 `config.idmap.grpc_port: must be between 1 and 65535`、
   `config.transport.post_url[0]: invalid http(s) URL`、`config.qq.app_id: must not be empty`。
-- **Semantic 校验**：`use_self_crt` 开启但 crt/key 缺失或文件不存在、`oss_type=4/10` 但 COS/Nature
-  凭据缺失、`lotus` 开启但 `server_dir`/`port` 为空。
+- **Semantic 校验**：`use_self_crt` 开启但 crt/key 缺失或文件不存在、`oss_type=4`（cos）但凭据缺失、
+  `lotus` 开启但 `server_dir`/`port` 为空。（nature=10 使用公开共享凭据，开箱即用，无需校验）
 - **Immutable Snapshot**：`Config()` 返回深拷贝（slice 独立底层数组），外部篡改不影响快照。
 - **Atomic Write**：先校验内容可解析 → 写 tmp + fsync → 拷贝 `.bak` 备份 → rename 原子替换；
   拒绝用坏配置覆盖有效配置，失败时原配置可用。

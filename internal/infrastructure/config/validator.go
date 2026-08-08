@@ -77,16 +77,12 @@ func ValidateSemantic(dto ConfigDTO) error {
 	}
 
 	// 图床 provider 开启但凭据缺失
+	// 注：nature（oss_type=10）使用公开共享凭据，开箱即用，无需校验。
 	switch s.OssType {
 	case 4: // cos 自签
 		if s.COS.SecretID == "" || s.COS.SecretKey == "" {
 			return newValidationError("config.media.image_provider",
 				"cos enabled but secret_id/secret_key missing")
-		}
-	case 10: // nature
-		if s.Nature.SecretID == "" || s.Nature.SecretKey == "" {
-			return newValidationError("config.media.image_provider",
-				"nature enabled but secret_id/secret_key missing")
 		}
 	}
 

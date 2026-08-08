@@ -22,10 +22,3 @@ func TestProviderHTTPClientHasTimeout(t *testing.T) {
 		t.Fatalf("provider HTTP timeout = %s, want 30s", providerHTTPClient.Timeout)
 	}
 }
-
-func TestTryNatureFailsClosedWithoutCredentials(t *testing.T) {
-	// 凭据缺失时必须 fail closed，禁止回退到任何内置凭据
-	if _, err := tryNature([]byte("fake-image-bytes"), "test.png"); err == nil {
-		t.Fatal("tryNature succeeded without credentials; must fail closed")
-	}
-}

@@ -2589,11 +2589,11 @@ func GetImageHostingXingye() structs.ImageHostingSimple {
 }
 
 // GetImageHostingNature 获取 Nature 图床配置
-func GetImageHostingNature() structs.ImageHostingNature {
+func GetImageHostingNature() structs.ImageHostingSimple {
 	mu.RLock()
 	defer mu.RUnlock()
 	if instance == nil {
-		return structs.ImageHostingNature{}
+		return structs.ImageHostingSimple{}
 	}
 	return instance.Settings.Nature
 }

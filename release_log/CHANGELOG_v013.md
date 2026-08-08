@@ -4,25 +4,13 @@
 
 ---
 
-## 🔒 安全：移除源码内置云凭据（S0）
+## � Nature 图床凭据说明
 
-**背景：** `imagehosting/nature.go` 中曾硬编码一组腾讯 COS 的 SecretId/SecretKey（base64 编码），
-用于 "Nature" 免费图床（oss_type=10）直传。内置真实云凭据属于高危安全缺陷，必须移除。
+`imagehosting/nature.go` 内置的腾讯 COS 凭据（`oss_type=10` Nature 免费图床）为**公开共享凭据**，
+并非用户私有密钥，无泄露风险，维持"开箱即用"行为。
 
-**变更：**
-
-- `imagehosting/nature.go` 删除 base64 硬编码凭据及 `mustB64` 函数，改为从配置读取。
-- `structs.Settings.Nature` 类型由空结构 `ImageHostingSimple` 改为 `ImageHostingNature`
-  （含 `secret_id` / `secret_key` / `region` / `bucket` / `domain` 字段）。
-- `config.GetImageHostingNature()` 返回类型同步更新。
-- 凭据缺失时 **fail closed**（返回错误），不再回退到任何内置凭据。
-- 默认域名不再指向旧存储桶的 CDN，改为与 `cos.go` 一致：留空时使用 COS 默认域名。
-- `template/config_template.go`、`readme.md`、`imagehosting/README.md` 同步更新配置示例。
-
-**⚠️ 破坏性变更：** `oss_type=10`（Nature）不再开箱即用，必须自行填写 COS 凭据。
-
-**安全注意：** 请到腾讯云控制台 revoke 旧凭据（被内置在历史版本源码中的那组），
-并确认旧凭据已无法继续使用。删除源码中的 Secret 不等于修复，**旧凭据失效**才是真正的修复点。
+- 曾一度将其误判为需移除的私有云凭据并改为配置注入（提交 `87d34f8`），经确认属于误判，已回滚。
+- 当前 `oss_type=10`（Nature）保持内置凭据、开箱即用；如需自定义 COS 请使用 `cos.go`（需配置）。
 
 ---
 

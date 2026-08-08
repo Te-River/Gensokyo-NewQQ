@@ -66,7 +66,7 @@ type Settings struct {
 	ChatGLM   ImageHostingSimple    `yaml:"chatglm"`
 	Ukaka     ImageHostingSimple    `yaml:"ukaka"`
 	Xingye    ImageHostingSimple    `yaml:"xingye"`
-	Nature    ImageHostingNature    `yaml:"nature"`
+	Nature    ImageHostingSimple    `yaml:"nature"`
 	//正向ws设置
 	WsServerPath   string `yaml:"ws_server_path"`
 	EnableWsServer bool   `yaml:"enable_ws_server"`
@@ -251,19 +251,9 @@ type ImageHostingQQChannel struct {
 	Token     string `yaml:"token"`
 }
 
-// ImageHostingSimple 开箱即用的免费图床（ChatGLM / Ukaka / 星野）
+// ImageHostingSimple 开箱即用的免费图床（ChatGLM / Ukaka / 星野 / Nature）
 // 无需配置，选中对应 oss_type 即可使用
 type ImageHostingSimple struct{}
-
-// ImageHostingNature Nature 腾讯 COS 直传图床配置
-// 仅当 oss_type=10 时生效。凭据必须通过配置注入，禁止硬编码在源码中。
-type ImageHostingNature struct {
-	SecretID  string `yaml:"secret_id"`
-	SecretKey string `yaml:"secret_key"`
-	Region    string `yaml:"region"`
-	Bucket    string `yaml:"bucket"`
-	Domain    string `yaml:"domain"`
-}
 
 type InterfaceBody struct {
 	Content        string   `json:"content"`

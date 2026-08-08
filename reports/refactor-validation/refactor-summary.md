@@ -1,4 +1,4 @@
-# 石山重构 — 阶段总结（S0 + P2~P13 + V1~V5）
+# 石山重构 — 阶段总结（P2~P13 + V1~V5）
 
 ```
 STATUS: 基础设施阶段全部完成；生产切换 + 真实联调待独立任务执行
@@ -27,7 +27,7 @@ internal/infrastructure/config  →  Snapshot/Manager
 
 | 阶段 | 提交 | 核心交付 |
 |------|------|----------|
-| S0 | `87d34f8` | 移除 Nature 内置云凭据，配置注入 + fail closed |
+| S0 | `87d34f8` | Nature 图床凭据为公开共享凭据；误判为私有密钥的处理已回滚（见下） |
 | P2 | `15cef7c` | Config Snapshot 管线（parse→migrate→validate→snapshot→atomic write→debounce） |
 | P3 | `cb75b38` | Typed Identity + Resolver；长度启发式归零 |
 | P4 | `b751e65` | ParsedMessage/MessagePart；String/Array 统一；96.9% coverage |
@@ -40,6 +40,10 @@ internal/infrastructure/config  →  Snapshot/Manager
 | P11 | `8cb1c6b` | 新架构 config 依赖归零 + 子配置构造注入 |
 | P12 | `a305fea` | botgo/go-silk 边界隔离 + fork inventory + generate 脚本 |
 | P13 | （本次） | 删除条件未满足 → BLOCKED（非破坏收尾完成） |
+
+> **关于 S0（Nature 凭据）：** `imagehosting/nature.go` 内置的腾讯 COS 凭据是**公开共享凭据**
+> （Nature 免费图床，非用户私有密钥），无泄露风险。最初误判为需移除的私有密钥并做了配置注入
+> （commit `87d34f8`），经确认属误判，**已回滚**，`oss_type=10` 维持内置凭据、开箱即用。
 
 ## 核心业务层依赖检查（计划目标）
 

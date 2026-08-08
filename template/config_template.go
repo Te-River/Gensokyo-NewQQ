@@ -274,12 +274,7 @@ settings:
   chatglm:                        #智谱免费图床（oss_type=7，开箱即用）
   ukaka:                          #Ukaka免费图床（oss_type=8，开箱即用）
   xingye:                         #星野免费图床（oss_type=9，开箱即用）
-  nature:                         #Nature腾讯COS直传（oss_type=10，需配置secret_id/secret_key）
-    secret_id: ""                 #腾讯云 API SecretId
-    secret_key: ""                #腾讯云 API SecretKey
-    region: "ap-nanjing"          #存储桶地域
-    bucket: ""                    #存储桶名称
-    domain: ""                    #自定义域名（留空使用COS默认域名）
+  nature:                         #Nature腾讯COS直传（oss_type=10，密钥内置，开箱即用）
 
 `
 const Logo = `
