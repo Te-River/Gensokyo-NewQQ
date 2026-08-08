@@ -9,6 +9,7 @@ import (
 	"github.com/hoshinonyaruko/gensokyo/callapi"
 	"github.com/hoshinonyaruko/gensokyo/config"
 	"github.com/hoshinonyaruko/gensokyo/idmap"
+	"github.com/hoshinonyaruko/gensokyo/internal/domain/identity"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/tencent-connect/botgo/dto"
 	"github.com/tencent-connect/botgo/openapi"
@@ -43,10 +44,10 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 		return "", nil
 	}
 
-	// 如果不是 32 位 OpenID，尝试从 idmap 转换（虚拟数字 ID → 真实 OpenID）
-	if len(userID) != 32 {
+	// 如果不是 OpenID，尝试从 idmap 转换（虚拟数字 ID → 真实 OpenID）
+	if !identity.IsOpenID(userID) {
 		realID, err := idmap.RetrieveRowByIDv2(userID)
-		if err == nil && len(realID) == 32 {
+		if err == nil && identity.IsOpenID(realID) {
 			mylog.Printf("send_private_msg_wakeup: 虚拟ID %s → 真实OpenID %s", userID, realID)
 			userID = realID
 		} else {

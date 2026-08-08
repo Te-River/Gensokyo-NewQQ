@@ -14,6 +14,7 @@ import (
   "github.com/hoshinonyaruko/gensokyo/config"
   "github.com/hoshinonyaruko/gensokyo/echo"
   "github.com/hoshinonyaruko/gensokyo/idmap"
+  "github.com/hoshinonyaruko/gensokyo/internal/domain/identity"
   "github.com/hoshinonyaruko/gensokyo/mylog"
   "github.com/tencent-connect/botgo/dto"
   "github.com/tencent-connect/botgo/dto/keyboard"
@@ -83,7 +84,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 		}
 	}
 
-	if message.Params.UserID != nil && len(message.Params.UserID.(string)) != 32 {
+	if message.Params.UserID != nil && !identity.IsOpenID(message.Params.UserID.(string)) {
 		if msgType == "" && message.Params.UserID != nil && checkZeroUserID(message.Params.UserID) {
 			msgType = GetMessageTypeByUserid(config.GetAppIDStr(), message.Params.UserID)
 		}
@@ -108,7 +109,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 	var idInt64 int64
 	var err error
 
-	if message.Params.UserID != nil && len(message.Params.UserID.(string)) == 32 {
+	if message.Params.UserID != nil && identity.IsOpenID(message.Params.UserID.(string)) {
 		idInt64, err = idmap.GenerateRowID(message.Params.UserID.(string), 9)
 		// 临时的
 		msgType = "group_private"
@@ -143,7 +144,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 	case "group_private", "group":
 		//私聊信息
 		var UserID string
-		if len(message.Params.UserID.(string)) != 32 {
+		if !identity.IsOpenID(message.Params.UserID.(string)) {
 			if config.GetIdmapPro() {
 				//还原真实的userid
 				//mylog.Printf("group_private:%v", message.Params.UserID.(string))
@@ -192,7 +193,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 		if messageID == "2000" {
 			messageID = ""
 			mylog.Println("通过lazymsgid发送群私聊主动信息,每月可发送1次")
-			if len(message.Params.UserID.(string)) != 32 {
+			if !identity.IsOpenID(message.Params.UserID.(string)) {
 				eventID = GetEventIDByUseridOrGroupid(config.GetAppIDStr(), message.Params.UserID)
 			} else {
 				eventID = GetEventIDByUseridOrGroupidv2(config.GetAppIDStr(), message.Params.UserID)

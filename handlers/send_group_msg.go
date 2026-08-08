@@ -22,6 +22,7 @@ import (
 	"github.com/hoshinonyaruko/gensokyo/config"
 	"github.com/hoshinonyaruko/gensokyo/echo"
 	"github.com/hoshinonyaruko/gensokyo/idmap"
+	"github.com/hoshinonyaruko/gensokyo/internal/domain/identity"
 	"github.com/hoshinonyaruko/gensokyo/imagehosting"
 	"github.com/hoshinonyaruko/gensokyo/images"
 	"github.com/hoshinonyaruko/gensokyo/mdutil"
@@ -109,7 +110,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		}
 	}
 
-	if message.Params.GroupID != nil && len(message.Params.GroupID.(string)) != 32 {
+	if message.Params.GroupID != nil && !identity.IsOpenID(message.Params.GroupID.(string)) {
 		if msgType == "" && message.Params.GroupID != nil && checkZeroGroupID(message.Params.GroupID) {
 			msgType = GetMessageTypeByGroupid(config.GetAppIDStr(), message.Params.GroupID)
 		}
@@ -141,9 +142,9 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 	var err error
 	var retmsg string
 
-	if len(message.Params.GroupID.(string)) == 32 {
+	if identity.IsOpenID(message.Params.GroupID.(string)) {
 		msgType = "group"
-	} else if message.Params.UserID != nil && len(message.Params.UserID.(string)) == 32 {
+	} else if message.Params.UserID != nil && identity.IsOpenID(message.Params.UserID.(string)) {
 		msgType = "group_private"
 	} else {
 		if message.Params.GroupID != "" {
@@ -153,7 +154,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		}
 	}
 
-	if message.Params.GroupID != nil && len(message.Params.GroupID.(string)) != 32 {
+	if message.Params.GroupID != nil && !identity.IsOpenID(message.Params.GroupID.(string)) {
 		// stringob11通过字段判断类型,不需要递归
 		if !config.GetStringOb11() {
 			//设置递归 对直接向gsk发送action时有效果
@@ -212,7 +213,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		}
 
 		var originalGroupID, originalUserID string
-		if len(message.Params.GroupID.(string)) != 32 {
+		if !identity.IsOpenID(message.Params.GroupID.(string)) {
 			// 检查UserID是否为nil
 			if message.Params.UserID != nil && config.GetIdmapPro() && message.Params.UserID.(string) != "" && message.Params.UserID.(string) != "0" {
 				// 如果UserID不是nil且配置为使用Pro版本，则调用RetrieveRowByIDv2Pro

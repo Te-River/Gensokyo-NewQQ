@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hoshinonyaruko/gensokyo/config"
+	ididentity "github.com/hoshinonyaruko/gensokyo/internal/domain/identity"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"go.etcd.io/bbolt"
 )
@@ -272,7 +273,7 @@ func lazyMigrateIdentity(virtualID string) (string, error) {
 
 	// 写入新库，下次就不用查旧库了
 	rawKey := stripUinPrefix(id)
-	if len(rawKey) == 32 {
+	if ididentity.IsOpenID(rawKey) {
 		// 32位 OpenID，写入新库
 		writeBackIdentity(virtualID, id)
 	}

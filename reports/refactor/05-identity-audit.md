@@ -27,3 +27,14 @@
 ## 迁移顺序
 
 先增加纯函数解析器和表驱动测试，再把 send private/group 接入；随后统一入站 mention 与出站 mention；最后收敛旧 idmap API。没有完成兼容测试前不得删除长度路径。
+
+---
+
+## 收敛状态（P3 已完成，2026-08-08）
+
+- 新增 `internal/domain/identity/`（类型系统 + `IdentityResolver` 接口 + `ResolvedTarget`）
+  与 `adapter/identity/`（基于 idmap 的真实 Resolver）。
+- 全仓 `len(id)==32 / !=32` 身份判断**已归零**，只剩 `identity.IsOpenID`（legacy adapter，`classify.go`）。
+- handlers 中 `params.GroupID = realOpenID` 式原字段覆盖遗留于撤回/还原路径，
+  属 P13 重写范围（改为 `resolver.Resolve`）。
+- 详细报告：`reports/refactor-validation/p3-identity.md`。

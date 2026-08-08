@@ -9,6 +9,7 @@ import (
 	"github.com/hoshinonyaruko/gensokyo/config"
 	"github.com/hoshinonyaruko/gensokyo/echo"
 	"github.com/hoshinonyaruko/gensokyo/idmap"
+	"github.com/hoshinonyaruko/gensokyo/internal/domain/identity"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/tencent-connect/botgo/dto"
 	"github.com/tencent-connect/botgo/dto/keyboard"
@@ -55,7 +56,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 		}
 	}
 
-	if message.Params.GroupID != nil && len(message.Params.GroupID.(string)) != 32 {
+	if message.Params.GroupID != nil && !identity.IsOpenID(message.Params.GroupID.(string)) {
 		if msgType == "" && message.Params.GroupID != nil && checkZeroGroupID(message.Params.GroupID) {
 			msgType = GetMessageTypeByGroupid(config.GetAppIDStr(), message.Params.GroupID)
 		}
@@ -82,11 +83,11 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 	var err error
 	var retmsg string
 
-	if len(message.Params.GroupID.(string)) == 32 {
+	if identity.IsOpenID(message.Params.GroupID.(string)) {
 		idInt64, err = idmap.GenerateRowID(message.Params.GroupID.(string), 9)
 		// 临时的
 		msgType = "group"
-	} else if message.Params.UserID != nil && len(message.Params.UserID.(string)) == 32 {
+	} else if message.Params.UserID != nil && identity.IsOpenID(message.Params.UserID.(string)) {
 		idInt64, err = idmap.GenerateRowID(message.Params.UserID.(string), 9)
 		// 临时的
 		msgType = "group_private"
@@ -122,7 +123,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 		var SSM bool
 
 		var originalGroupID, originalUserID string
-		if len(message.Params.GroupID.(string)) != 32 {
+		if !identity.IsOpenID(message.Params.GroupID.(string)) {
 			// 检查UserID是否为nil
 			if message.Params.UserID != nil && config.GetIdmapPro() && message.Params.UserID.(string) != "" && message.Params.UserID.(string) != "0" {
 				// 如果UserID不是nil且配置为使用Pro版本，则调用RetrieveRowByIDv2Pro

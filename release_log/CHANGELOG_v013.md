@@ -52,6 +52,25 @@
 
 ---
 
+## 🆔 Identity 类型化（P3）
+
+**背景：** 旧代码用 `len(id)==32` 长度启发式推断 OpenID/虚拟 ID，身份语义散落各处。
+
+**新增 `internal/domain/identity/`：**
+
+- `types.go`：`OpenID` / `OpenGroupID` / `VirtualUserID` / `VirtualGroupID` / `UIN` / `AppID` 类型 + 转换
+- `classify.go`：legacy adapter `IsOpenID` / `IsVirtualID`（长度启发式唯一收敛点）
+- `resolver.go`：`IdentityResolver` 接口 + `UserRef`/`GroupRef`/`ResolvedUser`/`ResolvedGroup`
+- `target.go`：`TargetKind`（Group/Private）+ `ResolvedTarget`
+- 新增 `adapter/identity/`：基于 idmap 的真实 Resolver 实现
+
+**长度启发式收敛：** 全仓 `len(id)==32 / !=32` 身份判断归零（handlers 7 文件 + idmap 3 文件），
+全部替换为 `identity.IsOpenID(...)`（纯等价，零行为差异）。
+
+**遗留（P13 处理）：** 撤回/还原路径的 `params.GroupID = realOpenID` 式字段覆盖。
+
+---
+
 ## 🧪 验证
 
 | 命令 | 结果 |
@@ -60,6 +79,7 @@
 | `go vet ./...` | ✅ 通过 |
 | `go test ./imagehosting/ ./config/ ./structs/ ./template/` | ✅ 通过 |
 | `go test ./internal/infrastructure/config/` | ✅ 通过（24 用例） |
+| `go test ./internal/domain/identity/ ./adapter/identity/` | ✅ 通过（12 用例） |
 | `go test ./...` | ✅ 通过 |
 
 ---
@@ -69,4 +89,5 @@
 ```
 <commit hash>（S0）
 <commit hash>（P2）
+<commit hash>（P3）
 ```

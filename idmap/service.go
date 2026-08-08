@@ -23,6 +23,7 @@ import (
   "time"
 
 	"github.com/hoshinonyaruko/gensokyo/config"
+	ididentity "github.com/hoshinonyaruko/gensokyo/internal/domain/identity"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	proto "github.com/hoshinonyaruko/gensokyo/proto"
 	"github.com/hoshinonyaruko/gensokyo/structs"
@@ -223,7 +224,7 @@ func CleanBucket(bucketName string) {
 
 			// 检查值id的长度 这里是正向键
 			id := string(k)
-			if len(id) != 32 {
+			if !ididentity.IsOpenID(id) {
 				if err := c.Delete(); err != nil {
 					return err
 				}
@@ -239,7 +240,7 @@ func CleanBucket(bucketName string) {
 				}
 				// 这里检查反向键是否是32位
 				id := string(v)
-				if len(id) != 32 {
+				if !ididentity.IsOpenID(id) {
 					if err := b.Delete(k); err != nil {
 						return err
 					}
@@ -490,7 +491,7 @@ func StoreID(id string) (int64, error) {
 	}
 
 	// 双写到新库
-	if err == nil && len(id) == 32 {
+	if err == nil && ididentity.IsOpenID(id) {
 		newDBStore(id, newRow)
 	}
 
