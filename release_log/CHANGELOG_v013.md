@@ -156,7 +156,23 @@ String/Array 一致性 + canonical 比较，覆盖率 96.9%。
 
 ---
 
-## 🧪 验证
+## 🔌 全局配置依赖收口（P11）
+
+- 验证 `internal/` + `adapter/` 全部无 `config` import（domain/application 干净）
+- outbound 增加 `OutboundConfig` 构造注入（P11.3 小配置接口示范）
+- 记录全仓 `config.GetXxx()` 分布 inventory 与 reload 静态/动态影响范围
+
+---
+
+## � SDK / Generated 边界隔离（P12）
+
+- 新增 `adapter/qq/`（botgo → typed identity 转换边界）；验证 domain/application 无 botgo/go-silk
+- proto 生成代码已有 DO NOT EDIT 标注；新增 `scripts/generate.{ps1,sh}`
+- 新增 fork inventory：`docs/forks/{botgo,go-silk}.md`
+
+---
+
+## �🧪 验证
 
 | 命令 | 结果 |
 |------|------|
@@ -189,4 +205,6 @@ String/Array 一致性 + canonical 比较，覆盖率 96.9%。
 <commit hash>（P8）
 <commit hash>（P9）
 <commit hash>（P10）
+<commit hash>（P11）
+<commit hash>（P12）
 ```
