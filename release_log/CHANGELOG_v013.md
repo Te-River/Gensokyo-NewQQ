@@ -4,7 +4,7 @@
 
 ---
 
-## � Nature 图床凭据说明
+## Nature 图床凭据说明
 
 `imagehosting/nature.go` 内置的腾讯 COS 凭据（`oss_type=10` Nature 免费图床）为**公开共享凭据**，
 并非用户私有密钥，无泄露风险，维持"开箱即用"行为。
@@ -152,7 +152,7 @@ String/Array 一致性 + canonical 比较，覆盖率 96.9%。
 
 ---
 
-## � SDK / Generated 边界隔离（P12）
+## SDK / Generated 边界隔离（P12）
 
 - 新增 `adapter/qq/`（botgo → typed identity 转换边界）；验证 domain/application 无 botgo/go-silk
 - proto 生成代码已有 DO NOT EDIT 标注；新增 `scripts/generate.{ps1,sh}`
@@ -175,7 +175,7 @@ String/Array 一致性 + canonical 比较，覆盖率 96.9%。
 - V5 真实联调：BLOCKED（需用户侧 QQ/OneBot 环境）
 
 ---
-## �🧪 验证
+## 🧪 验证
 
 | 命令 | 结果 |
 |------|------|
