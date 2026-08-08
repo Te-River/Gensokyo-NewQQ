@@ -10,6 +10,13 @@ type SendResult struct {
 	MessageID string
 }
 
+// OutboundConfig 出站服务需要的子配置（P11.3：Service 只接受需要的子配置，
+// 而非全局 Settings；由 bootstrap 从 Snapshot 提取注入）。
+type OutboundConfig struct {
+	// FallbackToPassive 全局默认：主动失败时是否回退被动补发。
+	FallbackToPassive bool
+}
+
 // OutboundService 统一出站发送服务。
 // 群聊/私聊/raw/wakeup 的差异由 DeliveryPolicy + QQ Adapter 承担，此处只有一条主链。
 type OutboundService struct {
@@ -19,9 +26,18 @@ type OutboundService struct {
 	fallbackToPassive bool
 }
 
-// NewService 创建出站服务。
+// NewService 创建出站服务（默认配置）。
 func NewService(sender QQSender, retry RetryPolicy) *OutboundService {
-	return &OutboundService{sender: sender, retry: retry}
+	return NewServiceWithConfig(sender, retry, OutboundConfig{})
+}
+
+// NewServiceWithConfig 创建出站服务（构造注入子配置）。
+func NewServiceWithConfig(sender QQSender, retry RetryPolicy, cfg OutboundConfig) *OutboundService {
+	return &OutboundService{
+		sender:            sender,
+		retry:             retry,
+		fallbackToPassive: cfg.FallbackToPassive,
+	}
 }
 
 // Send 发送一条出站指令。
