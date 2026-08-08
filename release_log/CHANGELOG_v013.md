@@ -146,6 +146,16 @@ String/Array 一致性 + canonical 比较，覆盖率 96.9%。
 
 ---
 
+## 🗄 idmap/echo 仓储化（P10）
+
+**新增 `internal/application/state/`：**
+
+- `SequenceRepository`：msgseq 只允许原子 Next（内存实现）
+- `MessageContextRepository`：owner+key 隔离 + TTL 过期校验 + 显式 Start/Close 清理
+- 统一 TTL 常量；`IdentityRepository` 复用 P3 的 IdentityResolver
+
+---
+
 ## 🧪 验证
 
 | 命令 | 结果 |
@@ -161,6 +171,7 @@ String/Array 一致性 + canonical 比较，覆盖率 96.9%。
 | `go test ./internal/application/queue/` | ✅ 通过（86.1% coverage） |
 | `go test ./internal/application/inbound/ ./adapter/onebot/` | ✅ 通过 |
 | `go test ./internal/application/action/` | ✅ 通过（87.5% coverage） |
+| `go test ./internal/application/state/` | ✅ 通过（97.5% coverage） |
 | `go test ./...` | ✅ 通过 |
 
 ---
@@ -177,4 +188,5 @@ String/Array 一致性 + canonical 比较，覆盖率 96.9%。
 <commit hash>（P7）
 <commit hash>（P8）
 <commit hash>（P9）
+<commit hash>（P10）
 ```
