@@ -90,6 +90,19 @@ String/Array 一致性 + canonical 比较，覆盖率 96.9%。
 
 ---
 
+## 🖼 媒体管线统一（P5）
+
+**新增 `internal/application/media/`：**
+
+- `MediaService.Prepare(ctx, source, policy)`：Local/URL/Base64/Bytes 统一入口
+- `SafeHTTPFetcher`：timeout / max bytes / 重定向限制 / SSRF 检查 / 状态码 / 签名；大媒体流式落临时文件
+- Base64 decode 前长度限制（防 OOM）；图片尺寸/像素校验（防解压炸弹）
+- 本地文件：AllowedDirs + 扩展名 + regular + 大小校验（防任意文件读取）
+- `PreparedMedia.Close()` 临时文件生命周期（幂等）+ 测试
+- `MediaUploader` / `AudioTranscoder` 接口边界（云 SDK / FFmpeg / go-silk 封装点）
+
+---
+
 ## 🧪 验证
 
 | 命令 | 结果 |
@@ -100,6 +113,7 @@ String/Array 一致性 + canonical 比较，覆盖率 96.9%。
 | `go test ./internal/infrastructure/config/` | ✅ 通过（24 用例） |
 | `go test ./internal/domain/identity/ ./adapter/identity/` | ✅ 通过（12 用例） |
 | `go test ./internal/domain/message/` | ✅ 通过（96.9% coverage） |
+| `go test ./internal/application/media/` | ✅ 通过（69.6% coverage） |
 | `go test ./...` | ✅ 通过 |
 
 ---
@@ -111,4 +125,5 @@ String/Array 一致性 + canonical 比较，覆盖率 96.9%。
 <commit hash>（P2）
 <commit hash>（P3）
 <commit hash>（P4）
+<commit hash>（P5）
 ```
