@@ -133,7 +133,57 @@ BindIdentityToVuin(ruin:QQ:0:2870338968, 10001)
 
 解绑后该 OpenID 彻底无映射，下次 `storeIdentity` 会重新分配唯一虚拟 ID。
 
-> **2026-08-01 修复：** `ForceUnbindID` 原仅接受 OpenID 入参，但用户实际常传虚拟 ID（row 值），导致查正向 `uin:<虚拟ID>` 找不到直接返回，`unboundCount=0`（表现为 `getid type=18` 返回 false）。现已支持双形式入参：纯数字视为虚拟 ID，先反查 OpenID 再清理；非纯数字视为 OpenID 直接清理。同时去掉"正向条目存在检查"的提前返回，即便正向已被其他路径删除，也要扫删残留逆向条目，确保彻底清理。
+> **2026-08-01 修复：** `ForceUnbindID` 原仅接受 OpenID 入参，但用户实际常传虚拟 ID（row 值），导致查正向 `uin:<虚拟ID>` 找不到直接返回，`unboundCount=0`（表现为 `getid type=18` 返回 false）。现已支持双形式入参：纯数字视为虚拟 ID，先反查 OpenID 再清理；非纯数字视为 OpenID 直接清理。同时去掉“正向条目存在检查”的提前返回，即便正向已被其他路径删除，也要扫删残留逆向条目，确保彻底清理。
+
+## 批量导出接口
+
+迁移调试或数据核查时，可一次性导出所有身份映射：
+
+| 工具 | 调用方式 | 行为 |
+|------|---------|------|
+| `ListAllIdentities()` | Go 内部 | 返回 `*IdentitySnapshot`，包含所有 OpenID <-> 虚拟 ID 映射及用户名缓存 |
+| `getid type=19` | HTTP API | `GET /getid?type=19`，返回所有身份映射的 JSON 快照 |
+
+**调用示例：**
+
+```bash
+# 本地访问（无 lotus_password 时）
+curl http://127.0.0.1:15630/getid?type=19
+
+# 带认证（有 lotus_password 时，需计算 HMAC 签名）
+curl "http://<server>:<port>/getid?type=19&timestamp=<ts>&token=<hmac>"
+```
+
+**响应示例：**
+
+```json
+{
+  "mappings": [
+    {"real_id": "ABC123DEF456...", "virtual_id": 10001, "username": "张三"},
+    {"real_id": "789GHI012JKL...", "virtual_id": 10002, "username": "李四"},
+    {"real_id": "MNO345PQR678...", "virtual_id": 10003, "username": ""}
+  ],
+  "count": 3,
+  "timestamp": 1723190400
+}
+```
+
+**字段说明：**
+- `real_id`：QQ 官方 OpenID（已去除内部 UIN 前缀）
+- `virtual_id`：Gensokyo 分配的虚拟数字 ID（下游 OneBot 使用）
+- `username`：用户名缓存（入站时自动缓存，10 分钟 TTL，可能为空）
+- `count`：映射总数
+- `timestamp`：快照生成时间（Unix 时间戳，秒）
+
+**快照机制：**
+- 接口使用 bbolt MVCC 事务，在请求到达时生成一致性快照
+- 即使遍历期间有其他消息触发新的映射写入，也不影响本次导出结果
+- `timestamp` 字段可用于判断数据新鲜度
+
+**注意事项：**
+- type=19 不走 lotus/gRPC 远程调用，始终查询本地 identityDB
+- 受 `IDMapAuthMiddleware` 保护：有 `lotus_password` 时需 HMAC 认证，无密码时仅允许本地访问
+- 数据量较大时响应可能较慢，建议仅在调试时使用
 
 ## msgid-map
 

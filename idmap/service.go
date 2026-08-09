@@ -2467,3 +2467,90 @@ func ForceUnbindID(openIDOrRow string) (int, error) {
 
 	return unboundCount, nil
 }
+
+// IdentityMapping 表示一条身份映射记录
+type IdentityMapping struct {
+	RealID    string `json:"real_id"`    // OpenID（去除 uin: 前缀）
+	VirtualID int64  `json:"virtual_id"` // 虚拟数字 ID
+	Username  string `json:"username"`   // 用户名缓存（可能为空）
+}
+
+// IdentitySnapshot 身份映射快照
+type IdentitySnapshot struct {
+	Mappings  []IdentityMapping `json:"mappings"`
+	Count     int               `json:"count"`
+	Timestamp int64             `json:"timestamp"` // 快照生成时间（Unix 时间戳）
+}
+
+// ListAllIdentities 一次性导出所有身份映射（OpenID <-> 虚拟 ID）
+// 使用 bbolt MVCC 事务快照，确保数据一致性
+func ListAllIdentities() (*IdentitySnapshot, error) {
+	// 只在 identityDB 未初始化时才调用 initNewDBs()
+	// 这样测试时可以预先设置 identityDB
+	if identityDB == nil {
+		initNewDBs()
+	}
+
+	ts := time.Now().Unix()
+	var mappings []IdentityMapping
+
+	err := identityDB.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(IdentityBucketName))
+		if b == nil {
+			return nil
+		}
+
+		return b.ForEach(func(k, v []byte) error {
+			key := string(k)
+
+			// 跳过非正向映射条目
+			// 1. 反向映射（row- 或 uin:row- 前缀）
+			if strings.HasPrefix(key, "row-") || strings.HasPrefix(key, "uin:row-") {
+				return nil
+			}
+			// 2. 计数器
+			if key == IdentityCounterKey || key == CounterKey {
+				return nil
+			}
+			// 3. 迁移标记
+			if key == migrationMarkerKey {
+				return nil
+			}
+			// 4. 复合键（包含 :）
+			if strings.Contains(key, ":") {
+				return nil
+			}
+
+			// 只处理 value 长度为 8 字节的条目（正向映射：OpenID -> uint64 虚拟 ID）
+			if len(v) != 8 {
+				return nil
+			}
+
+			// 解析虚拟 ID
+			virtualID := int64(binary.BigEndian.Uint64(v))
+
+			// 去除 UIN 前缀得到纯 OpenID
+			realID := stripUinPrefix(key)
+
+			// 获取用户名缓存
+			username := GetUserName(strconv.FormatInt(virtualID, 10))
+
+			mappings = append(mappings, IdentityMapping{
+				RealID:    realID,
+				VirtualID: virtualID,
+				Username:  username,
+			})
+			return nil
+		})
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to list identities: %w", err)
+	}
+
+	return &IdentitySnapshot{
+		Mappings:  mappings,
+		Count:     len(mappings),
+		Timestamp: ts,
+	}, nil
+}

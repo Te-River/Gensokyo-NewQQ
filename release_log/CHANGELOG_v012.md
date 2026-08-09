@@ -104,6 +104,34 @@
 
 ---
 
+## 🆕 新增接口
+
+### idmap 批量身份映射导出（`/getid?type=19`）
+
+**文件：** `idmap/service.go`、`server/getIDHandler.go`
+
+新增 `GET /getid?type=19` 接口，一次性导出所有身份映射（OpenID <-> 虚拟 ID），方便迁移调试和数据核查。
+
+**新增结构体：**
+- `IdentityMapping`：单条映射记录（`real_id`、`virtual_id`、`username`）
+- `IdentitySnapshot`：快照响应（`mappings`、`count`、`timestamp`）
+
+**新增函数：**
+- `ListAllIdentities() (*IdentitySnapshot, error)`：遍历 identityDB 导出所有正向映射
+
+**快照机制：**
+- 使用 bbolt MVCC `View` 事务，在请求到达时生成一致性快照
+- 即使遍历期间有其他 goroutine 写入 identityDB，也不影响本次导出结果
+- `timestamp` 字段记录快照生成时间（Unix 时间戳，秒）
+
+**注意事项：**
+- type=19 不走 lotus/gRPC 远程调用，始终查询本地 identityDB
+- 受 `IDMapAuthMiddleware` 保护（lotus password 或本地回环限制）
+
+详见 [docs/idmap.md](./docs/idmap.md#批量导出接口)。
+
+---
+
 ## 🏗 分阶段重构基础设施（PR #49）
 
 **说明：** 本轮重构在旧代码旁新增 `internal/` 分层架构包（双轨并存，未接入生产），生产路径（handlers / Processor / callapi / idmap / echo）行为完全不变。

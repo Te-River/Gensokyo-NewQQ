@@ -362,6 +362,15 @@ func GetIDHandler(c *gin.Context) {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "success", "unbound_count": unboundCount})
+	case 19:
+		// 批量导出所有身份映射（OpenID <-> 虚拟 ID）
+		// 用途：迁移调试或数据核查时，一次性导出所有身份映射
+		snapshot, err := idmap.ListAllIdentities()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, snapshot)
 	}
 
 }
