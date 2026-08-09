@@ -82,7 +82,6 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 -  event_id 存储，支持被动消息
 -  消息事件新增 `to_me` 字段，标识是否 @ 了机器人
 -  多 WS 地址连接
--  q頻 (QQ Guild) 虚拟成 q群 事件、私信虚拟成 q頻 事件
 -  WebUI 管理界面
 -  指令黑白名单、URL 自动转换
 -  可自定义图片压缩/图床/OSS 服务（oss_type 统一选择，支持 11 种后端）
@@ -97,6 +96,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 -  支持文字、图片、语音、视频、Markdown 等多种消息类型
 -  主动信息失败自动转被动
 -  完善的重连机制
+-  分层架构基础设施（`internal/` 类型化消息/身份/出站/入站/媒体/队列/配置管线，双轨并存）
 
 ## 文档
 
