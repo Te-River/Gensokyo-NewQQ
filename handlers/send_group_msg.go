@@ -976,8 +976,36 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 }
 
 // 上传富媒体信息
+// isURLWhitelisted 检查URL的域名是否在用户配置的白名单中
+func isURLWhitelisted(rawURL string) bool {
+	whitelist := config.GetURLWhitelist()
+	if len(whitelist) == 0 {
+		return false
+	}
+	parsed, err := neturl.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := parsed.Hostname()
+	for _, domain := range whitelist {
+		domain = strings.TrimSpace(domain)
+		if domain == "" {
+			continue
+		}
+		// 精确匹配或子域名匹配
+		if host == domain || strings.HasSuffix(host, "."+domain) {
+			return true
+		}
+	}
+	return false
+}
+
 // isPrivateOrLoopback 检查URL是否指向私有或回环地址（SSRF防护）
 func isPrivateOrLoopback(rawURL string) bool {
+	// 用户配置的URL白名单优先于SSRF防护
+	if isURLWhitelisted(rawURL) {
+		return false
+	}
 	parsed, err := neturl.Parse(rawURL)
 	if err != nil {
 		return true // 解析失败则拒绝

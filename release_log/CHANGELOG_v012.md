@@ -106,6 +106,26 @@
 
 ## 🆕 新增接口
 
+### URL 媒体域名白名单（`url_whitelist`）
+
+**文件：** `structs/structs.go`、`config/config.go`、`handlers/send_group_msg.go`、`template/config_template.go`
+
+新增 `url_whitelist` 配置项，允许用户自定义域名白名单以绕过 SSRF 防护。填入域名后，该域名及其子域名的 URL 将跳过 `isPrivateOrLoopback` 检查，允许发送语音、图片、视频等 URL 媒体。
+
+**配置示例：**
+
+```yaml
+url_whitelist: ["example.com", "mycdn.net"]
+```
+
+**行为：**
+- 白名单域名支持精确匹配和子域名匹配（如 `example.com` 匹配 `cdn.example.com`）
+- 仅影响 SSRF 防护检查，不影响其他 URL 处理逻辑
+- 默认值为空数组（不开启任何白名单）
+- 适用于所有 URL 类型的媒体：图片（`url_image`/`url_images`）、语音（`url_record`/`url_records`）、视频（`url_video`/`url_videos`）、文件（`url_file`/`url_files`）
+
+---
+
 ### idmap 批量身份映射导出（`/getid?type=19`）
 
 **文件：** `idmap/service.go`、`server/getIDHandler.go`
@@ -247,6 +267,31 @@
 
 - 曾一度将其误判为需移除的私有云凭据并改为配置注入（提交 `87d34f8`），经确认属于误判，已回滚（`d030501`）。
 - 当前 `oss_type=10`（Nature）保持内置凭据、开箱即用；如需自定义 COS 请使用 `cos.go`（需配置）。
+
+---
+
+## 📝 文档更新
+
+### 标准 CQ 码文档完善
+
+**新增文件：** `docs/cq码/` 下 12 个标准 CQ 码文档 + 1 个统一汇总
+
+为 OneBot V11 标准 CQ 码编写了完整的文档，包括：
+
+- `CQ码汇总.md`：统一索引页，汇总标准 CQ 码和扩展 CQ 码
+- `标准CQ码/标准cq码-cq-text.md`：纯文本
+- `标准CQ码/标准cq码-cq-face.md`：QQ 表情
+- `标准CQ码/标准cq码-cq-image.md`：图片（含 SSRF 防护和 url_whitelist 说明）
+- `标准CQ码/标准cq码-cq-record.md`：语音（含 silk 转码流程和 SSRF 防护说明）
+- `标准CQ码/标准cq码-cq-video.md`：视频（含 SSRF 防护说明）
+- `标准CQ码/标准cq码-cq-at.md`：@ 标签（含 idmap 转换和剥离逻辑说明）
+- `标准CQ码/标准cq码-cq-share.md`：链接分享（标注 QQ Bot API 不支持）
+- `标准CQ码/标准cq码-cq-location.md`：位置（标注 QQ Bot API 不支持）
+- `标准CQ码/标准cq码-cq-music.md`：音乐（仅 QQ 音乐）
+- `标准CQ码/标准cq码-cq-reply.md`：回复（含私聊越权防护说明）
+- `标准CQ码/标准cq码-cq-forward.md`：合并转发（标注 QQ Bot API 不支持）
+
+同步更新了 `docs/更多文档.md` 文档索引，新增标准 CQ 码章节。
 
 ---
 
