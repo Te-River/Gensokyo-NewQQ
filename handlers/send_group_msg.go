@@ -976,36 +976,8 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 }
 
 // 上传富媒体信息
-// isURLWhitelisted 检查URL的域名是否在用户配置的白名单中
-func isURLWhitelisted(rawURL string) bool {
-	whitelist := config.GetURLWhitelist()
-	if len(whitelist) == 0 {
-		return false
-	}
-	parsed, err := neturl.Parse(rawURL)
-	if err != nil {
-		return false
-	}
-	host := parsed.Hostname()
-	for _, domain := range whitelist {
-		domain = strings.TrimSpace(domain)
-		if domain == "" {
-			continue
-		}
-		// 精确匹配或子域名匹配
-		if host == domain || strings.HasSuffix(host, "."+domain) {
-			return true
-		}
-	}
-	return false
-}
-
-// isPrivateOrLoopback 检查URL是否指向私有或回环地址（SSRF防护）
+// isPrivateOrLoopback 检查 URL 是否指向私有或回环地址（SSRF 防护）
 func isPrivateOrLoopback(rawURL string) bool {
-	// 用户配置的URL白名单优先于SSRF防护
-	if isURLWhitelisted(rawURL) {
-		return false
-	}
 	parsed, err := neturl.Parse(rawURL)
 	if err != nil {
 		return true // 解析失败则拒绝
@@ -1359,30 +1331,20 @@ func generateGroupMessage(id string, eventid string, foundItems map[string][]str
 			recordData = silk.EncoderSilk(recordData)
 			mylog.Printf("音频转码ing")
 		}
-		// 转换为base64
 		base64Encoded := base64.StdEncoding.EncodeToString(recordData)
-
-		// 上传语音并获取新的URL
-		newURL, err := images.UploadBase64RecordToServer(base64Encoded)
+		// 语音直接 base64 上传到 QQ CDN，不需要本地图床中转
+		messageToCreate, err := images.CreateAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 3, false, "", groupid, id, msgseq, apiv2)
 		if err != nil {
-			mylog.Printf("Error uploading base64 encoded image: %v", err)
+			mylog.Printf("Error messageToCreate: %v", err)
 			return &dto.MessageToCreate{
 				Content: "错误: 上传语音失败",
 				MsgID:   id,
 				EventID: eventid,
 				MsgSeq:  msgseq,
-				MsgType: 0,
+				MsgType: 0, // 默认文本类型
 			}
 		}
-
-		// 发链接语音
-		return &dto.RichMediaMessage{
-			EventID:    id,
-			FileType:   3,      // 3代表语音
-			URL:        newURL, // 新语音链接
-			Content:    "",     // 这个字段文档没有了
-			SrvSendMsg: false,
-		}
+		return messageToCreate
 	} else if recordURLs, ok := foundItems["url_records"]; ok && len(recordURLs) > 0 {
 // 从URL下载语音
 if isPrivateOrLoopback("https://" + recordURLs[0]) {
@@ -1424,30 +1386,20 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 			recordData = silk.EncoderSilk(recordData)
 			mylog.Printf("音频转码ing")
 		}
-		// 转换为base64
 		base64Encoded := base64.StdEncoding.EncodeToString(recordData)
-
-		// 上传语音并获取新的URL
-		newURL, err := images.UploadBase64RecordToServer(base64Encoded)
+		// 语音直接 base64 上传到 QQ CDN，不需要本地图床中转
+		messageToCreate, err := images.CreateAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 3, false, "", groupid, id, msgseq, apiv2)
 		if err != nil {
-			mylog.Printf("Error uploading base64 encoded image: %v", err)
+			mylog.Printf("Error messageToCreate: %v", err)
 			return &dto.MessageToCreate{
 				Content: "错误: 上传语音失败",
 				MsgID:   id,
 				EventID: eventid,
 				MsgSeq:  msgseq,
-				MsgType: 0,
+				MsgType: 0, // 默认文本类型
 			}
 		}
-
-		// 发链接语音
-		return &dto.RichMediaMessage{
-			EventID:    id,
-			FileType:   3,      // 3代表语音
-			URL:        newURL, // 新语音链接
-			Content:    "",     // 这个字段文档没有了
-			SrvSendMsg: false,
-		}
+		return messageToCreate
 	} else if base64Image, ok := foundItems["base64_image"]; ok && len(base64Image) > 0 {
 		// todo 适配base64图片
 		//因为QQ群没有 form方式上传,所以在gensokyo内置了图床,需公网,或以lotus方式连接位于公网的gensokyo
@@ -2098,30 +2050,20 @@ func generatePrivateMessage(id string, eventid string, foundItems map[string][]s
 			recordData = silk.EncoderSilk(recordData)
 			mylog.Printf("音频转码ing")
 		}
-		// 转换为base64
 		base64Encoded := base64.StdEncoding.EncodeToString(recordData)
-
-		// 上传语音并获取新的URL
-		newURL, err := images.UploadBase64RecordToServer(base64Encoded)
+		// 语音直接 base64 上传到 QQ CDN，不需要本地图床中转
+		messageToCreate, err := images.CreateAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 3, false, "", userid, id, msgseq, apiv2)
 		if err != nil {
-			mylog.Printf("Error uploading base64 encoded image: %v", err)
+			mylog.Printf("Error messageToCreate: %v", err)
 			return &dto.MessageToCreate{
 				Content: "错误: 上传语音失败",
 				MsgID:   id,
 				EventID: eventid,
 				MsgSeq:  msgseq,
-				MsgType: 0,
+				MsgType: 0, // 默认文本类型
 			}
 		}
-
-		// 发链接语音
-		return &dto.RichMediaMessage{
-			EventID:    id,
-			FileType:   3,      // 3代表语音
-			URL:        newURL, // 新语音链接
-			Content:    "",     // 这个字段文档没有了
-			SrvSendMsg: false,
-		}
+		return messageToCreate
 	} else if recordURLs, ok := foundItems["url_records"]; ok && len(recordURLs) > 0 {
 // 从URL下载语音
 if isPrivateOrLoopback("https://" + recordURLs[0]) {
@@ -2163,30 +2105,20 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 			recordData = silk.EncoderSilk(recordData)
 			mylog.Printf("音频转码ing")
 		}
-		// 转换为base64
 		base64Encoded := base64.StdEncoding.EncodeToString(recordData)
-
-		// 上传语音并获取新的URL
-		newURL, err := images.UploadBase64RecordToServer(base64Encoded)
+		// 语音直接 base64 上传到 QQ CDN，不需要本地图床中转
+		messageToCreate, err := images.CreateAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 3, false, "", userid, id, msgseq, apiv2)
 		if err != nil {
-			mylog.Printf("Error uploading base64 encoded image: %v", err)
+			mylog.Printf("Error messageToCreate: %v", err)
 			return &dto.MessageToCreate{
 				Content: "错误: 上传语音失败",
 				MsgID:   id,
 				EventID: eventid,
 				MsgSeq:  msgseq,
-				MsgType: 0,
+				MsgType: 0, // 默认文本类型
 			}
 		}
-
-		// 发链接语音
-		return &dto.RichMediaMessage{
-			EventID:    id,
-			FileType:   3,      // 3代表语音
-			URL:        newURL, // 新语音链接
-			Content:    "",     // 这个字段文档没有了
-			SrvSendMsg: false,
-		}
+		return messageToCreate
 	} else if base64Image, ok := foundItems["base64_image"]; ok && len(base64Image) > 0 {
 		// todo 适配base64图片
 		//因为QQ群没有 form方式上传,所以在gensokyo内置了图床,需公网,或以lotus方式连接位于公网的gensokyo

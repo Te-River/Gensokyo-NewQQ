@@ -6,6 +6,26 @@
 
 ## 🐛 Bug 修复
 
+### 语音上传失败修复
+
+**文件：** `handlers/send_group_msg.go`
+
+`url_record`/`url_records` 处理路径调用了 `UploadBase64RecordToServer`（上传到本地服务器），当 `server_dir` 是私有地址时会失败。
+
+**修复：** 改为与 `local_record` 一致，直接调用 `CreateAndUploadMediaMessage` 上传 QQ CDN。
+
+---
+
+### 媒体消息 `url` 字段兼容修复
+
+**文件：** `handlers/message_parser.go`
+
+部分客户端（如 Koishi）使用 `url` 字段而非 `file` 字段传递媒体路径，导致本地文件路径被当作 `unknown_*` 处理，触发 SSRF 阻止。
+
+**修复：** 在 `image`、`voice/record`、`video` 的解析中，当 `file` 字段为空时，回退读取 `url` 字段。
+
+---
+
 ### lazy_message_id 多段回复偶发 40054005 msgseq 去重（Issue #19）
 
 **文件：** `echo/messageidmap.go`
@@ -105,26 +125,6 @@
 ---
 
 ## 🆕 新增接口
-
-### URL 媒体域名白名单（`url_whitelist`）
-
-**文件：** `structs/structs.go`、`config/config.go`、`handlers/send_group_msg.go`、`template/config_template.go`
-
-新增 `url_whitelist` 配置项，允许用户自定义域名白名单以绕过 SSRF 防护。填入域名后，该域名及其子域名的 URL 将跳过 `isPrivateOrLoopback` 检查，允许发送语音、图片、视频等 URL 媒体。
-
-**配置示例：**
-
-```yaml
-url_whitelist: ["example.com", "mycdn.net"]
-```
-
-**行为：**
-- 白名单域名支持精确匹配和子域名匹配（如 `example.com` 匹配 `cdn.example.com`）
-- 仅影响 SSRF 防护检查，不影响其他 URL 处理逻辑
-- 默认值为空数组（不开启任何白名单）
-- 适用于所有 URL 类型的媒体：图片（`url_image`/`url_images`）、语音（`url_record`/`url_records`）、视频（`url_video`/`url_videos`）、文件（`url_file`/`url_files`）
-
----
 
 ### idmap 批量身份映射导出（`/getid?type=19`）
 
@@ -281,7 +281,7 @@ url_whitelist: ["example.com", "mycdn.net"]
 - `CQ码汇总.md`：统一索引页，汇总标准 CQ 码和扩展 CQ 码
 - `标准CQ码/标准cq码-cq-text.md`：纯文本
 - `标准CQ码/标准cq码-cq-face.md`：QQ 表情
-- `标准CQ码/标准cq码-cq-image.md`：图片（含 SSRF 防护和 url_whitelist 说明）
+- `标准CQ码/标准cq码-cq-image.md`：图片（含 SSRF 防护说明）
 - `标准CQ码/标准cq码-cq-record.md`：语音（含 silk 转码流程和 SSRF 防护说明）
 - `标准CQ码/标准cq码-cq-video.md`：视频（含 SSRF 防护说明）
 - `标准CQ码/标准cq码-cq-at.md`：@ 标签（含 idmap 转换和剥离逻辑说明）

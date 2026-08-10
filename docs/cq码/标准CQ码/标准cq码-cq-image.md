@@ -46,8 +46,8 @@
 ### SSRF 防护
 
 所有 URL 类型的图片在发送时都会经过 SSRF（服务端请求伪造）防护检查：
-- 默认阻止私有地址（`10.x.x.x`、`192.168.x.x`、`127.x.x.x` 等）
-- 可通过配置 `url_whitelist` 添加域名白名单来放行特定域名
+- 阻止私有地址（`10.x.x.x`、`192.168.x.x`、`127.x.x.x` 等）
+- 阻止无法解析的域名
 
 ## 发送行为
 
@@ -116,4 +116,4 @@ await bot.send_group_msg(
 - 本地文件路径需使用 `file:///` 前缀（三个斜杠），Windows 路径如 `file:///D:/path/to/file`。
 - 图片大小受 QQ API 限制，建议不超过 5MB。
 - `url_pic_transfer` 配置仅影响 URL 图片，本地图片和 base64 图片始终走 CDN 上传。
-- URL 图片受 SSRF 防护限制，内网地址默认被阻止，可通过 `url_whitelist` 配置放行。
+- URL 图片受 SSRF 防护限制，内网地址默认被阻止。

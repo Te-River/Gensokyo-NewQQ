@@ -715,6 +715,10 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 				}
 			case "image":
 				fileContent, _ := segmentMap["data"].(map[string]interface{})["file"].(string)
+				// 兼容 url 字段（部分客户端使用 url 而非 file）
+				if fileContent == "" {
+					fileContent, _ = segmentMap["data"].(map[string]interface{})["url"].(string)
+				}
 
 				// 检查是否为 Base64 图片
 				if strings.HasPrefix(fileContent, "base64://") {
@@ -751,6 +755,10 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 
 			case "voice", "record":
 				fileContent, _ := segmentMap["data"].(map[string]interface{})["file"].(string)
+				// 兼容 url 字段（部分客户端使用 url 而非 file）
+				if fileContent == "" {
+					fileContent, _ = segmentMap["data"].(map[string]interface{})["url"].(string)
+				}
 
 				// 检查是否为 Base64 语音文件
 				if strings.HasPrefix(fileContent, "base64://") {
@@ -983,6 +991,10 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 
 			case "video":
 				fileContent, _ := segmentMap["data"].(map[string]interface{})["file"].(string)
+				// 兼容 url 字段（部分客户端使用 url 而非 file）
+				if fileContent == "" {
+					fileContent, _ = segmentMap["data"].(map[string]interface{})["url"].(string)
+				}
 				if strings.HasPrefix(fileContent, "http://") {
 					cleanContent := strings.TrimPrefix(fileContent, "http://")
 					foundItems["url_video"] = append(foundItems["url_video"], cleanContent)
@@ -1028,6 +1040,10 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 
 		case "image":
 			fileContent, _ := message["data"].(map[string]interface{})["file"].(string)
+			// 兼容 url 字段（部分客户端使用 url 而非 file）
+			if fileContent == "" {
+				fileContent, _ = message["data"].(map[string]interface{})["url"].(string)
+			}
 
 			// 检查是否为 Base64 图片
 			if strings.HasPrefix(fileContent, "base64://") {
@@ -1064,6 +1080,10 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 
 		case "voice", "record":
 			fileContent, _ := message["data"].(map[string]interface{})["file"].(string)
+			// 兼容 url 字段（部分客户端使用 url 而非 file）
+			if fileContent == "" {
+				fileContent, _ = message["data"].(map[string]interface{})["url"].(string)
+			}
 
 			// 检查是否为 Base64 语音文件
 			if strings.HasPrefix(fileContent, "base64://") {
@@ -1256,6 +1276,10 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 
 		case "video":
 			fileContent, _ := message["data"].(map[string]interface{})["file"].(string)
+			// 兼容 url 字段（部分客户端使用 url 而非 file）
+			if fileContent == "" {
+				fileContent, _ = message["data"].(map[string]interface{})["url"].(string)
+			}
 			if strings.HasPrefix(fileContent, "http://") {
 				cleanContent := strings.TrimPrefix(fileContent, "http://")
 				foundItems["url_video"] = append(foundItems["url_video"], cleanContent)

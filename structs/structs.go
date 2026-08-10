@@ -150,7 +150,6 @@ type Settings struct {
 	UrlToQrimage bool `yaml:"url_to_qrimage"`
 	QrSize       int  `yaml:"qr_size"`
 	TransferUrl  bool `yaml:"transfer_url"`
-	URLWhitelist []string `yaml:"url_whitelist"` // URL媒体域名白名单，匹配域名的URL跳过SSRF防护
 	//框架修改
 	Title        string `yaml:"title"`
 	FrpPort      string `yaml:"frp_port"`

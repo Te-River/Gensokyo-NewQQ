@@ -1710,17 +1710,6 @@ func GetTransferUrl() bool {
 	return instance.Settings.TransferUrl
 }
 
-// 获取 URL 媒体域名白名单
-func GetURLWhitelist() []string {
-	mu.RLock()
-	defer mu.RUnlock()
-
-	if instance == nil {
-		return nil
-	}
-	return instance.Settings.URLWhitelist
-}
-
 // 获取 HTTP 地址
 func GetHttpAddress() string {
 	mu.RLock()
