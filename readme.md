@@ -369,6 +369,7 @@ settings:
     # - "GroupDelRobotEventHandler"                  # 群聊机器人删除
     # - "GroupMemberAddEventHandler"                 # 群成员新增
     # - "GroupMemberRemoveEventHandler"              # 群成员移除
+    # - "GroupJoinRequestEventHandler"               # 入群申请事件（需群管理员身份）
 
   #── 消息转换 ────────────────────────────────────────
   hash_id: true                       # 使用 hash 生成虚拟 ID
