@@ -52,6 +52,9 @@ var eventParseFuncMap = map[dto.OPCode]map[dto.EventType]eventParseFunc{
 		// [新增] 群成员变动事件
 		dto.EventGroupMemberAdd:    groupMemberAddHandler,
 		dto.EventGroupMemberRemove: groupMemberRemoveHandler,
+
+		// [新增] 入群申请事件
+		dto.EventGroupJoinRequest: groupJoinRequestHandler,
 	},
 }
 
@@ -140,6 +143,13 @@ func ParseData(message []byte, target interface{}) error {
 		return nil
 
 	case *dto.WSC2CMsgReceiveData:
+		if err := json.Unmarshal([]byte(data.String()), v); err != nil {
+			return err
+		}
+		v.EventID = eventid
+		return nil
+
+	case *dto.GroupJoinRequestEvent:
 		if err := json.Unmarshal([]byte(data.String()), v); err != nil {
 			return err
 		}
@@ -317,5 +327,18 @@ func groupMessageHandler(payload *dto.WSPayload, message []byte) error {
 		return DefaultHandlers.GroupMessage(payload, data)
 	}
 	botlog.Warnf("[event] GROUP_MESSAGE_CREATE received but GroupMessageEventHandler is not registered; add it to text_intent to process this event. event_id=%s msg_id=%s group_openid=%s author_openid=%s", payload.ID, data.ID, data.GroupID, data.Author.ID)
+	return nil
+}
+
+// [新增] 入群申请事件处理
+func groupJoinRequestHandler(payload *dto.WSPayload, message []byte) error {
+	data := &dto.GroupJoinRequestEvent{}
+	if err := ParseData(message, data); err != nil {
+		return err
+	}
+	if DefaultHandlers.GroupJoinRequest != nil {
+		return DefaultHandlers.GroupJoinRequest(payload, data)
+	}
+	botlog.Warnf("[event] GROUP_JOIN_REQUEST received but GroupJoinRequestEventHandler is not registered; add it to text_intent to process this event. event_id=%s group_openid=%s member_openid=%s", payload.ID, data.GroupOpenID, data.MemberOpenID)
 	return nil
 }

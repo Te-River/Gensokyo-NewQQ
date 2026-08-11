@@ -508,10 +508,10 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 
 		// 优先发送文本信息
 		if messageText != "" {
-			// 处理出站 [CQ:member] → 自动转换 user_id 并设置 eventID/主动模式
-			// 返回的 realGroupID 是转换后的真实 GroupOpenID，可用作目标群
+			// 统一处理出站动作型 CQ 码（member/remove/禁言/入群审批/策略）
+			// 单次扫描全文，执行动作并从文本移除；返回 member 的 realGroupID 供跨群路由
 			var realGroupID string
-			messageText, realGroupID, _ = ProcessCQMemberOutbound(messageText, &eventID, message.Params.GroupID.(string), apiv2)
+			messageText, realGroupID = ProcessOutboundCQCodes(messageText, message.Params.GroupID.(string), &eventID, apiv2)
 			if realGroupID != "" {
 				mylog.Printf("[CQ:member] CQ 码 group_id 已转为 OpenID=%s", realGroupID)
 			}
@@ -522,11 +522,9 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				targetGroupID = realGroupID
 			}
 
-			// 处理出站 [CQ:remove] → 撤回消息并从文本中移除 CQ 码
-			messageText = ProcessCQRemoveOutbound(messageText, apiv2, targetGroupID)
-			// 如果处理后 messageText 为空（纯 CQ:remove 消息），直接返回客户端回执
+			// 如果处理后 messageText 为空（纯动作 CQ 码消息），直接返回客户端回执
 			if strings.TrimSpace(messageText) == "" && len(foundItems) == 0 {
-				mylog.Printf("[CQ:remove] 纯 CQ 码消息，不发送到 QQ 频道")
+				mylog.Printf("[CQ:action] 纯 CQ 码消息，不发送到 QQ 群聊")
 				SendResponse(client, nil, &message, nil, api, apiv2)
 				return "", nil
 			}

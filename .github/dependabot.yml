@@ -1,0 +1,77 @@
+# Dependabot 配置
+# 文档：https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+version: 2
+
+updates:
+  # Go 模块依赖
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 10
+    target-branch: main
+    commit-message:
+      prefix: "deps"
+      include: scope
+    labels:
+      - dependencies
+      - go
+    # 本地 replace 依赖（fork），不应由 Dependabot 升级
+    ignore:
+      - dependency-name: github.com/tencent-connect/botgo
+      - dependency-name: github.com/wdvxdr1123/go-silk
+    groups:
+      # 次要版本/补丁更新合并为一个 PR
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+    reviewers:
+      - Te-River
+
+  # 前端 npm 依赖
+  - package-ecosystem: npm
+    directory: "/frontend"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 10
+    target-branch: main
+    commit-message:
+      prefix: "deps"
+      include: scope
+    labels:
+      - dependencies
+      - javascript
+      - frontend
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+    reviewers:
+      - Te-River
+
+  # GitHub Actions 工作流依赖
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+      day: monday
+      time: "08:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    target-branch: main
+    commit-message:
+      prefix: "chore"
+      include: scope
+    labels:
+      - dependencies
+      - github-actions
+    reviewers:
+      - Te-River

@@ -158,6 +158,10 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 | [CQ:card]      | [群聊图文卡片消息]                  |
 | [CQ:input_notify] | [单聊输入状态通知]               |
 | [CQ:stream]      | [单聊流式消息]                    |
+| [CQ:set_group_ban] | [群成员禁言/解禁(出站动作)]    |
+| [CQ:set_group_whole_ban] | [群全员禁言开关(出站动作)] |
+| [CQ:set_group_add_request] | [入群申请审批(出站动作)]  |
+| [CQ:strategy]    | [审批策略执行/删除(出站动作)]     |
 
 
 </details>
@@ -188,19 +192,19 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 | /delete_msg              | [撤回信息]             |
 | /delete_group_msg        | [撤回QQ群用户或Bot消息] |
 | /set_group_kick          | [群 (Group Chat) 踢人] |
-| /set_group_ban | [群单人禁言] |
-| /set_group_whole_ban | [群全员禁言] |
+| /set_group_ban | [群单人禁言(禁言/解禁)] |
+| /set_group_whole_ban | [群全员禁言(开/关)] |
 | /set_group_admin         | [群设置管理员] |
 | /set_group_card          | [设置群名片] |
 | /set_group_name          | [设置群名称] |
 | /set_group_leave         | [退出群] |
 | /set_group_special_title | [设置群专属头衔] |
 | /set_friend_add_request  | [处理加好友请求]       |
-| /set_group_add_request   | [处理加群请求/邀请] |
+| /set_group_add_request   | [处理加群请求(真实审批)] |
 | /get_login_info | [获取登录号信息] |
 | /get_stranger_info | [获取陌生人信息] |
 | /get_friend_list | [获取好友列表] |
-| /get_group_info | [获取群聊信息] |
+| /get_group_info | [获取群聊信息(真实)] |
 | /get_group_list | [获取群列表] |
 | /get_group_member_info | [获取群成员信息] |
 | /get_group_member_list | [获取群成员列表] |
@@ -229,6 +233,14 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 | /get_group_files_by_folder  | [获取群子目录文件列表] |
 | /get_group_file_url         | [获取群文件资源链接]   |
 | /get_status | [获取状态] |
+| /get_group_join_request_list | [获取入群申请列表] |
+| /get_group_bot_state | [获取机器人群内状态] |
+| /join_approval_strategy_create | [创建入群自动审批策略] |
+| /join_approval_strategy_list | [查询入群自动审批策略列表] |
+| /join_approval_strategy_update | [修改入群自动审批策略] |
+| /join_approval_strategy_execute | [执行入群自动审批策略] |
+| /join_approval_strategy_whitelist | [修改策略白名单号码] |
+| /join_approval_strategy_delete | [删除入群自动审批策略] |
 
 
 </details>
@@ -298,6 +310,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 > - **GroupMsgReceiveHandler**（群推送开启）
 > - **GroupMemberAddEventHandler**（群成员新增）
 > - **GroupMemberRemoveEventHandler**（群成员移除）
+> - **GroupJoinRequestEventHandler**（入群申请）
 
 | 事件名称                   | 代表含义                         |
 | --------------------------- | ------------------------------- |
@@ -312,6 +325,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 | GroupMsgReceiveHandler     | [群聊请求开启推送]                 |
 | GroupMemberAddEventHandler | [群聊成员新增]                     |
 | GroupMemberRemoveEventHandler | [群聊成员移除]                  |
+| GroupJoinRequestEventHandler | [入群申请]                       |
 | C2CMsgRejectHandler        | [用户拒绝私聊 (C2C) 消息推送]      |
 | C2CMsgReceiveHandler       | [用户同意私聊 (C2C) 消息推送]      |
 

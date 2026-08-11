@@ -1,6 +1,79 @@
 # Changelog — Release012
 
-> 自 Release011 (`d5c780b`) 以来的所有变更。
+> 自 Release011 以来的所有变更。本轮合并 main 与 Pr-Edit 两条线：Pr-Edit 侧补齐 QQ 官方 API v2 全部群聊接口（文档全量遍历确认共 17 个）并接入入群申请事件（`GROUP_JOIN_REQUEST`）；main 侧包含语音上传修复、@Bot 剥离改进、分阶段重构基础设施（PR #49）等既有变更。
+
+---
+
+## 🆕 新功能
+
+### 群聊 API 全量补齐（11 个接口，12 个方法）
+
+基于官方文档实现全部群聊管理类接口，其中 **6 个入群自动审批策略接口为本轮新增**，其余 5 个为上一轮开发、本轮随提交落库：
+
+| 接口 | HTTP 路径 | 方法 | 说明 |
+|------|-----------|------|------|
+| 获取群基本信息 | `/v2/groups/{group_openid}/info` | GET | 群名、简介、分类、标签、成员数 |
+| 获取机器人群内状态 | `/v2/groups/{group_openid}/bot_state` | GET | 入群时间、是否可推送、角色 |
+| 入群申请列表拉取 | `/v2/groups/{group_openid}/join_request_list` | GET | 分页拉取，需群管理员身份 |
+| 入群申请审批 | `/v2/groups/{group_openid}/approval_join_request/{member_openid}` | POST | approve/decline，支持拒绝理由与拉黑 |
+| 查询群禁言状态 | `/v2/groups/{group_openid}/restrict_chat_setting` | GET | 全员禁言 + 成员级禁言列表 |
+| 设置群成员禁言 | `/v2/groups/{group_openid}/restrict_chat_setting` | POST | 单次最多 10 个成员 |
+| 创建入群自动审批策略 | `/v2/groups/join_approval_strategy` | POST | 一个机器人最多 20 个策略 |
+| 查询策略列表 | `/v2/groups/join_approval_strategy` | GET | cursor 分页，limit 默认 20 最大 100 |
+| 修改策略 | `/v2/groups/join_approval_strategy/{strategy_id}` | PATCH | 启停/过期/增删关联群/备注 |
+| 执行策略 | `/v2/groups/join_approval_strategy/{strategy_id}/execute` | POST | 对关联群全量扫描，异步约 10 分钟 |
+| 修改策略白名单 | `/v2/groups/join_approval_strategy/{strategy_id}/whitelist_users` | POST | 单次最多 10000 个 QQ 号码 |
+| 删除策略 | `/v2/groups/join_approval_strategy/{strategy_id}` | DELETE | — |
+
+既有群聊消息类接口（发送/撤回群消息、富媒体上传/预上传/分片完成）保持不变，至此 17 个群聊接口全部覆盖。
+
+### GROUP_JOIN_REQUEST 入群申请事件
+
+官方文档确认该事件属于 `GROUP_AND_C2C_EVENT`（1<<25）Intent，机器人需为群管理员才可收到：
+
+- **botgo 事件层**：事件常量、intent 映射、`ParseData` 事件 ID 注入、`GroupJoinRequestEventHandler` 注册（含未注册时的告警日志）
+- **Processor 接入**：新增 `ProcessGroupJoinRequest`，将 `group_openid`/`member_openid` 映射为虚拟 ID，上报 OneBot `request` 事件（`request_type=group`、`sub_type=add`），`flag` 携带 `join_request_id` 供审批使用，`comment` 携带验证信息
+- **配置**：`text_intent` 新增 `GroupJoinRequestEventHandler`（需群管理员身份）
+
+### set_group_add_request 真实化
+
+- `handlers/set_group_add_request.go` 由 MOCK 占位改为真实调用 v2 审批接口：虚拟 ID 经 idmap 反查真实 OpenID，`flag` 作为 `join_request_id`，`approve` 映射为 `op=approve/decline`
+- `callapi.ParamsContent` 新增扩展参数：`approve`、`flag`、`reason`（拒绝理由）、`add_to_member_blacklist`（是否拉黑）
+
+### 群聊管理 API 暴露为 OneBot action
+
+全部 11 个群聊管理类接口现已注册为 OneBot action，下游插件可直接调用：
+
+| Action | 对应 botgo API | 说明 |
+|--------|---------------|------|
+| `get_group_info`（真实化） | `GroupInfo` | 返回真实群名/简介/成员数（原为 MOCK 假数据） |
+| `set_group_ban`（真实化） | `SetRestrictChatSetting` | `duration` 秒禁言，0=解除（原为"暂未开放"骨架） |
+| `set_group_whole_ban`（真实化） | `SetRestrictChatSetting(AllMute)` | `enable` 开关全员禁言，保留已有成员级禁言 |
+| `get_group_join_request_list`（新增） | `JoinRequestList` | 入群申请列表，`next_index` 分页；返回的 `group_id`/`user_id`/`flag` 可直接回传审批 |
+| `get_group_bot_state`（新增） | `BotInGroupState` | 机器人群内状态（入群时间/可推送/角色） |
+| `join_approval_strategy_create/list/update/execute/whitelist/delete`（新增） | 6 个策略 API | 入群自动审批策略全生命周期管理 |
+
+`set_group_ban`/`set_group_whole_ban` 同时保留旧 action 名 `get_group_ban`/`get_group_whole_ban` 兼容。`callapi.ParamsContent` 同步新增 `next_index`/`cursor`/`limit`/`strategy_id`/`group_openids`/`group_ids`/`is_enable`/`expire_at`/`remark`/`op`/`whitelist_users` 参数。
+
+### 动作型 CQ 码（群聊管理）
+
+复用现有 `[CQ:member]`/`[CQ:remove]` 的"解析-执行-移除"出站模式，新增 4 个动作型 CQ 码（`handlers/message_parser.go` + `send_group_msg.go` 文本路径接入，纯 CQ 码消息不发送只回执）：
+
+| CQ 码 | 动作 |
+|-------|------|
+| `[CQ:set_group_ban,group_id=...,user_id=...,duration=秒]` | 成员禁言（0=解除） |
+| `[CQ:set_group_whole_ban,group_id=...,enable=true/false]` | 全员禁言开关（保留成员级禁言） |
+| `[CQ:set_group_add_request,group_id=...,user_id=...,flag=...,approve=true/false]` | 入群申请审批（可带 reason/add_to_member_blacklist） |
+| `[CQ:strategy,action=execute/delete,strategy_id=...]` | 审批策略执行/删除 |
+
+`group_id` 支持跨群路由（省略时使用发送目标群）；参数缺失/未知 action 时 CQ 码原样保留不吞掉。数据查询类接口（get_group_info 等）不做 CQ 码。
+
+### CQ 码处理重构（独立文件 + 单次扫描）
+
+- 新增 `handlers/cqcode.go`（546 行）：集中全部 CQ 码处理——包级正则常量（16 个）、`ProcessCQFile`/`ProcessCQActive`（迁移）、出站动作型统一入口
+- 新增 `ProcessOutboundCQCodes(text, defaultGroupID, eventID, apiv2) (string, string)`：**单次正则扫描全文**，按类型分发执行动作，未知类型（标准 CQ 码）原样保留
+- 出站动作型由 6 次独立全文扫描（member/remove/ban/whole_ban/add_request/strategy 各自 `ReplaceAllStringFunc`）改为 1 次扫描，行为完全兼容（member 的 eventID/跨群路由语义保留，内部函数对默认群 ID 增加反查保持等价）
+- `message_parser.go` 相应精简（-540 行），`send_group_msg.go` 6 次调用改为 1 次
 
 ---
 
@@ -65,6 +138,15 @@
 图文消息走 Markdown 路径（`auto_md`）时，`[CQ:at,qq=...]` 未被正确转换为 QQ @ 语法，导致原文显示。
 
 **修复：** 在 Markdown 消息处理路径中补充 CQ 码 @ 转换逻辑。
+
+---
+
+### botgo 层修复
+
+**文件：** `botgo/dto/group.go`、`botgo/openapi/v2/group.go`
+
+- `GroupJoinRequestEvent` 补 `ID`/`EventID` 字段（修复编译错误），`ApplyAt` 改为 `interface{}` 兼容不同类型时间戳
+- `ApprovalJoinRequest` 请求体字段名修正（`action` → `op`），并支持 `join_request_id`/`reject_reason`/`add_to_member_blacklist`
 
 ---
 
@@ -270,32 +352,14 @@
 
 ---
 
-## 📝 文档更新
+## 📦 构建与工程
 
-### 标准 CQ 码文档完善
+| 文件 | 变更 |
+|------|------|
+| `.github/dependabot.yml` | 新增 Dependabot 配置，覆盖 Go/npm/GitHub Actions 依赖 |
+| `.gitignore` | 新增 `.qoder/` 忽略项 |
 
-**新增文件：** `docs/cq码/` 下 12 个标准 CQ 码文档 + 1 个统一汇总
-
-为 OneBot V11 标准 CQ 码编写了完整的文档，包括：
-
-- `CQ码汇总.md`：统一索引页，汇总标准 CQ 码和扩展 CQ 码
-- `标准CQ码/标准cq码-cq-text.md`：纯文本
-- `标准CQ码/标准cq码-cq-face.md`：QQ 表情
-- `标准CQ码/标准cq码-cq-image.md`：图片（含 SSRF 防护说明）
-- `标准CQ码/标准cq码-cq-record.md`：语音（含 silk 转码流程和 SSRF 防护说明）
-- `标准CQ码/标准cq码-cq-video.md`：视频（含 SSRF 防护说明）
-- `标准CQ码/标准cq码-cq-at.md`：@ 标签（含 idmap 转换和剥离逻辑说明）
-- `标准CQ码/标准cq码-cq-share.md`：链接分享（标注 QQ Bot API 不支持）
-- `标准CQ码/标准cq码-cq-location.md`：位置（标注 QQ Bot API 不支持）
-- `标准CQ码/标准cq码-cq-music.md`：音乐（仅 QQ 音乐）
-- `标准CQ码/标准cq码-cq-reply.md`：回复（含私聊越权防护说明）
-- `标准CQ码/标准cq码-cq-forward.md`：合并转发（标注 QQ Bot API 不支持）
-
-同步更新了 `docs/更多文档.md` 文档索引，新增标准 CQ 码章节。
-
----
-
-## 📦 依赖更新
+### 依赖更新
 
 | PR | 变更 |
 |----|------|
@@ -313,12 +377,33 @@
 
 ---
 
+## 📝 文档同步
+
+| 文件 | 变更 |
+|------|------|
+| `release_log/CHANGELOG_v012.md` | 本文档（新建，融合 main 与 Pr-Edit 两份变更记录） |
+| `template/config_template.go` | `text_intent` 注释新增 `GroupJoinRequestEventHandler` |
+| `readme.md` | 已实现 Intent 列表新增 `GroupJoinRequestEventHandler`（入群申请）；API 表新增 8 个群聊管理 action 并标注真实化 |
+| `docs/api/api介绍.md` | 标准/扩展 API 表新增 8 个 action 及参数说明 |
+| `docs/api/扩展API文档.md` | 扩展 API 索引新增 8 个 action |
+| `docs/api/扩展api/` | 新增 `get_group_join_request_list`、`get_group_bot_state`、`join_approval_strategy`（6 action）详细文档 |
+| `docs/cq码/` | 新增 4 个动作型 CQ 码文档（set_group_ban/set_group_whole_ban/set_group_add_request/strategy），`CQ码汇总.md` 索引同步 |
+| `readme.md` | 拓展 CQ 码表新增 4 个动作型 CQ 码 |
+| `docs/本版新增功能.md` | 事件表新增 `GroupJoinRequestEventHandler`；API 表 8 个 action 加链接；`set_group_add_request` 过时 MOCK 描述修正 |
+| `AGENTS.md` | botgo Fork 描述补充群聊管理 API（GroupAPI）与入群申请事件 |
+| `docs/cq码/` | 标准 CQ 码文档完善（12 个标准 CQ 码文档 + 1 个统一汇总，同步 `docs/更多文档.md` 索引） |
+| `docs/forks/` | fork inventory：`botgo.md`、`go-silk.md`（P12） |
+
+---
+
 ## 🧪 验证
 
 | 命令 | 结果 |
 |------|------|
 | `go build ./...` | ✅ 通过 |
 | `go vet ./...` | ✅ 通过 |
+| `go test ./handlers/` | ✅ 通过 |
+| `go test ./Processor/` | ✅ 通过 |
 | `go test ./imagehosting/ ./config/ ./structs/ ./template/` | ✅ 通过 |
 | `go test ./internal/infrastructure/config/` | ✅ 通过（24 用例） |
 | `go test ./internal/domain/identity/ ./adapter/identity/` | ✅ 通过（12 用例） |
@@ -336,33 +421,37 @@
 ## ✅ 提交记录
 
 ```
-86888fb  fix: 非全量群重复 @ 修复（add_at_group 增加 remove_at 判断）
-158c33c  fix: 被动消息中移除 add_at_group 添加 @ 逻辑
-bef1750  fix: transformMessageTextAt 根据 remove_bot_at_group 移除 @bot
-961daf4  refactor: 正则直接匹配 AppID，简化 @bot 移除逻辑
-6421bcd  移除非全量消息@用户重复（PR #47）
-2a6315d  fix: 全量群消息(DisableErrorChan=true)时 @Bot 未被剥离
-4bbaf17  fix: 全量群消息 @Bot 剥离失败 — IsSelfAtID 因 ID 格式不匹配返回 false
-1ed26a5  fix: lazy_message_id 多段回复偶发 40054005 msgseq 去重（Issue #19）
-e72e04f  fix: 修复私聊富媒体reply跨场景msg_id越权(40034024)
-5a9c36d  fix: 修复私聊reply越权/群聊Markdown panic/多段回复msgseq去重
-bcba13d  修复图文消息cqat未转换（PR #16）
-9240987  fix: bound HTTP resources and atomize message sequences
-b93b01d  refactor: centralize delivery retry classification
-21d0015  refactor: route handler errors through retry classifier
-15cef7c  refactor(config): introduce immutable runtime snapshots（P2）
-cb75b38  refactor(identity): add typed identity resolver（P3）
-b751e65  refactor(message): introduce typed parsed message model（P4）
-762ab11  refactor(media): unify media pipeline with safe fetcher（P5）
-2f1cbe6  refactor(outbound): introduce unified outbound service（P6）
-fe4a4a7  refactor(queue): add bounded queue with session ordering（P7）
-444ae1f  refactor(processor): introduce inbound event pipeline（P8）
-514be8c  refactor(callapi): add typed actions and explicit registry（P9）
-9e58ce9  refactor(storage): repository-ize idmap and echo state（P10）
-8cb1c6b  refactor(config): remove global config reads from new architecture（P11）
-a305fea  refactor(adapter): isolate botgo and media SDKs（P12）
-a926dda  refactor(legacy): document P13 deletion gating（P13）
-87d34f8  security: remove embedded cloud credentials from Nature provider
-d030501  revert: restore nature public image hosting credentials
 ecff462  feat: 合并 PR #49 — 分阶段重构基础设施（P2-P12）
+a926dda  refactor(legacy): document P13 deletion gating（P13）
+a305fea  refactor(adapter): isolate botgo and media SDKs（P12）
+8cb1c6b  refactor(config): remove global config reads from new architecture（P11）
+9e58ce9  refactor(storage): repository-ize idmap and echo state（P10）
+514be8c  refactor(callapi): add typed actions and explicit registry（P9）
+444ae1f  refactor(processor): introduce inbound event pipeline（P8）
+fe4a4a7  refactor(queue): add bounded queue with session ordering（P7）
+2f1cbe6  refactor(outbound): introduce unified outbound service（P6）
+762ab11  refactor(media): unify media pipeline with safe fetcher（P5）
+b751e65  refactor(message): introduce typed parsed message model（P4）
+cb75b38  refactor(identity): add typed identity resolver（P3）
+15cef7c  refactor(config): introduce immutable runtime snapshots（P2）
+21d0015  refactor: route handler errors through retry classifier
+b93b01d  refactor: centralize delivery retry classification
+9240987  fix: bound HTTP resources and atomize message sequences
+bcba13d  修复图文消息cqat未转换（PR #16）
+5a9c36d  fix: 修复私聊reply越权/群聊Markdown panic/多段回复msgseq去重
+e72e04f  fix: 修复私聊富媒体reply跨场景msg_id越权(40034024)
+1ed26a5  fix: lazy_message_id 多段回复偶发 40054005 msgseq 去重（Issue #19）
+4bbaf17  fix: 全量群消息 @Bot 剥离失败 — IsSelfAtID 因 ID 格式不匹配返回 false
+2a6315d  fix: 全量群消息(DisableErrorChan=true)时 @Bot 未被剥离
+6421bcd  移除非全量消息@用户重复（PR #47）
+961daf4  refactor: 正则直接匹配 AppID，简化 @bot 移除逻辑
+bef1750  fix: transformMessageTextAt 根据 remove_bot_at_group 移除 @bot
+158c33c  fix: 被动消息中移除 add_at_group 添加 @ 逻辑
+86888fb  fix: 非全量群重复 @ 修复（add_at_group 增加 remove_at 判断）
+d030501  revert: restore nature public image hosting credentials
+87d34f8  security: remove embedded cloud credentials from Nature provider
+f535855  docs: 为新增群聊管理扩展 API 编写详细文档
+ce9791d  feat: 群聊管理 API 全部暴露为 OneBot action
+43b816e  feat: 补齐群聊 API 并接入入群申请事件
+0b4ee93  ci: 新增 Dependabot 配置覆盖 Go/npm/GitHub Actions 依赖
 ```
