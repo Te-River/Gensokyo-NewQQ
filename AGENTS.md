@@ -291,7 +291,7 @@ Handler 签名：`func(client callapi.Client, api openapi.OpenAPI, apiv2 openapi
 
 ```
 ├── Processor/        # 入站事件处理（QQ API → OneBot）
-├── handlers/         # 出站 API 处理（OneBot → QQ API）+ 消息解析（message_parser.go 2800+ 行）
+├── handlers/         # 出站 API 处理（OneBot → QQ API）+ 消息解析（message_parser.go）+ CQ 码集中处理（cqcode.go）
 ├── config/           # 配置加载与 GetXxx() 访问器（3100+ 行，含热重载逻辑）
 ├── structs/          # 配置结构体定义（Settings，YAML 标签）
 ├── idmap/            # 虚拟 ID ↔ OpenID 双向映射（bbolt + gRPC）

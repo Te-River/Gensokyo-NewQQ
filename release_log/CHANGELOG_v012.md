@@ -68,6 +68,13 @@
 
 `group_id` 支持跨群路由（省略时使用发送目标群）；参数缺失/未知 action 时 CQ 码原样保留不吞掉。数据查询类接口（get_group_info 等）不做 CQ 码。
 
+### CQ 码处理重构（独立文件 + 单次扫描）
+
+- 新增 `handlers/cqcode.go`（546 行）：集中全部 CQ 码处理——包级正则常量（16 个）、`ProcessCQFile`/`ProcessCQActive`（迁移）、出站动作型统一入口
+- 新增 `ProcessOutboundCQCodes(text, defaultGroupID, eventID, apiv2) (string, string)`：**单次正则扫描全文**，按类型分发执行动作，未知类型（标准 CQ 码）原样保留
+- 出站动作型由 6 次独立全文扫描（member/remove/ban/whole_ban/add_request/strategy 各自 `ReplaceAllStringFunc`）改为 1 次扫描，行为完全兼容（member 的 eventID/跨群路由语义保留，内部函数对默认群 ID 增加反查保持等价）
+- `message_parser.go` 相应精简（-540 行），`send_group_msg.go` 6 次调用改为 1 次
+
 ---
 
 ## 🐛 Bug 修复
