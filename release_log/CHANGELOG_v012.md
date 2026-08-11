@@ -107,6 +107,7 @@
 ## ✅ 提交记录
 
 ```
+f535855  docs: 为新增群聊管理扩展 API 编写详细文档
 ce9791d  feat: 群聊管理 API 全部暴露为 OneBot action
 43b816e  feat: 补齐群聊 API 并接入入群申请事件
 0b4ee93  ci: 新增 Dependabot 配置覆盖 Go/npm/GitHub Actions 依赖
