@@ -2125,7 +2125,10 @@ func parseMDData(mdData []byte) (*dto.Markdown, *keyboard.MessageKeyboard, error
 			Content *keyboard.CustomKeyboard `json:"content,omitempty"`
 			Rows    []*keyboard.Row          `json:"rows,omitempty"`
 		} `json:"keyboard,omitempty"`
-		Rows []*keyboard.Row `json:"rows,omitempty"`
+		// 顶层 content/id：官方 keyboard 简写形态（[CQ:keyboard] 独立使用时）
+		Content *keyboard.CustomKeyboard `json:"content,omitempty"`
+		ID      string                   `json:"id,omitempty"`
+		Rows    []*keyboard.Row          `json:"rows,omitempty"`
 	}
 
 	// 解析 JSON
@@ -2151,7 +2154,17 @@ func parseMDData(mdData []byte) (*dto.Markdown, *keyboard.MessageKeyboard, error
 
 	// 处理 Keyboard
 	var kb *keyboard.MessageKeyboard
-	if temp.Keyboard.Content != nil {
+	if temp.Content != nil {
+		// 处理顶层 content（官方 keyboard 简写形态，[CQ:keyboard] 独立使用）
+		kb = &keyboard.MessageKeyboard{
+			Content: temp.Content,
+		}
+	} else if temp.ID != "" {
+		// 处理顶层 id（按钮模板形态）
+		kb = &keyboard.MessageKeyboard{
+			ID: temp.ID,
+		}
+	} else if temp.Keyboard.Content != nil {
 		// 处理嵌套在 Keyboard 中的 CustomKeyboard
 		kb = &keyboard.MessageKeyboard{
 			ID:      temp.Keyboard.ID,

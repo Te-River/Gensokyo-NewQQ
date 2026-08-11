@@ -103,6 +103,14 @@
 
 ## 🐛 Bug 修复
 
+### [CQ:keyboard] 顶层 content 形态解析失败
+
+**文件：** `handlers/message_parser.go`
+
+`[CQ:keyboard]` 独立使用时的官方简写形态 `{"content": {"rows": [...]}}`（顶层 `content`）与按钮模板形态 `{"id": "..."}`（顶层 `id`）无法被 `parseMDData` 解析，导致键盘 JSON 解析失败（kb=nil）、CQ 码原样发出。
+
+**修复：** `parseMDData` 的临时结构体新增顶层 `content`/`id` 字段，与既有嵌套 `keyboard` 形态并行支持，不影响 `[CQ:markdown]` 既有行为。
+
 ### 语音上传失败修复
 
 **文件：** `handlers/send_group_msg.go`
