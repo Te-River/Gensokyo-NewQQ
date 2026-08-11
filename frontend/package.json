@@ -41,7 +41,7 @@
     "ansi_up": "^6.0.2",
     "apexcharts": "^3.40.0",
     "eslint": "^8",
-    "eslint-config-prettier": "^9",
+    "eslint-config-prettier": "^10",
     "eslint-plugin-vue": "^9",
     "monaco-editor-webpack-plugin": "^7.1.0",
     "vue3-apexcharts": "^1.4.1"
