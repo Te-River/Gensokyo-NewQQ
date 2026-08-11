@@ -825,6 +825,15 @@ func GroupMemberRemoveEventHandler() event.GroupMemberRemoveEventHandler {
 	}
 }
 
+// GroupJoinRequestEventHandler 实现处理 用户申请加群 事件的回调
+func GroupJoinRequestEventHandler() event.GroupJoinRequestEventHandler {
+	return func(event *dto.WSPayload, data *dto.GroupJoinRequestEvent) error {
+		data.EventID = event.ID
+		go p.ProcessGroupJoinRequest(data)
+		return nil
+	}
+}
+
 func getHandlerByName(handlerName string) (interface{}, bool) {
 	switch handlerName {
 	case "ReadyHandler": //连接成功
@@ -860,6 +869,8 @@ func getHandlerByName(handlerName string) (interface{}, bool) {
 		return GroupMemberAddEventHandler(), true
 	case "GroupMemberRemoveEventHandler": // 群成员移除
 		return GroupMemberRemoveEventHandler(), true
+	case "GroupJoinRequestEventHandler": // 入群申请事件
+		return GroupJoinRequestEventHandler(), true
 	default:
 		log.Printf("Unknown handler: %s\n", handlerName)
 		return nil, false
@@ -895,6 +906,7 @@ func applyDisallowedIntentPolicy(intent dto.Intent, enabledHandlers map[string]b
 			"FriendDelEventHandler",
 			"C2CMsgRejectHandler",
 			"C2CMsgReceiveHandler",
+			"GroupJoinRequestEventHandler",
 		) {
 			log.Printf("suppress_disallowed_intents: GroupMessageEventHandler 仅注册本地处理器，复用现有 IntentGroupMessages=%d", groupMessageIntent)
 		} else {

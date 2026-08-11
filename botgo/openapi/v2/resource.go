@@ -31,6 +31,19 @@ const (
 	groupMessagesURI  uri = "/v2/groups/{group_id}/messages"
 	groupRichMediaURI uri = "/v2/groups/{group_id}/files"
 
+	// [新增] 群聊管理接口
+	groupInfoURI              uri = "/v2/groups/{group_id}/info"
+	groupBotStateURI          uri = "/v2/groups/{group_id}/bot_state"
+	groupJoinRequestListURI   uri = "/v2/groups/{group_id}/join_request_list"
+	groupApprovalJoinReqURI   uri = "/v2/groups/{group_id}/approval_join_request/{member_openid}"
+	groupRestrictChatURI      uri = "/v2/groups/{group_id}/restrict_chat_setting"
+
+	// [新增] 入群自动审批策略接口
+	groupJoinApprovalStrategyURI      uri = "/v2/groups/join_approval_strategy"
+	groupJoinApprovalStrategyItemURI  uri = "/v2/groups/join_approval_strategy/{strategy_id}"
+	groupJoinApprovalStrategyExecURI  uri = "/v2/groups/join_approval_strategy/{strategy_id}/execute"
+	groupJoinApprovalStrategyWhiteURI uri = "/v2/groups/join_approval_strategy/{strategy_id}/whitelist_users"
+
 	c2cMessagesURI  uri = "/v2/users/{user_id}/messages"
 	c2cRichMediaURI uri = "/v2/users/{user_id}/files"
 

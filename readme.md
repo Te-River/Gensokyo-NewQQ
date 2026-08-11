@@ -298,6 +298,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 > - **GroupMsgReceiveHandler**（群推送开启）
 > - **GroupMemberAddEventHandler**（群成员新增）
 > - **GroupMemberRemoveEventHandler**（群成员移除）
+> - **GroupJoinRequestEventHandler**（入群申请）
 
 | 事件名称                   | 代表含义                         |
 | --------------------------- | ------------------------------- |
@@ -312,6 +313,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 | GroupMsgReceiveHandler     | [群聊请求开启推送]                 |
 | GroupMemberAddEventHandler | [群聊成员新增]                     |
 | GroupMemberRemoveEventHandler | [群聊成员移除]                  |
+| GroupJoinRequestEventHandler | [入群申请]                       |
 | C2CMsgRejectHandler        | [用户拒绝私聊 (C2C) 消息推送]      |
 | C2CMsgReceiveHandler       | [用户同意私聊 (C2C) 消息推送]      |
 

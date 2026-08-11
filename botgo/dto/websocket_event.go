@@ -53,6 +53,8 @@ const (
 	// [新增] 群成员变动事件（QQ API 未文档化但实际存在）
 	EventGroupMemberAdd    EventType = "GROUP_MEMBER_ADD"
 	EventGroupMemberRemove EventType = "GROUP_MEMBER_REMOVE"
+	// [新增] 入群申请事件
+	EventGroupJoinRequest EventType = "GROUP_JOIN_REQUEST"
 )
 
 // intentEventMap 不同 intent 对应的事件定义
@@ -71,6 +73,7 @@ var intentEventMap = map[Intent][]EventType{
 		EventGroupMsgReject, EventGroupMsgReceive,
 		EventFriendAdd, EventFriendDel,
 		EventC2CMsgReject, EventC2CMsgReceive,
+		EventGroupJoinRequest,
 	},
 	IntentGroupMembers: {
 		EventGroupMemberAdd, EventGroupMemberRemove,

@@ -24,6 +24,7 @@ type OpenAPI interface {
 	MessageAPI
 	WebhookAPI
 	InteractionAPI
+	GroupAPI
 }
 
 // Base 基础能力接口
@@ -88,4 +89,32 @@ type WebhookAPI interface {
 	CheckSessions(ctx context.Context) ([]*dto.HTTPSession, error)
 	SessionList(ctx context.Context) ([]*dto.HTTPSession, error)
 	RemoveSession(ctx context.Context, sessionID string) error
+}
+
+// GroupAPI 群聊相关接口
+type GroupAPI interface {
+	// GroupInfo 获取群基本信息
+	GroupInfo(ctx context.Context, groupOpenID string) (*dto.GroupInfo, error)
+	// BotInGroupState 获取机器人群内状态
+	BotInGroupState(ctx context.Context, groupOpenID string) (*dto.BotInGroupState, error)
+	// JoinRequestList 入群申请列表
+	JoinRequestList(ctx context.Context, groupOpenID string, nextIndex int) (*dto.JoinRequestList, error)
+	// ApprovalJoinRequest 入群申请审批 (op: "approve" / "decline")
+	ApprovalJoinRequest(ctx context.Context, groupOpenID, memberOpenID string, req *dto.ApprovalJoinRequest) error
+	// RestrictChatSetting 查询群禁言状态
+	RestrictChatSetting(ctx context.Context, groupOpenID string) (*dto.RestrictChatSetting, error)
+	// SetRestrictChatSetting 设置群成员禁言
+	SetRestrictChatSetting(ctx context.Context, groupOpenID string, setting *dto.RestrictChatSetting) error
+	// CreateJoinApprovalStrategy 创建入群自动审批策略
+	CreateJoinApprovalStrategy(ctx context.Context, req *dto.CreateJoinApprovalStrategyRequest) (*dto.CreateJoinApprovalStrategyResponse, error)
+	// ListJoinApprovalStrategy 查询入群自动审批策略列表 (cursor 分页游标, limit 单页数量 默认20 最大100)
+	ListJoinApprovalStrategy(ctx context.Context, cursor string, limit int) (*dto.JoinApprovalStrategyList, error)
+	// UpdateJoinApprovalStrategy 修改入群自动审批策略
+	UpdateJoinApprovalStrategy(ctx context.Context, strategyID string, req *dto.UpdateJoinApprovalStrategyRequest) (*dto.UpdateJoinApprovalStrategyResponse, error)
+	// ExecuteJoinApprovalStrategy 执行入群自动审批策略（对关联群全量扫描，异步约10分钟）
+	ExecuteJoinApprovalStrategy(ctx context.Context, strategyID string) error
+	// UpdateJoinApprovalStrategyWhitelist 修改入群自动审批策略白名单号码
+	UpdateJoinApprovalStrategyWhitelist(ctx context.Context, strategyID string, req *dto.WhitelistUsersRequest) (*dto.WhitelistUsersResponse, error)
+	// DeleteJoinApprovalStrategy 删除入群自动审批策略
+	DeleteJoinApprovalStrategy(ctx context.Context, strategyID string) error
 }

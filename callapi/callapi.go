@@ -78,6 +78,11 @@ type ParamsContent struct {
 	UserID    interface{} `json:"user_id,omitempty"`    // 这里使用interface{}因为它可能是多种类型
 	Duration  int         `json:"duration,omitempty"`   // 可选的整数
 	Enable    bool        `json:"enable,omitempty"`     // 可选的布尔值
+	// set_group_add_request 入群申请审批
+	Approve              bool   `json:"approve,omitempty"`                 // 是否同意入群申请
+	Flag                 string `json:"flag,omitempty"`                    // 申请标识(join_request_id)
+	Reason               string `json:"reason,omitempty"`                  // 拒绝理由(扩展参数)
+	AddToMemberBlacklist bool   `json:"add_to_member_blacklist,omitempty"` // 是否同时拉黑(扩展参数)
 	// handle quick operation
 	Context      Context   `json:"context,omitempty"`       // context 字段
 	Operation    Operation `json:"operation,omitempty"`     // operation 字段

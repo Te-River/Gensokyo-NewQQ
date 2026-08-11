@@ -36,6 +36,7 @@ settings:
     # - "C2CMsgReceiveHandler"                       # 用户开启(接收)C2C消息推送
     # - "GroupMemberAddEventHandler"                 # 群成员新增（非文档化事件）
     # - "GroupMemberRemoveEventHandler"              # 群成员移除（非文档化事件）
+    # - "GroupJoinRequestEventHandler"               # 入群申请事件（需群管理员身份）
   #转换类
   global_interaction_to_message : false              # 是否将按钮和表态回调转化为消息 仅在设置了按钮回调中的message时有效
   global_group_msg_rre_to_message : false            # 是否将用户开关机器人资料页的机器人推送开关 产生的事件转换为文本信息并发送给应用端.false将使用onebotv11的notice类型上报.
