@@ -40,6 +40,21 @@
 - `handlers/set_group_add_request.go` 由 MOCK 占位改为真实调用 v2 审批接口：虚拟 ID 经 idmap 反查真实 OpenID，`flag` 作为 `join_request_id`，`approve` 映射为 `op=approve/decline`
 - `callapi.ParamsContent` 新增扩展参数：`approve`、`flag`、`reason`（拒绝理由）、`add_to_member_blacklist`（是否拉黑）
 
+### 群聊管理 API 暴露为 OneBot action
+
+全部 11 个群聊管理类接口现已注册为 OneBot action，下游插件可直接调用：
+
+| Action | 对应 botgo API | 说明 |
+|--------|---------------|------|
+| `get_group_info`（真实化） | `GroupInfo` | 返回真实群名/简介/成员数（原为 MOCK 假数据） |
+| `set_group_ban`（真实化） | `SetRestrictChatSetting` | `duration` 秒禁言，0=解除（原为"暂未开放"骨架） |
+| `set_group_whole_ban`（真实化） | `SetRestrictChatSetting(AllMute)` | `enable` 开关全员禁言，保留已有成员级禁言 |
+| `get_group_join_request_list`（新增） | `JoinRequestList` | 入群申请列表，`next_index` 分页；返回的 `group_id`/`user_id`/`flag` 可直接回传审批 |
+| `get_group_bot_state`（新增） | `BotInGroupState` | 机器人群内状态（入群时间/可推送/角色） |
+| `join_approval_strategy_create/list/update/execute/whitelist/delete`（新增） | 6 个策略 API | 入群自动审批策略全生命周期管理 |
+
+`set_group_ban`/`set_group_whole_ban` 同时保留旧 action 名 `get_group_ban`/`get_group_whole_ban` 兼容。`callapi.ParamsContent` 同步新增 `next_index`/`cursor`/`limit`/`strategy_id`/`group_openids`/`group_ids`/`is_enable`/`expire_at`/`remark`/`op`/`whitelist_users` 参数。
+
 ---
 
 ## 🔧 修复
@@ -69,7 +84,8 @@
 |------|------|
 | `release_log/CHANGELOG_v012.md` | 本文档（新建） |
 | `template/config_template.go` | `text_intent` 注释新增 `GroupJoinRequestEventHandler` |
-| `readme.md` | 已实现 Intent 列表新增 `GroupJoinRequestEventHandler`（入群申请） |
+| `readme.md` | 已实现 Intent 列表新增 `GroupJoinRequestEventHandler`（入群申请）；API 表新增 8 个群聊管理 action 并标注真实化 |
+| `docs/api/api介绍.md` | 标准/扩展 API 表新增 8 个 action 及参数说明 |
 | `AGENTS.md` | botgo Fork 描述补充群聊管理 API（GroupAPI）与入群申请事件 |
 | `AGENTS.md` / `docs/本版新增功能.md` / `CHANGELOG_v010.md` | lazy_message_id msgseq 去重修复的文档同步（`2c0baf9`） |
 

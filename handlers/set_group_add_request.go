@@ -28,7 +28,7 @@ func SetGroupAddRequest(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		realGroupID, err := idmap.RetrieveRowByIDv2(groupID)
 		if err != nil || realGroupID == "" {
 			mylog.Printf("set_group_add_request: 反查 group_openid 失败: %v", err)
-			return sendGroupAddRequestResponse(client, message, "无法反查群 OpenID", 100)
+			return sendActionResult(client, message, "无法反查群 OpenID", 100)
 		}
 		groupOpenID = realGroupID
 	}
@@ -37,7 +37,7 @@ func SetGroupAddRequest(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		realUserID, err := idmap.RetrieveRowByIDv2(userID)
 		if err != nil || realUserID == "" {
 			mylog.Printf("set_group_add_request: 反查 member_openid 失败: %v", err)
-			return sendGroupAddRequestResponse(client, message, "无法反查用户 OpenID", 100)
+			return sendActionResult(client, message, "无法反查用户 OpenID", 100)
 		}
 		memberOpenID = realUserID
 	}
@@ -56,15 +56,15 @@ func SetGroupAddRequest(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 
 	if err := apiv2.ApprovalJoinRequest(context.TODO(), groupOpenID, memberOpenID, req); err != nil {
 		mylog.Printf("set_group_add_request: 审批失败: %v", err)
-		return sendGroupAddRequestResponse(client, message, err.Error(), 100)
+		return sendActionResult(client, message, err.Error(), 100)
 	}
 
 	mylog.Printf("set_group_add_request: 审批成功 group=%s user=%s op=%s", groupOpenID, memberOpenID, op)
-	return sendGroupAddRequestResponse(client, message, "", 0)
+	return sendActionResult(client, message, "", 0)
 }
 
-// sendGroupAddRequestResponse 构造并回传审批结果响应
-func sendGroupAddRequestResponse(client callapi.Client, message callapi.ActionMessage, errMsg string, retCode int) (string, error) {
+// sendActionResult 构造并回传 OneBot action 结果响应（retcode 0=成功）
+func sendActionResult(client callapi.Client, message callapi.ActionMessage, errMsg string, retCode int) (string, error) {
 	status := "ok"
 	if retCode != 0 {
 		status = "failed"
@@ -78,6 +78,35 @@ func sendGroupAddRequestResponse(client callapi.Client, message callapi.ActionMe
 		Message: errMsg,
 		RetCode: retCode,
 		Status:  status,
+		Echo:    message.Echo,
+	}
+	outputMap := structToMap(response)
+	if client != nil {
+		if err := client.SendMessage(outputMap); err != nil {
+			mylog.Printf("set_group_add_request: 发送响应失败: %v", err)
+		}
+	}
+	result, err := json.Marshal(response)
+	if err != nil {
+		mylog.Printf("set_group_add_request: 序列化响应失败: %v", err)
+		return "", err
+	}
+	return string(result), nil
+}
+
+// sendActionResultWithData 构造并回传带 data 的成功响应
+func sendActionResultWithData(client callapi.Client, message callapi.ActionMessage, data interface{}) (string, error) {
+	response := struct {
+		Data    interface{} `json:"data"`
+		Message string      `json:"message"`
+		RetCode int         `json:"retcode"`
+		Status  string      `json:"status"`
+		Echo    interface{} `json:"echo,omitempty"`
+	}{
+		Data:    data,
+		Message: "",
+		RetCode: 0,
+		Status:  "ok",
 		Echo:    message.Echo,
 	}
 	outputMap := structToMap(response)
