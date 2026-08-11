@@ -89,7 +89,7 @@
 ## ✅ 提交记录
 
 ```
-c0317e9  feat: 补齐群聊 API 并接入入群申请事件
+43b816e  feat: 补齐群聊 API 并接入入群申请事件
 0b4ee93  ci: 新增 Dependabot 配置覆盖 Go/npm/GitHub Actions 依赖
 59a8455  chore: gitignore 新增 .qoder/ 忽略项
 d5c780b  Merge pull request #17 from Te-River/Refactor
