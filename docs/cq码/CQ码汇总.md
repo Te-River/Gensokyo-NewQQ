@@ -11,7 +11,7 @@ OneBot V11 协议定义的标准消息类型。
 | CQ 码 | 范围 | 说明 | 文档 |
 |-------|------|------|------|
 | `[CQ:text]` | `全场景` | 纯文本消息段，最基本的消息类型。 | [查看](./标准CQ码/标准cq码-cq-text.md) |
-| `[CQ:face]` | `全场景` | QQ 表情（经典小脸表情）。 | [查看](./标准CQ码/标准cq码-cq-face.md) |
+| `[CQ:face]` | `全场景` | QQ 表情（经典小脸表情）。⚠️ 开发中，暂无法正常使用。 | [查看](./标准CQ码/标准cq码-cq-face.md) |
 | `[CQ:image]` | `q群 (Group Chat)` / `C2C (私聊)` | 图片消息，支持 URL / base64 / 本地路径。 | [查看](./标准CQ码/标准cq码-cq-image.md) |
 | `[CQ:record]` | `q群 (Group Chat)` / `C2C (私聊)` | 语音消息，支持 URL / base64 / 本地路径，自动转码 silk。 | [查看](./标准CQ码/标准cq码-cq-record.md) |
 | `[CQ:video]` | `q群 (Group Chat)` / `C2C (私聊)` | 视频消息，支持 URL / 本地路径。 | [查看](./标准CQ码/标准cq码-cq-video.md) |
