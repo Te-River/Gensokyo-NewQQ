@@ -89,6 +89,13 @@
 - **键盘能力**：支持官方三种形态（模板 `id`、`content.rows`、顶层 `rows`）；`specify_user_ids` 数字虚拟 ID 自动转换为 OpenID（`ResolveKeyboardVirtualIDs`）；私聊 `__USER_ID__` 占位符替换为实际用户 OpenID（`ResolvePlaceholderUserIDs`）；按钮本地图片自动解析（`ResolveKeyboardImages`）
 - **优先级**：与 `[CQ:markdown]` 同存时 markdown 优先（其附带键盘生效）
 
+### CQ 码解析统一管道架构（ProcessCQCodePipeline）
+
+- 新增 `handlers/cqcode_pipeline.go`：统一管道 `ProcessCQCodePipeline()` 处理所有出站 CQ 码字符串解析（媒体/控制/动作），输出纯文本 + foundItems
+- `message_parser.go` 移除分散的 CQ 码解析逻辑（string 分支内的 markdown/card/input_notify/stream/媒体正则，-116 行），统一调用 `ProcessCQCodePipeline`
+- **架构原则**：cqcode_pipeline.go 负责解析、cqcode.go 负责正则常量与动作执行、message_parser.go 只负责消息段格式转换
+- **修复**：消息段数组路径（NoneBot 等框架的 segment_type_koishi 格式）下 CQ 码原样发出的问题——此前 string 分支内的解析逻辑在 `[]interface{}` 路径不执行，统一管道确保两种路径解析一致
+
 ### QQ 开放平台新能力调研（群聊/C2C 场景）
 
 基于 QQ 开放平台 api-v2 文档（2026-07 更新）全量比对：
@@ -110,6 +117,14 @@
 `[CQ:keyboard]` 独立使用时的官方简写形态 `{"content": {"rows": [...]}}`（顶层 `content`）与按钮模板形态 `{"id": "..."}`（顶层 `id`）无法被 `parseMDData` 解析，导致键盘 JSON 解析失败（kb=nil）、CQ 码原样发出。
 
 **修复：** `parseMDData` 的临时结构体新增顶层 `content`/`id` 字段，与既有嵌套 `keyboard` 形态并行支持，不影响 `[CQ:markdown]` 既有行为。
+
+### 消息段数组路径 CQ 码原样发出
+
+**文件：** `handlers/message_parser.go`、`handlers/cqcode_pipeline.go`
+
+`parseMessageContent` 中 `[]interface{}` 路径（NoneBot 等框架发送的消息段数组格式）下，text 段内嵌的 `[CQ:keyboard]` 等 CQ 码未被解析，原样作为文本发送到 QQ。
+
+**修复：** 新建 `cqcode_pipeline.go` 统一管道 `ProcessCQCodePipeline()`，在 switch 之后统一调用，确保 string 与 `[]interface{}` 两种路径均经过同一解析。
 
 ### 语音上传失败修复
 
