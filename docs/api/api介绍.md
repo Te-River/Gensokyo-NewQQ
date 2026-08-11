@@ -51,14 +51,14 @@
 | `get_group_whole_ban` | set_group_whole_ban.go | `q群 (Group Chat)` | 兼容入口，处理逻辑等同 `set_group_whole_ban`。 |
 | `send_to_group` | send_group_msg.go | `q群 (Group Chat)` | `send_group_msg` 别名。 |
 | [`delete_group_msg`](./扩展api/扩展api-delete_group_msg.md) | delete_group_msg.go | `q群 (Group Chat)` | 撤回群内指定用户或 Bot 自身的消息；支持自动查找最后一条消息。 |
-| `get_group_join_request_list` | get_group_join_request_list.go | `q群 (Group Chat)` | 拉取入群申请列表，`next_index` 分页；返回的 `group_id`/`user_id`/`flag` 可直接回传 `set_group_add_request` 审批。 |
-| `get_group_bot_state` | get_group_bot_state.go | `q群 (Group Chat)` | 获取机器人在群内状态（入群时间/可推送/角色）。 |
-| `join_approval_strategy_create` | join_approval_strategy.go | `-` | 创建入群自动审批策略（`group_openids`/`group_ids` 二选一）。 |
-| `join_approval_strategy_list` | join_approval_strategy.go | `-` | 查询策略列表（`cursor`/`limit` 分页）。 |
-| `join_approval_strategy_update` | join_approval_strategy.go | `-` | 修改策略（`strategy_id` + `is_enable`/`expire_at`/`remark`/`op`+关联群）。 |
-| `join_approval_strategy_execute` | join_approval_strategy.go | `-` | 执行策略全量扫描（异步约 10 分钟）。 |
-| `join_approval_strategy_whitelist` | join_approval_strategy.go | `-` | 修改策略白名单（`strategy_id` + `op` + `whitelist_users`）。 |
-| `join_approval_strategy_delete` | join_approval_strategy.go | `-` | 删除策略（`strategy_id`）。 |
+| [`get_group_join_request_list`](./扩展api/扩展api-get_group_join_request_list.md) | get_group_join_request_list.go | `q群 (Group Chat)` | 拉取入群申请列表，`next_index` 分页；返回的 `group_id`/`user_id`/`flag` 可直接回传 `set_group_add_request` 审批。 |
+| [`get_group_bot_state`](./扩展api/扩展api-get_group_bot_state.md) | get_group_bot_state.go | `q群 (Group Chat)` | 获取机器人在群内状态（入群时间/可推送/角色）。 |
+| [`join_approval_strategy_create`](./扩展api/扩展api-join_approval_strategy.md) | join_approval_strategy.go | `-` | 创建入群自动审批策略（`group_openids`/`group_ids` 二选一）。 |
+| [`join_approval_strategy_list`](./扩展api/扩展api-join_approval_strategy.md) | join_approval_strategy.go | `-` | 查询策略列表（`cursor`/`limit` 分页）。 |
+| [`join_approval_strategy_update`](./扩展api/扩展api-join_approval_strategy.md) | join_approval_strategy.go | `-` | 修改策略（`strategy_id` + `is_enable`/`expire_at`/`remark`/`op`+关联群）。 |
+| [`join_approval_strategy_execute`](./扩展api/扩展api-join_approval_strategy.md) | join_approval_strategy.go | `-` | 执行策略全量扫描（异步约 10 分钟）。 |
+| [`join_approval_strategy_whitelist`](./扩展api/扩展api-join_approval_strategy.md) | join_approval_strategy.go | `-` | 修改策略白名单（`strategy_id` + `op` + `whitelist_users`）。 |
+| [`join_approval_strategy_delete`](./扩展api/扩展api-join_approval_strategy.md) | join_approval_strategy.go | `-` | 删除策略（`strategy_id`）。 |
 
 ## 消息事件扩展字段
 

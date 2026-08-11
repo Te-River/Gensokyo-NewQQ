@@ -86,6 +86,8 @@
 | `template/config_template.go` | `text_intent` 注释新增 `GroupJoinRequestEventHandler` |
 | `readme.md` | 已实现 Intent 列表新增 `GroupJoinRequestEventHandler`（入群申请）；API 表新增 8 个群聊管理 action 并标注真实化 |
 | `docs/api/api介绍.md` | 标准/扩展 API 表新增 8 个 action 及参数说明 |
+| `docs/api/扩展API文档.md` | 扩展 API 索引新增 8 个 action |
+| `docs/api/扩展api/` | 新增 `get_group_join_request_list`、`get_group_bot_state`、`join_approval_strategy`（6 action）详细文档 |
 | `AGENTS.md` | botgo Fork 描述补充群聊管理 API（GroupAPI）与入群申请事件 |
 | `AGENTS.md` / `docs/本版新增功能.md` / `CHANGELOG_v010.md` | lazy_message_id msgseq 去重修复的文档同步（`2c0baf9`） |
 
@@ -105,6 +107,7 @@
 ## ✅ 提交记录
 
 ```
+ce9791d  feat: 群聊管理 API 全部暴露为 OneBot action
 43b816e  feat: 补齐群聊 API 并接入入群申请事件
 0b4ee93  ci: 新增 Dependabot 配置覆盖 Go/npm/GitHub Actions 依赖
 59a8455  chore: gitignore 新增 .qoder/ 忽略项
