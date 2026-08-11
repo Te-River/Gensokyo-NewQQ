@@ -524,9 +524,15 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 
 			// 处理出站 [CQ:remove] → 撤回消息并从文本中移除 CQ 码
 			messageText = ProcessCQRemoveOutbound(messageText, apiv2, targetGroupID)
-			// 如果处理后 messageText 为空（纯 CQ:remove 消息），直接返回客户端回执
+
+			// 处理出站群聊管理动作 CQ 码（禁言/全员禁言/入群审批/策略），执行后从文本中移除
+			messageText = ProcessCQSetGroupBanOutbound(messageText, targetGroupID, apiv2)
+			messageText = ProcessCQSetGroupWholeBanOutbound(messageText, targetGroupID, apiv2)
+			messageText = ProcessCQSetGroupAddRequestOutbound(messageText, targetGroupID, apiv2)
+			messageText = ProcessCQStrategyOutbound(messageText, apiv2)
+			// 如果处理后 messageText 为空（纯动作 CQ 码消息），直接返回客户端回执
 			if strings.TrimSpace(messageText) == "" && len(foundItems) == 0 {
-				mylog.Printf("[CQ:remove] 纯 CQ 码消息，不发送到 QQ 频道")
+				mylog.Printf("[CQ:action] 纯 CQ 码消息，不发送到 QQ 群聊")
 				SendResponse(client, nil, &message, nil, api, apiv2)
 				return "", nil
 			}

@@ -55,6 +55,19 @@
 
 `set_group_ban`/`set_group_whole_ban` 同时保留旧 action 名 `get_group_ban`/`get_group_whole_ban` 兼容。`callapi.ParamsContent` 同步新增 `next_index`/`cursor`/`limit`/`strategy_id`/`group_openids`/`group_ids`/`is_enable`/`expire_at`/`remark`/`op`/`whitelist_users` 参数。
 
+### 动作型 CQ 码（群聊管理）
+
+复用现有 `[CQ:member]`/`[CQ:remove]` 的"解析-执行-移除"出站模式，新增 4 个动作型 CQ 码（`handlers/message_parser.go` + `send_group_msg.go` 文本路径接入，纯 CQ 码消息不发送只回执）：
+
+| CQ 码 | 动作 |
+|-------|------|
+| `[CQ:set_group_ban,group_id=...,user_id=...,duration=秒]` | 成员禁言（0=解除） |
+| `[CQ:set_group_whole_ban,group_id=...,enable=true/false]` | 全员禁言开关（保留成员级禁言） |
+| `[CQ:set_group_add_request,group_id=...,user_id=...,flag=...,approve=true/false]` | 入群申请审批（可带 reason/add_to_member_blacklist） |
+| `[CQ:strategy,action=execute/delete,strategy_id=...]` | 审批策略执行/删除 |
+
+`group_id` 支持跨群路由（省略时使用发送目标群）；参数缺失/未知 action 时 CQ 码原样保留不吞掉。数据查询类接口（get_group_info 等）不做 CQ 码。
+
 ---
 
 ## 🐛 Bug 修复
@@ -367,6 +380,8 @@
 | `docs/api/api介绍.md` | 标准/扩展 API 表新增 8 个 action 及参数说明 |
 | `docs/api/扩展API文档.md` | 扩展 API 索引新增 8 个 action |
 | `docs/api/扩展api/` | 新增 `get_group_join_request_list`、`get_group_bot_state`、`join_approval_strategy`（6 action）详细文档 |
+| `docs/cq码/` | 新增 4 个动作型 CQ 码文档（set_group_ban/set_group_whole_ban/set_group_add_request/strategy），`CQ码汇总.md` 索引同步 |
+| `readme.md` | 拓展 CQ 码表新增 4 个动作型 CQ 码 |
 | `docs/本版新增功能.md` | 事件表新增 `GroupJoinRequestEventHandler`；API 表 8 个 action 加链接；`set_group_add_request` 过时 MOCK 描述修正 |
 | `AGENTS.md` | botgo Fork 描述补充群聊管理 API（GroupAPI）与入群申请事件 |
 | `docs/cq码/` | 标准 CQ 码文档完善（12 个标准 CQ 码文档 + 1 个统一汇总，同步 `docs/更多文档.md` 索引） |

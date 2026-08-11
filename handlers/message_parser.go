@@ -2886,6 +2886,276 @@ func ProcessCQRemoveOutbound(text string, apiv2 openapi.OpenAPI, groupID string)
 	})
 }
 
+// ProcessCQSetGroupBanOutbound 处理出站 [CQ:set_group_ban,group_id=虚拟群ID,user_id=虚拟用户ID,duration=秒]
+// 设置成员禁言（duration=0 解除），并从文本中移除 CQ 码
+func ProcessCQSetGroupBanOutbound(text, defaultGroupID string, apiv2 openapi.OpenAPI) string {
+	re := regexp.MustCompile(`\[CQ:set_group_ban,([^\]]*)\]`)
+	return re.ReplaceAllStringFunc(text, func(match string) string {
+		inner := match[1 : len(match)-1]
+		var cqGroupID, userID, durationStr string
+		for _, part := range strings.Split(inner, ",") {
+			kv := strings.SplitN(part, "=", 2)
+			if len(kv) != 2 {
+				continue
+			}
+			switch strings.TrimSpace(kv[0]) {
+			case "group_id":
+				cqGroupID = strings.TrimSpace(kv[1])
+			case "user_id":
+				userID = strings.TrimSpace(kv[1])
+			case "duration":
+				durationStr = strings.TrimSpace(kv[1])
+			}
+		}
+		// 群 ID 缺失时回退发送目标群
+		groupID := cqGroupID
+		if groupID == "" {
+			groupID = defaultGroupID
+		}
+		if groupID == "" || userID == "" {
+			mylog.Printf("[CQ:set_group_ban] group_id 或 user_id 为空: %s", match)
+			return match
+		}
+		duration, err := strconv.Atoi(durationStr)
+		if err != nil {
+			duration = 0
+		}
+
+		// 反查真实 OpenID（32 位原生 OpenID 直接使用）
+		groupOpenID := groupID
+		if len(groupID) != 32 {
+			realGroupID, err := idmap.RetrieveRowByIDv2(groupID)
+			if err != nil || realGroupID == "" {
+				mylog.Printf("[CQ:set_group_ban] group_id=%s 反查失败: %v", groupID, err)
+				return ""
+			}
+			groupOpenID = realGroupID
+		}
+		memberOpenID := userID
+		if len(userID) != 32 {
+			realUserID, err := idmap.RetrieveRowByIDv2(userID)
+			if err != nil || realUserID == "" {
+				mylog.Printf("[CQ:set_group_ban] user_id=%s 反查失败: %v", userID, err)
+				return ""
+			}
+			memberOpenID = realUserID
+		}
+
+		setting := &dto.RestrictChatSetting{GroupOpenID: groupOpenID}
+		if duration > 0 {
+			setting.MemberRestrict = []dto.MemberRestrict{{
+				MemberOpenID:  memberOpenID,
+				RestrictUntil: time.Now().Unix() + int64(duration),
+			}}
+		} else {
+			// 解除禁言：查询当前设置, 移除该成员后提交
+			cur, err := apiv2.RestrictChatSetting(context.TODO(), groupOpenID)
+			if err != nil {
+				mylog.Printf("[CQ:set_group_ban] 查询禁言状态失败: %v", err)
+				return ""
+			}
+			for _, m := range cur.MemberRestrict {
+				if m.MemberOpenID != memberOpenID {
+					setting.MemberRestrict = append(setting.MemberRestrict, m)
+				}
+			}
+		}
+		if err := apiv2.SetRestrictChatSetting(context.TODO(), groupOpenID, setting); err != nil {
+			mylog.Printf("[CQ:set_group_ban] 设置禁言失败: %v", err)
+		} else {
+			mylog.Printf("[CQ:set_group_ban] 已设置禁言 group=%s user=%s duration=%d", groupOpenID, memberOpenID, duration)
+		}
+		return "" // 无论成败都不发送原文
+	})
+}
+
+// ProcessCQSetGroupWholeBanOutbound 处理出站 [CQ:set_group_whole_ban,group_id=虚拟群ID,enable=true/false]
+// 切换全员禁言，并从文本中移除 CQ 码
+func ProcessCQSetGroupWholeBanOutbound(text, defaultGroupID string, apiv2 openapi.OpenAPI) string {
+	re := regexp.MustCompile(`\[CQ:set_group_whole_ban,([^\]]*)\]`)
+	return re.ReplaceAllStringFunc(text, func(match string) string {
+		inner := match[1 : len(match)-1]
+		var cqGroupID, enableStr string
+		for _, part := range strings.Split(inner, ",") {
+			kv := strings.SplitN(part, "=", 2)
+			if len(kv) != 2 {
+				continue
+			}
+			switch strings.TrimSpace(kv[0]) {
+			case "group_id":
+				cqGroupID = strings.TrimSpace(kv[1])
+			case "enable":
+				enableStr = strings.TrimSpace(kv[1])
+			}
+		}
+		// 群 ID 缺失时回退发送目标群
+		groupID := cqGroupID
+		if groupID == "" {
+			groupID = defaultGroupID
+		}
+		if groupID == "" {
+			mylog.Printf("[CQ:set_group_whole_ban] group_id 为空: %s", match)
+			return match
+		}
+		enable, err := strconv.ParseBool(enableStr)
+		if err != nil {
+			mylog.Printf("[CQ:set_group_whole_ban] enable 参数无效: %s", match)
+			return match
+		}
+
+		groupOpenID := groupID
+		if len(groupID) != 32 {
+			realGroupID, err := idmap.RetrieveRowByIDv2(groupID)
+			if err != nil || realGroupID == "" {
+				mylog.Printf("[CQ:set_group_whole_ban] group_id=%s 反查失败: %v", groupID, err)
+				return ""
+			}
+			groupOpenID = realGroupID
+		}
+
+		setting := &dto.RestrictChatSetting{GroupOpenID: groupOpenID, AllMute: enable}
+		if cur, err := apiv2.RestrictChatSetting(context.TODO(), groupOpenID); err == nil {
+			setting.MemberRestrict = cur.MemberRestrict
+		} else {
+			mylog.Printf("[CQ:set_group_whole_ban] 查询禁言状态失败: %v", err)
+		}
+		if err := apiv2.SetRestrictChatSetting(context.TODO(), groupOpenID, setting); err != nil {
+			mylog.Printf("[CQ:set_group_whole_ban] 设置全员禁言失败: %v", err)
+		} else {
+			mylog.Printf("[CQ:set_group_whole_ban] 已设置全员禁言 group=%s enable=%v", groupOpenID, enable)
+		}
+		return ""
+	})
+}
+
+// ProcessCQSetGroupAddRequestOutbound 处理出站 [CQ:set_group_add_request,group_id=虚拟群ID,user_id=虚拟用户ID,flag=申请ID,approve=true/false]
+// 审批入群申请（可带 reason / add_to_member_blacklist），并从文本中移除 CQ 码
+func ProcessCQSetGroupAddRequestOutbound(text, defaultGroupID string, apiv2 openapi.OpenAPI) string {
+	re := regexp.MustCompile(`\[CQ:set_group_add_request,([^\]]*)\]`)
+	return re.ReplaceAllStringFunc(text, func(match string) string {
+		inner := match[1 : len(match)-1]
+		var cqGroupID, userID, flag, approveStr, reason, blacklistStr string
+		for _, part := range strings.Split(inner, ",") {
+			kv := strings.SplitN(part, "=", 2)
+			if len(kv) != 2 {
+				continue
+			}
+			switch strings.TrimSpace(kv[0]) {
+			case "group_id":
+				cqGroupID = strings.TrimSpace(kv[1])
+			case "user_id":
+				userID = strings.TrimSpace(kv[1])
+			case "flag":
+				flag = strings.TrimSpace(kv[1])
+			case "approve":
+				approveStr = strings.TrimSpace(kv[1])
+			case "reason":
+				reason = strings.TrimSpace(kv[1])
+			case "add_to_member_blacklist":
+				blacklistStr = strings.TrimSpace(kv[1])
+			}
+		}
+		// 群 ID 缺失时回退发送目标群
+		groupID := cqGroupID
+		if groupID == "" {
+			groupID = defaultGroupID
+		}
+		if groupID == "" || userID == "" || flag == "" {
+			mylog.Printf("[CQ:set_group_add_request] group_id/user_id/flag 不能为空: %s", match)
+			return match
+		}
+		approve, err := strconv.ParseBool(approveStr)
+		if err != nil {
+			mylog.Printf("[CQ:set_group_add_request] approve 参数无效: %s", match)
+			return match
+		}
+
+		groupOpenID := groupID
+		if len(groupID) != 32 {
+			realGroupID, err := idmap.RetrieveRowByIDv2(groupID)
+			if err != nil || realGroupID == "" {
+				mylog.Printf("[CQ:set_group_add_request] group_id=%s 反查失败: %v", groupID, err)
+				return ""
+			}
+			groupOpenID = realGroupID
+		}
+		memberOpenID := userID
+		if len(userID) != 32 {
+			realUserID, err := idmap.RetrieveRowByIDv2(userID)
+			if err != nil || realUserID == "" {
+				mylog.Printf("[CQ:set_group_add_request] user_id=%s 反查失败: %v", userID, err)
+				return ""
+			}
+			memberOpenID = realUserID
+		}
+
+		op := "decline"
+		if approve {
+			op = "approve"
+		}
+		req := &dto.ApprovalJoinRequest{
+			Op:            op,
+			JoinRequestID: flag,
+			RejectReason:  reason,
+		}
+		if blacklistStr != "" {
+			if blacklist, err := strconv.ParseBool(blacklistStr); err == nil {
+				req.AddToMemberBlacklist = blacklist
+			}
+		}
+		if err := apiv2.ApprovalJoinRequest(context.TODO(), groupOpenID, memberOpenID, req); err != nil {
+			mylog.Printf("[CQ:set_group_add_request] 审批失败: %v", err)
+		} else {
+			mylog.Printf("[CQ:set_group_add_request] 已审批 group=%s user=%s op=%s", groupOpenID, memberOpenID, op)
+		}
+		return ""
+	})
+}
+
+// ProcessCQStrategyOutbound 处理出站 [CQ:strategy,action=execute/delete,strategy_id=策略ID]
+// 执行或删除入群自动审批策略，并从文本中移除 CQ 码；未知 action 原样保留
+func ProcessCQStrategyOutbound(text string, apiv2 openapi.OpenAPI) string {
+	re := regexp.MustCompile(`\[CQ:strategy,([^\]]*)\]`)
+	return re.ReplaceAllStringFunc(text, func(match string) string {
+		inner := match[1 : len(match)-1]
+		var action, strategyID string
+		for _, part := range strings.Split(inner, ",") {
+			kv := strings.SplitN(part, "=", 2)
+			if len(kv) != 2 {
+				continue
+			}
+			switch strings.TrimSpace(kv[0]) {
+			case "action":
+				action = strings.TrimSpace(kv[1])
+			case "strategy_id":
+				strategyID = strings.TrimSpace(kv[1])
+			}
+		}
+		if strategyID == "" {
+			mylog.Printf("[CQ:strategy] strategy_id 为空: %s", match)
+			return match
+		}
+		switch action {
+		case "execute":
+			if err := apiv2.ExecuteJoinApprovalStrategy(context.TODO(), strategyID); err != nil {
+				mylog.Printf("[CQ:strategy] 执行策略失败: %v", err)
+			} else {
+				mylog.Printf("[CQ:strategy] 已执行策略 %s（异步约10分钟）", strategyID)
+			}
+		case "delete":
+			if err := apiv2.DeleteJoinApprovalStrategy(context.TODO(), strategyID); err != nil {
+				mylog.Printf("[CQ:strategy] 删除策略失败: %v", err)
+			} else {
+				mylog.Printf("[CQ:strategy] 已删除策略 %s", strategyID)
+			}
+		default:
+			mylog.Printf("[CQ:strategy] 未知 action=%s: %s", action, match)
+			return match // 未知 action 原样保留
+		}
+		return ""
+	})
+}
+
 // parseMarkdownFromMessage 从 base64 编码的 markdown JSON 数据中解析 dto.Markdown + keyboard
 // 输入格式: 原始 base64 字符串（无 base64:// 前缀）
 func parseMarkdownFromMessage(b64Data string) (*dto.Markdown, *keyboard.MessageKeyboard) {
