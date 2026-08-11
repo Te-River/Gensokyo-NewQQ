@@ -1358,6 +1358,9 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 		 return ""
 		})
 
+		// 处理 [CQ:keyboard,...]：解析键盘数据存入 foundItems["keyboard"]
+		messageText = ProcessCQKeyboard(messageText, foundItems)
+
 		patterns := []struct {
 			key     string
 			pattern *regexp.Regexp
@@ -2178,6 +2181,13 @@ func parseMDData(mdData []byte) (*dto.Markdown, *keyboard.MessageKeyboard, error
 	}
 
 	return md, kb, nil
+}
+
+// parseKeyboardData 从 JSON 数据解析独立的 keyboard 对象（不带 markdown）
+// 输入结构同 [CQ:markdown] 的 keyboard 字段：{id, content.rows} / {rows} / {id}
+func parseKeyboardData(kbData []byte) (*keyboard.MessageKeyboard, error) {
+	_, kb, err := parseMDData(kbData)
+	return kb, err
 }
 
 // ResolveKeyboardVirtualIDs 遍历 keyboard 中的所有按钮，将 specify_user_ids

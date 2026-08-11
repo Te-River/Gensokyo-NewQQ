@@ -75,6 +75,30 @@
 - 出站动作型由 6 次独立全文扫描（member/remove/ban/whole_ban/add_request/strategy 各自 `ReplaceAllStringFunc`）改为 1 次扫描，行为完全兼容（member 的 eventID/跨群路由语义保留，内部函数对默认群 ID 增加反查保持等价）
 - `message_parser.go` 相应精简（-540 行），`send_group_msg.go` 6 次调用改为 1 次
 
+### [CQ:keyboard] 独立内嵌键盘 CQ 码
+
+新增扩展 CQ 码 `[CQ:keyboard]`，使文本消息可以直接附加 QQ 官方内嵌键盘（按钮消息），覆盖群聊与单聊：
+
+| 语法 | 说明 |
+|------|------|
+| `[CQ:keyboard,data=base64://<键盘JSON>]` | base64 编码形式（与 `[CQ:markdown]` 一致） |
+| `[CQ:keyboard,data=<键盘JSON>]` | 原始 JSON 形式 |
+
+- **解析**：`handlers/cqcode.go` 新增 `ProcessCQKeyboard`，从出站文本中提取并移除 CQ 码，解码后的键盘 JSON 存入 `foundItems["keyboard"]`；`handlers/message_parser.go` 的 `parseMessageContent` 统一接入
+- **发送**：`send_group_msg` / `send_private_msg` / `send_group_msg_raw` 文本路径在无 markdown 时解析键盘（复用 `parseMDData` 结构），附加到 `MessageToCreate.Keyboard`，以 `msg_type=0` 文本 + 键盘发送
+- **键盘能力**：支持官方三种形态（模板 `id`、`content.rows`、顶层 `rows`）；`specify_user_ids` 数字虚拟 ID 自动转换为 OpenID（`ResolveKeyboardVirtualIDs`）；私聊 `__USER_ID__` 占位符替换为实际用户 OpenID（`ResolvePlaceholderUserIDs`）；按钮本地图片自动解析（`ResolveKeyboardImages`）
+- **优先级**：与 `[CQ:markdown]` 同存时 markdown 优先（其附带键盘生效）
+
+### QQ 开放平台新能力调研（群聊/C2C 场景）
+
+基于 QQ 开放平台 api-v2 文档（2026-07 更新）全量比对：
+
+- **事件**：群聊/C2C 场景的文档化事件（`GROUP_AND_C2C_EVENT` 1<<25 全量 10 个 + `GROUP_MESSAGE_CREATE` + 探测所得成员/入群申请/内联搜索/互动）本地已全部适配，**无新增可适配事件**
+- **表情消息**：官方 api-v2 消息类型新增"表情"页面（2025-07），但公开文档未披露群聊发送接口与 `msg_type` 取值，无法确认适配方式
+- **表情表态（reaction）**：官方明确"仅支持在频道内使用"，群聊/C2C 不可用
+- **消息审核（MESSAGE_AUDIT）**：官方描述面向主动消息审核，群聊/C2C 场景适用性未获官方确认，暂不接入
+- **图文消息**：官方 4 个发送场景（单聊/群聊/文字子频道/频道私信）中的图文能力已由本地富媒体 `msg_type=7` 与卡片 `msg_type=8` 覆盖
+
 ---
 
 ## 🐛 Bug 修复
@@ -393,6 +417,9 @@
 | `AGENTS.md` | botgo Fork 描述补充群聊管理 API（GroupAPI）与入群申请事件 |
 | `docs/cq码/` | 标准 CQ 码文档完善（12 个标准 CQ 码文档 + 1 个统一汇总，同步 `docs/更多文档.md` 索引） |
 | `docs/forks/` | fork inventory：`botgo.md`、`go-silk.md`（P12） |
+| `docs/cq码/` | 新增 `扩展cq码-cq-keyboard.md`（[CQ:keyboard] 独立内嵌键盘），`CQ码汇总.md` 扩展表新增 keyboard 行 |
+| `docs/本版新增功能.md` | 消息与 CQ 行为章节新增 `[CQ:keyboard]` |
+| `release_log/CHANGELOG_v012.md` | 新增 [CQ:keyboard] 与官方新能力调研结论两个小节 |
 
 ---
 

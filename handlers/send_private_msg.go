@@ -448,6 +448,26 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			         groupMessage.Content = resolvePlainTextAtMentions(groupMessage.Content)
 			        }
 
+			        // 没有 markdown 时，处理独立 [CQ:keyboard] → 文本消息附加内嵌键盘
+			        if md == nil {
+			         if kbItems, ok := foundItems["keyboard"]; ok && len(kbItems) > 0 {
+			          kb, err := parseKeyboardData([]byte(kbItems[0]))
+			          if err != nil || kb == nil {
+			           mylog.Printf("[CQ:keyboard] 解析键盘数据失败: %v", err)
+			          } else {
+			           // 替换 keyboard 中 __USER_ID__ 占位符为实际用户 OpenID
+			           userOpenID := idmap.ResolveOriginalID(UserID)
+			           ResolvePlaceholderUserIDs(kb, userOpenID)
+			           // 处理 keyboard 按钮中的本地图片路径
+			           ResolveKeyboardImages(kb, apiv2)
+			           groupMessage.Keyboard = kb
+			           // 从 foundItems 中移除 keyboard，避免下方循环重复发送
+			           delete(foundItems, "keyboard")
+			           mylog.Printf("[CQ:keyboard] 私聊文本消息附加内嵌键盘")
+			          }
+			         }
+			        }
+
 			        // 处理 [CQ:reply,id=数字] → message_reference + msg_id（私聊场景校验避免越权）
 			    if replyIDs, ok := foundItems["reply_msg_id"]; ok && len(replyIDs) > 0 && messageText != "" {
 			        applyPrivateReply(groupMessage, replyIDs, UserID)

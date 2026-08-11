@@ -580,6 +580,23 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				mylog.Printf("[CQ:markdown] 将消息类型切换为 markdown")
 			}
 
+			// 没有 markdown 时，处理独立 [CQ:keyboard] → 文本消息附加内嵌键盘
+			if md == nil {
+				if kbItems, ok := foundItems["keyboard"]; ok && len(kbItems) > 0 {
+					kb, err := parseKeyboardData([]byte(kbItems[0]))
+					if err != nil || kb == nil {
+						mylog.Printf("[CQ:keyboard] 解析键盘数据失败: %v", err)
+					} else {
+						// 处理 keyboard 按钮中的本地图片路径
+						ResolveKeyboardImages(kb, apiv2)
+						groupMessage.Keyboard = kb
+						// 从 foundItems 中移除 keyboard，避免下方循环重复发送
+						delete(foundItems, "keyboard")
+						mylog.Printf("[CQ:keyboard] 文本消息附加内嵌键盘")
+					}
+				}
+			}
+
 			// 如果有 [CQ:card]，改为卡片消息 (msg_type=8)
 			if cardItems, ok := foundItems["card"]; ok && len(cardItems) > 0 && groupMessage.MsgType != 2 {
 				var cardData map[string]string
