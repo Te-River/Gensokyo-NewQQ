@@ -648,13 +648,6 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 		if config.GetEnableChangeWord() {
 			messageText = acnode.CheckWordOUT(messageText)
 		}
-		if paramsMessage.GroupID == nil {
-			// 解析[CQ:avatar,qq=123456]
-			messageText = ProcessCQAvatarNoGroupID(messageText)
-		} else {
-			// 解析[CQ:avatar,qq=123456]
-			messageText = ProcessCQAvatar(paramsMessage.GroupID.(string), messageText)
-		}
 	case []interface{}:
 		mylog.Printf("params.message is a slice (segment_type_koishi)\n")
 		for _, segment := range message {
@@ -1275,16 +1268,9 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 		   mylog.Println("Unsupported message format: params.message field is not a string, map or slice")
 	}
 
-	// 从 messageText 中提取 [CQ:reply,id=数字] 用于构建 message_reference
-	  for _, matches := range replyRe.FindAllStringSubmatch(messageText, -1) {
-		if len(matches) > 1 {
-			foundItems["reply_msg_id"] = append(foundItems["reply_msg_id"], matches[1])
-		}
-	}
-
-	// 在合并后的 messageText 中统一解析 [CQ:active]（覆盖消息段路径）
-	messageText = ProcessCQActive(messageText, foundItems)
-	messageText = ProcessCQFile(messageText, foundItems)
+	// 统一 CQ 码解析管道：无论消息来自 string 还是消息段数组，
+	// 均在此单次扫描解析全部 CQ 码（媒体/控制/动作），剔除后返回纯文本
+	messageText = ProcessCQCodePipeline(messageText, foundItems, paramsMessage.GroupID)
 
 	if paramsMessage.GroupID == nil {
 		//处理at
@@ -1292,105 +1278,6 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 	} else {
 		//处理at
 		messageText = transformMessageTextAt(messageText, paramsMessage.GroupID.(string), paramsMessage.UserID.(string))
-	}
-
-	// 当匹配到复古cq码上报类型,使用低效率正则.
-	if _, ok := paramsMessage.Message.(string); ok {
-		// 使用包级正则变量（避免重复编译）
-		compilePatternsOnce.Do(initPlatformPatterns)
-
-		// 处理 [CQ:markdown,data={...}] JSON 格式：base64 编码后存入 foundItems["markdown"]
-		 messageText = mdJSONPattern.ReplaceAllStringFunc(messageText, func(match string) string {
-		  if submatch := mdJSONPattern.FindStringSubmatch(match); len(submatch) > 1 {
-		   encoded := base64.StdEncoding.EncodeToString([]byte(submatch[1]))
-		   foundItems["markdown"] = append(foundItems["markdown"], encoded)
-		  }
-		  return ""
-		 })
-
-		 // 处理 [CQ:card,...]：提取参数并 JSON 编码后存入 foundItems["card"]
-		 messageText = cardPattern.ReplaceAllStringFunc(messageText, func(match string) string {
-		  cardData := make(map[string]string)
-		  kvRe := regexp.MustCompile(`(\w+)=([^,\]]+)`)
-		  for _, kv := range kvRe.FindAllStringSubmatch(match, -1) {
-		   if len(kv) == 3 {
-		    cardData[kv[1]] = kv[2]
-		   }
-		  }
-		  if len(cardData) > 0 {
-		   encoded, err := json.Marshal(cardData)
-		   if err == nil {
-		    foundItems["card"] = append(foundItems["card"], string(encoded))
-		   }
-		  }
-		  return ""
-		 })
-
-		// 处理 [CQ:input_notify,...]：提取参数后存入 foundItems["input_notify"]
-		messageText = inputNotifyPattern.ReplaceAllStringFunc(messageText, func(match string) string {
-		 if submatch := inputNotifyPattern.FindStringSubmatch(match); len(submatch) > 1 {
-		  notifyData := map[string]string{
-		   "type": submatch[1],
-		  }
-		  if len(submatch) > 2 && submatch[2] != "" {
-		   notifyData["second"] = submatch[2]
-		  }
-		  encoded, err := json.Marshal(notifyData)
-		  if err == nil {
-		   foundItems["input_notify"] = append(foundItems["input_notify"], string(encoded))
-		  }
-		 }
-		 return ""
-		})
-
-		// 处理 [CQ:stream,...]：提取 type 和 qq 后存入 foundItems["stream"]
-		messageText = streamPattern.ReplaceAllStringFunc(messageText, func(match string) string {
-		 if submatch := streamPattern.FindStringSubmatch(match); len(submatch) > 2 {
-		  streamData := map[string]string{
-		   "type": submatch[1],
-		   "qq":   submatch[2],
-		  }
-		  encoded, err := json.Marshal(streamData)
-		  if err == nil {
-		   foundItems["stream"] = append(foundItems["stream"], string(encoded))
-		  }
-		 }
-		 return ""
-		})
-
-		// 处理 [CQ:keyboard,...]：解析键盘数据存入 foundItems["keyboard"]
-		messageText = ProcessCQKeyboard(messageText, foundItems)
-
-		patterns := []struct {
-			key     string
-			pattern *regexp.Regexp
-		}{
-			{"local_image", localImagePattern},
-			{"url_image", httpUrlImagePattern},
-			{"url_images", httpsUrlImagePattern},
-			{"base64_image", base64ImagePattern},
-			{"base64_record", base64RecordPattern},
-			{"local_record", localRecordPattern},
-			{"url_record", httpUrlRecordPattern},
-			{"url_records", httpsUrlRecordPattern},
-			{"markdown", mdPattern},
-			{"qqmusic", qqMusicPattern},
-			{"url_video", httpUrlVideoPattern},
-			    {"url_videos", httpsUrlVideoPattern},
-			    {"base64_video", base64VideoPattern},
-			    {"local_video", localVideoPattern},
-		}
-
-		for _, pattern := range patterns {
-			matches := pattern.pattern.FindAllStringSubmatch(messageText, -1)
-			for _, match := range matches {
-				if len(match) > 1 {
-					foundItems[pattern.key] = append(foundItems[pattern.key], match[1])
-				}
-			}
-			// 移动替换操作到这里，确保所有匹配都被处理后再进行替换
-			messageText = pattern.pattern.ReplaceAllString(messageText, "")
-		}
 	}
 
 	//最后再处理Url
