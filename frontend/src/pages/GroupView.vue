@@ -60,10 +60,10 @@
 </template>
 <script setup lang="ts">
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { ref, watch, reactive, computed, onMounted } from 'vue';
 import { api } from 'src/boot/axios';
 import GroupList from 'src/components/GroupList.vue';
-import ChannelList from 'src/components/ChannelList.vue';
 import { useRouter } from 'vue-router';
 
 const $router = useRouter();
@@ -123,7 +123,7 @@ interface Row {
   // ...其他属性，根据您的实际需要来定义
 }
 
-function handleRowClick(evt: MouseEvent, row: Row, index: number): void {
+function handleRowClick(evt: MouseEvent, row: Row): void {
   // 使用row对象的属性
   console.log(row.description); // 这应该正常工作，并且现在类型是安全的
 
