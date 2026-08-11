@@ -126,6 +126,26 @@
 
 **修复：** 新建 `cqcode_pipeline.go` 统一管道 `ProcessCQCodePipeline()`，在 switch 之后统一调用，确保 string 与 `[]interface{}` 两种路径均经过同一解析。
 
+### 复检问题修复（P1/P2/P3 全量）
+
+针对复检报告（`reports/refactor-validation/rereview-2026-08-11.md`）中的 6 项问题逐一修复：
+
+**P1-4.1 热路径聚焦测试**：新增 `handlers/cqcode_pipeline_test.go`（24 个用例），覆盖统一管道全部 CQ 码类型的解析、文本剔除、keyboard JSON 解析、card/stream 参数验证、消息段数组路径、幂等性与未知 CQ 码保留。
+
+**P1-4.2 CI 测试门禁**：`cross_compile.yml` 新增 `test` job（`go vet ./...` + `go test ./... -count=1`），`build` job 通过 `needs: test` 依赖，测试失败则编译不执行。
+
+**P2-4.3 前端测试占位符**：`frontend/package.json` 的 test 脚本替换为零依赖语法验证脚本 `scripts/test-syntax.js`（检查 30 个 .ts/.vue 文件的非空、UTF-8 合法性、script 标签闭合），CI 中 ESLint 仍由 quasar build 覆盖。
+
+**P2-4.4 SSM 补发关联标识**：`echo.MessageGroupPair` 新增 `EnqueueTime`/`CorrelationID` 字段；`PushGlobalStack` 自动生成 `ssm-<group>-<seq>` 关联标识并记录入队时间；`send_group_msg.go` 与 `send_group_msg_raw.go` 的 5+4 处入队/补发路径日志统一携带 `[SSM][cid]` 前缀，补发时输出队列停留时长，实现跨入队/补发边界的日志关联。
+
+**P3-4.5 [CQ:face] 文档一致性**：文档已标注"开发中，暂无法正常使用"（上一轮完成），与代码零实现一致。
+
+**P3-4.6 MCP 版本固定**：`.mcp.json` 两个 MCP 服务固定版本（`@modelcontextprotocol/server-github@2025.4.8`、`@upstash/context7-mcp@4.0.1`），并修正 context7 错误包名（原 `@context7/server` 不存在）。
+
+### [CQ:keyboard] 渲染说明补充
+
+实测确认：**QQ 客户端仅在 Markdown 消息（`msg_type=2`）下渲染内嵌键盘按钮**，纯文本消息（`msg_type=0`）附带的 `keyboard` 参数不显示按钮。已在 `扩展cq码-cq-keyboard.md` 新增"渲染说明（重要）"章节，建议与 `[CQ:markdown]` 配合使用；`CQ码汇总.md` 同步标注。测试插件文本同步修正（移除消息文本中的 CQ 码字面量）。
+
 ### 语音上传失败修复
 
 **文件：** `handlers/send_group_msg.go`

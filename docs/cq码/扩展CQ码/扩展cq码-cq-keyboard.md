@@ -61,6 +61,20 @@
 
 按钮 `action.type`：`0`=跳转按钮（http 或小程序）、`1`=回调按钮（触发 `INTERACTION_CREATE` 事件）、`2`=指令按钮（自动在输入框插入 `@bot data`）。
 
+## 渲染说明（重要）
+
+**QQ 客户端仅在 Markdown 消息（`msg_type=2`）下渲染内嵌键盘按钮。**
+
+- 纯文本消息（`msg_type=0`）附带的 `keyboard` 参数会随消息发送，但 QQ 客户端**不显示按钮**（已实测确认）。
+- 因此 `[CQ:keyboard]` 独立使用时，建议**与 `[CQ:markdown]` 配合**：将文本放入 markdown 内容，键盘随 markdown 一起渲染。
+- 组合用法示例：
+
+```text
+[CQ:markdown,data={"content":"你好，欢迎使用签到功能"}][CQ:keyboard,data=base64://<键盘JSON>]
+```
+
+- 若同一消息同时携带 `[CQ:markdown]`，其附带键盘优先生效，独立 `[CQ:keyboard]` 被忽略（markdown 路径的 keyboard 解析自 markdown JSON 的 `keyboard` 字段）。
+
 ## 解析行为
 
 - 从消息文本中提取 `[CQ:keyboard,...]` 并移除，最终用户不会看到该 CQ 码。

@@ -291,10 +291,12 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 				mylog.Printf("%s", FormatQQError(err))
 			}
    if IsQQError(err, 22009) {
-				mylog.Printf("信息发送失败,加入到队列中,下次被动信息进行发送")
+				cid := echo.NextSSMCorrelationID(message.Params.GroupID.(string))
+				mylog.Printf("[SSM][%s] 信息发送失败,加入到队列中,下次被动信息进行发送", cid)
 				var pair echo.MessageGroupPair
 				pair.Group = message.Params.GroupID.(string)
 				pair.GroupMessage = groupMessage
+				pair.CorrelationID = cid
 				echo.PushGlobalStack(pair)
 			}
 
@@ -350,10 +352,12 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 				mylog.Printf("%s", FormatQQError(err))
 			}
    if IsQQError(err, 22009) {
-				mylog.Printf("信息发送失败,加入到队列中,下次被动信息进行发送")
+				cid := echo.NextSSMCorrelationID(message.Params.GroupID.(string))
+				mylog.Printf("[SSM][%s] 信息发送失败,加入到队列中,下次被动信息进行发送", cid)
 				var pair echo.MessageGroupPair
 				pair.Group = message.Params.GroupID.(string)
 				pair.GroupMessage = groupMessage
+				pair.CorrelationID = cid
 				echo.PushGlobalStack(pair)
 			}
 
@@ -395,10 +399,12 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 							mylog.Printf("%s", FormatQQError(err))
 						}
       if IsQQError(err, 22009) {
-							mylog.Printf("信息发送失败,加入到队列中,下次被动信息进行发送")
+							cid := echo.NextSSMCorrelationID(message.Params.GroupID.(string))
+							mylog.Printf("[SSM][%s] 信息发送失败,加入到队列中,下次被动信息进行发送", cid)
 							var pair echo.MessageGroupPair
 							pair.Group = message.Params.GroupID.(string)
 							pair.GroupMessage = groupMessage
+							pair.CorrelationID = cid
 							echo.PushGlobalStack(pair)
 						}
 
@@ -450,10 +456,12 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 						mylog.Printf("发送图片失败: %v", err)
 					}
      if IsQQError(err, 22009) {
-						mylog.Printf("信息发送失败,加入到队列中,下次被动信息进行发送")
+						cid := echo.NextSSMCorrelationID(message.Params.GroupID.(string))
+						mylog.Printf("[SSM][%s] 信息发送失败,加入到队列中,下次被动信息进行发送", cid)
 						var pair echo.MessageGroupPair
 						pair.Group = message.Params.GroupID.(string)
 						pair.GroupMessage = groupMessage
+						pair.CorrelationID = cid
 						echo.PushGlobalStack(pair)
 					}
 				}

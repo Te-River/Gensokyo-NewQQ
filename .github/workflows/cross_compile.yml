@@ -9,8 +9,29 @@ permissions:
   contents: read
 
 jobs:
+  test:
+    name: Test & Vet
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run go test
+        run: go test ./... -count=1
+
   build:
     name: Build on ${{ matrix.os }} for ${{ matrix.goarch }}
+    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
