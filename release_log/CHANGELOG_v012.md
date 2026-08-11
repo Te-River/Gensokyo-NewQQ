@@ -146,6 +146,11 @@
 
 实测确认：**QQ 客户端仅在 Markdown 消息（`msg_type=2`）下渲染内嵌键盘按钮**，纯文本消息（`msg_type=0`）附带的 `keyboard` 参数不显示按钮。已在 `扩展cq码-cq-keyboard.md` 新增"渲染说明（重要）"章节，建议与 `[CQ:markdown]` 配合使用；`CQ码汇总.md` 同步标注。测试插件文本同步修正（移除消息文本中的 CQ 码字面量）。
 
+### [CQ:keyboard] 完整构建文档 + AGENTS.md 适用范围
+
+- `扩展cq码-cq-keyboard.md` 新增"完整构建（按钮 JSON 全字段诠释）"章节：Keyboard/KeyboardContent/Row/Button/RenderData/Action/Permission 全字段表格 + 三按钮完整示例（指令+回调+跳转），并附 QQ 开放平台官网链接（发送群聊/单聊消息页面）
+- `AGENTS.md` 新增"适用范围（重要）"章节：规范仅在本仓库内拥有最高优先级，其他项目/工作区域以用户指令为准、无需参考本文件；文件随仓库公开上传供所有访问本仓库的 Agent 使用
+
 ### 语音上传失败修复
 
 **文件：** `handlers/send_group_msg.go`
