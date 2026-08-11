@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+var imageProbeHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
 // 宽度 高度
 func GetImageDimensions(url string) (int, int, error) {
 	// 原有的后缀判断逻辑
@@ -34,7 +36,7 @@ func GetImageDimensions(url string) (int, int, error) {
 }
 
 func getPNGDimensions(url string) (int, int, error) {
-	resp, err := http.Get(url)
+	resp, err := imageProbeHTTPClient.Get(url)
 	if err != nil {
 		return 0, 0, fmt.Errorf("error occurred while making request: %w", err)
 	}
@@ -71,7 +73,7 @@ func getPNGDimensions(url string) (int, int, error) {
 }
 
 func getJpegDimensions(url string) (int, int, error) {
-	response, err := http.Get(url)
+	response, err := imageProbeHTTPClient.Get(url)
 	if err != nil {
 		return 0, 0, fmt.Errorf("error occurred while making request: %w", err)
 	}
@@ -156,7 +158,7 @@ func getJpegDimensions(url string) (int, int, error) {
 }
 
 func getGIFDimensions(url string) (int, int, error) {
-	resp, err := http.Get(url)
+	resp, err := imageProbeHTTPClient.Get(url)
 	if err != nil {
 		return 0, 0, fmt.Errorf("error occurred while making request: %w", err)
 	}

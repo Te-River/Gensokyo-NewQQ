@@ -5,7 +5,6 @@ package imagehosting
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"mime/multipart"
 	"net/http"
 
@@ -49,12 +48,14 @@ func tryBilibili(data []byte, filename string) (string, error) {
 	q.Add("csrf", cfg.CSRFToken)
 	req.URL.RawQuery = q.Encode()
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := providerHTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("上传请求失败: %w", err)
 	}
-	defer resp.Body.Close()
-	bodyBytes, _ := io.ReadAll(resp.Body)
+	bodyBytes, readErr := readClose(resp)
+	if readErr != nil {
+		return "", fmt.Errorf("读取 Bilibili 响应失败: %w", readErr)
+	}
 
 	if resp.StatusCode != 200 {
 		return "", fmt.Errorf("Bilibili 返回 HTTP %d: %s", resp.StatusCode, string(bodyBytes))

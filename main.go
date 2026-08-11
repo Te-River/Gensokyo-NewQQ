@@ -547,10 +547,7 @@ func main() {
 		}
 	}
 	// 创建一个http.Server实例（主服务器）
-	httpServer := &http.Server{
-		Addr:    "0.0.0.0:" + serverPort,
-		Handler: r,
-	}
+	httpServer := server.NewHTTPServer("0.0.0.0:"+serverPort, r)
 	mylog.Printf("gin运行在%v端口", serverPort)
 	// 在一个新的goroutine中启动主服务器
 	go func() {
@@ -577,10 +574,7 @@ func main() {
 	if serverPort == "443" || conf.Settings.ForceSSL {
 		go func() {
 			// 创建另一个http.Server实例（用于conf.Settings.HttpPortAfterSSL端口）
-			httpServerHttpPortAfterSSL := &http.Server{
-				Addr:    "0.0.0.0:" + conf.Settings.HttpPortAfterSSL,
-				Handler: r,
-			}
+			httpServerHttpPortAfterSSL := server.NewHTTPServer("0.0.0.0:"+conf.Settings.HttpPortAfterSSL, r)
 
 			// 启动conf.Settings.HttpPortAfterSSL端口的HTTP服务器
 			if err := httpServerHttpPortAfterSSL.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -592,10 +586,7 @@ func main() {
 	if http_api_address != "" {
 		go func() {
 			// 创建一个http.Server实例（Http Api服务器）
-			httpServerHttpApi := &http.Server{
-				Addr:    http_api_address,
-				Handler: hr,
-			}
+			httpServerHttpApi := server.NewHTTPServer(http_api_address, hr)
 			// 使用HTTP
 			if err := httpServerHttpApi.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				mylog.Printf("http apilisten: %s\n", err)
@@ -988,13 +979,20 @@ var sensitiveHeaders = map[string]bool{
 	"x-signature-256": true,
 }
 
+var unionWebhookHTTPClient = &http.Client{Timeout: 5 * time.Second}
+
 // 包装器：在执行原有处理器前，抓取 Body；在本地处理器运行的同时，异步原样转发到 UnionWebhook。
 func UnionFanout(base gin.HandlerFunc) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// 1) 读取并缓存原始请求体
+		// 1) 限制并缓存原始请求体，避免转发前无界 io.ReadAll。
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, server.MaxWebhookBodyBytes)
 		body, err := io.ReadAll(c.Request.Body)
 		if err != nil {
-			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "read body failed"})
+			if _, ok := err.(*http.MaxBytesError); ok {
+				c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body too large"})
+			} else {
+				c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "read body failed"})
+			}
 			return
 		}
 		// 2) 复位 Body 给本地处理链使用
@@ -1029,7 +1027,7 @@ func UnionFanout(base gin.HandlerFunc) gin.HandlerFunc {
 					}
 				}
 				// 发起转发（忽略返回结果，不影响主流程）
-				_, _ = http.DefaultClient.Do(req)
+				_, _ = unionWebhookHTTPClient.Do(req)
 			}(method, uw, headers, body)
 		}
 

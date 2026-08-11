@@ -5,7 +5,6 @@ package imagehosting
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"mime/multipart"
 	"net/http"
 )
@@ -36,12 +35,14 @@ func tryChatGLM(data []byte, filename string) (string, error) {
 	// 指定图片 MIME 让服务端正确识别
 	req.Header.Set("X-File-Mime", mime)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := providerHTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("上传请求失败: %w", err)
 	}
-	defer resp.Body.Close()
-	bodyBytes, _ := io.ReadAll(resp.Body)
+	bodyBytes, readErr := readClose(resp)
+	if readErr != nil {
+		return "", fmt.Errorf("读取 ChatGLM 响应失败: %w", readErr)
+	}
 
 	if resp.StatusCode != 200 {
 		return "", fmt.Errorf("ChatGLM 返回 HTTP %d: %s", resp.StatusCode, string(bodyBytes))

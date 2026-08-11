@@ -130,7 +130,7 @@ func RememberSelfAtID(id string) {
 	selfAtMu.Unlock()
 }
 
-func isSelfAtID(id string) bool {
+func IsSelfAtID(id string) bool {
 	if id == "" {
 		return false
 	}
@@ -144,7 +144,7 @@ func isSelfAtID(id string) bool {
 }
 
 func resolveIncomingAtID(id string) (string, bool) {
-	if isSelfAtID(id) {
+	if IsSelfAtID(id) {
 		// 与消息 SelfID 字段保持一致：use_uin=true 时用 UIN，否则用 AppID。
 		// 否则下游会因 [CQ:at] 的 qq 与 self_id 不匹配而无法识别 @ 的是自己。
 		if config.GetUseUin() {
@@ -715,6 +715,10 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 				}
 			case "image":
 				fileContent, _ := segmentMap["data"].(map[string]interface{})["file"].(string)
+				// 兼容 url 字段（部分客户端使用 url 而非 file）
+				if fileContent == "" {
+					fileContent, _ = segmentMap["data"].(map[string]interface{})["url"].(string)
+				}
 
 				// 检查是否为 Base64 图片
 				if strings.HasPrefix(fileContent, "base64://") {
@@ -751,6 +755,10 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 
 			case "voice", "record":
 				fileContent, _ := segmentMap["data"].(map[string]interface{})["file"].(string)
+				// 兼容 url 字段（部分客户端使用 url 而非 file）
+				if fileContent == "" {
+					fileContent, _ = segmentMap["data"].(map[string]interface{})["url"].(string)
+				}
 
 				// 检查是否为 Base64 语音文件
 				if strings.HasPrefix(fileContent, "base64://") {
@@ -983,6 +991,10 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 
 			case "video":
 				fileContent, _ := segmentMap["data"].(map[string]interface{})["file"].(string)
+				// 兼容 url 字段（部分客户端使用 url 而非 file）
+				if fileContent == "" {
+					fileContent, _ = segmentMap["data"].(map[string]interface{})["url"].(string)
+				}
 				if strings.HasPrefix(fileContent, "http://") {
 					cleanContent := strings.TrimPrefix(fileContent, "http://")
 					foundItems["url_video"] = append(foundItems["url_video"], cleanContent)
@@ -1028,6 +1040,10 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 
 		case "image":
 			fileContent, _ := message["data"].(map[string]interface{})["file"].(string)
+			// 兼容 url 字段（部分客户端使用 url 而非 file）
+			if fileContent == "" {
+				fileContent, _ = message["data"].(map[string]interface{})["url"].(string)
+			}
 
 			// 检查是否为 Base64 图片
 			if strings.HasPrefix(fileContent, "base64://") {
@@ -1064,6 +1080,10 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 
 		case "voice", "record":
 			fileContent, _ := message["data"].(map[string]interface{})["file"].(string)
+			// 兼容 url 字段（部分客户端使用 url 而非 file）
+			if fileContent == "" {
+				fileContent, _ = message["data"].(map[string]interface{})["url"].(string)
+			}
 
 			// 检查是否为 Base64 语音文件
 			if strings.HasPrefix(fileContent, "base64://") {
@@ -1256,6 +1276,10 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 
 		case "video":
 			fileContent, _ := message["data"].(map[string]interface{})["file"].(string)
+			// 兼容 url 字段（部分客户端使用 url 而非 file）
+			if fileContent == "" {
+				fileContent, _ = message["data"].(map[string]interface{})["url"].(string)
+			}
 			if strings.HasPrefix(fileContent, "http://") {
 				cleanContent := strings.TrimPrefix(fileContent, "http://")
 				foundItems["url_video"] = append(foundItems["url_video"], cleanContent)
@@ -1305,7 +1329,7 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 		messageText = transformMessageTextAtNoGroupID(messageText)
 	} else {
 		//处理at
-		messageText = transformMessageTextAt(messageText, paramsMessage.GroupID.(string))
+		messageText = transformMessageTextAt(messageText, paramsMessage.GroupID.(string), paramsMessage.UserID.(string))
 	}
 
 	// 当匹配到复古cq码上报类型,使用低效率正则.
@@ -1418,7 +1442,7 @@ func isIPAddress(address string) bool {
 }
 
 // at处理
-func transformMessageTextAt(messageText string, groupid string) string {
+func transformMessageTextAt(messageText string, groupid string, userid string) string {
 	// 保存原始内容，用于纯 at 消息回退
 	originalText := messageText
 	// DoNotReplaceAppid=false(默认频道bot,需要自己at自己时,否则改成true)
@@ -1442,9 +1466,13 @@ func transformMessageTextAt(messageText string, groupid string) string {
 	replyRE := regexp.MustCompile(`\[CQ:reply,id=\d+\]`)
 	messageText = replyRE.ReplaceAllString(messageText, "")
 
-	// 使用正则表达式来查找所有[CQ:at,qq=数字]的模式
-	re := regexp.MustCompile(`\[CQ:at,qq=(\d+)\]`)
+	// 使用正则表达式来查找所有[CQ:at,qq=UserID]的模式（仅匹配 用户 自身）
+	re := regexp.MustCompile(`\[CQ:at,qq=` + userid + `\]`)
 	messageText = re.ReplaceAllStringFunc(messageText, func(m string) string {
+		// 如果 remove_bot_at_group 开启，移除 触发被动消息@用户，避免重复
+		if config.GetRemoveBotAtGroup() {
+			return ""
+		}
 		return m
 	})
 	// 如果内容为空且原始内容仅含 at（不含 reply），退回原始 at 文本
@@ -1621,7 +1649,11 @@ func RevertTransformedText(data interface{}, msgtype string, api openapi.OpenAPI
 			if !ok {
 				return m
 			}
-			if isSelfAtID(userID) {
+			// 判断是否为 @Bot 自身：
+			// 1) IsSelfAtID 检查原始 ID（BotID/AppID/selfAtIDs）
+			// 2) 解析后的 atID 等于 bot 的 UIN 或 AppID（兼容 QQ 平台不同场景使用不同 ID 格式）
+			isSelf := IsSelfAtID(userID) || atID == config.GetUinStr() || atID == config.GetAppIDStr()
+			if isSelf {
 				// 全量群消息(GROUP_MESSAGE_CREATE)中的 @Bot 始终剥离，不依赖 remove_at 配置
 				if isFullGroupMsg || config.GetRemoveAt() {
 					return ""
@@ -1983,7 +2015,9 @@ func ConvertToSegmentedMessage(data interface{}) []map[string]interface{} {
 				"qq": atID,
 			},
 		}
-		if isSelfAtID(userID) && (isFullGroupMsg || config.GetRemoveAt()) {
+		// 判断是否为 @Bot 自身（兼容 QQ 平台不同 ID 格式）
+		isSelf := IsSelfAtID(userID) || atID == config.GetUinStr() || atID == config.GetAppIDStr()
+		if isSelf && (isFullGroupMsg || config.GetRemoveAt()) {
 		    msg.Content = strings.Replace(msg.Content, match[0], "", 1)
 		    continue
 		   }
@@ -2071,9 +2105,8 @@ func SendMessage(messageText string, data interface{}, messageType string, api o
 	switch messageType {
 	case "group":
 		// 处理群组消息
-		msgseq := echo.GetMappingSeq(msg.ID)
-		echo.AddMappingSeq(msg.ID, msgseq+1)
-		textMsg, _ := GenerateReplyMessage(msg.ID, nil, messageText, msgseq+1, nil)
+		msgseq := echo.NextMappingSeq(msg.ID)
+		textMsg, _ := GenerateReplyMessage(msg.ID, nil, messageText, msgseq, nil)
 		response, err := apiv2.PostGroupMessage(context.TODO(), msg.GroupID, textMsg)
 		if err != nil {
 			mylog.Printf("发送文本群组信息失败: %v", err)
@@ -2085,9 +2118,8 @@ func SendMessage(messageText string, data interface{}, messageType string, api o
 
 	case "group_private":
 		// 处理群组私聊消息
-		msgseq := echo.GetMappingSeq(msg.ID)
-		echo.AddMappingSeq(msg.ID, msgseq+1)
-		textMsg, _ := GenerateReplyMessage(msg.ID, nil, messageText, msgseq+1, nil)
+		msgseq := echo.NextMappingSeq(msg.ID)
+		textMsg, _ := GenerateReplyMessage(msg.ID, nil, messageText, msgseq, nil)
 		_, err := apiv2.PostC2CMessage(context.TODO(), msg.Author.ID, textMsg)
 		if err != nil {
 			mylog.Printf("发送文本私聊信息失败: %v", err)
@@ -2556,20 +2588,31 @@ func createMusicKeyboard(jumpURL string) *keyboard.MessageKeyboard {
 
 // FetchTrackInfo 用于根据trackMid获取QQ音乐的track信息
 func FetchTrackInfo(trackMid string) (string, error) {
+	const maxQQMusicResponseBytes int64 = 2 << 20
 	urlTemplate := "https://u.y.qq.com/cgi-bin/musicu.fcg?g_tk=2034008533&uin=0&format=json&data={\"comm\":{\"ct\":23,\"cv\":0},\"url_mid\":{\"module\":\"vkey.GetVkeyServer\",\"method\":\"CgiGetVkey\",\"param\":{\"guid\":\"4311206557\",\"songmid\":[\"%s\"],\"songtype\":[0],\"uin\":\"0\",\"loginflag\":1,\"platform\":\"23\"}}}&_=1599039471576"
 	url := fmt.Sprintf(urlTemplate, trackMid)
 
 	// 发送HTTP GET请求
-	resp, err := http.Get(url)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
 	if err != nil {
 		return "", fmt.Errorf("error making request: %v", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return "", fmt.Errorf("QQ音乐响应 HTTP %d", resp.StatusCode)
+	}
+	if resp.ContentLength > maxQQMusicResponseBytes {
+		return "", fmt.Errorf("QQ音乐响应超过 %d 字节", maxQQMusicResponseBytes)
+	}
 
 	// 读取并解析响应体
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxQQMusicResponseBytes+1))
 	if err != nil {
 		return "", fmt.Errorf("error reading response body: %v", err)
+	}
+	if int64(len(body)) > maxQQMusicResponseBytes {
+		return "", fmt.Errorf("QQ音乐响应超过 %d 字节", maxQQMusicResponseBytes)
 	}
 
 	var result interface{} // 使用interface{}来接收任意的JSON对象
@@ -2582,20 +2625,31 @@ func FetchTrackInfo(trackMid string) (string, error) {
 
 // FetchSongDetail 发送请求到QQ音乐API并获取歌曲详情
 func FetchSongDetail(songID string) (string, error) {
+	const maxQQMusicResponseBytes int64 = 2 << 20
 	// 构建请求URL
 	url := fmt.Sprintf("https://u.y.qq.com/cgi-bin/musicu.fcg?format=json&inCharset=utf8&outCharset=utf-8&notice=0&platform=yqq.json&needNewCode=0&data={\"comm\":{\"ct\":24,\"cv\":0},\"songinfo\":{\"method\":\"get_song_detail_yqq\",\"param\":{\"song_type\":0,\"song_mid\":\"\",\"song_id\":%s},\"module\":\"music.pf_song_detail_svr\"}}", songID)
 
 	// 发送GET请求
-	resp, err := http.Get(url)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
 	if err != nil {
 		return "", fmt.Errorf("error making request: %v", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return "", fmt.Errorf("QQ音乐响应 HTTP %d", resp.StatusCode)
+	}
+	if resp.ContentLength > maxQQMusicResponseBytes {
+		return "", fmt.Errorf("QQ音乐响应超过 %d 字节", maxQQMusicResponseBytes)
+	}
 
 	// 读取响应体
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxQQMusicResponseBytes+1))
 	if err != nil {
 		return "", fmt.Errorf("error reading response body: %v", err)
+	}
+	if int64(len(body)) > maxQQMusicResponseBytes {
+		return "", fmt.Errorf("QQ音乐响应超过 %d 字节", maxQQMusicResponseBytes)
 	}
 
 	return string(body), nil

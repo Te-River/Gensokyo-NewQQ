@@ -9,6 +9,7 @@ import (
 	"github.com/hoshinonyaruko/gensokyo/callapi"
 	"github.com/hoshinonyaruko/gensokyo/config"
 	"github.com/hoshinonyaruko/gensokyo/idmap"
+	"github.com/hoshinonyaruko/gensokyo/internal/domain/identity"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/hoshinonyaruko/gensokyo/structs"
 	"github.com/tencent-connect/botgo/dto"
@@ -73,7 +74,7 @@ func HandleSendPrivateMsgSSE(client callapi.Client, api openapi.OpenAPI, apiv2 o
 
 	var UserID string
 
-	if message.Params.UserID != nil && len(message.Params.UserID.(string)) != 32 {
+	if message.Params.UserID != nil && !identity.IsOpenID(message.Params.UserID.(string)) {
 		//私聊信息
 		if config.GetIdmapPro() {
 			//还原真实的userid

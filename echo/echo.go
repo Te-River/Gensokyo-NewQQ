@@ -239,8 +239,12 @@ func GetMapping(key int64) int {
 	return value.(int)
 }
 
-// AddMappingSeq 添加一个新的映射
+// AddMappingSeq 添加一个新的映射。
+// Deprecated: 新代码应使用 NextMappingSeq 或 CurrentAndIncrementMappingSeq，
+// 以避免 GetMappingSeq 和 AddMappingSeq 组合产生读-改-写竞态。
 func AddMappingSeq(key string, value int) {
+	globalStringToIntMappingSeq.mu.Lock()
+	defer globalStringToIntMappingSeq.mu.Unlock()
 	globalStringToIntMappingSeq.mapping.Store(key, value)
 }
 
@@ -257,27 +261,41 @@ func GetMappingSeq(key string) int {
 	return value.(int)
 }
 
-// IncrementMappingSeq 原子递增 seq 并返回递增后的值。
-// 多段回复快速调用时，GetMappingSeq+AddMappingSeq 两步模式存在读-改-写竞态，
-// 两段可能拿到相同 seq 导致 QQ 侧 40054005 去重。用互斥锁保护递增：
-// 多个 goroutine 并发调用时每段拿到独立递增的 seq，彻底消除竞态。
-func IncrementMappingSeq(key string) int {
+// nextMappingSeqLocked 读取当前值并原子推进到下一个值。
+// 调用方必须持有 globalStringToIntMappingSeq.mu。
+func nextMappingSeqLocked(key string) (current, next int) {
+	value, ok := globalStringToIntMappingSeq.mapping.Load(key)
+	if ok {
+		current = value.(int)
+	} else if config.GetRamDomSeq() {
+		rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+		current = rng.Intn(10000) + 1
+	}
+	next = current + 1
+	globalStringToIntMappingSeq.mapping.Store(key, next)
+	return current, next
+}
+
+// NextMappingSeq 原子递增 seq 并返回递增后的值。
+func NextMappingSeq(key string) int {
 	globalStringToIntMappingSeq.mu.Lock()
 	defer globalStringToIntMappingSeq.mu.Unlock()
-	old, ok := globalStringToIntMappingSeq.mapping.Load(key)
-	var newVal int
-	if !ok {
-		if config.GetRamDomSeq() {
-			rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-			newVal = rng.Intn(10000) + 1
-		} else {
-			newVal = 1
-		}
-	} else {
-		newVal = old.(int) + 1
-	}
-	globalStringToIntMappingSeq.mapping.Store(key, newVal)
-	return newVal
+	_, next := nextMappingSeqLocked(key)
+	return next
+}
+
+// CurrentAndIncrementMappingSeq 原子读取当前 seq，并推进内部值。
+// 该接口用于兼容历史上“使用当前值、再写入下一个值”的调用路径。
+func CurrentAndIncrementMappingSeq(key string) int {
+	globalStringToIntMappingSeq.mu.Lock()
+	defer globalStringToIntMappingSeq.mu.Unlock()
+	current, _ := nextMappingSeqLocked(key)
+	return current
+}
+
+// IncrementMappingSeq 保留旧 API，行为等同于 NextMappingSeq。
+func IncrementMappingSeq(key string) int {
+	return NextMappingSeq(key)
 }
 
 // PushGlobalStack 向全局栈中添加一个新的 MessageGroupPair

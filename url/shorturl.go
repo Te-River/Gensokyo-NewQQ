@@ -167,7 +167,7 @@ func GenerateShortURL(longURL string) string {
 		req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 
 		// 发送请求
-		client := &http.Client{}
+		client := &http.Client{Timeout: 30 * time.Second}
 		resp, err := client.Do(req)
 		if err != nil {
 			mylog.Printf("Error while generating short URL: %v", err)

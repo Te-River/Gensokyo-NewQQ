@@ -9,6 +9,7 @@ import (
 	"github.com/hoshinonyaruko/gensokyo/config"
 	"github.com/hoshinonyaruko/gensokyo/echo"
 	"github.com/hoshinonyaruko/gensokyo/idmap"
+	"github.com/hoshinonyaruko/gensokyo/internal/domain/identity"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/tencent-connect/botgo/openapi"
 )
@@ -53,7 +54,7 @@ func HandleSendMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.Ope
 		}
 	}
 
-	if len(message.Params.GroupID.(string)) != 32 {
+	if !identity.IsOpenID(message.Params.GroupID.(string)) {
 		if msgType == "" && message.Params.GroupID != nil && checkZeroGroupID(message.Params.GroupID) {
 			msgType = GetMessageTypeByGroupid(config.GetAppIDStr(), message.Params.GroupID)
 		}
@@ -78,7 +79,7 @@ func HandleSendMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.Ope
 	var idInt64 int64
 	var err error
 
-	if len(message.Params.GroupID.(string)) == 32 {
+	if identity.IsOpenID(message.Params.GroupID.(string)) {
 		if message.Params.GroupID != "" {
 			idInt64, err = idmap.GenerateRowID(message.Params.GroupID.(string), 9)
 		} else if message.Params.UserID != "" {

@@ -23,6 +23,7 @@ import (
   "time"
 
 	"github.com/hoshinonyaruko/gensokyo/config"
+	ididentity "github.com/hoshinonyaruko/gensokyo/internal/domain/identity"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	proto "github.com/hoshinonyaruko/gensokyo/proto"
 	"github.com/hoshinonyaruko/gensokyo/structs"
@@ -223,7 +224,7 @@ func CleanBucket(bucketName string) {
 
 			// 检查值id的长度 这里是正向键
 			id := string(k)
-			if len(id) != 32 {
+			if !ididentity.IsOpenID(id) {
 				if err := c.Delete(); err != nil {
 					return err
 				}
@@ -239,7 +240,7 @@ func CleanBucket(bucketName string) {
 				}
 				// 这里检查反向键是否是32位
 				id := string(v)
-				if len(id) != 32 {
+				if !ididentity.IsOpenID(id) {
 					if err := b.Delete(k); err != nil {
 						return err
 					}
@@ -490,7 +491,7 @@ func StoreID(id string) (int64, error) {
 	}
 
 	// 双写到新库
-	if err == nil && len(id) == 32 {
+	if err == nil && ididentity.IsOpenID(id) {
 		newDBStore(id, newRow)
 	}
 
@@ -585,7 +586,7 @@ func SimplifiedStoreIDv2(id string) (int64, error) {
 
 		// 构建请求URL
 		url := fmt.Sprintf("%s://%s:%s/getid?type=13&id=%s", protocol, serverDir, portValue, id)
-		resp, err := http.Get(url)
+		resp, err := idmapHTTPClient.Get(url)
 		if err != nil {
 			return 0, fmt.Errorf("failed to send request: %v", err)
 		}
@@ -692,7 +693,7 @@ func StoreIDv2(id string) (int64, error) {
 
 		// 构建请求URL
 		url := fmt.Sprintf("%s://%s:%s/getid?type=1&id=%s", protocol, serverDir, portValue, id)
-		resp, err := http.Get(url)
+		resp, err := idmapHTTPClient.Get(url)
 		if err != nil {
 			return 0, fmt.Errorf("failed to send request: %v", err)
 		}
@@ -741,7 +742,7 @@ func StoreCachev2(id string) (int64, error) {
 
 		// 构建请求URL
 		url := fmt.Sprintf("%s://%s:%s/getid?type=16&id=%s", protocol, serverDir, portValue, id)
-		resp, err := http.Get(url)
+		resp, err := idmapHTTPClient.Get(url)
 		if err != nil {
 			return 0, fmt.Errorf("failed to send request: %v", err)
 		}
@@ -790,7 +791,7 @@ func StoreIDv2Pro(id string, subid string) (int64, int64, error) {
 
 		// 构建请求URL
 		url := fmt.Sprintf("%s://%s:%s/getid?type=8&id=%s&subid=%s", protocol, serverDir, portValue, id, subid)
-		resp, err := http.Get(url)
+		resp, err := idmapHTTPClient.Get(url)
 		if err != nil {
 			return 0, 0, fmt.Errorf("failed to send request: %v", err)
 		}
@@ -933,7 +934,7 @@ func RetrieveRowByIDv2Pro(newRowID string, newSubRowID string) (string, string, 
 
 		// 构建请求URL
 		url := fmt.Sprintf("%s://%s:%s/getid?type=9&id=%s&subid=%s", protocol, serverDir, portValue, newRowID, newSubRowID)
-		resp, err := http.Get(url)
+		resp, err := idmapHTTPClient.Get(url)
 		if err != nil {
 			return "", "", fmt.Errorf("failed to send request: %v", err)
 		}
@@ -1031,7 +1032,7 @@ func RetrieveRowByIDv2(rowid string) (string, error) {
 
 		// 构建请求URL
 		url := fmt.Sprintf("%s://%s:%s/getid?type=2&id=%s", protocol, serverDir, portValue, rowid)
-		resp, err := http.Get(url)
+		resp, err := idmapHTTPClient.Get(url)
 		if err != nil {
 			return "", fmt.Errorf("failed to send request: %v", err)
 		}
@@ -1105,7 +1106,7 @@ func RetrieveRowByCachev2(rowid string) (string, error) {
 
 		// 构建请求URL
 		url := fmt.Sprintf("%s://%s:%s/getid?type=17&id=%s", protocol, serverDir, portValue, rowid)
-		resp, err := http.Get(url)
+		resp, err := idmapHTTPClient.Get(url)
 		if err != nil {
 			return "", fmt.Errorf("failed to send request: %v", err)
 		}
@@ -1203,7 +1204,7 @@ func WriteConfigv2(sectionName, keyName, value string) error {
 		params.Add("value", value)
 		url := baseURL + "?" + params.Encode()
 
-		resp, err := http.Get(url)
+		resp, err := idmapHTTPClient.Get(url)
 		if err != nil {
 			return fmt.Errorf("failed to send request: %v", err)
 		}
@@ -1310,7 +1311,7 @@ func DeleteConfigv2(sectionName, keyName string) error {
 		params.Add("subtype", keyName)
 		url := baseURL + "?" + params.Encode()
 
-		resp, err := http.Get(url)
+		resp, err := idmapHTTPClient.Get(url)
 		if err != nil {
 			return fmt.Errorf("failed to send request: %v", err)
 		}
@@ -1358,7 +1359,7 @@ func ReadConfigv2(sectionName, keyName string) (string, error) {
 		params.Add("subtype", keyName)
 		url := baseURL + "?" + params.Encode()
 
-		resp, err := http.Get(url)
+		resp, err := idmapHTTPClient.Get(url)
 		if err != nil {
 			return "", fmt.Errorf("failed to send request: %v", err)
 		}
@@ -1368,9 +1369,12 @@ func ReadConfigv2(sectionName, keyName string) (string, error) {
 			return "", fmt.Errorf("error response from server: %s", resp.Status)
 		}
 
-		body, err := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxIDMapResponseBytes+1))
 		if err != nil {
 			return "", fmt.Errorf("failed to read response body: %v", err)
+		}
+		if int64(len(body)) > maxIDMapResponseBytes {
+			return "", fmt.Errorf("response body exceeds %d bytes", maxIDMapResponseBytes)
 		}
 
 		var responseMap map[string]interface{}
@@ -1667,7 +1671,7 @@ func UpdateVirtualValuev2(oldRowValue, newRowValue int64) error {
 			protocol = "https"
 		}
 		url := fmt.Sprintf("%s://%s:%s/getid?type=5&oldRowValue=%d&newRowValue=%d", protocol, serverDir, portValue, oldRowValue, newRowValue)
-		resp, err := http.Get(url)
+		resp, err := idmapHTTPClient.Get(url)
 		if err != nil {
 			return fmt.Errorf("failed to send request: %v", err)
 		}
@@ -1703,7 +1707,7 @@ func RetrieveRealValuev2(virtualValue int64) (string, string, error) {
 			protocol = "https"
 		}
 		url := fmt.Sprintf("%s://%s:%s/getid?type=6&virtualValue=%d", protocol, serverDir, portValue, virtualValue)
-		resp, err := http.Get(url)
+		resp, err := idmapHTTPClient.Get(url)
 		if err != nil {
 			return "", "", fmt.Errorf("failed to send request: %v", err)
 		}
@@ -1757,7 +1761,7 @@ func RetrieveVirtualValuev2(realValue string) (string, string, error) {
 
 		// 构建请求URL
 		url := fmt.Sprintf("%s://%s:%s/getid?type=7&id=%s", protocol, serverDir, portValue, realValue)
-		resp, err := http.Get(url)
+		resp, err := idmapHTTPClient.Get(url)
 		if err != nil {
 			return "", "", fmt.Errorf("failed to send request: %v", err)
 		}
@@ -1811,7 +1815,7 @@ func RetrieveVirtualValuev2Pro(realValue string, realValueSub string) (string, s
 
 		// 构建请求URL
 		url := fmt.Sprintf("%s://%s:%s/getid?type=9&id=%s&subid=%s", protocol, serverDir, portValue, realValue, realValueSub)
-		resp, err := http.Get(url)
+		resp, err := idmapHTTPClient.Get(url)
 		if err != nil {
 			return "", "", fmt.Errorf("failed to send request: %v", err)
 		}
@@ -1949,7 +1953,7 @@ func RetrieveRealValuesv2Pro(virtualValue int64, virtualValueSub int64) (string,
 
 		// 构建请求URL
 		url := fmt.Sprintf("%s://%s:%s/getrealvalues?type=11&id=%d&subid=%d", protocol, serverDir, portValue, virtualValue, virtualValueSub)
-		resp, err := http.Get(url)
+		resp, err := idmapHTTPClient.Get(url)
 		if err != nil {
 			return "", "", fmt.Errorf("failed to send request: %v", err)
 		}
@@ -2054,7 +2058,7 @@ func UpdateVirtualValuev2Pro(oldVirtualValue1, newVirtualValue1, oldVirtualValue
 		url := fmt.Sprintf("%s://%s:%s/getid?type=12&oldVirtualValue1=%d&newVirtualValue1=%d&oldVirtualValue2=%d&newVirtualValue2=%d",
 			protocol, serverDir, portValue, oldVirtualValue1, newVirtualValue1, oldVirtualValue2, newVirtualValue2)
 
-		resp, err := http.Get(url)
+		resp, err := idmapHTTPClient.Get(url)
 		if err != nil {
 			return fmt.Errorf("failed to send request: %v", err)
 		}
@@ -2161,7 +2165,7 @@ func FindSubKeysByIdPro(id string) ([]string, error) {
 
 		// 构建请求URL
 		url := fmt.Sprintf("%s://%s:%s/getid?type=14&id=%s", protocol, serverDir, portValue, id)
-		resp, err := http.Get(url)
+		resp, err := idmapHTTPClient.Get(url)
 		if err != nil {
 			return nil, fmt.Errorf("failed to send request: %v", err)
 		}
@@ -2462,4 +2466,91 @@ func ForceUnbindID(openIDOrRow string) (int, error) {
 	}
 
 	return unboundCount, nil
+}
+
+// IdentityMapping 表示一条身份映射记录
+type IdentityMapping struct {
+	RealID    string `json:"real_id"`    // OpenID（去除 uin: 前缀）
+	VirtualID int64  `json:"virtual_id"` // 虚拟数字 ID
+	Username  string `json:"username"`   // 用户名缓存（可能为空）
+}
+
+// IdentitySnapshot 身份映射快照
+type IdentitySnapshot struct {
+	Mappings  []IdentityMapping `json:"mappings"`
+	Count     int               `json:"count"`
+	Timestamp int64             `json:"timestamp"` // 快照生成时间（Unix 时间戳）
+}
+
+// ListAllIdentities 一次性导出所有身份映射（OpenID <-> 虚拟 ID）
+// 使用 bbolt MVCC 事务快照，确保数据一致性
+func ListAllIdentities() (*IdentitySnapshot, error) {
+	// 只在 identityDB 未初始化时才调用 initNewDBs()
+	// 这样测试时可以预先设置 identityDB
+	if identityDB == nil {
+		initNewDBs()
+	}
+
+	ts := time.Now().Unix()
+	var mappings []IdentityMapping
+
+	err := identityDB.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(IdentityBucketName))
+		if b == nil {
+			return nil
+		}
+
+		return b.ForEach(func(k, v []byte) error {
+			key := string(k)
+
+			// 跳过非正向映射条目
+			// 1. 反向映射（row- 或 uin:row- 前缀）
+			if strings.HasPrefix(key, "row-") || strings.HasPrefix(key, "uin:row-") {
+				return nil
+			}
+			// 2. 计数器
+			if key == IdentityCounterKey || key == CounterKey {
+				return nil
+			}
+			// 3. 迁移标记
+			if key == migrationMarkerKey {
+				return nil
+			}
+			// 4. 复合键（包含 :）
+			if strings.Contains(key, ":") {
+				return nil
+			}
+
+			// 只处理 value 长度为 8 字节的条目（正向映射：OpenID -> uint64 虚拟 ID）
+			if len(v) != 8 {
+				return nil
+			}
+
+			// 解析虚拟 ID
+			virtualID := int64(binary.BigEndian.Uint64(v))
+
+			// 去除 UIN 前缀得到纯 OpenID
+			realID := stripUinPrefix(key)
+
+			// 获取用户名缓存
+			username := GetUserName(strconv.FormatInt(virtualID, 10))
+
+			mappings = append(mappings, IdentityMapping{
+				RealID:    realID,
+				VirtualID: virtualID,
+				Username:  username,
+			})
+			return nil
+		})
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to list identities: %w", err)
+	}
+
+	return &IdentitySnapshot{
+		Mappings:  mappings,
+		Count:     len(mappings),
+		Timestamp: ts,
+	}, nil
 }

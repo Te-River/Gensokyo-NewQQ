@@ -1,0 +1,5 @@
+version: 1
+settings:
+  app_id: 12345
+  post_url:
+    - "not-a-valid-url"
