@@ -48,15 +48,15 @@ function checkFile(filePath) {
 
   // .vue 文件检查：至少包含 <template> 或 <script> 之一
   if (filePath.endsWith('.vue')) {
-    const hasTemplate = /<template[\s>]/.test(content);
-    const hasScript = /<script[\s>]/.test(content);
+    const hasTemplate = /<template[\s>]/i.test(content);
+    const hasScript = /<script[\s>]/i.test(content);
     if (!hasTemplate && !hasScript) {
       console.error(`[FAIL] ${rel}: 缺少 <template> 和 <script> 标签`);
       errors++;
       return;
     }
     // 如果有 script 标签，检查闭合
-    if (hasScript && !/<\/script>/.test(content)) {
+    if (hasScript && !/<\/script>/i.test(content)) {
       console.error(`[FAIL] ${rel}: 缺少 </script> 闭合标签`);
       errors++;
       return;
