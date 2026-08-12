@@ -462,24 +462,14 @@ CodeQL 规则 `js/bad-tag-filter`（high）触发：HTML 标签正则大小写�
 
 | 文件 | 变更 |
 |------|------|
-| `.github/dependabot.yml` | 新增 Dependabot 配置，覆盖 Go/npm/GitHub Actions 依赖 |
+| `.github/dependabot.yml` | 曾新增 Dependabot 配置（覆盖 Go/npm/GitHub Actions 依赖），后随 `6033728` 删除停用 |
 | `.gitignore` | 新增 `.qoder/` 忽略项 |
 
-### 依赖更新
+### Dependabot 停用与依赖回退
 
-| PR | 变更 |
-|----|------|
-| #20 | `golang.org/x/net` → 0.55.0（botgo/examples） |
-| #21 | `golang.org/x/crypto` → 0.52.0 |
-| #22 | `form-data` → 4.0.6（frontend） |
-| #23 | `google.golang.org/grpc` → 1.82.1 |
-| #26 | `golang.org/x/image` → 0.41.0（botgo） |
-| #28 | `actions/setup-node` v6 → v7 |
-| #29 | `actions/setup-go` v6 → v7 |
-| #30 | go_modules minor-and-patch 14 项更新 |
-| #40 | `@types/node` → 26.1.2（frontend） |
-| #43 | go_modules 3 项更新 |
-| #44 | go_modules 2 项更新 |
+- 提交 `6033728 chore: 停用 Dependabot 自动依赖更新`：删除 `.github/dependabot.yml`，停用 Go/npm/GitHub Actions 依赖的自动更新 PR，避免持续污染 PR 列表
+- 此前 Dependabot 合并的依赖更新（PR #20-#44：golang.org/x/net、x/crypto、x/image、grpc、form-data、@types/node、setup-go/setup-node 等）已**全部回退**，当前依赖保持原版本（`google.golang.org/grpc v1.65.0`、`golang.org/x/crypto v0.23.0`、`golang.org/x/net v0.25.0` 等）
+- GitHub Actions 保持 `actions/setup-go@v6`、`actions/setup-node@v6`
 
 ---
 
