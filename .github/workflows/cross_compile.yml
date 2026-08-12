@@ -116,32 +116,43 @@ jobs:
         run: |
           build_spec="${GITHUB_SHA::7}"
           ldflags="-s -w -X github.com/hoshinonyaruko/gensokyo/buildinfo.BuildType=git -X github.com/hoshinonyaruko/gensokyo/buildinfo.BuildSpec=${build_spec}"
+          ext=""
           if [ "$GOOS" = "windows" ]; then
-            go build -ldflags="$ldflags" -o output/gensokyo-${{ matrix.os }}-${{ matrix.goarch }}.exe
-          else
-            go build -ldflags="$ldflags" -o output/gensokyo-${{ matrix.os }}-${{ matrix.goarch }}
+            ext=".exe"
           fi
+          # 完整版
+          go build -ldflags="$ldflags" -o output/gensokyo-${GOOS}-${GOARCH}${ext}
+          # noWebUI 精简版（-tags=small）
+          go build -tags=small -ldflags="$ldflags" -o output/gensokyo-${GOOS}-${GOARCH}-noWebui${ext}
 
       - name: Compress executable files with UPX
         run: |
           sudo apt-get update
           sudo apt-get install -y upx
+          ext=""
           if [[ "${{ matrix.os }}" == *"windows"* ]]; then
-            FILENAME="output/gensokyo-${{ matrix.os }}-${{ matrix.goarch }}.exe"
-          else
-            FILENAME="output/gensokyo-${{ matrix.os }}-${{ matrix.goarch }}"
+            ext=".exe"
           fi
+          skip=0
           if [[ "${{ matrix.os }}" == "android" && "${{ matrix.goarch }}" == "arm64" ]] || [[ "${{ matrix.os }}" == "darwin" ]]; then
-            echo "Skipping UPX compression for $FILENAME"
-          else
-            upx --best --lzma "$FILENAME"
+            skip=1
           fi
+          for variant in "" "-noWebui"; do
+            FILENAME="output/gensokyo-${{ matrix.os }}-${{ matrix.goarch }}${variant}${ext}"
+            if [ "$skip" -eq 1 ]; then
+              echo "Skipping UPX compression for $FILENAME"
+            else
+              upx --best --lzma "$FILENAME"
+            fi
+          done
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
           name: gensokyo-${{ matrix.os }}-${{ matrix.goarch }}
-          path: output/gensokyo-${{ matrix.os }}-${{ matrix.goarch }}${{ endsWith(matrix.os, 'windows') && '.exe' || '' }}
+          path: |
+            output/gensokyo-${{ matrix.os }}-${{ matrix.goarch }}${{ endsWith(matrix.os, 'windows') && '.exe' || '' }}
+            output/gensokyo-${{ matrix.os }}-${{ matrix.goarch }}-noWebui${{ endsWith(matrix.os, 'windows') && '.exe' || '' }}
           if-no-files-found: error
 
   prepare_release:
