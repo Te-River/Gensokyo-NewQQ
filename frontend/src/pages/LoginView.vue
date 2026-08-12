@@ -120,7 +120,8 @@
           icon: 'report_problem'
         });
       }
-    } catch (err) {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    } catch (_err) {
       $q.notify({
         color: 'negative',
         position: 'top',

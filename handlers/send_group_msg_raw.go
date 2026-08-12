@@ -291,10 +291,12 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 				mylog.Printf("%s", FormatQQError(err))
 			}
    if IsQQError(err, 22009) {
-				mylog.Printf("信息发送失败,加入到队列中,下次被动信息进行发送")
+				cid := echo.NextSSMCorrelationID(message.Params.GroupID.(string))
+				mylog.Printf("[SSM][%s] 信息发送失败,加入到队列中,下次被动信息进行发送", cid)
 				var pair echo.MessageGroupPair
 				pair.Group = message.Params.GroupID.(string)
 				pair.GroupMessage = groupMessage
+				pair.CorrelationID = cid
 				echo.PushGlobalStack(pair)
 			}
 
@@ -327,6 +329,21 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 				return "", nil // 或其他错误处理
 			}
 
+			// 处理独立 [CQ:keyboard] → 文本消息附加内嵌键盘
+			if kbItems, ok := foundItems["keyboard"]; ok && len(kbItems) > 0 {
+				kb, err := parseKeyboardData([]byte(kbItems[0]))
+				if err != nil || kb == nil {
+					mylog.Printf("[CQ:keyboard] 解析键盘数据失败: %v", err)
+				} else {
+					// 处理 keyboard 按钮中的本地图片路径
+					ResolveKeyboardImages(kb, apiv2)
+					groupMessage.Keyboard = kb
+					// 从 foundItems 中移除 keyboard，避免下方循环重复发送
+					delete(foundItems, "keyboard")
+					mylog.Printf("[CQ:keyboard] 文本消息附加内嵌键盘")
+				}
+			}
+
 			groupMessage.Timestamp = time.Now().Unix() // 设置时间戳
 			//重新为err赋值
 			resp, err := apiv2.PostGroupMessage(context.TODO(), message.Params.GroupID.(string), groupMessage)
@@ -335,10 +352,12 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 				mylog.Printf("%s", FormatQQError(err))
 			}
    if IsQQError(err, 22009) {
-				mylog.Printf("信息发送失败,加入到队列中,下次被动信息进行发送")
+				cid := echo.NextSSMCorrelationID(message.Params.GroupID.(string))
+				mylog.Printf("[SSM][%s] 信息发送失败,加入到队列中,下次被动信息进行发送", cid)
 				var pair echo.MessageGroupPair
 				pair.Group = message.Params.GroupID.(string)
 				pair.GroupMessage = groupMessage
+				pair.CorrelationID = cid
 				echo.PushGlobalStack(pair)
 			}
 
@@ -380,10 +399,12 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 							mylog.Printf("%s", FormatQQError(err))
 						}
       if IsQQError(err, 22009) {
-							mylog.Printf("信息发送失败,加入到队列中,下次被动信息进行发送")
+							cid := echo.NextSSMCorrelationID(message.Params.GroupID.(string))
+							mylog.Printf("[SSM][%s] 信息发送失败,加入到队列中,下次被动信息进行发送", cid)
 							var pair echo.MessageGroupPair
 							pair.Group = message.Params.GroupID.(string)
 							pair.GroupMessage = groupMessage
+							pair.CorrelationID = cid
 							echo.PushGlobalStack(pair)
 						}
 
@@ -435,10 +456,12 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 						mylog.Printf("发送图片失败: %v", err)
 					}
      if IsQQError(err, 22009) {
-						mylog.Printf("信息发送失败,加入到队列中,下次被动信息进行发送")
+						cid := echo.NextSSMCorrelationID(message.Params.GroupID.(string))
+						mylog.Printf("[SSM][%s] 信息发送失败,加入到队列中,下次被动信息进行发送", cid)
 						var pair echo.MessageGroupPair
 						pair.Group = message.Params.GroupID.(string)
 						pair.GroupMessage = groupMessage
+						pair.CorrelationID = cid
 						echo.PushGlobalStack(pair)
 					}
 				}

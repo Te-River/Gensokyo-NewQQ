@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/base64"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -35,6 +36,8 @@ var (
 	cardPattern          = regexp.MustCompile(`\[CQ:card[^\]]*\]`)
 	inputNotifyPattern   = regexp.MustCompile(`\[CQ:input_notify,type=(\d+)(?:,second=(\d+))?\]`)
 	streamPattern        = regexp.MustCompile(`\[CQ:stream,type:(\w+),qq:(\d+)\]`)
+	keyboardPattern      = regexp.MustCompile(`\[CQ:keyboard,data=base64://(.+?)\]`)
+	keyboardJSONPattern  = regexp.MustCompile(`\[CQ:keyboard,data=(\{.*\})\]`)
 	replyRe              = regexp.MustCompile(`\[CQ:reply,id=(\d+)\]`)
 	localImagePattern    *regexp.Regexp
 	localRecordPattern   *regexp.Regexp
@@ -102,6 +105,32 @@ func ProcessCQFile(text string, foundItems map[string][]string) string {
 		foundItems[itemKey] = append(foundItems[itemKey], cleanValue)
 		if fileName != "" {
 			foundItems["file_name"] = append(foundItems["file_name"], fileName)
+		}
+		return ""
+	})
+	return text
+}
+
+// ProcessCQKeyboard 解析 [CQ:keyboard,data=base64://...] 或 [CQ:keyboard,data={json}] 并移除
+// 与 [CQ:markdown] 保持一致：data 支持 base64 编码或原始 JSON 两种形式，
+// 解码后的键盘 JSON（结构同 parseMDData 的 keyboard 字段）存入 foundItems["keyboard"]
+func ProcessCQKeyboard(text string, foundItems map[string][]string) string {
+	// 处理 base64 格式
+	text = keyboardPattern.ReplaceAllStringFunc(text, func(match string) string {
+		if submatch := keyboardPattern.FindStringSubmatch(match); len(submatch) > 1 {
+			decoded, err := base64.StdEncoding.DecodeString(submatch[1])
+			if err != nil {
+				mylog.Printf("[CQ:keyboard] base64 解码失败: %v", err)
+				return ""
+			}
+			foundItems["keyboard"] = append(foundItems["keyboard"], string(decoded))
+		}
+		return ""
+	})
+	// 处理原始 JSON 格式
+	text = keyboardJSONPattern.ReplaceAllStringFunc(text, func(match string) string {
+		if submatch := keyboardJSONPattern.FindStringSubmatch(match); len(submatch) > 1 {
+			foundItems["keyboard"] = append(foundItems["keyboard"], submatch[1])
 		}
 		return ""
 	})

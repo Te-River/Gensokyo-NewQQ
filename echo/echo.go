@@ -95,8 +95,10 @@ type StringToIntMappingSeq struct {
 
 // MessageGroupPair 用于存储 group 和 groupMessage
 type MessageGroupPair struct {
-	Group        string
-	GroupMessage *dto.MessageToCreate
+	Group         string
+	GroupMessage  *dto.MessageToCreate
+	EnqueueTime   time.Time // 入队时间，用于诊断补发延迟
+	CorrelationID string    // 关联标识，用于跨入队/补发边界的日志关联
 }
 
 // 定义全局栈的结构体
@@ -298,8 +300,25 @@ func IncrementMappingSeq(key string) int {
 	return NextMappingSeq(key)
 }
 
+// ssmCounter 用于生成 SSM 补发队列的唯一关联标识
+var ssmCounter uint64
+var ssmMu sync.Mutex
+
+// NextSSMCorrelationID 生成 SSM 补发队列的唯一关联标识
+func NextSSMCorrelationID(groupID string) string {
+	ssmMu.Lock()
+	ssmCounter++
+	c := ssmCounter
+	ssmMu.Unlock()
+	return fmt.Sprintf("ssm-%s-%d", groupID[:8], c)
+}
+
 // PushGlobalStack 向全局栈中添加一个新的 MessageGroupPair
 func PushGlobalStack(pair MessageGroupPair) {
+	pair.EnqueueTime = time.Now()
+	if pair.CorrelationID == "" {
+		pair.CorrelationID = NextSSMCorrelationID(pair.Group)
+	}
 	globalMessageGroupStack.mu.Lock()
 	defer globalMessageGroupStack.mu.Unlock()
 	globalMessageGroupStack.stack = append(globalMessageGroupStack.stack, pair)

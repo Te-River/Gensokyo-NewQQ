@@ -75,9 +75,81 @@
 - 出站动作型由 6 次独立全文扫描（member/remove/ban/whole_ban/add_request/strategy 各自 `ReplaceAllStringFunc`）改为 1 次扫描，行为完全兼容（member 的 eventID/跨群路由语义保留，内部函数对默认群 ID 增加反查保持等价）
 - `message_parser.go` 相应精简（-540 行），`send_group_msg.go` 6 次调用改为 1 次
 
+### [CQ:keyboard] 独立内嵌键盘 CQ 码
+
+新增扩展 CQ 码 `[CQ:keyboard]`，使文本消息可以直接附加 QQ 官方内嵌键盘（按钮消息），覆盖群聊与单聊：
+
+| 语法 | 说明 |
+|------|------|
+| `[CQ:keyboard,data=base64://<键盘JSON>]` | base64 编码形式（与 `[CQ:markdown]` 一致） |
+| `[CQ:keyboard,data=<键盘JSON>]` | 原始 JSON 形式 |
+
+- **解析**：`handlers/cqcode.go` 新增 `ProcessCQKeyboard`，从出站文本中提取并移除 CQ 码，解码后的键盘 JSON 存入 `foundItems["keyboard"]`；`handlers/message_parser.go` 的 `parseMessageContent` 统一接入
+- **发送**：`send_group_msg` / `send_private_msg` / `send_group_msg_raw` 文本路径在无 markdown 时解析键盘（复用 `parseMDData` 结构），附加到 `MessageToCreate.Keyboard`，以 `msg_type=0` 文本 + 键盘发送
+- **键盘能力**：支持官方三种形态（模板 `id`、`content.rows`、顶层 `rows`）；`specify_user_ids` 数字虚拟 ID 自动转换为 OpenID（`ResolveKeyboardVirtualIDs`）；私聊 `__USER_ID__` 占位符替换为实际用户 OpenID（`ResolvePlaceholderUserIDs`）；按钮本地图片自动解析（`ResolveKeyboardImages`）
+- **优先级**：与 `[CQ:markdown]` 同存时 markdown 优先（其附带键盘生效）
+
+### CQ 码解析统一管道架构（ProcessCQCodePipeline）
+
+- 新增 `handlers/cqcode_pipeline.go`：统一管道 `ProcessCQCodePipeline()` 处理所有出站 CQ 码字符串解析（媒体/控制/动作），输出纯文本 + foundItems
+- `message_parser.go` 移除分散的 CQ 码解析逻辑（string 分支内的 markdown/card/input_notify/stream/媒体正则，-116 行），统一调用 `ProcessCQCodePipeline`
+- **架构原则**：cqcode_pipeline.go 负责解析、cqcode.go 负责正则常量与动作执行、message_parser.go 只负责消息段格式转换
+- **修复**：消息段数组路径（NoneBot 等框架的 segment_type_koishi 格式）下 CQ 码原样发出的问题——此前 string 分支内的解析逻辑在 `[]interface{}` 路径不执行，统一管道确保两种路径解析一致
+
+### QQ 开放平台新能力调研（群聊/C2C 场景）
+
+基于 QQ 开放平台 api-v2 文档（2026-07 更新）全量比对：
+
+- **事件**：群聊/C2C 场景的文档化事件（`GROUP_AND_C2C_EVENT` 1<<25 全量 10 个 + `GROUP_MESSAGE_CREATE` + 探测所得成员/入群申请/内联搜索/互动）本地已全部适配，**无新增可适配事件**
+- **表情消息**：官方 api-v2 消息类型新增"表情"页面（2025-07），但公开文档未披露群聊发送接口与 `msg_type` 取值，无法确认适配方式
+- **表情表态（reaction）**：官方明确"仅支持在频道内使用"，群聊/C2C 不可用
+- **消息审核（MESSAGE_AUDIT）**：官方描述面向主动消息审核，群聊/C2C 场景适用性未获官方确认，暂不接入
+- **图文消息**：官方 4 个发送场景（单聊/群聊/文字子频道/频道私信）中的图文能力已由本地富媒体 `msg_type=7` 与卡片 `msg_type=8` 覆盖
+
 ---
 
 ## 🐛 Bug 修复
+
+### [CQ:keyboard] 顶层 content 形态解析失败
+
+**文件：** `handlers/message_parser.go`
+
+`[CQ:keyboard]` 独立使用时的官方简写形态 `{"content": {"rows": [...]}}`（顶层 `content`）与按钮模板形态 `{"id": "..."}`（顶层 `id`）无法被 `parseMDData` 解析，导致键盘 JSON 解析失败（kb=nil）、CQ 码原样发出。
+
+**修复：** `parseMDData` 的临时结构体新增顶层 `content`/`id` 字段，与既有嵌套 `keyboard` 形态并行支持，不影响 `[CQ:markdown]` 既有行为。
+
+### 消息段数组路径 CQ 码原样发出
+
+**文件：** `handlers/message_parser.go`、`handlers/cqcode_pipeline.go`
+
+`parseMessageContent` 中 `[]interface{}` 路径（NoneBot 等框架发送的消息段数组格式）下，text 段内嵌的 `[CQ:keyboard]` 等 CQ 码未被解析，原样作为文本发送到 QQ。
+
+**修复：** 新建 `cqcode_pipeline.go` 统一管道 `ProcessCQCodePipeline()`，在 switch 之后统一调用，确保 string 与 `[]interface{}` 两种路径均经过同一解析。
+
+### 复检问题修复（P1/P2/P3 全量）
+
+针对复检报告（`reports/refactor-validation/rereview-2026-08-11.md`）中的 6 项问题逐一修复：
+
+**P1-4.1 热路径聚焦测试**：新增 `handlers/cqcode_pipeline_test.go`（24 个用例），覆盖统一管道全部 CQ 码类型的解析、文本剔除、keyboard JSON 解析、card/stream 参数验证、消息段数组路径、幂等性与未知 CQ 码保留。
+
+**P1-4.2 CI 测试门禁**：`cross_compile.yml` 新增 `test` job（`go vet ./...` + `go test ./... -count=1`），`build` job 通过 `needs: test` 依赖，测试失败则编译不执行。
+
+**P2-4.3 前端测试占位符**：`frontend/package.json` 的 test 脚本替换为零依赖语法验证脚本 `scripts/test-syntax.js`（检查 30 个 .ts/.vue 文件的非空、UTF-8 合法性、script 标签闭合），CI 中 ESLint 仍由 quasar build 覆盖。
+
+**P2-4.4 SSM 补发关联标识**：`echo.MessageGroupPair` 新增 `EnqueueTime`/`CorrelationID` 字段；`PushGlobalStack` 自动生成 `ssm-<group>-<seq>` 关联标识并记录入队时间；`send_group_msg.go` 与 `send_group_msg_raw.go` 的 5+4 处入队/补发路径日志统一携带 `[SSM][cid]` 前缀，补发时输出队列停留时长，实现跨入队/补发边界的日志关联。
+
+**P3-4.5 [CQ:face] 文档一致性**：文档已标注"开发中，暂无法正常使用"（上一轮完成），与代码零实现一致。
+
+**P3-4.6 MCP 版本固定**：`.mcp.json` 两个 MCP 服务固定版本（`@modelcontextprotocol/server-github@2025.4.8`、`@upstash/context7-mcp@4.0.1`），并修正 context7 错误包名（原 `@context7/server` 不存在）。
+
+### [CQ:keyboard] 渲染说明补充
+
+实测确认：**QQ 客户端仅在 Markdown 消息（`msg_type=2`）下渲染内嵌键盘按钮**，纯文本消息（`msg_type=0`）附带的 `keyboard` 参数不显示按钮。已在 `扩展cq码-cq-keyboard.md` 新增"渲染说明（重要）"章节，建议与 `[CQ:markdown]` 配合使用；`CQ码汇总.md` 同步标注。测试插件文本同步修正（移除消息文本中的 CQ 码字面量）。
+
+### [CQ:keyboard] 完整构建文档 + AGENTS.md 适用范围
+
+- `扩展cq码-cq-keyboard.md` 新增"完整构建（按钮 JSON 全字段诠释）"章节：Keyboard/KeyboardContent/Row/Button/RenderData/Action/Permission 全字段表格 + 三按钮完整示例（指令+回调+跳转），并附 QQ 开放平台官网链接（发送群聊/单聊消息页面）
+- `AGENTS.md` 新增"适用范围（重要）"章节：规范仅在本仓库内拥有最高优先级，其他项目/工作区域以用户指令为准、无需参考本文件；文件随仓库公开上传供所有访问本仓库的 Agent 使用
 
 ### 语音上传失败修复
 
@@ -393,6 +465,9 @@
 | `AGENTS.md` | botgo Fork 描述补充群聊管理 API（GroupAPI）与入群申请事件 |
 | `docs/cq码/` | 标准 CQ 码文档完善（12 个标准 CQ 码文档 + 1 个统一汇总，同步 `docs/更多文档.md` 索引） |
 | `docs/forks/` | fork inventory：`botgo.md`、`go-silk.md`（P12） |
+| `docs/cq码/` | 新增 `扩展cq码-cq-keyboard.md`（[CQ:keyboard] 独立内嵌键盘），`CQ码汇总.md` 扩展表新增 keyboard 行 |
+| `docs/本版新增功能.md` | 消息与 CQ 行为章节新增 `[CQ:keyboard]` |
+| `release_log/CHANGELOG_v012.md` | 新增 [CQ:keyboard] 与官方新能力调研结论两个小节 |
 
 ---
 
