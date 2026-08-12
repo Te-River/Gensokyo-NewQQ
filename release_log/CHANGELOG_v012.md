@@ -151,6 +151,44 @@
 - `扩展cq码-cq-keyboard.md` 新增"完整构建（按钮 JSON 全字段诠释）"章节：Keyboard/KeyboardContent/Row/Button/RenderData/Action/Permission 全字段表格 + 三按钮完整示例（指令+回调+跳转），并附 QQ 开放平台官网链接（发送群聊/单聊消息页面）
 - `AGENTS.md` 新增"适用范围（重要）"章节：规范仅在本仓库内拥有最高优先级，其他项目/工作区域以用户指令为准、无需参考本文件；文件随仓库公开上传供所有访问本仓库的 Agent 使用
 
+### 前端构建失败修复（ESLint 11 处错误）
+
+**文件：** `frontend/src/`（5 个 Vue/TS 文件）
+
+`npm run build` 因 11 处 ESLint 错误（10 处 `no-unused-vars` + 2 处 `no-explicit-any`）导致 COMPILATION FAILED，前端产物无法生成，`go:embed` 一直打包旧 WebUI。
+
+**修复：**
+- `ChannelList.vue`/`GroupList.vue`：`defineProps` 去掉未使用的 `props` 变量赋值
+- `ChannelView.vue`：删除未使用的 `watch`/`GroupList`/`groupList`；`getNextPage`/`getPreviousPage` 删除无用参数并同步调用处
+- `GroupView.vue`：删除未使用的 `ChannelList` 导入；`handleRowClick` 删除无用 `index` 参数
+- `LoginView.vue`：`catch(err)` 未使用变量加行内忽略
+- `ChannelView.vue`/`GroupView.vue`：文件头补充 `no-explicit-any` disable（与既有 `no-unsafe-assignment` 风格一致）
+
+### [CQ:face] 文档标注开发中
+
+**文件：** `docs/cq码/标准CQ码/标准cq码-cq-face.md`、`docs/cq码/CQ码汇总.md`
+
+`[CQ:face]` 官方未公开群聊/C2C 表情发送接口，文档标注"开发中，暂无法正常使用"（标题下新增提示 + 汇总表标注），与代码零实现保持一致。
+
+### CodeQL 警报 #30 修复（js/bad-tag-filter）
+
+**文件：** `frontend/scripts/test-syntax.js`
+
+CodeQL 规则 `js/bad-tag-filter`（high）触发：HTML 标签正则大小写敏感，不匹配 `<SCRIPT>` 等大写标签。
+
+**修复：** `/<script[\s>]/`、`/<template[\s>]/`、`/<\/script>/` 三处正则添加 `i`（大小写不敏感）标志；CodeQL 重新扫描后警报自动关闭（状态 fixed）。
+
+### CI 申请 PR 时构建全平台双版本
+
+**文件：** `.github/workflows/cross_compile.yml`
+
+申请 PR（`pull_request` opened/synchronize）自动触发的构建 action 由单版本改为**全平台双版本**（9 平台 × 完整版 + noWebUI 精简版，共 18 产物）：
+
+- Compile 步骤同时构建完整版与 `-tags=small` 精简版，产物命名 `gensokyo-{os}-{arch}[-noWebui][.exe]`
+- UPX 压缩循环处理两个产物（android/darwin 跳过逻辑保留）
+- Upload artifacts 上传双产物（多行 path pattern）
+- 本地验证：`go build ./...` 与 `go build -tags=small ./...` 均通过，YAML 语法正确
+
 ### 语音上传失败修复
 
 **文件：** `handlers/send_group_msg.go`
@@ -159,8 +197,6 @@
 
 **修复：** 改为与 `local_record` 一致，直接调用 `CreateAndUploadMediaMessage` 上传 QQ CDN。
 
----
-
 ### 媒体消息 `url` 字段兼容修复
 
 **文件：** `handlers/message_parser.go`
@@ -168,8 +204,6 @@
 部分客户端（如 Koishi）使用 `url` 字段而非 `file` 字段传递媒体路径，导致本地文件路径被当作 `unknown_*` 处理，触发 SSRF 阻止。
 
 **修复：** 在 `image`、`voice/record`、`video` 的解析中，当 `file` 字段为空时，回退读取 `url` 字段。
-
----
 
 ### lazy_message_id 多段回复偶发 40054005 msgseq 去重（Issue #19）
 
@@ -468,6 +502,13 @@
 | `docs/cq码/` | 新增 `扩展cq码-cq-keyboard.md`（[CQ:keyboard] 独立内嵌键盘），`CQ码汇总.md` 扩展表新增 keyboard 行 |
 | `docs/本版新增功能.md` | 消息与 CQ 行为章节新增 `[CQ:keyboard]` |
 | `release_log/CHANGELOG_v012.md` | 新增 [CQ:keyboard] 与官方新能力调研结论两个小节 |
+| `docs/cq码/` | `标准cq码-cq-face.md` 标题下新增"开发中"提示；`CQ码汇总.md` face 行标注开发中 |
+| `docs/cq码/` | `扩展cq码-cq-keyboard.md` 新增"渲染说明（重要）"与"完整构建（按钮 JSON 全字段诠释）"章节；`CQ码汇总.md` keyboard 行同步标注 |
+| `AGENTS.md` | 新增"适用范围（重要）"章节，限定规范仅在本仓库内生效 |
+| `frontend/scripts/test-syntax.js` | 新增零依赖前端语法验证脚本（30 个 .ts/.vue 文件） |
+| `.github/workflows/cross_compile.yml` | 新增 `test` job（go vet + go test）；申请 PR 时构建全平台双版本（完整版 + noWebUI） |
+| `.mcp.json` | 两个 MCP 服务固定版本（github@2025.4.8、context7-mcp@4.0.1），修正 context7 错误包名 |
+| `reports/refactor-validation/rereview-2026-08-11.md` | 新增复检与测试报告（全流程测试结果、热路径走查、F1-F4 复核、6 项逻辑问题汇总） |
 
 ---
 
@@ -490,6 +531,10 @@
 | `go test ./internal/application/action/` | ✅ 通过（87.5% coverage） |
 | `go test ./internal/application/state/` | ✅ 通过（97.5% coverage） |
 | `go test ./...` | ✅ 通过 |
+| `go test ./handlers/ -run TestProcessCQCodePipeline` | ✅ 通过（24 用例，统一管道全覆盖） |
+| `npm test`（frontend） | ✅ 通过（30 个 .ts/.vue 文件语法验证） |
+| `npm run build`（frontend） | ✅ 通过（仅 2 个非阻塞 warning） |
+| `go build -tags=small ./...` | ✅ 通过（noWebUI 精简版编译验证） |
 
 ---
 
@@ -529,4 +574,14 @@ f535855  docs: 为新增群聊管理扩展 API 编写详细文档
 ce9791d  feat: 群聊管理 API 全部暴露为 OneBot action
 43b816e  feat: 补齐群聊 API 并接入入群申请事件
 0b4ee93  ci: 新增 Dependabot 配置覆盖 Go/npm/GitHub Actions 依赖
+c4300c8  ci: 申请 PR 时构建全平台双版本（完整版 + noWebUI）
+70933ec  fix: CodeQL 警报 #30 - test-syntax.js HTML 标签正则大小写不敏感
+1519d29  docs: AGENTS.md 限定仓库适用范围 + [CQ:keyboard] 完整构建文档
+675b874  fix: 复检 P1/P2/P3 全量修复 + [CQ:keyboard] 渲染说明
+ccdb4a0  docs: 补充统一管道重构记录并输出复检与测试报告
+f229318  refactor: CQ码解析统一管道架构（ProcessCQCodePipeline）
+6a404d4  fix: [CQ:keyboard] 顶层 content/id 形态解析失败导致 CQ 码原样发出
+123d249  docs: 标注 [CQ:face] 为开发中状态
+2a842e2  fix: 修复前端构建失败（ESLint 未使用变量与 any 类型错误）
+56ef577  feat: 新增 [CQ:keyboard] 独立内嵌键盘 CQ 码并完成官方能力调研
 ```
