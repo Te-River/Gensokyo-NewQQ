@@ -5,7 +5,8 @@
   "private": true,
   "scripts": {
     "lint": "eslint --ext .js,.ts,.vue ./",
-    "test": "node scripts/test-syntax.js",
+    "test": "vitest run",
+    "test:syntax": "node scripts/test-syntax.js",
     "dev": "quasar dev",
     "build": "quasar build"
   },

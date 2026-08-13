@@ -12,6 +12,11 @@ yarn
 quasar dev
 ```
 
+### Run the tests
+```bash
+npm test
+```
+
 ### Lint the files
 ```bash
 yarn run lint

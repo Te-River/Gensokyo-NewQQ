@@ -7,13 +7,15 @@ export namespace QDVC {
   export type EncodingMethod = 'base64' | 'base16384';
 
   const isBase64 = (str: string) => /^[a-zA-Z0-9+/=]+$/.test(str);
-  export const decodeBase64 = (encoded: string, text = false) =>
-    text
-      ? window.atob(encoded)
-      : Uint8Array.from(window.atob(encoded), (c) => c.charCodeAt(0));
+  export const decodeBase64 = (encoded: string, text = false) => {
+    const bytes = Uint8Array.from(window.atob(encoded), (c) => c.charCodeAt(0));
+    return text ? new TextDecoder().decode(bytes) : bytes;
+  };
   export const encodeBase64 = (decoded: string | Uint8Array) =>
     window.btoa(
-      decoded instanceof Uint8Array ? String.fromCharCode(...decoded) : decoded
+      decoded instanceof Uint8Array
+        ? String.fromCharCode(...decoded)
+        : String.fromCharCode(...new TextEncoder().encode(decoded))
     );
 
   const decodeBase16384 = (encoded: string, text = false) =>

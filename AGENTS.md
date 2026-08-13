@@ -252,6 +252,8 @@ Handler 签名：`func(client callapi.Client, api openapi.OpenAPI, apiv2 openapi
 | 静态分析 | `go vet ./...` |
 | 运行全部测试 | `go test ./handlers/` |
 | 运行单个测试 | `go test ./handlers/ -run TestFunctionName -v` |
+| 前端单元测试（vitest） | `cd frontend && npm test` |
+| 前端语法门控 | `cd frontend && npm run test:syntax` |
 | 构建当前平台（默认） | `.\build.ps1` |
 | 构建指定平台 | `.\build.ps1 linux amd64` |
 | 构建所有平台（双版本） | `.\build.ps1 -All` |
