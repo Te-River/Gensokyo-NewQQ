@@ -9,6 +9,7 @@ import (
 
 	"github.com/hoshinonyaruko/gensokyo/config"
 	"github.com/hoshinonyaruko/gensokyo/idmap"
+	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/tencent-connect/botgo/dto"
 )
 
@@ -310,7 +311,12 @@ func NextSSMCorrelationID(groupID string) string {
 	ssmCounter++
 	c := ssmCounter
 	ssmMu.Unlock()
-	return fmt.Sprintf("ssm-%s-%d", groupID[:8], c)
+	// groupID 可能为短字符串（如虚拟ID），长度不足8时取全部，避免切片越界
+	prefix := groupID
+	if len(groupID) > 8 {
+		prefix = groupID[:8]
+	}
+	return fmt.Sprintf("ssm-%s-%d", prefix, c)
 }
 
 // PushGlobalStack 向全局栈中添加一个新的 MessageGroupPair
@@ -320,8 +326,10 @@ func PushGlobalStack(pair MessageGroupPair) {
 		pair.CorrelationID = NextSSMCorrelationID(pair.Group)
 	}
 	globalMessageGroupStack.mu.Lock()
-	defer globalMessageGroupStack.mu.Unlock()
 	globalMessageGroupStack.stack = append(globalMessageGroupStack.stack, pair)
+	stackLen := len(globalMessageGroupStack.stack)
+	globalMessageGroupStack.mu.Unlock()
+	mylog.Printf("[SSM][%s] 已入队 group=%s 队列长度=%d", pair.CorrelationID, pair.Group, stackLen)
 }
 
 // PopGlobalStackMulti 从全局栈中取出指定数量的 MessageGroupPair，但不删除它们
