@@ -23,6 +23,18 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
+      # webui/dist 被 .gitignore 忽略，checkout 后不存在；
+      # go:embed dist/* 等 5 条 pattern 至少需要各 1 个文件才能编译，
+      # 故创建占位文件（与 build.ps1 的 Ensure-WebUIDist 一致）。
+      - name: Create webui embed placeholders
+        run: |
+          mkdir -p webui/dist/css webui/dist/fonts webui/dist/icons webui/dist/js
+          touch webui/dist/placeholder.html \
+            webui/dist/css/placeholder.css \
+            webui/dist/fonts/placeholder.txt \
+            webui/dist/icons/placeholder.txt \
+            webui/dist/js/placeholder.js
+
       - name: Run go vet
         run: go vet ./...
 

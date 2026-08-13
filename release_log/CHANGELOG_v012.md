@@ -189,6 +189,14 @@ CodeQL 规则 `js/bad-tag-filter`（high）触发：HTML 标签正则大小写�
 - Upload artifacts 上传双产物（多行 path pattern）
 - 本地验证：`go build ./...` 与 `go build -tags=small ./...` 均通过，YAML 语法正确
 
+#### Test & Vet 步骤修复（webui embed 占位）
+
+Test job 的 `go vet ./...` 与 `go test ./... -count=1` 步骤此前在 CI 中必然失败：`webui/dist/` 被 `.gitignore` 忽略，checkout 后目录不存在，`go:embed dist/*` 编译报 `pattern dist/*: no matching files found`。
+
+**修复：** 在 Test job 中新增 `Create webui embed placeholders` 步骤，创建与 `build.ps1` 的 `Ensure-WebUIDist` 一致的占位文件（覆盖 dist 及 css/fonts/icons/js 五个 embed pattern）；9 平台编译矩阵与 `contents: read` 最小权限保持不变。
+
+**验证：** 移除 `webui/dist` 后按 workflow 等效命令本地执行，`go vet ./...` 与 `go test ./... -count=1` 均通过（37 包全绿）。
+
 ### 语音上传失败修复
 
 **文件：** `handlers/send_group_msg.go`
