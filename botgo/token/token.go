@@ -68,7 +68,7 @@ func UserToken(appID uint64, clientSecret string) *Token {
 func (t *Token) InitToken(ctx context.Context) (err error) {
 	if err = t.authToken.StartRefreshAccessToken(ctx, t.tokenURL, fmt.Sprint(t.appID), t.clientSecret); err != nil {
 		log.Errorf("无法获取AccessToken: %v", err)
-		//return err
+		return err
 	}
 	return nil
 }

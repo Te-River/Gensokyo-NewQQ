@@ -130,11 +130,12 @@ func (l *ChanManager) newConnect(session dto.Session) {
 			currentSession.ID = ""
 			currentSession.LastSeq = 0
 		}
-		// 一些错误不能够鉴权，比如机器人被封禁，这里就直接退出了
+		// 一些错误不能够鉴权，比如机器人被封禁、或连续鉴权失败（token/密钥配置错误）
 		if manager.CanNotIdentify(err) {
-			msg := fmt.Sprintf("can not identify because server return %+v, so process exit", err)
+			msg := fmt.Sprintf("无法通过QQ网关鉴权, 可能原因: config.yml中appid/client_secret/token配置错误, 或机器人被封禁/下架: %+v, 已停止重连, 请检查配置后重启", err)
 			log.Errorf(msg)
-			panic(msg) // 当机器人被下架，或者封禁，将不能再连接，所以 panic
+			// 不再把 session 放回队列，终止无限重连（放回队列会被 Start 循环再次拉起形成死循环）
+			return
 		}
 		// 将 session 放到 session chan 中，用于启动新的连接，当前连接退出
 		l.sessionChan <- *currentSession

@@ -56,11 +56,25 @@ func (atoken *AuthTokenInfo) ForceUpToken(ctx context.Context, reason string) er
 // 该函数首先会立即查询一次AccessToken，并保存。
 // 然后它将在后台启动一个goroutine，定期（根据token的有效期）刷新AccessToken。
 func (atoken *AuthTokenInfo) StartRefreshAccessToken(ctx context.Context, tokenURL, appID, clientSecrent string) (err error) {
-	// 首先，立即获取一次AccessToken
-	tokenInfo, err := queryAccessToken(ctx, tokenURL, appID, clientSecrent)
+	// 首先，立即获取一次AccessToken（失败时重试3次，避免瞬时网络抖动误伤启动）
+	var tokenInfo AccessTokenInfo
+	for attempt := 1; attempt <= 3; attempt++ {
+		tokenInfo, err = queryAccessToken(ctx, tokenURL, appID, clientSecrent)
+		if err == nil {
+			break
+		}
+		log.Errorf("无法获取AccessToken(第%d次): %v", attempt, err)
+		if attempt < 3 {
+			select {
+			case <-time.After(3 * time.Second):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
 	if err != nil {
-		log.Errorf("无法获取AccessToken: %v", err)
-		//return err
+		// 初次获取失败不再静默写入空token，直接向上返回错误，避免带空token进入ws鉴权无限重连
+		return fmt.Errorf("获取access_token失败, 请检查config.yml中appid/client_secret配置: %w", err)
 	}
 	atoken.setAuthToken(tokenInfo)
 	  log.Info("获取到的token是: " + redactToken(tokenInfo.Token)) // 输出获取到的token（脱敏）
@@ -128,10 +142,18 @@ type queryTokenReq struct {
 	ClientSecret string `json:"clientSecret"`
 }
 
-// 自定义地址返回需满足这个格式
+// queryTokenRsp 兼容两种返回结构:
+// 1. 扁平结构: {"access_token":"xxx","expires_in":7200}
+// 2. api-v2 信封结构: {"code":0,"message":"ok","data":{"access_token":"xxx","expires_in":7200}}
 type queryTokenRsp struct {
-	AccessToken string      `json:"access_token"`
-	ExpiresIn   interface{} `json:"expires_in"` // 允许任何类型
+	Code        int    `json:"code"`
+	Message     string `json:"message"`
+	AccessToken string `json:"access_token"`
+	ExpiresIn   interface{} `json:"expires_in"`
+	Data        struct {
+		AccessToken string      `json:"access_token"`
+		ExpiresIn   interface{} `json:"expires_in"`
+	} `json:"data"`
 }
 
 // func queryAccessToken(ctx context.Context, tokenURL, appID, clientSecrent string) (AccessTokenInfo, error) {
@@ -241,22 +263,59 @@ func queryAccessToken(ctx context.Context, tokenURL, appID, clientSecret string)
 		return AccessTokenInfo{}, err
 	}
 
-	var respData queryTokenRsp
-	if err = json.Unmarshal(body, &respData); err != nil {
-		return AccessTokenInfo{}, err
+	// 校验 HTTP 状态码，非 2xx 直接返回错误
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return AccessTokenInfo{}, fmt.Errorf("get access token http status %d, body: %s", resp.StatusCode, truncateBody(body))
 	}
 
-	// 自定义地址返回可能是string或者int
-	expiresInInt, err := parseExpiresIn(respData.ExpiresIn)
-	if err != nil {
-		return AccessTokenInfo{}, fmt.Errorf("expires_in is not a valid int or string: %v", err)
+	return parseAccessTokenResponse(body)
+}
+
+// parseAccessTokenResponse 解析获取 access_token 的响应体，兼容扁平与 data 信封两种结构
+func parseAccessTokenResponse(body []byte) (AccessTokenInfo, error) {
+	var respData queryTokenRsp
+	if err := json.Unmarshal(body, &respData); err != nil {
+		return AccessTokenInfo{}, fmt.Errorf("parse access token response failed: %v, body: %s", err, truncateBody(body))
+	}
+
+	// 显式错误包络，如 {"code":10001,"message":"invalid clientSecret"}
+	if respData.Code != 0 && respData.Message != "" {
+		return AccessTokenInfo{}, fmt.Errorf("get access token failed: code=%d message=%s", respData.Code, respData.Message)
+	}
+
+	// 兼容扁平结构与 data 信封结构
+	accessToken := respData.AccessToken
+	expiresIn := respData.ExpiresIn
+	if accessToken == "" {
+		accessToken = respData.Data.AccessToken
+		expiresIn = respData.Data.ExpiresIn
+	}
+	if accessToken == "" {
+		return AccessTokenInfo{}, fmt.Errorf("get access token failed: response has no access_token, body: %s", truncateBody(body))
+	}
+
+	expiresInInt := int64(7200) // 未返回 expires_in 时使用默认有效期
+	if expiresIn != nil {
+		parsed, parseErr := parseExpiresIn(expiresIn)
+		if parseErr != nil {
+			return AccessTokenInfo{}, fmt.Errorf("expires_in is not a valid int or string: %v", parseErr)
+		}
+		expiresInInt = parsed
 	}
 
 	return AccessTokenInfo{
-		Token:     respData.AccessToken,
+		Token:     accessToken,
 		ExpiresIn: expiresInInt,
 		UpTime:    time.Now(),
 	}, nil
+}
+
+// truncateBody 截断响应体，避免日志与错误信息过长
+func truncateBody(body []byte) string {
+	if len(body) > 200 {
+		return string(body[:200]) + "..."
+	}
+	return string(body)
 }
 
 func parseExpiresIn(expiresIn interface{}) (int64, error) {
