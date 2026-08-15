@@ -150,5 +150,5 @@ f9209ca  refactor: 清理idmap/echo频道映射
 db54a10  refactor: 精简botgo SDK Fork频道部分
 c771acf  refactor: 剔除频道入站processor
 d53a66d  refactor: 剔除频道配置系统
-b8f1c7f  refactor: 剔除频道出站handler
+8b69368  refactor: 剔除频道出站handler
 ```
