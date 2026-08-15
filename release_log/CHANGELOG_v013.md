@@ -56,6 +56,12 @@
 
 **验证：** 按 workflow 等效命令本地执行 `go vet ./...` 与 `go test ./... -count=1` 均通过（37 包全绿），`go build ./...` 通过。
 
+### .mcp.json 移除 context7 MCP 服务
+
+**文件：** `.mcp.json`
+
+v012（P3-4.6）曾固定两个 MCP 服务版本，本轮移除 `context7`（`@upstash/context7-mcp@4.0.1`），仅保留 `github`（`@modelcontextprotocol/server-github@2025.4.8` 固定版本），并统一 args 数组换行格式。
+
 ---
 
 ## ✅ 提交记录
