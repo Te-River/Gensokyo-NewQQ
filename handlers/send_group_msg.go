@@ -163,8 +163,8 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				if err != nil {
 					mylog.Printf("错误：无法转换 ID %v\n", err)
 				} else {
-					// 递归3次
-					echo.AddMapping(idInt64, 4)
+					// 递归1次（枚举剩余消息类型，当前仅 group）
+					echo.AddMapping(idInt64, 2)
 					// 递归调用handleSendGroupMsg，使用设置的消息类型
 					echo.AddMsgType(config.GetAppIDStr(), idInt64, "group_private")
 					retmsg, _ = HandleSendGroupMsg(client, api, apiv2, messageCopy)
