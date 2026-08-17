@@ -23,10 +23,10 @@
 
 ### 剔除频道 handler 后消息类型递归枚举越界 panic 修复
 
-修复 `send_private_msg` / `send_group_msg` 在直接向 Gensokyo 发送 action（`msgType` 为空触发类型递归）时的 `panic: runtime error: index out of range` 崩溃：
+修复 `send_private_msg` / `send_group_msg` / `send_group_msg_raw` / `send_msg` 在直接向 Gensokyo 发送 action（`msgType` 为空触发类型递归）时的 `panic: runtime error: index out of range` 崩溃：
 
 - 提交 8b69368 剔除频道出站 handler 时，把 `tryMessageTypes` 枚举数组由 `{"group", "guild", "guild_private"}` 缩减为 `{"group"}`，但递归计数器仍为 `AddMapping(idInt64, 4)`，递归索引 `tryMessageTypes[GetMapping-1]` 可达 `[2]` 而数组长度仅 1，触发越界
-- 修复：`handlers/send_group_msg.go` 与 `handlers/send_private_msg.go` 的递归计数 `AddMapping(idInt64, 4)` 调整为 `AddMapping(idInt64, 2)`，与 1 元素枚举数组匹配（仅剩 `group_private` + `group` 两种类型可尝试），索引最大为 `[0]`，不再越界
+- 修复：`handlers/send_group_msg.go` / `send_private_msg.go` / `send_group_msg_raw.go` / `send_msg.go` 的递归计数 `AddMapping(idInt64, 4)` 调整为 `AddMapping(idInt64, 2)`，枚举数组与 1 元素匹配（仅剩 `group_private` + `group` 两种类型可尝试），索引最大为 `[0]`，不再越界
 - 行为不变：正常带 `Echo` 类型的 OneBot 请求不经过该递归路径；仅直接投递无类型 action 时触发，修复后递归 1 次尝试 `group` 类型
 
 ---
