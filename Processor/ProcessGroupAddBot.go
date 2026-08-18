@@ -25,8 +25,9 @@ type GroupRequestEvent struct {
 	SubType     string `json:"sub_type"`
 	Time        int64  `json:"time"`
 	UserID      int64  `json:"user_id"`
-	RealUserID  string `json:"real_user_id,omitempty"`  //当前真实uid
-	RealGroupID string `json:"real_group_id,omitempty"` //当前真实gid
+	Username    string `json:"username,omitempty"`       // 申请者昵称
+	RealUserID  string `json:"real_user_id,omitempty"`   //当前真实uid
+	RealGroupID string `json:"real_group_id,omitempty"`  //当前真实gid
 }
 
 // GroupNoticeEvent 表示群通知事件的数据结构
