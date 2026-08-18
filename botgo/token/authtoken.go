@@ -77,20 +77,31 @@ func (atoken *AuthTokenInfo) StartRefreshAccessToken(ctx context.Context, tokenU
 		return fmt.Errorf("获取access_token失败, 请检查config.yml中appid/client_secret配置: %w", err)
 	}
 	atoken.setAuthToken(tokenInfo)
-	  log.Info("获取到的token是: " + redactToken(tokenInfo.Token)) // 输出获取到的token（脱敏）
+	log.Info("获取到的token是: " + redactToken(tokenInfo.Token)) // 输出获取到的token（脱敏）
 
-	  // 获取token的有效期（通常以秒为单位）
-	  tokenTTL := tokenInfo.ExpiresIn
-	  // 使用sync.Once保证仅启动一个goroutine进行定时刷新
-	  atoken.once.Do(func() {
+	// 获取token的有效期（通常以秒为单位）
+	tokenTTL := tokenInfo.ExpiresIn
+	// 刷新失败后的快速重试间隔，避免旧token过期后长时间空窗
+	const failRetryInterval = 30 * time.Second
+	// 计算下次刷新间隔：官方文档建议在token接近过期60秒内获取新token（旧token在此期间仍有效），
+	// 提前45s刷新，预留网络延迟余量，实现无缝切换；TTL不足45s时用一半兜底，避免负数
+	refreshInterval := func() time.Duration {
+		if tokenTTL <= 0 {
+			return 15 * time.Second
+		}
+		if tokenTTL > 45 {
+			return time.Duration(tokenTTL-45) * time.Second
+		}
+		return time.Duration(tokenTTL/2) * time.Second
+	}
+	// 使用sync.Once保证仅启动一个goroutine进行定时刷新
+	atoken.once.Do(func() {
 		go func() { // 启动一个新的goroutine
+			nextInterval := refreshInterval()
+			log.Infof("access_token 刷新计划: 有效期%ds, 距下次刷新约%ds", tokenTTL, int(nextInterval/time.Second))
 			for {
-				// 如果tokenTTL为0或负数，将其设置为15
-				if tokenTTL <= 0 {
-					tokenTTL = 15
-				}
 				select {
-				case <-time.NewTimer(time.Duration(tokenTTL) * time.Second).C: // 当token过期时
+				case <-time.NewTimer(nextInterval).C: // 定时刷新（提前60s，避免token过期竞态）
 				case upToken := <-atoken.forceUpToken: // 接收强制更新token的信号
 					log.Warnf("recv uptoken info:%v", upToken)
 				case <-ctx.Done(): // 当上下文结束时，退出goroutine
@@ -103,9 +114,13 @@ func (atoken *AuthTokenInfo) StartRefreshAccessToken(ctx context.Context, tokenU
 					atoken.setAuthToken(tokenInfo)
 					log.Info("获取到的token是: " + redactToken(tokenInfo.Token)) // 输出获取到的token（脱敏）
 					tokenTTL = tokenInfo.ExpiresIn
+					nextInterval = refreshInterval()
+					log.Infof("access_token 刷新成功, 有效期%ds, 距下次刷新约%ds", tokenTTL, int(nextInterval/time.Second))
 				} else {
 					log.Errorf("queryAccessToken err:%v", err)
 					log.Errorf("请在config.yml或网页控制台的默认机器人中设置正确的appid和密钥信息")
+					// 刷新失败时30s后快速重试，避免过期token长时间空窗
+					nextInterval = failRetryInterval
 				}
 			}
 		}()
