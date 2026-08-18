@@ -101,8 +101,8 @@ func HandleSendMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.Ope
 		if err != nil {
 			mylog.Printf("错误：无法转换 ID %v\n", err)
 		} else {
-			// 递归3次
-			echo.AddMapping(idInt64, 4)
+			// 递归1次（枚举剩余消息类型，当前仅 group）
+			echo.AddMapping(idInt64, 2)
 			// 递归调用handleSendMsg，使用设置的消息类型
 			echo.AddMsgType(config.GetAppIDStr(), idInt64, "group_private")
 			retmsg, _ = HandleSendMsg(client, api, apiv2, messageCopy)
@@ -131,9 +131,9 @@ func HandleSendMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.Ope
 		}
 		echo.AddMapping(idInt64, echo.GetMapping(idInt64)-1)
 
-		//递归3次枚举类型
+		//递归1次枚举类型（当前仅 group）
 		if echo.GetMapping(idInt64) > 0 {
-			tryMessageTypes := []string{"group", "guild", "guild_private"}
+			tryMessageTypes := []string{"group"}
 			messageCopy := message // 创建message的副本
 			echo.AddMsgType(config.GetAppIDStr(), idInt64, tryMessageTypes[echo.GetMapping(idInt64)-1])
 			delay := config.GetSendDelay()

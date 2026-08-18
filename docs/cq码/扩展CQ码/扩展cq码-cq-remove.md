@@ -39,7 +39,7 @@
 
 - 仅支持出站（outbound）场景，通过 `send_group_msg` 发送。没有入站 `[CQ:remove]`。
 - 需要同时提供 `user_id` 和 `msg_id`。不支持仅提供 `user_id` 自动撤回最新一条消息（该功能由 `delete_group_msg` API action 提供）。
-- 范围仅限 `q群 (Group Chat)`，频道消息撤回请使用 `delete_msg` API action。
+- 范围仅限 `q群 (Group Chat)`。
 
 ## nonebot2 示例
 

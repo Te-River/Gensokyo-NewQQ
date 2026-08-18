@@ -31,7 +31,6 @@
 - `send_group_msg` / `send_to_group`（群聊图文混合）
 - `send_group_msg_raw`（raw 变体）
 - `send_private_msg`（私聊图文混合）
-- `send_guild_channel_msg`（频道图文混合，含 base64 与 multipart 两条子路径）
 
 ```text
 图文混合出站: 图片[CQ:at,qq=123213] → 图片@张三 
@@ -46,7 +45,6 @@
 覆盖范围（共用 `auto_md`）：
 - `send_group_msg` / `send_to_group`（群聊图文混合 → Markdown）
 - `send_group_msg_raw`（raw 变体图文混合 → Markdown）
-- `send_guild_channel_msg`（频道图文混合 → Markdown）
 
 ```text
 图文混合 Markdown 出站: 图片[CQ:at,qq=123213]你好 → 图片<qqbot-at-user id="OpenID" />你好
