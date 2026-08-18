@@ -337,13 +337,20 @@ func cqRemoveAction(paramsStr, match, defaultGroupID string, apiv2 openapi.OpenA
 	return "" // 从 messageText 中移除 CQ 码，无论成败都不发送原文
 }
 
-// cqParseParams 顺序无关地解析 CQ 码参数（key=value, 逗号分隔）
+// cqParseParams 顺序无关地解析 CQ 码参数（key=value, 逗号分隔）。
+// 值中的 CQ 转义（&#44;=逗号, &#93;=右括号, &amp;=&）会被还原，
+// 与 buildSetGroupCQCode 的转义互为逆操作。
 func cqParseParams(paramsStr string) map[string]string {
 	params := make(map[string]string)
 	for _, part := range strings.Split(paramsStr, ",") {
 		kv := strings.SplitN(part, "=", 2)
 		if len(kv) == 2 {
-			params[strings.TrimSpace(kv[0])] = strings.TrimSpace(kv[1])
+			value := strings.TrimSpace(kv[1])
+			// 反转义：先还原实体，再还原 & 本身（顺序不可颠倒）
+			value = strings.ReplaceAll(value, "&#44;", ",")
+			value = strings.ReplaceAll(value, "&#93;", "]")
+			value = strings.ReplaceAll(value, "&amp;", "&")
+			params[strings.TrimSpace(kv[0])] = value
 		}
 	}
 	return params
@@ -449,10 +456,14 @@ func cqSetGroupAddRequestAction(params map[string]string, match, defaultGroupID 
 		mylog.Printf("[CQ:set_group] add_request: group_id/user_id/flag 不能为空: %s", match)
 		return match
 	}
-	approve, err := strconv.ParseBool(params["approve"])
-	if err != nil {
-		mylog.Printf("[CQ:set_group] add_request: approve 参数无效: %s", match)
-		return match
+	approve := true // 省略时默认通过
+	if params["approve"] != "" {
+		parsed, err := strconv.ParseBool(params["approve"])
+		if err != nil {
+			mylog.Printf("[CQ:set_group] add_request: approve 参数无效: %s", match)
+			return match
+		}
+		approve = parsed
 	}
 	groupOpenID, err := resolveGroupOpenID(groupID)
 	if err != nil {

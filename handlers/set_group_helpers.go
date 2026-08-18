@@ -3,6 +3,8 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/hoshinonyaruko/gensokyo/idmap"
@@ -43,11 +45,16 @@ func resolveMemberOpenID(userID string) (string, error) {
 // applyRestrictChatSetting 查询当前群禁言设置并应用变更后提交。
 // memberOpenID 非空时按 duration 增/删该成员禁言条目（duration<=0 表示解除）；
 // allMute 非 nil 时切换全员禁言开关；两者可同时生效，均保留对方已有设置。
+// 解除禁言依赖当前设置列表，查询失败时中止提交，避免空列表清空全员禁言。
 func applyRestrictChatSetting(apiv2 openapi.OpenAPI, groupOpenID string, memberOpenID string, duration int, allMute *bool) error {
 	setting := &dto.RestrictChatSetting{GroupOpenID: groupOpenID}
 	// 查询当前设置作为基础，避免覆盖已有禁言条目
 	if cur, err := apiv2.RestrictChatSetting(context.TODO(), groupOpenID); err == nil {
 		setting.MemberRestrict = cur.MemberRestrict
+	} else if memberOpenID != "" && duration <= 0 {
+		// 解禁路径依赖当前列表（先移除该成员条目），查询失败时无法安全提交，
+		// 空列表会清空群里所有已设置的禁言，直接中止并返回错误
+		return fmt.Errorf("查询禁言状态失败，无法安全解除禁言: %w", err)
 	} else {
 		mylog.Printf("set_group: 查询禁言状态失败: %v", err)
 	}
@@ -93,13 +100,36 @@ func approveJoinRequest(apiv2 openapi.OpenAPI, groupOpenID, memberOpenID, flag s
 
 // buildSetGroupCQCode 将消息段 data 字段拼装为 [CQ:set_group,key=value,...] 字符串，
 // 供消息段数组（[]interface{}）与 TRSS（map）路径还原 CQ 码使用；
-// 字段顺序固定，解析端 cqParseParams 顺序无关。无任何参数时返回空串。
+// 字段顺序固定，解析端 cqParseParams 顺序无关。
+// 支持 string / 数字 / 布尔值，值中的逗号与右括号做 CQ 转义（&#44;/&#93;），
+// 避免含逗号的值（如 reason）在 cqParseParams 按逗号切分时被截断。
+// 无任何参数时返回空串。
 func buildSetGroupCQCode(dataMap map[string]interface{}) string {
 	cq := "[CQ:set_group"
 	for _, k := range []string{"action", "group_id", "user_id", "duration", "enable", "approve", "flag", "reason", "add_to_member_blacklist", "strategy_id"} {
-		if v, ok := dataMap[k].(string); ok && v != "" {
-			cq += "," + k + "=" + v
+		v, ok := dataMap[k]
+		if !ok {
+			continue
 		}
+		var sv string
+		switch tv := v.(type) {
+		case string:
+			sv = tv
+		case float64: // JSON 数字
+			sv = strconv.FormatFloat(tv, 'f', -1, 64)
+		case bool:
+			sv = strconv.FormatBool(tv)
+		default:
+			continue // 其他类型忽略
+		}
+		if sv == "" {
+			continue
+		}
+		// 转义逗号与右括号，防止解析时截断；& 一并转义避免二次解析歧义
+		sv = strings.ReplaceAll(sv, "&", "&amp;")
+		sv = strings.ReplaceAll(sv, ",", "&#44;")
+		sv = strings.ReplaceAll(sv, "]", "&#93;")
+		cq += "," + k + "=" + sv
 	}
 	cq += "]"
 	if cq == "[CQ:set_group]" {
