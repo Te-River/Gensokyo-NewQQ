@@ -57,7 +57,7 @@ func (p *Processors) ProcessGroupJoinRequest(data *dto.GroupJoinRequestEvent) {
 	}
 
 	request := GroupRequestEvent{
-		Comment:     data.VerifyInfo,
+		Comment:     data.VerifyInfo.String(),
 		Flag:        data.JoinRequestID,
 		GroupID:     groupID,
 		PostType:    "request",

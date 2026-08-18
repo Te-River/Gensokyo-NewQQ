@@ -68,7 +68,7 @@ func GetGroupJoinRequestList(client callapi.Client, api openapi.OpenAPI, apiv2 o
 			ApplyAt:      req.ApplyAt,
 			ApplySource:  req.ApplySource,
 			InvitedBy:    req.InvitedBy,
-			VerifyInfo:   req.VerifyInfo,
+			VerifyInfo:   req.VerifyInfo.String(),
 			AutoApproved: req.AutoApproved,
 		})
 	}

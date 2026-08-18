@@ -1,5 +1,50 @@
 package dto
 
+import (
+	"encoding/json"
+	"fmt"
+)
+
+// VerifyInfo 入群申请的验证信息，兼容两种格式：
+//   - 旧格式（纯字符串）："111"
+//   - 新格式（对象）：{"method":"verify_message","verify_message":"111"}
+type VerifyInfo struct {
+	Method  string `json:"method"`
+	Message string `json:"verify_message"`
+}
+
+// UnmarshalJSON 兼容字符串与对象两种格式的 verify_info
+func (v *VerifyInfo) UnmarshalJSON(data []byte) error {
+	// 优先尝试对象格式（method + verify_message）
+	var obj struct {
+		Method  string `json:"method"`
+		Message string `json:"verify_message"`
+	}
+	if err := json.Unmarshal(data, &obj); err == nil && (obj.Method != "" || obj.Message != "") {
+		v.Method = obj.Method
+		v.Message = obj.Message
+		return nil
+	}
+	// 回退到纯字符串格式
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		v.Message = s
+		return nil
+	}
+	return fmt.Errorf("无法解析 verify_info: %s", data)
+}
+
+// String 返回验证信息文本（对象格式取 verify_message，字符串格式原样返回）
+func (v *VerifyInfo) String() string {
+	if v == nil {
+		return ""
+	}
+	if v.Message != "" {
+		return v.Message
+	}
+	return v.Method
+}
+
 // GroupInfo 群基本信息
 type GroupInfo struct {
 	GroupOpenID     string   `json:"group_openid"`
@@ -21,15 +66,15 @@ type BotInGroupState struct {
 
 // JoinRequest 入群申请
 type JoinRequest struct {
-	GroupOpenID   string `json:"group_openid"`
-	JoinRequestID string `json:"join_request_id"`
-	MemberOpenID  string `json:"member_openid"`
-	Username      string `json:"username"`
-	ApplyAt       int64  `json:"apply_at"`
-	ApplySource   string `json:"apply_source"`
-	InvitedBy     string `json:"invited_by"`
-	VerifyInfo    string `json:"verify_info"`
-	AutoApproved  bool   `json:"auto_approved"`
+	GroupOpenID   string     `json:"group_openid"`
+	JoinRequestID string     `json:"join_request_id"`
+	MemberOpenID  string     `json:"member_openid"`
+	Username      string     `json:"username"`
+	ApplyAt       int64      `json:"apply_at"`
+	ApplySource   string     `json:"apply_source"`
+	InvitedBy     string     `json:"invited_by"`
+	VerifyInfo    VerifyInfo `json:"verify_info"`
+	AutoApproved  bool       `json:"auto_approved"`
 }
 
 // JoinRequestList 入群申请列表响应
@@ -62,7 +107,7 @@ type GroupJoinRequestEvent struct {
 	ApplyAt       interface{} `json:"apply_at"`
 	ApplySource   string      `json:"apply_source"`
 	InvitedBy     string      `json:"invited_by"`
-	VerifyInfo    string      `json:"verify_info"`
+	VerifyInfo    VerifyInfo  `json:"verify_info"`
 	AutoApproved  bool        `json:"auto_approved"`
 }
 
