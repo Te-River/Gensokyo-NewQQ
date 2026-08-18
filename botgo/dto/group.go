@@ -34,15 +34,14 @@ func (v *VerifyInfo) UnmarshalJSON(data []byte) error {
 	return fmt.Errorf("无法解析 verify_info: %s", data)
 }
 
-// String 返回验证信息文本（对象格式取 verify_message，字符串格式原样返回）
+// String 返回验证消息内容（verify_message 字段）。
+// 仅当 verify_info 为对象且含 verify_message 时才有内容；
+// 纯字符串格式原样返回；method 只是验证方式名，不作为内容返回。
 func (v *VerifyInfo) String() string {
 	if v == nil {
 		return ""
 	}
-	if v.Message != "" {
-		return v.Message
-	}
-	return v.Method
+	return v.Message
 }
 
 // GroupInfo 群基本信息
