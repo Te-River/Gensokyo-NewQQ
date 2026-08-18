@@ -129,6 +129,30 @@ func TestParseMessageContentFoundItems(t *testing.T) {
 			wantText: "",
 			wantNotKey: func(key string) bool { return key == "markdown" },
 		},
+		{
+			name: "set_group 动作段还原为 CQ 码字符串（数组路径）",
+			message: []interface{}{
+				seg("set_group", map[string]interface{}{"action": "ban", "group_id": "123", "user_id": "456", "duration": "60"}),
+				seg("text", map[string]interface{}{"text": " 已禁言"}),
+			},
+			wantText: "[CQ:set_group,action=ban,group_id=123,user_id=456,duration=60] 已禁言",
+		},
+		{
+			name: "set_group 动作段还原为 CQ 码字符串（TRSS map 路径）",
+			message: map[string]interface{}{
+				"type": "set_group",
+				"data": map[string]interface{}{"action": "whole_ban", "group_id": "123", "enable": "true"},
+			},
+			wantText: "[CQ:set_group,action=whole_ban,group_id=123,enable=true]",
+		},
+		{
+			name: "member 动作段还原为 CQ 码字符串（TRSS map 路径补齐）",
+			message: map[string]interface{}{
+				"type": "member",
+				"data": map[string]interface{}{"type": "add", "group_id": "123", "user_id": "456"},
+			},
+			wantText: "[CQ:member,type=add,group_id=123,user_id=456]",
+		},
 	}
 
 	for _, tt := range tests {

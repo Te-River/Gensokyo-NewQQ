@@ -1,13 +1,10 @@
 package handlers
 
 import (
-	"context"
 	"encoding/json"
 
 	"github.com/hoshinonyaruko/gensokyo/callapi"
-	"github.com/hoshinonyaruko/gensokyo/idmap"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
-	"github.com/tencent-connect/botgo/dto"
 	"github.com/tencent-connect/botgo/openapi"
 )
 
@@ -18,47 +15,37 @@ func init() {
 // SetGroupAddRequest 审批入群申请
 // params: group_id(虚拟/真实群ID), user_id(虚拟/真实用户ID), flag(join_request_id), approve(bool)
 // 扩展参数: reason(拒绝理由), add_to_member_blacklist(是否同时拉黑)
+// 内部复用 set_group_helpers.go 共享底层，与 [CQ:set_group,action=add_request] 行为一致
 func SetGroupAddRequest(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, message callapi.ActionMessage) (string, error) {
 	groupID, _ := message.Params.GroupID.(string)
 	userID, _ := message.Params.UserID.(string)
 
 	// 反查真实 OpenID（32 位原生 OpenID 直接使用）
-	groupOpenID := groupID
-	if len(groupID) != 32 {
-		realGroupID, err := idmap.RetrieveRowByIDv2(groupID)
-		if err != nil || realGroupID == "" {
-			mylog.Printf("set_group_add_request: 反查 group_openid 失败: %v", err)
-			return sendActionResult(client, message, "无法反查群 OpenID", 100)
-		}
-		groupOpenID = realGroupID
+	groupOpenID, err := resolveGroupOpenID(groupID)
+	if err != nil {
+		mylog.Printf("set_group_add_request: 反查 group_openid 失败: %v", err)
+		return sendActionResult(client, message, "无法反查群 OpenID", 100)
 	}
-	memberOpenID := userID
-	if len(userID) != 32 {
-		realUserID, err := idmap.RetrieveRowByIDv2(userID)
-		if err != nil || realUserID == "" {
-			mylog.Printf("set_group_add_request: 反查 member_openid 失败: %v", err)
-			return sendActionResult(client, message, "无法反查用户 OpenID", 100)
-		}
-		memberOpenID = realUserID
+	memberOpenID, err := resolveMemberOpenID(userID)
+	if err != nil {
+		mylog.Printf("set_group_add_request: 反查 member_openid 失败: %v", err)
+		return sendActionResult(client, message, "无法反查用户 OpenID", 100)
+	}
+
+	var blacklist *bool
+	if message.Params.AddToMemberBlacklist {
+		b := true
+		blacklist = &b
+	}
+	if err := approveJoinRequest(apiv2, groupOpenID, memberOpenID, message.Params.Flag, message.Params.Approve, message.Params.Reason, blacklist); err != nil {
+		mylog.Printf("set_group_add_request: 审批失败: %v", err)
+		return sendActionResult(client, message, err.Error(), 100)
 	}
 
 	op := "decline"
 	if message.Params.Approve {
 		op = "approve"
 	}
-
-	req := &dto.ApprovalJoinRequest{
-		Op:                   op,
-		JoinRequestID:        message.Params.Flag,
-		RejectReason:         message.Params.Reason,
-		AddToMemberBlacklist: message.Params.AddToMemberBlacklist,
-	}
-
-	if err := apiv2.ApprovalJoinRequest(context.TODO(), groupOpenID, memberOpenID, req); err != nil {
-		mylog.Printf("set_group_add_request: 审批失败: %v", err)
-		return sendActionResult(client, message, err.Error(), 100)
-	}
-
 	mylog.Printf("set_group_add_request: 审批成功 group=%s user=%s op=%s", groupOpenID, memberOpenID, op)
 	return sendActionResult(client, message, "", 0)
 }

@@ -57,7 +57,7 @@ func (p *Processors) ProcessGroupJoinRequest(data *dto.GroupJoinRequestEvent) {
 	}
 
 	request := GroupRequestEvent{
-		Comment:     data.VerifyInfo,
+		Comment:     data.VerifyInfo.String(),
 		Flag:        data.JoinRequestID,
 		GroupID:     groupID,
 		PostType:    "request",
@@ -66,6 +66,7 @@ func (p *Processors) ProcessGroupJoinRequest(data *dto.GroupJoinRequestEvent) {
 		SubType:     "add",
 		Time:        timestamp,
 		UserID:      userID,
+		Username:    data.Username,
 	}
 	//增强配置
 	if !config.GetNativeOb11() {

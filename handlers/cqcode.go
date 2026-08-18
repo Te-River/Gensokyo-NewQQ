@@ -8,13 +8,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/hoshinonyaruko/gensokyo/config"
 	"github.com/hoshinonyaruko/gensokyo/echo"
 	"github.com/hoshinonyaruko/gensokyo/idmap"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
-	"github.com/tencent-connect/botgo/dto"
 	"github.com/tencent-connect/botgo/openapi"
 )
 
@@ -191,14 +189,8 @@ func ProcessOutboundCQCodes(text, defaultGroupID string, eventID *string, apiv2 
 			return cqMemberAction(paramsStr, match, eventID, defaultGroupID, apiv2, &realGroupID)
 		case "remove":
 			return cqRemoveAction(paramsStr, match, defaultGroupID, apiv2)
-		case "set_group_ban":
-			return cqSetGroupBanAction(paramsStr, match, defaultGroupID, apiv2)
-		case "set_group_whole_ban":
-			return cqSetGroupWholeBanAction(paramsStr, match, defaultGroupID, apiv2)
-		case "set_group_add_request":
-			return cqSetGroupAddRequestAction(paramsStr, match, defaultGroupID, apiv2)
-		case "strategy":
-			return cqStrategyAction(paramsStr, match, apiv2)
+		case "set_group":
+			return cqSetGroupAction(paramsStr, match, defaultGroupID, apiv2)
 		default:
 			return match // 非动作 CQ 码原样保留
 		}
@@ -345,231 +337,180 @@ func cqRemoveAction(paramsStr, match, defaultGroupID string, apiv2 openapi.OpenA
 	return "" // 从 messageText 中移除 CQ 码，无论成败都不发送原文
 }
 
-// cqSetGroupBanAction 处理 [CQ:set_group_ban,group_id=虚拟群ID,user_id=虚拟用户ID,duration=秒]
-// 设置成员禁言（duration=0 解除）
-func cqSetGroupBanAction(paramsStr, match, defaultGroupID string, apiv2 openapi.OpenAPI) string {
-	var cqGroupID, userID, durationStr string
+// cqParseParams 顺序无关地解析 CQ 码参数（key=value, 逗号分隔）。
+// 值中的 CQ 转义（&#44;=逗号, &#93;=右括号, &amp;=&）会被还原，
+// 与 buildSetGroupCQCode 的转义互为逆操作。
+func cqParseParams(paramsStr string) map[string]string {
+	params := make(map[string]string)
 	for _, part := range strings.Split(paramsStr, ",") {
 		kv := strings.SplitN(part, "=", 2)
-		if len(kv) != 2 {
-			continue
-		}
-		switch strings.TrimSpace(kv[0]) {
-		case "group_id":
-			cqGroupID = strings.TrimSpace(kv[1])
-		case "user_id":
-			userID = strings.TrimSpace(kv[1])
-		case "duration":
-			durationStr = strings.TrimSpace(kv[1])
+		if len(kv) == 2 {
+			value := strings.TrimSpace(kv[1])
+			// 反转义：先还原实体，再还原 & 本身（顺序不可颠倒）
+			value = strings.ReplaceAll(value, "&#44;", ",")
+			value = strings.ReplaceAll(value, "&#93;", "]")
+			value = strings.ReplaceAll(value, "&amp;", "&")
+			params[strings.TrimSpace(kv[0])] = value
 		}
 	}
-	// 群 ID 缺失时回退发送目标群
-	groupID := cqResolveGroupID(cqGroupID)
+	return params
+}
+
+// cqSetGroupAction 处理 [CQ:set_group,action=ban/whole_ban/add_request/strategy_execute/strategy_delete,...]
+// 统一分发 set_group 系列动作；未知 action 原样保留
+func cqSetGroupAction(paramsStr, match, defaultGroupID string, apiv2 openapi.OpenAPI) string {
+	params := cqParseParams(paramsStr)
+	action := params["action"]
+	switch action {
+	case "ban":
+		return cqSetGroupBanAction(params, match, defaultGroupID, apiv2)
+	case "whole_ban":
+		return cqSetGroupWholeBanAction(params, match, defaultGroupID, apiv2)
+	case "add_request":
+		return cqSetGroupAddRequestAction(params, match, defaultGroupID, apiv2)
+	case "strategy_execute":
+		return cqSetGroupStrategyAction(params, match, apiv2, true)
+	case "strategy_delete":
+		return cqSetGroupStrategyAction(params, match, apiv2, false)
+	default:
+		mylog.Printf("[CQ:set_group] 未知 action=%s: %s", action, match)
+		return match // 未知 action 原样保留
+	}
+}
+
+// cqSetGroupBanAction 处理 [CQ:set_group,action=ban,group_id=虚拟群ID,user_id=虚拟用户ID,duration=秒]
+// 设置成员禁言（duration=0 解除）
+func cqSetGroupBanAction(params map[string]string, match, defaultGroupID string, apiv2 openapi.OpenAPI) string {
+	userID := params["user_id"]
+	groupID := params["group_id"]
 	if groupID == "" {
-		groupID = cqResolveGroupID(defaultGroupID)
+		groupID = defaultGroupID
 	}
 	if groupID == "" || userID == "" {
-		mylog.Printf("[CQ:set_group_ban] group_id 或 user_id 为空: %s", match)
+		mylog.Printf("[CQ:set_group] ban: group_id 或 user_id 为空: %s", match)
 		return match
 	}
-	duration, err := strconv.Atoi(durationStr)
+	duration, err := strconv.Atoi(params["duration"])
 	if err != nil {
 		duration = 0
 	}
-
 	// 反查真实 OpenID（32 位原生 OpenID 直接使用）
-	groupOpenID := cqResolveGroupID(groupID)
-	memberOpenID := userID
-	if len(userID) != 32 {
-		realUserID, err := idmap.RetrieveRowByIDv2(userID)
-		if err != nil || realUserID == "" {
-			mylog.Printf("[CQ:set_group_ban] user_id=%s 反查失败: %v", userID, err)
-			return ""
-		}
-		memberOpenID = realUserID
+	groupOpenID, err := resolveGroupOpenID(groupID)
+	if err != nil {
+		mylog.Printf("[CQ:set_group] ban: 群 OpenID 反查失败: %v", err)
+		return ""
 	}
-
-	setting := &dto.RestrictChatSetting{GroupOpenID: groupOpenID}
-	if duration > 0 {
-		setting.MemberRestrict = []dto.MemberRestrict{{
-			MemberOpenID:  memberOpenID,
-			RestrictUntil: time.Now().Unix() + int64(duration),
-		}}
-	} else {
-		// 解除禁言：查询当前设置, 移除该成员后提交
-		cur, err := apiv2.RestrictChatSetting(context.TODO(), groupOpenID)
-		if err != nil {
-			mylog.Printf("[CQ:set_group_ban] 查询禁言状态失败: %v", err)
-			return ""
-		}
-		for _, m := range cur.MemberRestrict {
-			if m.MemberOpenID != memberOpenID {
-				setting.MemberRestrict = append(setting.MemberRestrict, m)
-			}
-		}
+	memberOpenID, err := resolveMemberOpenID(userID)
+	if err != nil {
+		mylog.Printf("[CQ:set_group] ban: user_id=%s 反查失败: %v", userID, err)
+		return ""
 	}
-	if err := apiv2.SetRestrictChatSetting(context.TODO(), groupOpenID, setting); err != nil {
-		mylog.Printf("[CQ:set_group_ban] 设置禁言失败: %v", err)
+	if err := applyRestrictChatSetting(apiv2, groupOpenID, memberOpenID, duration, nil); err != nil {
+		mylog.Printf("[CQ:set_group] ban: 设置禁言失败: %v", err)
 	} else {
-		mylog.Printf("[CQ:set_group_ban] 已设置禁言 group=%s user=%s duration=%d", groupOpenID, memberOpenID, duration)
+		mylog.Printf("[CQ:set_group] ban: 已设置禁言 group=%s user=%s duration=%d", groupOpenID, memberOpenID, duration)
 	}
 	return "" // 无论成败都不发送原文
 }
 
-// cqSetGroupWholeBanAction 处理 [CQ:set_group_whole_ban,group_id=虚拟群ID,enable=true/false]
+// cqSetGroupWholeBanAction 处理 [CQ:set_group,action=whole_ban,group_id=虚拟群ID,enable=true/false]
 // 切换全员禁言
-func cqSetGroupWholeBanAction(paramsStr, match, defaultGroupID string, apiv2 openapi.OpenAPI) string {
-	var cqGroupID, enableStr string
-	for _, part := range strings.Split(paramsStr, ",") {
-		kv := strings.SplitN(part, "=", 2)
-		if len(kv) != 2 {
-			continue
-		}
-		switch strings.TrimSpace(kv[0]) {
-		case "group_id":
-			cqGroupID = strings.TrimSpace(kv[1])
-		case "enable":
-			enableStr = strings.TrimSpace(kv[1])
-		}
-	}
-	// 群 ID 缺失时回退发送目标群
-	groupID := cqResolveGroupID(cqGroupID)
+func cqSetGroupWholeBanAction(params map[string]string, match, defaultGroupID string, apiv2 openapi.OpenAPI) string {
+	groupID := params["group_id"]
 	if groupID == "" {
-		groupID = cqResolveGroupID(defaultGroupID)
+		groupID = defaultGroupID
 	}
 	if groupID == "" {
-		mylog.Printf("[CQ:set_group_whole_ban] group_id 为空: %s", match)
+		mylog.Printf("[CQ:set_group] whole_ban: group_id 为空: %s", match)
 		return match
 	}
-	enable, err := strconv.ParseBool(enableStr)
+	enable, err := strconv.ParseBool(params["enable"])
 	if err != nil {
-		mylog.Printf("[CQ:set_group_whole_ban] enable 参数无效: %s", match)
+		mylog.Printf("[CQ:set_group] whole_ban: enable 参数无效: %s", match)
 		return match
 	}
-
-	groupOpenID := cqResolveGroupID(groupID)
-	setting := &dto.RestrictChatSetting{GroupOpenID: groupOpenID, AllMute: enable}
-	if cur, err := apiv2.RestrictChatSetting(context.TODO(), groupOpenID); err == nil {
-		setting.MemberRestrict = cur.MemberRestrict
-	} else {
-		mylog.Printf("[CQ:set_group_whole_ban] 查询禁言状态失败: %v", err)
+	groupOpenID, err := resolveGroupOpenID(groupID)
+	if err != nil {
+		mylog.Printf("[CQ:set_group] whole_ban: 群 OpenID 反查失败: %v", err)
+		return ""
 	}
-	if err := apiv2.SetRestrictChatSetting(context.TODO(), groupOpenID, setting); err != nil {
-		mylog.Printf("[CQ:set_group_whole_ban] 设置全员禁言失败: %v", err)
+	allMute := enable
+	if err := applyRestrictChatSetting(apiv2, groupOpenID, "", 0, &allMute); err != nil {
+		mylog.Printf("[CQ:set_group] whole_ban: 设置全员禁言失败: %v", err)
 	} else {
-		mylog.Printf("[CQ:set_group_whole_ban] 已设置全员禁言 group=%s enable=%v", groupOpenID, enable)
+		mylog.Printf("[CQ:set_group] whole_ban: 已设置全员禁言 group=%s enable=%v", groupOpenID, enable)
 	}
 	return ""
 }
 
-// cqSetGroupAddRequestAction 处理 [CQ:set_group_add_request,group_id=虚拟群ID,user_id=虚拟用户ID,flag=申请ID,approve=true/false]
+// cqSetGroupAddRequestAction 处理 [CQ:set_group,action=add_request,group_id=虚拟群ID,user_id=虚拟用户ID,flag=申请ID,approve=true/false]
 // 审批入群申请（可带 reason / add_to_member_blacklist）
-func cqSetGroupAddRequestAction(paramsStr, match, defaultGroupID string, apiv2 openapi.OpenAPI) string {
-	var cqGroupID, userID, flag, approveStr, reason, blacklistStr string
-	for _, part := range strings.Split(paramsStr, ",") {
-		kv := strings.SplitN(part, "=", 2)
-		if len(kv) != 2 {
-			continue
-		}
-		switch strings.TrimSpace(kv[0]) {
-		case "group_id":
-			cqGroupID = strings.TrimSpace(kv[1])
-		case "user_id":
-			userID = strings.TrimSpace(kv[1])
-		case "flag":
-			flag = strings.TrimSpace(kv[1])
-		case "approve":
-			approveStr = strings.TrimSpace(kv[1])
-		case "reason":
-			reason = strings.TrimSpace(kv[1])
-		case "add_to_member_blacklist":
-			blacklistStr = strings.TrimSpace(kv[1])
-		}
-	}
-	// 群 ID 缺失时回退发送目标群
-	groupID := cqResolveGroupID(cqGroupID)
+func cqSetGroupAddRequestAction(params map[string]string, match, defaultGroupID string, apiv2 openapi.OpenAPI) string {
+	userID := params["user_id"]
+	flag := params["flag"]
+	groupID := params["group_id"]
 	if groupID == "" {
-		groupID = cqResolveGroupID(defaultGroupID)
+		groupID = defaultGroupID
 	}
 	if groupID == "" || userID == "" || flag == "" {
-		mylog.Printf("[CQ:set_group_add_request] group_id/user_id/flag 不能为空: %s", match)
+		mylog.Printf("[CQ:set_group] add_request: group_id/user_id/flag 不能为空: %s", match)
 		return match
 	}
-	approve, err := strconv.ParseBool(approveStr)
+	approve := true // 省略时默认通过
+	if params["approve"] != "" {
+		parsed, err := strconv.ParseBool(params["approve"])
+		if err != nil {
+			mylog.Printf("[CQ:set_group] add_request: approve 参数无效: %s", match)
+			return match
+		}
+		approve = parsed
+	}
+	groupOpenID, err := resolveGroupOpenID(groupID)
 	if err != nil {
-		mylog.Printf("[CQ:set_group_add_request] approve 参数无效: %s", match)
-		return match
+		mylog.Printf("[CQ:set_group] add_request: 群 OpenID 反查失败: %v", err)
+		return ""
 	}
-
-	groupOpenID := cqResolveGroupID(groupID)
-	memberOpenID := userID
-	if len(userID) != 32 {
-		realUserID, err := idmap.RetrieveRowByIDv2(userID)
-		if err != nil || realUserID == "" {
-			mylog.Printf("[CQ:set_group_add_request] user_id=%s 反查失败: %v", userID, err)
-			return ""
-		}
-		memberOpenID = realUserID
+	memberOpenID, err := resolveMemberOpenID(userID)
+	if err != nil {
+		mylog.Printf("[CQ:set_group] add_request: user_id=%s 反查失败: %v", userID, err)
+		return ""
 	}
-
-	op := "decline"
-	if approve {
-		op = "approve"
+	var blacklist *bool
+	if b, err := strconv.ParseBool(params["add_to_member_blacklist"]); err == nil {
+		blacklist = &b
 	}
-	req := &dto.ApprovalJoinRequest{
-		Op:            op,
-		JoinRequestID: flag,
-		RejectReason:  reason,
-	}
-	if blacklistStr != "" {
-		if blacklist, err := strconv.ParseBool(blacklistStr); err == nil {
-			req.AddToMemberBlacklist = blacklist
-		}
-	}
-	if err := apiv2.ApprovalJoinRequest(context.TODO(), groupOpenID, memberOpenID, req); err != nil {
-		mylog.Printf("[CQ:set_group_add_request] 审批失败: %v", err)
+	if err := approveJoinRequest(apiv2, groupOpenID, memberOpenID, flag, approve, params["reason"], blacklist); err != nil {
+		mylog.Printf("[CQ:set_group] add_request: 审批失败: %v", err)
 	} else {
-		mylog.Printf("[CQ:set_group_add_request] 已审批 group=%s user=%s op=%s", groupOpenID, memberOpenID, op)
+		op := "decline"
+		if approve {
+			op = "approve"
+		}
+		mylog.Printf("[CQ:set_group] add_request: 已审批 group=%s user=%s op=%s", groupOpenID, memberOpenID, op)
 	}
 	return ""
 }
 
-// cqStrategyAction 处理 [CQ:strategy,action=execute/delete,strategy_id=策略ID]
-// 执行或删除入群自动审批策略；未知 action 原样保留
-func cqStrategyAction(paramsStr, match string, apiv2 openapi.OpenAPI) string {
-	var action, strategyID string
-	for _, part := range strings.Split(paramsStr, ",") {
-		kv := strings.SplitN(part, "=", 2)
-		if len(kv) != 2 {
-			continue
-		}
-		switch strings.TrimSpace(kv[0]) {
-		case "action":
-			action = strings.TrimSpace(kv[1])
-		case "strategy_id":
-			strategyID = strings.TrimSpace(kv[1])
-		}
-	}
+// cqSetGroupStrategyAction 处理 [CQ:set_group,action=strategy_execute/strategy_delete,strategy_id=策略ID]
+// execute=true 执行入群自动审批策略（异步约10分钟）；execute=false 删除策略
+func cqSetGroupStrategyAction(params map[string]string, match string, apiv2 openapi.OpenAPI, execute bool) string {
+	strategyID := params["strategy_id"]
 	if strategyID == "" {
-		mylog.Printf("[CQ:strategy] strategy_id 为空: %s", match)
+		mylog.Printf("[CQ:set_group] strategy: strategy_id 为空: %s", match)
 		return match
 	}
-	switch action {
-	case "execute":
+	if execute {
 		if err := apiv2.ExecuteJoinApprovalStrategy(context.TODO(), strategyID); err != nil {
-			mylog.Printf("[CQ:strategy] 执行策略失败: %v", err)
+			mylog.Printf("[CQ:set_group] strategy: 执行策略失败: %v", err)
 		} else {
-			mylog.Printf("[CQ:strategy] 已执行策略 %s（异步约10分钟）", strategyID)
+			mylog.Printf("[CQ:set_group] strategy: 已执行策略 %s（异步约10分钟）", strategyID)
 		}
-	case "delete":
+	} else {
 		if err := apiv2.DeleteJoinApprovalStrategy(context.TODO(), strategyID); err != nil {
-			mylog.Printf("[CQ:strategy] 删除策略失败: %v", err)
+			mylog.Printf("[CQ:set_group] strategy: 删除策略失败: %v", err)
 		} else {
-			mylog.Printf("[CQ:strategy] 已删除策略 %s", strategyID)
+			mylog.Printf("[CQ:set_group] strategy: 已删除策略 %s", strategyID)
 		}
-	default:
-		mylog.Printf("[CQ:strategy] 未知 action=%s: %s", action, match)
-		return match // 未知 action 原样保留
 	}
 	return ""
 }
