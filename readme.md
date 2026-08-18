@@ -158,10 +158,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 | [CQ:card]      | [群聊图文卡片消息]                  |
 | [CQ:input_notify] | [单聊输入状态通知]               |
 | [CQ:stream]      | [单聊流式消息]                    |
-| [CQ:set_group_ban] | [群成员禁言/解禁(出站动作)]    |
-| [CQ:set_group_whole_ban] | [群全员禁言开关(出站动作)] |
-| [CQ:set_group_add_request] | [入群申请审批(出站动作)]  |
-| [CQ:strategy]    | [审批策略执行/删除(出站动作)]     |
+| [CQ:set_group]  | [群管理动作统一码(禁言/全员禁言/入群审批/策略, 出站动作)] |
 
 
 </details>

@@ -916,6 +916,16 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 					messageText += fmt.Sprintf("[CQ:member,type=%s,group_id=%s,user_id=%s]", memberType, groupID, userID)
 				}
 
+			case "set_group":
+				// 消息段形式 [CQ:set_group,action=...]：还原为 CQ 码字符串,
+				// 与字符串模式汇合后由 ProcessOutboundCQCodes 统一执行
+				dataMap, ok := segmentMap["data"].(map[string]interface{})
+				if ok && dataMap != nil {
+					if cq := buildSetGroupCQCode(dataMap); cq != "" {
+						messageText += cq
+					}
+				}
+
 			case "file":
 				dataMap, _ := segmentMap["data"].(map[string]interface{})
 				fileContent, _ := dataMap["file"].(string)
@@ -1258,6 +1268,25 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 		    musicID, _ := message["data"].(map[string]interface{})["id"].(string)
 		    if musicType == "qq" && musicID != "" {
 		     foundItems["qqmusic"] = append(foundItems["qqmusic"], musicID)
+		    }
+
+		   case "member":
+		    dataMap, _ := message["data"].(map[string]interface{})
+		    if dataMap != nil {
+		     memberType, _ := dataMap["type"].(string)
+		     groupID, _ := dataMap["group_id"].(string)
+		     userID, _ := dataMap["user_id"].(string)
+		     messageText += fmt.Sprintf("[CQ:member,type=%s,group_id=%s,user_id=%s]", memberType, groupID, userID)
+		    }
+
+		   case "set_group":
+		    // 消息段形式 [CQ:set_group,action=...]：还原为 CQ 码字符串,
+		    // 与字符串模式汇合后由 ProcessOutboundCQCodes 统一执行
+		    dataMap, _ := message["data"].(map[string]interface{})
+		    if dataMap != nil {
+		     if cq := buildSetGroupCQCode(dataMap); cq != "" {
+		      messageText += cq
+		     }
 		    }
 
 		   default:
