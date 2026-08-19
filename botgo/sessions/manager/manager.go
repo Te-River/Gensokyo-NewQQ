@@ -22,6 +22,11 @@ var CanNotIdentifyErrSet = map[int]bool{
 // concurrencyTimeWindowSec 并发时间窗口，单位秒
 const concurrencyTimeWindowSec = 2
 
+// MaxAuthRetryCount 连续鉴权失败达到上限后，自动从头整轮重试的最大轮数。
+// 每轮仍会触发 token 强刷与重新连接/鉴权；达到该上限后仍未成功才真正停止重连，
+// 用于覆盖服务器停电重启等瞬时抖动，同时避免密钥真正错误时无限重连。
+const MaxAuthRetryCount = 5
+
 // CalcInterval 根据并发要求，计算连接启动间隔
 func CalcInterval(maxConcurrency uint32) time.Duration {
 	if maxConcurrency == 0 {
