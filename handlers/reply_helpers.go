@@ -8,11 +8,22 @@ import (
 	"os"
 	"time"
 
+	"github.com/hoshinonyaruko/gensokyo/echo"
 	"github.com/hoshinonyaruko/gensokyo/images"
 
 	"github.com/tencent-connect/botgo/dto"
 	"github.com/tencent-connect/botgo/openapi"
 )
+
+// ResolveReplyRefID 解析 [CQ:reply] 引用的真实消息ID：若该消息关联了 REFIDX（引用非机器人消息时
+// QQ 官方要求使用 REFIDX 索引），则返回 REFIDX，否则回退普通消息ID。
+// 该返回值用于 MessageReference.MessageID；MsgID 字段应继续使用普通消息ID（被动回复语义）。
+func ResolveReplyRefID(refID string) string {
+	if refIdx := echo.GetRefIdx(refID); refIdx != "" {
+		return refIdx
+	}
+	return refID
+}
 
 // GenerateReplyMessage 根据消息内容生成回复消息对象
 func GenerateReplyMessage(id string, foundItems map[string][]string, messageText string, msgseq int, api2 openapi.OpenAPI) (*dto.MessageToCreate, bool) {

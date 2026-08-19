@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,6 +32,7 @@ func startCleanupRoutine() {
 func cleanupGlobalMaps() {
 	cleanupSyncMap(&globalSyncMapMsgid)
 	cleanupSyncMap(&globalReverseMapMsgid)
+	cleanupSyncMap(&globalRefIdxMap)
 	cleanupMessageGroupStack(globalMessageGroupStack)
 	cleanupEchoMapping(globalEchoMapping)
 	cleanupInt64ToIntMapping(globalInt64ToIntMapping)
@@ -114,6 +116,8 @@ var (
 	globalReverseMapMsgid sync.Map // 用于存储反向键值对
 	cleanupTicker         *time.Ticker
 	onceMsgid             sync.Once
+	// globalRefIdxMap 存储 消息ID → REFIDX（引用消息索引）映射，供出站 [CQ:reply] 引用时使用
+	globalRefIdxMap sync.Map
 )
 
 // 初始化一个全局栈实例
@@ -403,6 +407,51 @@ func GetCacheIDFromMemoryByRowID(rowID string) (string, bool) {
 		return value.(string), true
 	}
 	return "", false
+}
+
+// StoreRefIdx 存储 消息ID → REFIDX（引用消息索引）映射
+func StoreRefIdx(msgID, refIDX string) {
+	if msgID == "" || refIDX == "" {
+		return
+	}
+	globalRefIdxMap.Store(msgID, refIDX)
+}
+
+// GetRefIdx 反查消息ID对应的 REFIDX，无则返回空串
+func GetRefIdx(msgID string) string {
+	if msgID == "" {
+		return ""
+	}
+	value, ok := globalRefIdxMap.Load(msgID)
+	if !ok {
+		return ""
+	}
+	s, _ := value.(string)
+	return s
+}
+
+// DeleteRefIdx 删除指定消息ID的 REFIDX 映射
+func DeleteRefIdx(msgID string) {
+	if msgID != "" {
+		globalRefIdxMap.Delete(msgID)
+	}
+}
+
+// StoreRefIdxFromScene 从入站消息事件的 message_scene.ext[] 提取 msg_idx=REFIDX_* 并存储
+// ext 元素为 key=value 格式，如 "msg_idx=REFIDX_xxx" / "ref_msg_idx=TMP_xxx" / "auth_token=xxx"
+func StoreRefIdxFromScene(msgID string, scene *dto.MessageScene) {
+	if msgID == "" || scene == nil {
+		return
+	}
+	for _, item := range scene.Ext {
+		if strings.HasPrefix(item, "msg_idx=") {
+			refIDX := strings.TrimPrefix(item, "msg_idx=")
+			if refIDX != "" {
+				StoreRefIdx(msgID, refIDX)
+			}
+			return
+		}
+	}
 }
 
 // StartCleanupRoutine 启动定时清理函数，每5分钟清空 globalSyncMapMsgid 和 globalReverseMapMsgid

@@ -709,7 +709,7 @@ func applyPrivateReply(groupMessage *dto.MessageToCreate, replyIDs []string, pri
 	parts := strings.Split(realReplyID, " ")
 	refID := parts[len(parts)-1]
 	groupMessage.MessageReference = &dto.MessageReference{
-		MessageID:             refID,
+		MessageID:             ResolveReplyRefID(refID),
 		IgnoreGetMessageError: false,
 	}
 	groupMessage.MsgID = refID

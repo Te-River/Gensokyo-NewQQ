@@ -48,6 +48,9 @@ func (p *Processors) ProcessGroupMessage(data *dto.WSGroupATMessageData) error {
 		return nil
 	}
 
+	// 从事件 message_scene.ext[] 提取 msg_idx=REFIDX_* 存储，供出站 [CQ:reply] 引用时使用
+	echo.StoreRefIdxFromScene(data.ID, data.MessageScene)
+
 	// 改变之前先存
 	if data.Author.UnionOpenID != "" && data.Author.ID != "" {
 		unioncache.Store(data.Author.ID, data.Author.UnionOpenID)

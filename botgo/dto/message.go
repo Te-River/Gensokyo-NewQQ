@@ -31,8 +31,16 @@ type Message struct {
 	Ark *Ark `json:"ark"`
 	// 引用的消息
 	MessageReference *MessageReference `json:"message_reference,omitempty"`
+	// 消息场景上下文（含 ext 里的 msg_idx/ref_msg_idx/auth_token）
+	MessageScene *MessageScene `json:"message_scene,omitempty"`
 	//返回的ret 超过主动限制会返回22009
 	Ret int `json:"ret,omitempty"`
+}
+
+// MessageScene 消息场景上下文
+type MessageScene struct {
+	Source string   `json:"source"` // 场景来源。default=默认聊天窗口
+	Ext    []string `json:"ext"`    // 扩展数据列表，key=value 格式: msg_idx=消息索引 ref_msg_idx=引用的消息索引 auth_token=鉴权令牌
 }
 
 // Forum 消息结构体定义

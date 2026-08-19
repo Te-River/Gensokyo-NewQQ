@@ -391,7 +391,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 					   parts := strings.Split(realReplyID, " ")
 					   refID := parts[len(parts)-1]
 					   groupMessage.MessageReference = &dto.MessageReference{
-					    MessageID:             refID,
+					    MessageID:             ResolveReplyRefID(refID),
 					    IgnoreGetMessageError: false,
 					   }
 					   groupMessage.MsgID = refID
@@ -424,7 +424,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 					   parts := strings.Split(realReplyID, " ")
 					   refID := parts[len(parts)-1]
 					   groupMessage.MessageReference = &dto.MessageReference{
-					    MessageID:             refID,
+					    MessageID:             ResolveReplyRefID(refID),
 					    IgnoreGetMessageError: false,
 					   }
 					   groupMessage.MsgID = refID
@@ -634,7 +634,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			       parts := strings.Split(realReplyID, " ")
 			       refID := parts[len(parts)-1]
 			       groupMessage.MessageReference = &dto.MessageReference{
-			        MessageID:             refID,
+			        MessageID:             ResolveReplyRefID(refID),
 			        IgnoreGetMessageError: false,
 			       }
 			       // 同时设置 msg_id，确保 v2 API 识别为回复
@@ -787,7 +787,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 						         parts := strings.Split(realReplyID, " ")
 						         refID := parts[len(parts)-1]
 						         groupMessage.MessageReference = &dto.MessageReference{
-						          MessageID:             refID,
+						          MessageID:             ResolveReplyRefID(refID),
 						          IgnoreGetMessageError: false,
 						         }
 						         groupMessage.MsgID = refID
@@ -893,14 +893,14 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 
 					// 处理 [CQ:reply,id=数字] → message_reference + msg_id (富媒体消息)
 					if replyIDs, ok := foundItems["reply_msg_id"]; ok && len(replyIDs) > 0 {
-						realReplyID, err := idmap.RetrieveRowByCachev2(replyIDs[0])
-						if err == nil && realReplyID != "" {
-							parts := strings.Split(realReplyID, " ")
-							refID := parts[len(parts)-1]
-							groupMessage.MessageReference = &dto.MessageReference{
-								MessageID:             refID,
-								IgnoreGetMessageError: false,
-							}
+					 realReplyID, err := idmap.RetrieveRowByCachev2(replyIDs[0])
+					 if err == nil && realReplyID != "" {
+					  parts := strings.Split(realReplyID, " ")
+					  refID := parts[len(parts)-1]
+					  groupMessage.MessageReference = &dto.MessageReference{
+					   MessageID:             ResolveReplyRefID(refID),
+					   IgnoreGetMessageError: false,
+					  }
 							groupMessage.MsgID = refID
 							// msg_id 与 event_id 二选一，清空 event_id
 							groupMessage.EventID = ""

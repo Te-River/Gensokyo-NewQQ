@@ -3,6 +3,8 @@ package echo
 import (
 	"sync"
 	"testing"
+
+	"github.com/tencent-connect/botgo/dto"
 )
 
 func TestNextMappingSeqConcurrent(t *testing.T) {
@@ -50,4 +52,57 @@ func TestCurrentAndIncrementMappingSeqPreservesCurrentValue(t *testing.T) {
 	if got := GetMappingSeq(key); got != 2 {
 		t.Fatalf("stored sequence after second advance = %d, want 2", got)
 	}
+}
+
+func TestStoreRefIdxAndGetRefIdx(t *testing.T) {
+	const msgID = "ROBOT1.0_test_refidx_msg"
+	const refIDX = "REFIDX_abc123def456=="
+
+	// 清理可能残留
+	DeleteRefIdx(msgID)
+	if got := GetRefIdx(msgID); got != "" {
+		t.Fatalf("expected empty before store, got %q", got)
+	}
+
+	StoreRefIdx(msgID, refIDX)
+	if got := GetRefIdx(msgID); got != refIDX {
+		t.Fatalf("GetRefIdx = %q, want %q", got, refIDX)
+	}
+
+	// 空值不存储、不 panic
+	StoreRefIdx("", refIDX)
+	StoreRefIdx(msgID, "")
+	if got := GetRefIdx(msgID); got != refIDX {
+		t.Fatalf("empty store should not overwrite, got %q", got)
+	}
+
+	DeleteRefIdx(msgID)
+	if got := GetRefIdx(msgID); got != "" {
+		t.Fatalf("expected empty after delete, got %q", got)
+	}
+}
+
+func TestStoreRefIdxFromScene(t *testing.T) {
+	scene := &dto.MessageScene{
+		Source: "default",
+		Ext: []string{
+			"msg_idx=REFIDX_scene123==",
+			"auth_token=sometoken",
+		},
+	}
+	StoreRefIdxFromScene("msg-scene-id", scene)
+	if got := GetRefIdx("msg-scene-id"); got != "REFIDX_scene123==" {
+		t.Fatalf("GetRefIdx from scene = %q, want %q", got, "REFIDX_scene123==")
+	}
+
+	// 无 msg_idx 时不做存储
+	sceneNoMsgIdx := &dto.MessageScene{Ext: []string{"auth_token=abc"}}
+	StoreRefIdxFromScene("msg-no-idx", sceneNoMsgIdx)
+	if got := GetRefIdx("msg-no-idx"); got != "" {
+		t.Fatalf("expected empty when no msg_idx, got %q", got)
+	}
+
+	// nil scene / 空 msgID 不 panic
+	StoreRefIdxFromScene("", scene)
+	StoreRefIdxFromScene("msg-nil-scene", nil)
 }
