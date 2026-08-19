@@ -907,6 +907,39 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 					mylog.Printf("Error: markdown segment data is nil.")
 				}
 
+			case "keyboard":
+				kbContent, ok := segmentMap["data"].(map[string]interface{})["data"]
+				if ok {
+					var kbContentJSON string
+					if kbContentMap, isMap := kbContent.(map[string]interface{}); isMap {
+						kbContentBytes, err := json.Marshal(kbContentMap)
+						if err != nil {
+							mylog.Printf("Error marshaling kbContentMap to JSON:%v", err)
+							continue
+						}
+						kbContentJSON = string(kbContentBytes)
+					} else if kbContentStr, isString := kbContent.(string); isString {
+						if strings.HasPrefix(kbContentStr, "base64://") {
+							decoded, decErr := base64.StdEncoding.DecodeString(strings.TrimPrefix(kbContentStr, "base64://"))
+							if decErr != nil {
+								mylog.Printf("[CQ:keyboard] base64 解码失败: %v", decErr)
+								continue
+							}
+							kbContentJSON = string(decoded)
+						} else {
+							// 原始 JSON 形式（与 string 路径 keyboardJSONPattern 一致）
+							kbContentJSON = kbContentStr
+						}
+					} else {
+						mylog.Printf("Error marshaling keyboard segment wrong type.")
+						continue
+					}
+					foundItems["keyboard"] = append(foundItems["keyboard"], kbContentJSON)
+					// [CQ:keyboard] 不在 messageText 中留痕，避免重复发送
+				} else {
+					mylog.Printf("Error: keyboard segment data is nil.")
+				}
+
 			case "member":
 				dataMap, ok := segmentMap["data"].(map[string]interface{})
 				if ok && dataMap != nil {
@@ -1210,6 +1243,39 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 			} else {
 				mylog.Printf("Error: markdown segment data is nil.")
 			}
+
+		 case "keyboard":
+		  kbContent, ok := message["data"].(map[string]interface{})["data"]
+		  if ok {
+		   var kbContentJSON string
+		   if kbContentMap, isMap := kbContent.(map[string]interface{}); isMap {
+		    kbContentBytes, err := json.Marshal(kbContentMap)
+		    if err != nil {
+		     mylog.Printf("Error marshaling kbContentMap to JSON:%v", err)
+		     break
+		    }
+		    kbContentJSON = string(kbContentBytes)
+		   } else if kbContentStr, isString := kbContent.(string); isString {
+		    if strings.HasPrefix(kbContentStr, "base64://") {
+		     decoded, decErr := base64.StdEncoding.DecodeString(strings.TrimPrefix(kbContentStr, "base64://"))
+		     if decErr != nil {
+		      mylog.Printf("[CQ:keyboard] base64 解码失败: %v", decErr)
+		      break
+		     }
+		     kbContentJSON = string(decoded)
+		    } else {
+		     // 原始 JSON 形式（与 string 路径 keyboardJSONPattern 一致）
+		     kbContentJSON = kbContentStr
+		    }
+		   } else {
+		    mylog.Printf("Error marshaling keyboard segment wrong type.")
+		    break
+		   }
+		   foundItems["keyboard"] = append(foundItems["keyboard"], kbContentJSON)
+		   // [CQ:keyboard] 不在 messageText 中留痕，避免重复发送
+		  } else {
+		   mylog.Printf("Error: keyboard segment data is nil.")
+		  }
 
 		case "file":
 			dataMap, _ := message["data"].(map[string]interface{})
