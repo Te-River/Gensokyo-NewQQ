@@ -543,6 +543,24 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 						        applyPrivateReply(groupMessage, replyIDs, UserID)
 						       }
 
+						       // 将独立 [CQ:keyboard] 合并到 markdown 消息中（markdown JSON 未内嵌 keyboard 时）
+						       if groupMessage.Keyboard == nil {
+						        if kbItems, ok := foundItems["keyboard"]; ok && len(kbItems) > 0 {
+						         kb, err := parseKeyboardData([]byte(kbItems[0]))
+						         if err != nil || kb == nil {
+						          mylog.Printf("[CQ:keyboard] 解析键盘数据失败: %v", err)
+						         } else {
+						          // 替换 keyboard 中 __USER_ID__ 占位符为实际用户 OpenID
+						          userOpenID := idmap.ResolveOriginalID(UserID)
+						          ResolvePlaceholderUserIDs(kb, userOpenID)
+						          ResolveKeyboardImages(kb, apiv2)
+						          groupMessage.Keyboard = kb
+						          delete(foundItems, "keyboard")
+						          mylog.Printf("[CQ:keyboard] 私聊 markdown 消息附加内嵌键盘")
+						         }
+						        }
+						       }
+
 						       // 首次发送私聊 MessageToCreate
 						resp, err = apiv2.PostC2CMessage(context.TODO(), UserID, groupMessage)
 						if err != nil {

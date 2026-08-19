@@ -796,6 +796,20 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 						  mylog.Printf("[CQ:reply] 设置 markdown 回复消息: msg_id=%s", refID)
 						        }
 						       }
+						// 将独立 [CQ:keyboard] 合并到 markdown 消息中（markdown JSON 未内嵌 keyboard 时）
+						if groupMessage.Keyboard == nil {
+							if kbItems, ok := foundItems["keyboard"]; ok && len(kbItems) > 0 {
+								kb, err := parseKeyboardData([]byte(kbItems[0]))
+								if err != nil || kb == nil {
+									mylog.Printf("[CQ:keyboard] 解析键盘数据失败: %v", err)
+								} else {
+									ResolveKeyboardImages(kb, apiv2)
+									groupMessage.Keyboard = kb
+									delete(foundItems, "keyboard")
+									mylog.Printf("[CQ:keyboard] markdown 消息附加内嵌键盘")
+								}
+							}
+						}
 						//重新为err赋值
 						resp, err = apiv2.PostGroupMessage(context.TODO(), message.Params.GroupID.(string), groupMessage)
 						if err != nil {

@@ -43,7 +43,7 @@ QQ v2 群聊/C2C 发送 API 要求引用「非机器人发的消息」时，`mes
 
 `[CQ:markdown]` + 独立 `[CQ:keyboard,data=base64://...]` 组合发送时，按钮不再被忽略：
 
-- `handlers/send_group_msg.go` / `handlers/send_private_msg.go`：独立 `[CQ:keyboard]` 的合并条件由 `md == nil` 改为 `groupMessage.Keyboard == nil`——markdown 消息未内嵌 keyboard（`parseMarkdownFromMessage` 返回的 `kb` 为 nil）时，独立 `[CQ:keyboard]` 仍会附加到 `groupMessage.Keyboard`，实现「MD 内容 + 独立键盘按钮」
+- `handlers/send_group_msg.go` / `handlers/send_private_msg.go`：独立 `[CQ:keyboard]` 的合并条件由 `md == nil` 改为 `groupMessage.Keyboard == nil`——markdown 消息未内嵌 keyboard（`parseMarkdownFromMessage` 返回的 `kb` 为 nil）时，独立 `[CQ:keyboard]` 仍会附加到 `groupMessage.Keyboard`，实现「MD 内容 + 独立键盘按钮」；**foundItems 循环路径同步补齐**——消息段（koishi/TRSS）发送 markdown 走 foundItems 循环而非主文本路径，循环内 markdown 分支此前只合并 reply 未合并独立 keyboard，现同样按 `groupMessage.Keyboard == nil` 合并（群聊 `ResolveKeyboardImages`，私聊另含 `ResolvePlaceholderUserIDs`），发送请求体正确携带 `keyboard` 字段
 - 行为：markdown JSON 已内嵌 keyboard 时优先使用内嵌键盘（`Keyboard` 非 nil 跳过合并），无 markdown 时行为与原先完全一致，零回归
 - 私聊路径保留 `ResolvePlaceholderUserIDs`（`__USER_ID__` 占位符替换）与 `ResolveKeyboardImages`
 - `handlers/message_parser.go`：**消息段路径补齐 keyboard case**——`[]interface{}` 数组段（koishi）与 `map[string]interface{}`（TRSS）两条路径此前缺失 `case "keyboard"`（日志 `Unhandled segment type: keyboard`，按钮被静默丢弃），现按 string 路径 `ProcessCQKeyboard` 语义补齐（`base64://` 解码 / 原始 JSON 直接存入 `foundItems["keyboard"]`，不残留 messageText，避免统一管道重复处理）；三路径（string / 数组段 / TRSS）解析行为一致
