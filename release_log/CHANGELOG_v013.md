@@ -1,5 +1,7 @@
 # Changelog — Release013
 
+> 🚀 **已封版**：Release013 已封版，后续变更请记录到 [CHANGELOG_v014.md](./CHANGELOG_v014.md)。
+
 > 自 Release012 以来的所有变更。
 
 ---
