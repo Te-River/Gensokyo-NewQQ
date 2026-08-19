@@ -2,7 +2,9 @@ package webui
 
 import (
 	"embed"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/hoshinonyaruko/gensokyo/callapi"
 	"github.com/hoshinonyaruko/gensokyo/config"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/tencent-connect/botgo/openapi"
@@ -122,17 +125,29 @@ func CombinedMiddleware(api openapi.OpenAPI, apiV2 openapi.OpenAPI) gin.HandlerF
 				HandleCheckLoginStatusRequest(c)
 				return
 			}
-			// 根据api名称处理请求
-			if c.Param("filepath") == "/api/"+appIDStr+"/api" && c.Request.Method == http.MethodPost {
-			 apiName := c.Query("name")
-			 switch apiName {
-			 default:
-			  // 处理其他或未知的api名称
-			  c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid API name"})
-				}
+			// 设备信息编辑（QDVC 导入/导出）
+			if c.Param("filepath") == "/api/"+appIDStr+"/device" && c.Request.Method == http.MethodGet {
+				handleDeviceRead(c, appIDStr)
 				return
 			}
-			// 如果还有其他API端点，可以在这里继续添加...
+			if c.Param("filepath") == "/api/"+appIDStr+"/device" && c.Request.Method == http.MethodPatch {
+				handleDeviceWrite(c, appIDStr)
+				return
+			}
+			// session token 文件编辑（QDVC 导入/导出）
+			if c.Param("filepath") == "/api/"+appIDStr+"/session" && c.Request.Method == http.MethodGet {
+				handleSessionRead(c, appIDStr)
+				return
+			}
+			if c.Param("filepath") == "/api/"+appIDStr+"/session" && c.Request.Method == http.MethodPatch {
+				handleSessionWrite(c, appIDStr)
+				return
+			}
+			// 根据api名称处理请求
+			if c.Param("filepath") == "/api/"+appIDStr+"/api" && c.Request.Method == http.MethodPost {
+				handleAccountAPIRelay(c, api, apiV2)
+				return
+			}
 		} else {
 			// 否则，处理静态文件请求
 			// 如果请求是 "/webui/" ，默认为 "index.html"
@@ -166,20 +181,39 @@ type SendMessageRequest struct {
 }
 
 func getContentType(path string) string {
-	// todo 根据需要增加更多的 MIME 类型
 	switch filepath.Ext(path) {
-	case ".html":
+	case ".html", ".htm":
 		return "text/html"
-	case ".js":
+	case ".js", ".mjs":
 		return "application/javascript"
 	case ".css":
 		return "text/css"
+	case ".json":
+		return "application/json"
 	case ".png":
 		return "image/png"
 	case ".jpg", ".jpeg":
 		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".svg":
+		return "image/svg+xml"
+	case ".ico":
+		return "image/x-icon"
+	case ".woff":
+		return "font/woff"
+	case ".woff2":
+		return "font/woff2"
+	case ".ttf":
+		return "font/ttf"
+	case ".otf":
+		return "font/otf"
+	case ".txt":
+		return "text/plain; charset=utf-8"
 	default:
-		return "text/plain"
+		return "application/octet-stream"
 	}
 }
 
@@ -205,6 +239,7 @@ func HandleAccountsRequest(c *gin.Context) {
 	c.JSON(http.StatusOK, responseData)
 }
 
+// HandleProcessStatusRequest 返回当前实例进程状态
 func HandleProcessStatusRequest(c *gin.Context) {
 	responseData := gin.H{
 		"status":     "running",
@@ -212,11 +247,11 @@ func HandleProcessStatusRequest(c *gin.Context) {
 		"restarts":   0,
 		"qr_uri":     nil,
 		"details": gin.H{
-			"pid":         0,
+			"pid":         os.Getpid(),
 			"status":      "running",
-			"memory_used": 19361792,          // 示例内存使用量
-			"cpu_percent": 0.0,               // 示例CPU使用率
-			"start_time":  time.Now().Unix(), // 10位时间戳
+			"memory_used": getProcessMemoryUsage(),
+			"cpu_percent": 0.0,
+			"start_time":  getProcessStartTime(),
 		},
 	}
 	c.JSON(http.StatusOK, responseData)
@@ -376,4 +411,202 @@ func HandleCheckLoginStatusRequest(c *gin.Context) {
 	} else {
 		c.JSON(http.StatusOK, gin.H{"isLoggedIn": false, "error": "Invalid cookie"})
 	}
+}
+
+// ---------- 进程状态辅助 ----------
+
+var processStartTime = time.Now().Unix()
+
+func getProcessStartTime() int64 {
+	return processStartTime
+}
+
+// getProcessMemoryUsage 返回当前进程内存使用量（字节）
+func getProcessMemoryUsage() int64 {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return int64(m.Alloc)
+}
+
+// ---------- 设备信息 / session 文件（QDVC 导入导出） ----------
+
+func deviceConfigPath(uin string) string {
+	return filepath.Join(".", "data", "webui-device-"+uin+".json")
+}
+
+func sessionConfigPath(uin string) string {
+	return filepath.Join(".", "data", "webui-session-"+uin+".json")
+}
+
+func ensureDataDir() error {
+	return os.MkdirAll(filepath.Join(".", "data"), 0o755)
+}
+
+// handleDeviceRead 读取设备信息文件
+func handleDeviceRead(c *gin.Context, uin string) {
+	data, err := os.ReadFile(deviceConfigPath(uin))
+	if err != nil {
+		if os.IsNotExist(err) {
+			c.JSON(http.StatusOK, gin.H{})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Unable to read device file"})
+		return
+	}
+	c.Data(http.StatusOK, "application/json", data)
+}
+
+// handleDeviceWrite 写入设备信息文件
+func handleDeviceWrite(c *gin.Context, uin string) {
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+	if err := ensureDataDir(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create data directory"})
+		return
+	}
+	if err := os.WriteFile(deviceConfigPath(uin), body, 0o644); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write device file"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Device config saved successfully"})
+}
+
+// handleSessionRead 读取 session token 文件
+func handleSessionRead(c *gin.Context, uin string) {
+	data, err := os.ReadFile(sessionConfigPath(uin))
+	if err != nil {
+		if os.IsNotExist(err) {
+			c.JSON(http.StatusOK, gin.H{"base64_content": ""})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Unable to read session file"})
+		return
+	}
+	c.Data(http.StatusOK, "application/json", data)
+}
+
+// handleSessionWrite 写入 session token 文件
+func handleSessionWrite(c *gin.Context, uin string) {
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+	if err := ensureDataDir(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create data directory"})
+		return
+	}
+	if err := os.WriteFile(sessionConfigPath(uin), body, 0o644); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write session file"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Session token saved successfully"})
+}
+
+// ---------- /api/{uin}/api OneBot action 代理 ----------
+
+// webuiClient 实现 callapi.Client 接口，捕获 handler 发送的响应
+type webuiClient struct {
+	response map[string]interface{}
+}
+
+func (w *webuiClient) SendMessage(message map[string]interface{}) error {
+	w.response = message
+	return nil
+}
+
+// handleAccountAPIRelay 将前端 POST /api/{uin}/api?name=xxx 的请求代理到对应 OneBot handler
+func handleAccountAPIRelay(c *gin.Context, api openapi.OpenAPI, apiv2 openapi.OpenAPI) {
+	apiName := c.Query("name")
+	if apiName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing API name"})
+		return
+	}
+
+	// 解析请求体为 params
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+	var params map[string]interface{}
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &params); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body JSON"})
+			return
+		}
+	}
+
+	// 构造 ActionMessage 并调用注册的 handler
+	message := callapi.ActionMessage{
+		Action: apiName,
+		Params: buildParamsContent(params),
+	}
+	client := &webuiClient{}
+	result := callapi.CallAPIFromDict(client, api, apiv2, message)
+	if result == "" && client.response != nil {
+		if b, err := json.Marshal(client.response); err == nil {
+			result = string(b)
+		}
+	}
+	if result == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Unsupported or failed API: " + apiName})
+		return
+	}
+	c.Header("Content-Type", "application/json")
+	c.String(http.StatusOK, result)
+}
+
+// buildParamsContent 将前端传递的 params map 映射为 callapi.ParamsContent
+func buildParamsContent(params map[string]interface{}) callapi.ParamsContent {
+	var pc callapi.ParamsContent
+	if params == nil {
+		return pc
+	}
+	if v, ok := params["group_id"]; ok {
+		pc.GroupID = v
+	}
+	if v, ok := params["user_id"]; ok {
+		pc.UserID = v
+	}
+	if v, ok := params["message_id"]; ok {
+		pc.MessageID = v
+	}
+	if v, ok := params["channel_id"]; ok {
+		pc.ChannelID = v
+	}
+	if v, ok := params["guild_id"]; ok {
+		pc.GuildID = v
+	}
+	if v, ok := params["message"]; ok {
+		pc.Message = v
+	}
+	if v, ok := params["messages"]; ok {
+		pc.Messages = v
+	}
+	if v, ok := params["duration"]; ok {
+		if n, ok := v.(float64); ok {
+			pc.Duration = int(n)
+		}
+	}
+	if v, ok := params["enable"]; ok {
+		if b, ok := v.(bool); ok {
+			pc.Enable = b
+		}
+	}
+	if v, ok := params["approve"]; ok {
+		if b, ok := v.(bool); ok {
+			pc.Approve = b
+		}
+	}
+	if v, ok := params["flag"].(string); ok {
+		pc.Flag = v
+	}
+	if v, ok := params["reason"].(string); ok {
+		pc.Reason = v
+	}
+	return pc
 }
