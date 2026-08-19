@@ -1,4 +1,4 @@
-﻿package handlers
+package handlers
 
 import (
 	"bytes"
@@ -22,6 +22,7 @@ import (
 	"github.com/hoshinonyaruko/gensokyo/config"
 	"github.com/hoshinonyaruko/gensokyo/echo"
 	"github.com/hoshinonyaruko/gensokyo/idmap"
+	"github.com/hoshinonyaruko/gensokyo/internal/domain/identity"
 	"github.com/hoshinonyaruko/gensokyo/imagehosting"
 	"github.com/hoshinonyaruko/gensokyo/images"
 	"github.com/hoshinonyaruko/gensokyo/mdutil"
@@ -109,7 +110,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		}
 	}
 
-	if message.Params.GroupID != nil && len(message.Params.GroupID.(string)) != 32 {
+	if message.Params.GroupID != nil && !identity.IsOpenID(message.Params.GroupID.(string)) {
 		if msgType == "" && message.Params.GroupID != nil && checkZeroGroupID(message.Params.GroupID) {
 			msgType = GetMessageTypeByGroupid(config.GetAppIDStr(), message.Params.GroupID)
 		}
@@ -141,9 +142,9 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 	var err error
 	var retmsg string
 
-	if len(message.Params.GroupID.(string)) == 32 {
+	if identity.IsOpenID(message.Params.GroupID.(string)) {
 		msgType = "group"
-	} else if message.Params.UserID != nil && len(message.Params.UserID.(string)) == 32 {
+	} else if message.Params.UserID != nil && identity.IsOpenID(message.Params.UserID.(string)) {
 		msgType = "group_private"
 	} else {
 		if message.Params.GroupID != "" {
@@ -153,7 +154,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		}
 	}
 
-	if message.Params.GroupID != nil && len(message.Params.GroupID.(string)) != 32 {
+	if message.Params.GroupID != nil && !identity.IsOpenID(message.Params.GroupID.(string)) {
 		// stringob11通过字段判断类型,不需要递归
 		if !config.GetStringOb11() {
 			//设置递归 对直接向gsk发送action时有效果
@@ -162,8 +163,8 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				if err != nil {
 					mylog.Printf("错误：无法转换 ID %v\n", err)
 				} else {
-					// 递归3次
-					echo.AddMapping(idInt64, 4)
+					// 递归1次（枚举剩余消息类型，当前仅 group）
+					echo.AddMapping(idInt64, 2)
 					// 递归调用handleSendGroupMsg，使用设置的消息类型
 					echo.AddMsgType(config.GetAppIDStr(), idInt64, "group_private")
 					retmsg, _ = HandleSendGroupMsg(client, api, apiv2, messageCopy)
@@ -212,7 +213,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		}
 
 		var originalGroupID, originalUserID string
-		if len(message.Params.GroupID.(string)) != 32 {
+		if !identity.IsOpenID(message.Params.GroupID.(string)) {
 			// 检查UserID是否为nil
 			if message.Params.UserID != nil && config.GetIdmapPro() && message.Params.UserID.(string) != "" && message.Params.UserID.(string) != "0" {
 				// 如果UserID不是nil且配置为使用Pro版本，则调用RetrieveRowByIDv2Pro
@@ -390,7 +391,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 					   parts := strings.Split(realReplyID, " ")
 					   refID := parts[len(parts)-1]
 					   groupMessage.MessageReference = &dto.MessageReference{
-					    MessageID:             refID,
+					    MessageID:             ResolveReplyRefID(refID),
 					    IgnoreGetMessageError: false,
 					   }
 					   groupMessage.MsgID = refID
@@ -423,7 +424,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 					   parts := strings.Split(realReplyID, " ")
 					   refID := parts[len(parts)-1]
 					   groupMessage.MessageReference = &dto.MessageReference{
-					    MessageID:             refID,
+					    MessageID:             ResolveReplyRefID(refID),
 					    IgnoreGetMessageError: false,
 					   }
 					   groupMessage.MsgID = refID
@@ -457,13 +458,15 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 					mylog.ErrLogToFile("error", err.Error())
 				}
 			}
-			if err != nil && strings.Contains(err.Error(), `"code":22009`) {
-				mylog.Printf("信息发送失败,加入到队列中,下次被动信息进行发送")
+   if IsQQError(err, 22009) {
+				cid := echo.NextSSMCorrelationID(message.Params.GroupID.(string))
+				mylog.Printf("[SSM][%s] 信息发送失败,加入到队列中,下次被动信息进行发送", cid)
 				var pair echo.MessageGroupPair
 				pair.Group = message.Params.GroupID.(string)
 				pair.GroupMessage = groupMessage
+				pair.CorrelationID = cid
 				echo.PushGlobalStack(pair)
-			} else if err != nil && strings.Contains(err.Error(), `"code":40034025`) {
+   } else if IsQQError(err, 40034025) {
 				// event_id无效的时候
 				groupMessage.EventID = ""
 				resp, err = apiv2.PostGroupMessage(context.TODO(), message.Params.GroupID.(string), groupMessage)
@@ -477,7 +480,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 						mylog.ErrLogToFile("error", err.Error())
 					}
 				}
-			} else if err != nil && strings.Contains(err.Error(), "context deadline exceeded") {
+   } else if IsDeliveryTimeout(err) {
 				postGroupMessageWithRetry(apiv2, message.Params.GroupID.(string), groupMessage)
 			}
 
@@ -507,10 +510,10 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 
 		// 优先发送文本信息
 		if messageText != "" {
-			// 处理出站 [CQ:member] → 自动转换 user_id 并设置 eventID/主动模式
-			// 返回的 realGroupID 是转换后的真实 GroupOpenID，可用作目标群
+			// 统一处理出站动作型 CQ 码（member/remove/禁言/入群审批/策略）
+			// 单次扫描全文，执行动作并从文本移除；返回 member 的 realGroupID 供跨群路由
 			var realGroupID string
-			messageText, realGroupID, _ = ProcessCQMemberOutbound(messageText, &eventID, message.Params.GroupID.(string), apiv2)
+			messageText, realGroupID = ProcessOutboundCQCodes(messageText, message.Params.GroupID.(string), &eventID, apiv2)
 			if realGroupID != "" {
 				mylog.Printf("[CQ:member] CQ 码 group_id 已转为 OpenID=%s", realGroupID)
 			}
@@ -521,11 +524,9 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				targetGroupID = realGroupID
 			}
 
-			// 处理出站 [CQ:remove] → 撤回消息并从文本中移除 CQ 码
-			messageText = ProcessCQRemoveOutbound(messageText, apiv2, targetGroupID)
-			// 如果处理后 messageText 为空（纯 CQ:remove 消息），直接返回客户端回执
+			// 如果处理后 messageText 为空（纯动作 CQ 码消息），直接返回客户端回执
 			if strings.TrimSpace(messageText) == "" && len(foundItems) == 0 {
-				mylog.Printf("[CQ:remove] 纯 CQ 码消息，不发送到 QQ 频道")
+				mylog.Printf("[CQ:action] 纯 CQ 码消息，不发送到 QQ 群聊")
 				SendResponse(client, nil, &message, nil, api, apiv2)
 				return "", nil
 			}
@@ -581,6 +582,23 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				mylog.Printf("[CQ:markdown] 将消息类型切换为 markdown")
 			}
 
+			// 没有内嵌 keyboard 时，处理独立 [CQ:keyboard] → 附加内嵌键盘（可与 markdown 共存）
+			if groupMessage.Keyboard == nil {
+				if kbItems, ok := foundItems["keyboard"]; ok && len(kbItems) > 0 {
+					kb, err := parseKeyboardData([]byte(kbItems[0]))
+					if err != nil || kb == nil {
+						mylog.Printf("[CQ:keyboard] 解析键盘数据失败: %v", err)
+					} else {
+						// 处理 keyboard 按钮中的本地图片路径
+						ResolveKeyboardImages(kb, apiv2)
+						groupMessage.Keyboard = kb
+						// 从 foundItems 中移除 keyboard，避免下方循环重复发送
+						delete(foundItems, "keyboard")
+						mylog.Printf("[CQ:keyboard] 消息附加内嵌键盘")
+					}
+				}
+			}
+
 			// 如果有 [CQ:card]，改为卡片消息 (msg_type=8)
 			if cardItems, ok := foundItems["card"]; ok && len(cardItems) > 0 && groupMessage.MsgType != 2 {
 				var cardData map[string]string
@@ -616,7 +634,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			       parts := strings.Split(realReplyID, " ")
 			       refID := parts[len(parts)-1]
 			       groupMessage.MessageReference = &dto.MessageReference{
-			        MessageID:             refID,
+			        MessageID:             ResolveReplyRefID(refID),
 			        IgnoreGetMessageError: false,
 			       }
 			       // 同时设置 msg_id，确保 v2 API 识别为回复
@@ -644,13 +662,15 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 					mylog.ErrLogToFile("error", err.Error())
 				}
 			}
-			if err != nil && strings.Contains(err.Error(), `"code":22009`) {
-				mylog.Printf("信息发送失败,加入到队列中,下次被动信息进行发送")
+   if IsQQError(err, 22009) {
+				cid := echo.NextSSMCorrelationID(targetGroupID)
+				mylog.Printf("[SSM][%s] 信息发送失败,加入到队列中,下次被动信息进行发送", cid)
 				var pair echo.MessageGroupPair
 				pair.Group = targetGroupID
 				pair.GroupMessage = groupMessage
+				pair.CorrelationID = cid
 				echo.PushGlobalStack(pair)
-			} else if err != nil && strings.Contains(err.Error(), `"code":40034025`) {
+   } else if IsQQError(err, 40034025) {
 				groupMessage.EventID = ""
 				resp, err = apiv2.PostGroupMessage(context.TODO(), targetGroupID, groupMessage)
 				if err != nil {
@@ -662,7 +682,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 						mylog.ErrLogToFile("error", err.Error())
 					}
 				}
-			} else if err != nil && strings.Contains(err.Error(), "context deadline exceeded") {
+   } else if IsDeliveryTimeout(err) {
 				postGroupMessageWithRetry(apiv2, targetGroupID, groupMessage)
 			}
 
@@ -736,7 +756,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		   for key, urls := range foundItems {
 		    // 跳过控制型 key，避免误发送空消息
 		    if key == "active" || key == "active_type" || key == "active_sub_type" ||
-		     key == "reply_msg_id" || key == "file_name" {
+		     key == "reply_msg_id" || key == "file_name" || key == "wakeup" {
 		     continue
 		    }
 		    for i, url := range urls {
@@ -767,7 +787,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 						         parts := strings.Split(realReplyID, " ")
 						         refID := parts[len(parts)-1]
 						         groupMessage.MessageReference = &dto.MessageReference{
-						          MessageID:             refID,
+						          MessageID:             ResolveReplyRefID(refID),
 						          IgnoreGetMessageError: false,
 						         }
 						         groupMessage.MsgID = refID
@@ -776,6 +796,20 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 						  mylog.Printf("[CQ:reply] 设置 markdown 回复消息: msg_id=%s", refID)
 						        }
 						       }
+						// 将独立 [CQ:keyboard] 合并到 markdown 消息中（markdown JSON 未内嵌 keyboard 时）
+						if groupMessage.Keyboard == nil {
+							if kbItems, ok := foundItems["keyboard"]; ok && len(kbItems) > 0 {
+								kb, err := parseKeyboardData([]byte(kbItems[0]))
+								if err != nil || kb == nil {
+									mylog.Printf("[CQ:keyboard] 解析键盘数据失败: %v", err)
+								} else {
+									ResolveKeyboardImages(kb, apiv2)
+									groupMessage.Keyboard = kb
+									delete(foundItems, "keyboard")
+									mylog.Printf("[CQ:keyboard] markdown 消息附加内嵌键盘")
+								}
+							}
+						}
 						//重新为err赋值
 						resp, err = apiv2.PostGroupMessage(context.TODO(), message.Params.GroupID.(string), groupMessage)
 						if err != nil {
@@ -788,13 +822,15 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 								mylog.ErrLogToFile("error", err.Error())
 							}
 						}
-						if err != nil && strings.Contains(err.Error(), `"code":22009`) {
-							mylog.Printf("信息发送失败,加入到队列中,下次被动信息进行发送")
+   if IsQQError(err, 22009) {
+							cid := echo.NextSSMCorrelationID(message.Params.GroupID.(string))
+							mylog.Printf("[SSM][%s] 信息发送失败,加入到队列中,下次被动信息进行发送", cid)
 							var pair echo.MessageGroupPair
 							pair.Group = message.Params.GroupID.(string)
 							pair.GroupMessage = groupMessage
+							pair.CorrelationID = cid
 							echo.PushGlobalStack(pair)
-						} else if err != nil && strings.Contains(err.Error(), `"code":40034025`) {
+      } else if IsQQError(err, 40034025) {
 							//请求参数event_id无效 重试
 							groupMessage.EventID = ""
 							//重新为err赋值
@@ -808,7 +844,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 									mylog.ErrLogToFile("error", err.Error())
 								}
 							}
-						} else if err != nil && strings.Contains(err.Error(), "context deadline exceeded") {
+      } else if IsDeliveryTimeout(err) {
 							postGroupMessageWithRetry(apiv2, message.Params.GroupID.(string), groupMessage)
 						}
 
@@ -845,7 +881,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 						mylog.ErrLogToFile("error", err.Error())
 					}
 				}
-				if err != nil && (strings.Contains(err.Error(), "context deadline exceeded") || strings.Contains(err.Error(), "富媒体文件上传超时")) {
+    if IsDeliveryTimeout(err) {
 					message_return, err = postGroupRichMediaMessageWithRetry(apiv2, message.Params.GroupID.(string), richMediaMessage)
 				}
 
@@ -871,14 +907,14 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 
 					// 处理 [CQ:reply,id=数字] → message_reference + msg_id (富媒体消息)
 					if replyIDs, ok := foundItems["reply_msg_id"]; ok && len(replyIDs) > 0 {
-						realReplyID, err := idmap.RetrieveRowByCachev2(replyIDs[0])
-						if err == nil && realReplyID != "" {
-							parts := strings.Split(realReplyID, " ")
-							refID := parts[len(parts)-1]
-							groupMessage.MessageReference = &dto.MessageReference{
-								MessageID:             refID,
-								IgnoreGetMessageError: false,
-							}
+					 realReplyID, err := idmap.RetrieveRowByCachev2(replyIDs[0])
+					 if err == nil && realReplyID != "" {
+					  parts := strings.Split(realReplyID, " ")
+					  refID := parts[len(parts)-1]
+					  groupMessage.MessageReference = &dto.MessageReference{
+					   MessageID:             ResolveReplyRefID(refID),
+					   IgnoreGetMessageError: false,
+					  }
 							groupMessage.MsgID = refID
 							// msg_id 与 event_id 二选一，清空 event_id
 							groupMessage.EventID = ""
@@ -898,19 +934,21 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 							mylog.ErrLogToFile("error", err.Error())
 						}
 					}
-					if err != nil && strings.Contains(err.Error(), `"code":22009`) {
-						mylog.Printf("信息发送失败,加入到队列中,下次被动信息进行发送")
+      if IsQQError(err, 22009) {
+						cid := echo.NextSSMCorrelationID(message.Params.GroupID.(string))
+						mylog.Printf("[SSM][%s] 信息发送失败,加入到队列中,下次被动信息进行发送", cid)
 						var pair echo.MessageGroupPair
 						pair.Group = message.Params.GroupID.(string)
 						pair.GroupMessage = groupMessage
+						pair.CorrelationID = cid
 						echo.PushGlobalStack(pair)
-					} else if err != nil && strings.Contains(err.Error(), `"code":40034025`) {
+     } else if IsQQError(err, 40034025) {
 						groupMessage.EventID = ""
 						resp, err = apiv2.PostGroupMessage(context.TODO(), message.Params.GroupID.(string), groupMessage)
 						if err != nil {
 							mylog.Printf("发送图片失败: %v", err)
 						}
-					} else if err != nil && strings.Contains(err.Error(), "context deadline exceeded") {
+     } else if IsDeliveryTimeout(err) {
 						postGroupMessageWithRetry(apiv2, message.Params.GroupID.(string), groupMessage)
 					}
 				}
@@ -975,7 +1013,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 }
 
 // 上传富媒体信息
-// isPrivateOrLoopback 检查URL是否指向私有或回环地址（SSRF防护）
+// isPrivateOrLoopback 检查 URL 是否指向私有或回环地址（SSRF 防护）
 func isPrivateOrLoopback(rawURL string) bool {
 	parsed, err := neturl.Parse(rawURL)
 	if err != nil {
@@ -1330,30 +1368,20 @@ func generateGroupMessage(id string, eventid string, foundItems map[string][]str
 			recordData = silk.EncoderSilk(recordData)
 			mylog.Printf("音频转码ing")
 		}
-		// 转换为base64
 		base64Encoded := base64.StdEncoding.EncodeToString(recordData)
-
-		// 上传语音并获取新的URL
-		newURL, err := images.UploadBase64RecordToServer(base64Encoded)
+		// 语音直接 base64 上传到 QQ CDN，不需要本地图床中转
+		messageToCreate, err := images.CreateAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 3, false, "", groupid, id, msgseq, apiv2)
 		if err != nil {
-			mylog.Printf("Error uploading base64 encoded image: %v", err)
+			mylog.Printf("Error messageToCreate: %v", err)
 			return &dto.MessageToCreate{
 				Content: "错误: 上传语音失败",
 				MsgID:   id,
 				EventID: eventid,
 				MsgSeq:  msgseq,
-				MsgType: 0,
+				MsgType: 0, // 默认文本类型
 			}
 		}
-
-		// 发链接语音
-		return &dto.RichMediaMessage{
-			EventID:    id,
-			FileType:   3,      // 3代表语音
-			URL:        newURL, // 新语音链接
-			Content:    "",     // 这个字段文档没有了
-			SrvSendMsg: false,
-		}
+		return messageToCreate
 	} else if recordURLs, ok := foundItems["url_records"]; ok && len(recordURLs) > 0 {
 // 从URL下载语音
 if isPrivateOrLoopback("https://" + recordURLs[0]) {
@@ -1395,30 +1423,20 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 			recordData = silk.EncoderSilk(recordData)
 			mylog.Printf("音频转码ing")
 		}
-		// 转换为base64
 		base64Encoded := base64.StdEncoding.EncodeToString(recordData)
-
-		// 上传语音并获取新的URL
-		newURL, err := images.UploadBase64RecordToServer(base64Encoded)
+		// 语音直接 base64 上传到 QQ CDN，不需要本地图床中转
+		messageToCreate, err := images.CreateAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 3, false, "", groupid, id, msgseq, apiv2)
 		if err != nil {
-			mylog.Printf("Error uploading base64 encoded image: %v", err)
+			mylog.Printf("Error messageToCreate: %v", err)
 			return &dto.MessageToCreate{
 				Content: "错误: 上传语音失败",
 				MsgID:   id,
 				EventID: eventid,
 				MsgSeq:  msgseq,
-				MsgType: 0,
+				MsgType: 0, // 默认文本类型
 			}
 		}
-
-		// 发链接语音
-		return &dto.RichMediaMessage{
-			EventID:    id,
-			FileType:   3,      // 3代表语音
-			URL:        newURL, // 新语音链接
-			Content:    "",     // 这个字段文档没有了
-			SrvSendMsg: false,
-		}
+		return messageToCreate
 	} else if base64Image, ok := foundItems["base64_image"]; ok && len(base64Image) > 0 {
 		// todo 适配base64图片
 		//因为QQ群没有 form方式上传,所以在gensokyo内置了图床,需公网,或以lotus方式连接位于公网的gensokyo
@@ -2069,30 +2087,20 @@ func generatePrivateMessage(id string, eventid string, foundItems map[string][]s
 			recordData = silk.EncoderSilk(recordData)
 			mylog.Printf("音频转码ing")
 		}
-		// 转换为base64
 		base64Encoded := base64.StdEncoding.EncodeToString(recordData)
-
-		// 上传语音并获取新的URL
-		newURL, err := images.UploadBase64RecordToServer(base64Encoded)
+		// 语音直接 base64 上传到 QQ CDN，不需要本地图床中转
+		messageToCreate, err := images.CreateAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 3, false, "", userid, id, msgseq, apiv2)
 		if err != nil {
-			mylog.Printf("Error uploading base64 encoded image: %v", err)
+			mylog.Printf("Error messageToCreate: %v", err)
 			return &dto.MessageToCreate{
 				Content: "错误: 上传语音失败",
 				MsgID:   id,
 				EventID: eventid,
 				MsgSeq:  msgseq,
-				MsgType: 0,
+				MsgType: 0, // 默认文本类型
 			}
 		}
-
-		// 发链接语音
-		return &dto.RichMediaMessage{
-			EventID:    id,
-			FileType:   3,      // 3代表语音
-			URL:        newURL, // 新语音链接
-			Content:    "",     // 这个字段文档没有了
-			SrvSendMsg: false,
-		}
+		return messageToCreate
 	} else if recordURLs, ok := foundItems["url_records"]; ok && len(recordURLs) > 0 {
 // 从URL下载语音
 if isPrivateOrLoopback("https://" + recordURLs[0]) {
@@ -2134,30 +2142,20 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 			recordData = silk.EncoderSilk(recordData)
 			mylog.Printf("音频转码ing")
 		}
-		// 转换为base64
 		base64Encoded := base64.StdEncoding.EncodeToString(recordData)
-
-		// 上传语音并获取新的URL
-		newURL, err := images.UploadBase64RecordToServer(base64Encoded)
+		// 语音直接 base64 上传到 QQ CDN，不需要本地图床中转
+		messageToCreate, err := images.CreateAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 3, false, "", userid, id, msgseq, apiv2)
 		if err != nil {
-			mylog.Printf("Error uploading base64 encoded image: %v", err)
+			mylog.Printf("Error messageToCreate: %v", err)
 			return &dto.MessageToCreate{
 				Content: "错误: 上传语音失败",
 				MsgID:   id,
 				EventID: eventid,
 				MsgSeq:  msgseq,
-				MsgType: 0,
+				MsgType: 0, // 默认文本类型
 			}
 		}
-
-		// 发链接语音
-		return &dto.RichMediaMessage{
-			EventID:    id,
-			FileType:   3,      // 3代表语音
-			URL:        newURL, // 新语音链接
-			Content:    "",     // 这个字段文档没有了
-			SrvSendMsg: false,
-		}
+		return messageToCreate
 	} else if base64Image, ok := foundItems["base64_image"]; ok && len(base64Image) > 0 {
 		// todo 适配base64图片
 		//因为QQ群没有 form方式上传,所以在gensokyo内置了图床,需公网,或以lotus方式连接位于公网的gensokyo
@@ -2614,20 +2612,21 @@ func uploadMedia(ctx context.Context, groupID string, richMediaMessage *dto.Rich
 // 发送栈中的消息
 func SendStackMessages(apiv2 openapi.OpenAPI, messageid string, GroupID string) {
 	count := config.GetAtoPCount()
-	mylog.Printf("取出数量: %v", count)
+	mylog.Printf("[SSM] 取出数量: %v", count)
 	pairs := echo.PopGlobalStackMulti(count)
 	for i, pair := range pairs {
 		//mylog.Printf("发送栈中的消息匹配 %v: %v", pair.Group, GroupID)
 		if pair.Group == GroupID {
 			// 发送消息
-			msgseq := echo.GetMappingSeq(messageid)
-			echo.AddMappingSeq(messageid, msgseq+1)
-			pair.GroupMessage.MsgSeq = msgseq + 1
+			msgseq := echo.NextMappingSeq(messageid)
+			pair.GroupMessage.MsgSeq = msgseq
 			pair.GroupMessage.MsgID = messageid
-			mylog.Printf("发送栈中的消息 使用MsgSeq[%v]使用MsgID[%v]", pair.GroupMessage.MsgSeq, pair.GroupMessage.MsgID)
+			mylog.Printf("[SSM][%s] 补发使用MsgSeq[%v] MsgID[%v] 入队时间=%v 队列停留=%v",
+				pair.CorrelationID, pair.GroupMessage.MsgSeq, pair.GroupMessage.MsgID,
+				pair.EnqueueTime.Format("15:04:05"), time.Since(pair.EnqueueTime).Round(time.Second))
 			_, err := apiv2.PostGroupMessage(context.TODO(), pair.Group, pair.GroupMessage)
 			if err != nil {
-				mylog.Printf("发送组合消息失败: %v", err)
+				mylog.Printf("[SSM][%s] 补发失败: %v", pair.CorrelationID, err)
 				// 错误保存到本地
 				if config.GetSaveError() {
 					mylog.ErrLogToFile("type", "PostGroupMessage")
@@ -2635,11 +2634,12 @@ func SendStackMessages(apiv2 openapi.OpenAPI, messageid string, GroupID string) 
 					mylog.ErrLogToFile("error", err.Error())
 				}
 			} else {
+				mylog.Printf("[SSM][%s] 补发成功", pair.CorrelationID)
 				echo.RemoveFromGlobalStack(i)
 			}
 			// 检查错误码
-			if err != nil && strings.Contains(err.Error(), `"code":22009`) {
-				mylog.Printf("信息再次发送失败,加入到队列中,下次被动信息进行发送")
+     if IsQQError(err, 22009) {
+				mylog.Printf("[SSM][%s] 信息再次发送失败,重新入队", pair.CorrelationID)
 				echo.PushGlobalStack(pair)
 			}
 		}
@@ -3005,9 +3005,8 @@ func processImgUrl(input string) string {
 func postGroupMessageWithRetry(apiv2 openapi.OpenAPI, groupID string, groupMessage *dto.MessageToCreate) (resp *dto.GroupMessageResponse, err error) {
 	retryCount := 3
 	for i := 0; i < retryCount; i++ {
-		msgseq := echo.GetMappingSeq(groupMessage.MsgID)
-		echo.AddMappingSeq(groupMessage.MsgID, msgseq+1)
-		groupMessage.MsgSeq = msgseq + 1
+		msgseq := echo.NextMappingSeq(groupMessage.MsgID)
+		groupMessage.MsgSeq = msgseq
 
 		if !messagequeue.GetRateLimiter().WaitWithTimeout(5 * time.Second) {
 			mylog.Printf("[限流] 群消息发送等待超时，重试 %d/%d", i+1, retryCount)
@@ -3015,14 +3014,14 @@ func postGroupMessageWithRetry(apiv2 openapi.OpenAPI, groupID string, groupMessa
 		}
 
 		resp, err = apiv2.PostGroupMessage(context.TODO(), groupID, groupMessage)
-		if err != nil && strings.Contains(err.Error(), "context deadline exceeded") {
+		if err != nil && defaultRetryPolicy.ShouldRetry(err, i) {
 			mylog.Printf("超时重试第 %d 次: %v", i+1, err)
 			if config.GetSaveError() {
 				mylog.ErrLogToFile("type", "PostGroupMessage-context-deadline-exceeded-retry-"+strconv.Itoa(i+1))
 				mylog.ErrInterfaceToFile("request", groupMessage)
 				mylog.ErrLogToFile("error", err.Error())
 			}
-			time.Sleep(1 * time.Second) // 重试间隔1秒
+			time.Sleep(defaultRetryPolicy.Backoff(i + 1))
 			continue
 		} else {
 			mylog.Printf("超时重试第 %d 次成功: %v", i+1, err)
@@ -3045,7 +3044,7 @@ func postGroupRichMediaMessageWithRetry(apiv2 openapi.OpenAPI, groupID string, r
 	retryCount := 3 // 设置最大重试次数为 3
 	for i := 0; i < retryCount; i++ {
 		resp, err = apiv2.PostGroupMessage(context.TODO(), groupID, richMediaMessage)
-		if err != nil && (strings.Contains(err.Error(), "context deadline exceeded") || strings.Contains(err.Error(), "富媒体文件上传超时")) {
+		if err != nil && defaultRetryPolicy.ShouldRetry(err, i) {
 			// 仅对超时做重试
 			mylog.Printf("富媒体超时重试第 %d 次: %v", i+1, err)
 			if config.GetSaveError() {
@@ -3053,7 +3052,7 @@ func postGroupRichMediaMessageWithRetry(apiv2 openapi.OpenAPI, groupID string, r
 				mylog.ErrInterfaceToFile("request", richMediaMessage)
 				mylog.ErrLogToFile("error", err.Error())
 			}
-			time.Sleep(3 * time.Second) // 重试间隔 3 秒
+			time.Sleep(defaultRetryPolicy.Backoff(i + 1))
 			continue
 		}
 

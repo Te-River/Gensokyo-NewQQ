@@ -3,6 +3,7 @@ package Processor
 import (
 	"fmt"
 	"log"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -38,6 +39,9 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 		mylog.Printf("出现ID为空未知错误.%v\n", data)
 		return nil
 	}
+
+	// 从事件 message_scene.ext[] 提取 msg_idx=REFIDX_* 存储，供出站 [CQ:reply] 引用时使用
+	echo.StoreRefIdxFromScene(data.ID, data.MessageScene)
 
 	// union id 缓存
 	if data.Author.UnionOpenID != "" && data.Author.ID != "" {
@@ -126,6 +130,21 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 				messageText = messageText[:idx] + messageText[idx+1:]
 			}
 		}
+	}
+
+	// 全量群消息(GROUP_MESSAGE_CREATE)中 @Bot 始终剥离，不依赖 remove_at 配置。
+	// 当 DisableErrorChan=true 时 RevertTransformedText 不会被调用，
+	// 因此需要在此处独立处理 <@OpenID> 的剥离，确保 @Bot 不会出现在上报内容中。
+	if GetDisableErrorChan {
+		selfAtAtPattern := regexp.MustCompile(`<@!?([0-9A-Fa-f]+)>\s*`)
+		messageText = selfAtAtPattern.ReplaceAllStringFunc(messageText, func(m string) string {
+			submatches := selfAtAtPattern.FindStringSubmatch(m)
+			if len(submatches) > 1 && handlers.IsSelfAtID(submatches[1]) {
+				return ""
+			}
+			return m
+		})
+		messageText = strings.TrimSpace(messageText)
 	}
 
 	if config.GetAddAtGroup() {

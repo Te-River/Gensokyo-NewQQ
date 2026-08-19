@@ -42,44 +42,6 @@ var AppID string
 var selfAtMu sync.RWMutex
 var selfAtIDs = make(map[string]struct{})
 
-// ---------- 包级正则表达式（避免重复编译） ----------
-
-var (
-	httpUrlImagePattern  = regexp.MustCompile(`\[CQ:image,file=http://(.+?)\]`)
-	httpsUrlImagePattern = regexp.MustCompile(`\[CQ:image,file=https://(.+?)\]`)
-	base64ImagePattern   = regexp.MustCompile(`\[CQ:image,file=base64://(.+?)\]`)
-	base64RecordPattern  = regexp.MustCompile(`\[CQ:record,file=base64://(.+?)\]`)
-	httpUrlRecordPattern = regexp.MustCompile(`\[CQ:record,file=http://(.+?)\]`)
-	httpsUrlRecordPattern = regexp.MustCompile(`\[CQ:record,file=https://(.+?)\]`)
-	httpUrlVideoPattern  = regexp.MustCompile(`\[CQ:video,file=http://(.+?)\]`)
-	  httpsUrlVideoPattern = regexp.MustCompile(`\[CQ:video,file=https://(.+?)\]`)
-	  base64VideoPattern   = regexp.MustCompile(`\[CQ:video,file=base64://(.+?)\]`)
-	  mdPattern            = regexp.MustCompile(`\[CQ:markdown,data=base64://(.+?)\]`)
-	mdJSONPattern        = regexp.MustCompile(`\[CQ:markdown,data=(\{.*\})\]`)
-	qqMusicPattern       = regexp.MustCompile(`\[CQ:music,type=qq,id=(\d+)\]`)
-	cardPattern          = regexp.MustCompile(`\[CQ:card[^\]]*\]`)
-	inputNotifyPattern  = regexp.MustCompile(`\[CQ:input_notify,type=(\d+)(?:,second=(\d+))?\]`)
-	streamPattern        = regexp.MustCompile(`\[CQ:stream,type:(\w+),qq:(\d+)\]`)
-	replyRe              = regexp.MustCompile(`\[CQ:reply,id=(\d+)\]`)
-	localImagePattern    *regexp.Regexp
-	localRecordPattern    *regexp.Regexp
-	localVideoPattern    *regexp.Regexp
-	compilePatternsOnce  sync.Once
-)
-
-// initPlatformPatterns 初始化平台相关的正则表达式（Windows vs Unix 路径前缀差异）
-func initPlatformPatterns() {
-  if runtime.GOOS == "windows" {
-   localImagePattern = regexp.MustCompile(`\[CQ:image,file=file:///([^\]]+?)\]`)
-   localRecordPattern = regexp.MustCompile(`\[CQ:record,file=file:///([^\]]+?)\]`)
-   localVideoPattern = regexp.MustCompile(`\[CQ:video,file=file:///([^\]]+?)\]`)
-  } else {
-   localImagePattern = regexp.MustCompile(`\[CQ:image,file=file://([^\]]+?)\]`)
-   localRecordPattern = regexp.MustCompile(`\[CQ:record,file=file://([^\]]+?)\]`)
-   localVideoPattern = regexp.MustCompile(`\[CQ:video,file=file://([^\]]+?)\]`)
-  }
- }
-
 // ---------- 安全工具函数 ----------
 
 // safeLocalPath 校验并安全化本地文件路径，防止路径穿越
@@ -130,7 +92,7 @@ func RememberSelfAtID(id string) {
 	selfAtMu.Unlock()
 }
 
-func isSelfAtID(id string) bool {
+func IsSelfAtID(id string) bool {
 	if id == "" {
 		return false
 	}
@@ -144,7 +106,7 @@ func isSelfAtID(id string) bool {
 }
 
 func resolveIncomingAtID(id string) (string, bool) {
-	if isSelfAtID(id) {
+	if IsSelfAtID(id) {
 		// 与消息 SelfID 字段保持一致：use_uin=true 时用 UIN，否则用 AppID。
 		// 否则下游会因 [CQ:at] 的 qq 与 self_id 不匹配而无法识别 @ 的是自己。
 		if config.GetUseUin() {
@@ -686,13 +648,6 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 		if config.GetEnableChangeWord() {
 			messageText = acnode.CheckWordOUT(messageText)
 		}
-		if paramsMessage.GroupID == nil {
-			// 解析[CQ:avatar,qq=123456]
-			messageText = ProcessCQAvatarNoGroupID(messageText)
-		} else {
-			// 解析[CQ:avatar,qq=123456]
-			messageText = ProcessCQAvatar(paramsMessage.GroupID.(string), messageText)
-		}
 	case []interface{}:
 		mylog.Printf("params.message is a slice (segment_type_koishi)\n")
 		for _, segment := range message {
@@ -715,6 +670,10 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 				}
 			case "image":
 				fileContent, _ := segmentMap["data"].(map[string]interface{})["file"].(string)
+				// 兼容 url 字段（部分客户端使用 url 而非 file）
+				if fileContent == "" {
+					fileContent, _ = segmentMap["data"].(map[string]interface{})["url"].(string)
+				}
 
 				// 检查是否为 Base64 图片
 				if strings.HasPrefix(fileContent, "base64://") {
@@ -751,6 +710,10 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 
 			case "voice", "record":
 				fileContent, _ := segmentMap["data"].(map[string]interface{})["file"].(string)
+				// 兼容 url 字段（部分客户端使用 url 而非 file）
+				if fileContent == "" {
+					fileContent, _ = segmentMap["data"].(map[string]interface{})["url"].(string)
+				}
 
 				// 检查是否为 Base64 语音文件
 				if strings.HasPrefix(fileContent, "base64://") {
@@ -805,6 +768,15 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 					}
 				}
 				// [CQ:active] 不在 messageText 中留痕
+
+			case "wakeup":
+				dataMap, ok := segmentMap["data"].(map[string]interface{})
+				if ok && dataMap != nil {
+					if wakeupUserID, ok := dataMap["userid"].(string); ok && wakeupUserID != "" {
+						foundItems["wakeup"] = append(foundItems["wakeup"], wakeupUserID)
+					}
+				}
+				// [CQ:wakeup] 不在 messageText 中留痕
 
 			case "avatar":
 				qqNumber, _ := segmentMap["data"].(map[string]interface{})["qq"].(string)
@@ -944,6 +916,39 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 					mylog.Printf("Error: markdown segment data is nil.")
 				}
 
+			case "keyboard":
+				kbContent, ok := segmentMap["data"].(map[string]interface{})["data"]
+				if ok {
+					var kbContentJSON string
+					if kbContentMap, isMap := kbContent.(map[string]interface{}); isMap {
+						kbContentBytes, err := json.Marshal(kbContentMap)
+						if err != nil {
+							mylog.Printf("Error marshaling kbContentMap to JSON:%v", err)
+							continue
+						}
+						kbContentJSON = string(kbContentBytes)
+					} else if kbContentStr, isString := kbContent.(string); isString {
+						if strings.HasPrefix(kbContentStr, "base64://") {
+							decoded, decErr := base64.StdEncoding.DecodeString(strings.TrimPrefix(kbContentStr, "base64://"))
+							if decErr != nil {
+								mylog.Printf("[CQ:keyboard] base64 解码失败: %v", decErr)
+								continue
+							}
+							kbContentJSON = string(decoded)
+						} else {
+							// 原始 JSON 形式（与 string 路径 keyboardJSONPattern 一致）
+							kbContentJSON = kbContentStr
+						}
+					} else {
+						mylog.Printf("Error marshaling keyboard segment wrong type.")
+						continue
+					}
+					foundItems["keyboard"] = append(foundItems["keyboard"], kbContentJSON)
+					// [CQ:keyboard] 不在 messageText 中留痕，避免重复发送
+				} else {
+					mylog.Printf("Error: keyboard segment data is nil.")
+				}
+
 			case "member":
 				dataMap, ok := segmentMap["data"].(map[string]interface{})
 				if ok && dataMap != nil {
@@ -951,6 +956,16 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 					groupID, _ := dataMap["group_id"].(string)
 					userID, _ := dataMap["user_id"].(string)
 					messageText += fmt.Sprintf("[CQ:member,type=%s,group_id=%s,user_id=%s]", memberType, groupID, userID)
+				}
+
+			case "set_group":
+				// 消息段形式 [CQ:set_group,action=...]：还原为 CQ 码字符串,
+				// 与字符串模式汇合后由 ProcessOutboundCQCodes 统一执行
+				dataMap, ok := segmentMap["data"].(map[string]interface{})
+				if ok && dataMap != nil {
+					if cq := buildSetGroupCQCode(dataMap); cq != "" {
+						messageText += cq
+					}
 				}
 
 			case "file":
@@ -983,6 +998,10 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 
 			case "video":
 				fileContent, _ := segmentMap["data"].(map[string]interface{})["file"].(string)
+				// 兼容 url 字段（部分客户端使用 url 而非 file）
+				if fileContent == "" {
+					fileContent, _ = segmentMap["data"].(map[string]interface{})["url"].(string)
+				}
 				if strings.HasPrefix(fileContent, "http://") {
 					cleanContent := strings.TrimPrefix(fileContent, "http://")
 					foundItems["url_video"] = append(foundItems["url_video"], cleanContent)
@@ -1028,6 +1047,10 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 
 		case "image":
 			fileContent, _ := message["data"].(map[string]interface{})["file"].(string)
+			// 兼容 url 字段（部分客户端使用 url 而非 file）
+			if fileContent == "" {
+				fileContent, _ = message["data"].(map[string]interface{})["url"].(string)
+			}
 
 			// 检查是否为 Base64 图片
 			if strings.HasPrefix(fileContent, "base64://") {
@@ -1064,6 +1087,10 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 
 		case "voice", "record":
 			fileContent, _ := message["data"].(map[string]interface{})["file"].(string)
+			// 兼容 url 字段（部分客户端使用 url 而非 file）
+			if fileContent == "" {
+				fileContent, _ = message["data"].(map[string]interface{})["url"].(string)
+			}
 
 			// 检查是否为 Base64 语音文件
 			if strings.HasPrefix(fileContent, "base64://") {
@@ -1106,6 +1133,15 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 		    if replyID != "" {
 		     foundItems["reply_msg_id"] = append(foundItems["reply_msg_id"], replyID)
 		    }
+
+		   case "wakeup":
+		    dataMap, _ := message["data"].(map[string]interface{})
+		    if dataMap != nil {
+		     if wakeupUserID, ok := dataMap["userid"].(string); ok && wakeupUserID != "" {
+		      foundItems["wakeup"] = append(foundItems["wakeup"], wakeupUserID)
+		     }
+		    }
+		    // [CQ:wakeup] 不在 messageText 中留痕
 
 		   case "avatar":
 		    qqNumber, _ := message["data"].(map[string]interface{})["qq"].(string)
@@ -1226,6 +1262,39 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 				mylog.Printf("Error: markdown segment data is nil.")
 			}
 
+		 case "keyboard":
+		  kbContent, ok := message["data"].(map[string]interface{})["data"]
+		  if ok {
+		   var kbContentJSON string
+		   if kbContentMap, isMap := kbContent.(map[string]interface{}); isMap {
+		    kbContentBytes, err := json.Marshal(kbContentMap)
+		    if err != nil {
+		     mylog.Printf("Error marshaling kbContentMap to JSON:%v", err)
+		     break
+		    }
+		    kbContentJSON = string(kbContentBytes)
+		   } else if kbContentStr, isString := kbContent.(string); isString {
+		    if strings.HasPrefix(kbContentStr, "base64://") {
+		     decoded, decErr := base64.StdEncoding.DecodeString(strings.TrimPrefix(kbContentStr, "base64://"))
+		     if decErr != nil {
+		      mylog.Printf("[CQ:keyboard] base64 解码失败: %v", decErr)
+		      break
+		     }
+		     kbContentJSON = string(decoded)
+		    } else {
+		     // 原始 JSON 形式（与 string 路径 keyboardJSONPattern 一致）
+		     kbContentJSON = kbContentStr
+		    }
+		   } else {
+		    mylog.Printf("Error marshaling keyboard segment wrong type.")
+		    break
+		   }
+		   foundItems["keyboard"] = append(foundItems["keyboard"], kbContentJSON)
+		   // [CQ:keyboard] 不在 messageText 中留痕，避免重复发送
+		  } else {
+		   mylog.Printf("Error: keyboard segment data is nil.")
+		  }
+
 		case "file":
 			dataMap, _ := message["data"].(map[string]interface{})
 			fileContent, _ := dataMap["file"].(string)
@@ -1256,6 +1325,10 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 
 		case "video":
 			fileContent, _ := message["data"].(map[string]interface{})["file"].(string)
+			// 兼容 url 字段（部分客户端使用 url 而非 file）
+			if fileContent == "" {
+				fileContent, _ = message["data"].(map[string]interface{})["url"].(string)
+			}
 			if strings.HasPrefix(fileContent, "http://") {
 				cleanContent := strings.TrimPrefix(fileContent, "http://")
 				foundItems["url_video"] = append(foundItems["url_video"], cleanContent)
@@ -1281,6 +1354,25 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 		     foundItems["qqmusic"] = append(foundItems["qqmusic"], musicID)
 		    }
 
+		   case "member":
+		    dataMap, _ := message["data"].(map[string]interface{})
+		    if dataMap != nil {
+		     memberType, _ := dataMap["type"].(string)
+		     groupID, _ := dataMap["group_id"].(string)
+		     userID, _ := dataMap["user_id"].(string)
+		     messageText += fmt.Sprintf("[CQ:member,type=%s,group_id=%s,user_id=%s]", memberType, groupID, userID)
+		    }
+
+		   case "set_group":
+		    // 消息段形式 [CQ:set_group,action=...]：还原为 CQ 码字符串,
+		    // 与字符串模式汇合后由 ProcessOutboundCQCodes 统一执行
+		    dataMap, _ := message["data"].(map[string]interface{})
+		    if dataMap != nil {
+		     if cq := buildSetGroupCQCode(dataMap); cq != "" {
+		      messageText += cq
+		     }
+		    }
+
 		   default:
 		    mylog.Printf("Unhandled message type: %s", messageType)
 		   }
@@ -1289,119 +1381,16 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 		   mylog.Println("Unsupported message format: params.message field is not a string, map or slice")
 	}
 
-	// 从 messageText 中提取 [CQ:reply,id=数字] 用于构建 message_reference
-	  for _, matches := range replyRe.FindAllStringSubmatch(messageText, -1) {
-		if len(matches) > 1 {
-			foundItems["reply_msg_id"] = append(foundItems["reply_msg_id"], matches[1])
-		}
-	}
-
-	// 在合并后的 messageText 中统一解析 [CQ:active]（覆盖消息段路径）
-	messageText = ProcessCQActive(messageText, foundItems)
-	messageText = ProcessCQFile(messageText, foundItems)
+	// 统一 CQ 码解析管道：无论消息来自 string 还是消息段数组，
+	// 均在此单次扫描解析全部 CQ 码（媒体/控制/动作），剔除后返回纯文本
+	messageText = ProcessCQCodePipeline(messageText, foundItems, paramsMessage.GroupID)
 
 	if paramsMessage.GroupID == nil {
 		//处理at
 		messageText = transformMessageTextAtNoGroupID(messageText)
 	} else {
 		//处理at
-		messageText = transformMessageTextAt(messageText, paramsMessage.GroupID.(string))
-	}
-
-	// 当匹配到复古cq码上报类型,使用低效率正则.
-	if _, ok := paramsMessage.Message.(string); ok {
-		// 使用包级正则变量（避免重复编译）
-		compilePatternsOnce.Do(initPlatformPatterns)
-
-		// 处理 [CQ:markdown,data={...}] JSON 格式：base64 编码后存入 foundItems["markdown"]
-		 messageText = mdJSONPattern.ReplaceAllStringFunc(messageText, func(match string) string {
-		  if submatch := mdJSONPattern.FindStringSubmatch(match); len(submatch) > 1 {
-		   encoded := base64.StdEncoding.EncodeToString([]byte(submatch[1]))
-		   foundItems["markdown"] = append(foundItems["markdown"], encoded)
-		  }
-		  return ""
-		 })
-
-		 // 处理 [CQ:card,...]：提取参数并 JSON 编码后存入 foundItems["card"]
-		 messageText = cardPattern.ReplaceAllStringFunc(messageText, func(match string) string {
-		  cardData := make(map[string]string)
-		  kvRe := regexp.MustCompile(`(\w+)=([^,\]]+)`)
-		  for _, kv := range kvRe.FindAllStringSubmatch(match, -1) {
-		   if len(kv) == 3 {
-		    cardData[kv[1]] = kv[2]
-		   }
-		  }
-		  if len(cardData) > 0 {
-		   encoded, err := json.Marshal(cardData)
-		   if err == nil {
-		    foundItems["card"] = append(foundItems["card"], string(encoded))
-		   }
-		  }
-		  return ""
-		 })
-
-		// 处理 [CQ:input_notify,...]：提取参数后存入 foundItems["input_notify"]
-		messageText = inputNotifyPattern.ReplaceAllStringFunc(messageText, func(match string) string {
-		 if submatch := inputNotifyPattern.FindStringSubmatch(match); len(submatch) > 1 {
-		  notifyData := map[string]string{
-		   "type": submatch[1],
-		  }
-		  if len(submatch) > 2 && submatch[2] != "" {
-		   notifyData["second"] = submatch[2]
-		  }
-		  encoded, err := json.Marshal(notifyData)
-		  if err == nil {
-		   foundItems["input_notify"] = append(foundItems["input_notify"], string(encoded))
-		  }
-		 }
-		 return ""
-		})
-
-		// 处理 [CQ:stream,...]：提取 type 和 qq 后存入 foundItems["stream"]
-		messageText = streamPattern.ReplaceAllStringFunc(messageText, func(match string) string {
-		 if submatch := streamPattern.FindStringSubmatch(match); len(submatch) > 2 {
-		  streamData := map[string]string{
-		   "type": submatch[1],
-		   "qq":   submatch[2],
-		  }
-		  encoded, err := json.Marshal(streamData)
-		  if err == nil {
-		   foundItems["stream"] = append(foundItems["stream"], string(encoded))
-		  }
-		 }
-		 return ""
-		})
-
-		patterns := []struct {
-			key     string
-			pattern *regexp.Regexp
-		}{
-			{"local_image", localImagePattern},
-			{"url_image", httpUrlImagePattern},
-			{"url_images", httpsUrlImagePattern},
-			{"base64_image", base64ImagePattern},
-			{"base64_record", base64RecordPattern},
-			{"local_record", localRecordPattern},
-			{"url_record", httpUrlRecordPattern},
-			{"url_records", httpsUrlRecordPattern},
-			{"markdown", mdPattern},
-			{"qqmusic", qqMusicPattern},
-			{"url_video", httpUrlVideoPattern},
-			    {"url_videos", httpsUrlVideoPattern},
-			    {"base64_video", base64VideoPattern},
-			    {"local_video", localVideoPattern},
-		}
-
-		for _, pattern := range patterns {
-			matches := pattern.pattern.FindAllStringSubmatch(messageText, -1)
-			for _, match := range matches {
-				if len(match) > 1 {
-					foundItems[pattern.key] = append(foundItems[pattern.key], match[1])
-				}
-			}
-			// 移动替换操作到这里，确保所有匹配都被处理后再进行替换
-			messageText = pattern.pattern.ReplaceAllString(messageText, "")
-		}
+		messageText = transformMessageTextAt(messageText, paramsMessage.GroupID.(string), paramsMessage.UserID.(string))
 	}
 
 	//最后再处理Url
@@ -1418,7 +1407,7 @@ func isIPAddress(address string) bool {
 }
 
 // at处理
-func transformMessageTextAt(messageText string, groupid string) string {
+func transformMessageTextAt(messageText string, groupid string, userid string) string {
 	// 保存原始内容，用于纯 at 消息回退
 	originalText := messageText
 	// DoNotReplaceAppid=false(默认频道bot,需要自己at自己时,否则改成true)
@@ -1442,9 +1431,13 @@ func transformMessageTextAt(messageText string, groupid string) string {
 	replyRE := regexp.MustCompile(`\[CQ:reply,id=\d+\]`)
 	messageText = replyRE.ReplaceAllString(messageText, "")
 
-	// 使用正则表达式来查找所有[CQ:at,qq=数字]的模式
-	re := regexp.MustCompile(`\[CQ:at,qq=(\d+)\]`)
+	// 使用正则表达式来查找所有[CQ:at,qq=UserID]的模式（仅匹配 用户 自身）
+	re := regexp.MustCompile(`\[CQ:at,qq=` + userid + `\]`)
 	messageText = re.ReplaceAllStringFunc(messageText, func(m string) string {
+		// 如果 remove_bot_at_group 开启，移除 触发被动消息@用户，避免重复
+		if config.GetRemoveBotAtGroup() {
+			return ""
+		}
 		return m
 	})
 	// 如果内容为空且原始内容仅含 at（不含 reply），退回原始 at 文本
@@ -1621,7 +1614,11 @@ func RevertTransformedText(data interface{}, msgtype string, api openapi.OpenAPI
 			if !ok {
 				return m
 			}
-			if isSelfAtID(userID) {
+			// 判断是否为 @Bot 自身：
+			// 1) IsSelfAtID 检查原始 ID（BotID/AppID/selfAtIDs）
+			// 2) 解析后的 atID 等于 bot 的 UIN 或 AppID（兼容 QQ 平台不同场景使用不同 ID 格式）
+			isSelf := IsSelfAtID(userID) || atID == config.GetUinStr() || atID == config.GetAppIDStr()
+			if isSelf {
 				// 全量群消息(GROUP_MESSAGE_CREATE)中的 @Bot 始终剥离，不依赖 remove_at 配置
 				if isFullGroupMsg || config.GetRemoveAt() {
 					return ""
@@ -1983,7 +1980,9 @@ func ConvertToSegmentedMessage(data interface{}) []map[string]interface{} {
 				"qq": atID,
 			},
 		}
-		if isSelfAtID(userID) && (isFullGroupMsg || config.GetRemoveAt()) {
+		// 判断是否为 @Bot 自身（兼容 QQ 平台不同 ID 格式）
+		isSelf := IsSelfAtID(userID) || atID == config.GetUinStr() || atID == config.GetAppIDStr()
+		if isSelf && (isFullGroupMsg || config.GetRemoveAt()) {
 		    msg.Content = strings.Replace(msg.Content, match[0], "", 1)
 		    continue
 		   }
@@ -2071,9 +2070,8 @@ func SendMessage(messageText string, data interface{}, messageType string, api o
 	switch messageType {
 	case "group":
 		// 处理群组消息
-		msgseq := echo.GetMappingSeq(msg.ID)
-		echo.AddMappingSeq(msg.ID, msgseq+1)
-		textMsg, _ := GenerateReplyMessage(msg.ID, nil, messageText, msgseq+1, nil)
+		msgseq := echo.NextMappingSeq(msg.ID)
+		textMsg, _ := GenerateReplyMessage(msg.ID, nil, messageText, msgseq, nil)
 		response, err := apiv2.PostGroupMessage(context.TODO(), msg.GroupID, textMsg)
 		if err != nil {
 			mylog.Printf("发送文本群组信息失败: %v", err)
@@ -2085,9 +2083,8 @@ func SendMessage(messageText string, data interface{}, messageType string, api o
 
 	case "group_private":
 		// 处理群组私聊消息
-		msgseq := echo.GetMappingSeq(msg.ID)
-		echo.AddMappingSeq(msg.ID, msgseq+1)
-		textMsg, _ := GenerateReplyMessage(msg.ID, nil, messageText, msgseq+1, nil)
+		msgseq := echo.NextMappingSeq(msg.ID)
+		textMsg, _ := GenerateReplyMessage(msg.ID, nil, messageText, msgseq, nil)
 		_, err := apiv2.PostC2CMessage(context.TODO(), msg.Author.ID, textMsg)
 		if err != nil {
 			mylog.Printf("发送文本私聊信息失败: %v", err)
@@ -2128,7 +2125,10 @@ func parseMDData(mdData []byte) (*dto.Markdown, *keyboard.MessageKeyboard, error
 			Content *keyboard.CustomKeyboard `json:"content,omitempty"`
 			Rows    []*keyboard.Row          `json:"rows,omitempty"`
 		} `json:"keyboard,omitempty"`
-		Rows []*keyboard.Row `json:"rows,omitempty"`
+		// 顶层 content/id：官方 keyboard 简写形态（[CQ:keyboard] 独立使用时）
+		Content *keyboard.CustomKeyboard `json:"content,omitempty"`
+		ID      string                   `json:"id,omitempty"`
+		Rows    []*keyboard.Row          `json:"rows,omitempty"`
 	}
 
 	// 解析 JSON
@@ -2154,7 +2154,17 @@ func parseMDData(mdData []byte) (*dto.Markdown, *keyboard.MessageKeyboard, error
 
 	// 处理 Keyboard
 	var kb *keyboard.MessageKeyboard
-	if temp.Keyboard.Content != nil {
+	if temp.Content != nil {
+		// 处理顶层 content（官方 keyboard 简写形态，[CQ:keyboard] 独立使用）
+		kb = &keyboard.MessageKeyboard{
+			Content: temp.Content,
+		}
+	} else if temp.ID != "" {
+		// 处理顶层 id（按钮模板形态）
+		kb = &keyboard.MessageKeyboard{
+			ID: temp.ID,
+		}
+	} else if temp.Keyboard.Content != nil {
 		// 处理嵌套在 Keyboard 中的 CustomKeyboard
 		kb = &keyboard.MessageKeyboard{
 			ID:      temp.Keyboard.ID,
@@ -2184,6 +2194,13 @@ func parseMDData(mdData []byte) (*dto.Markdown, *keyboard.MessageKeyboard, error
 	}
 
 	return md, kb, nil
+}
+
+// parseKeyboardData 从 JSON 数据解析独立的 keyboard 对象（不带 markdown）
+// 输入结构同 [CQ:markdown] 的 keyboard 字段：{id, content.rows} / {rows} / {id}
+func parseKeyboardData(kbData []byte) (*keyboard.MessageKeyboard, error) {
+	_, kb, err := parseMDData(kbData)
+	return kb, err
 }
 
 // ResolveKeyboardVirtualIDs 遍历 keyboard 中的所有按钮，将 specify_user_ids
@@ -2556,20 +2573,31 @@ func createMusicKeyboard(jumpURL string) *keyboard.MessageKeyboard {
 
 // FetchTrackInfo 用于根据trackMid获取QQ音乐的track信息
 func FetchTrackInfo(trackMid string) (string, error) {
+	const maxQQMusicResponseBytes int64 = 2 << 20
 	urlTemplate := "https://u.y.qq.com/cgi-bin/musicu.fcg?g_tk=2034008533&uin=0&format=json&data={\"comm\":{\"ct\":23,\"cv\":0},\"url_mid\":{\"module\":\"vkey.GetVkeyServer\",\"method\":\"CgiGetVkey\",\"param\":{\"guid\":\"4311206557\",\"songmid\":[\"%s\"],\"songtype\":[0],\"uin\":\"0\",\"loginflag\":1,\"platform\":\"23\"}}}&_=1599039471576"
 	url := fmt.Sprintf(urlTemplate, trackMid)
 
 	// 发送HTTP GET请求
-	resp, err := http.Get(url)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
 	if err != nil {
 		return "", fmt.Errorf("error making request: %v", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return "", fmt.Errorf("QQ音乐响应 HTTP %d", resp.StatusCode)
+	}
+	if resp.ContentLength > maxQQMusicResponseBytes {
+		return "", fmt.Errorf("QQ音乐响应超过 %d 字节", maxQQMusicResponseBytes)
+	}
 
 	// 读取并解析响应体
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxQQMusicResponseBytes+1))
 	if err != nil {
 		return "", fmt.Errorf("error reading response body: %v", err)
+	}
+	if int64(len(body)) > maxQQMusicResponseBytes {
+		return "", fmt.Errorf("QQ音乐响应超过 %d 字节", maxQQMusicResponseBytes)
 	}
 
 	var result interface{} // 使用interface{}来接收任意的JSON对象
@@ -2582,254 +2610,34 @@ func FetchTrackInfo(trackMid string) (string, error) {
 
 // FetchSongDetail 发送请求到QQ音乐API并获取歌曲详情
 func FetchSongDetail(songID string) (string, error) {
+	const maxQQMusicResponseBytes int64 = 2 << 20
 	// 构建请求URL
 	url := fmt.Sprintf("https://u.y.qq.com/cgi-bin/musicu.fcg?format=json&inCharset=utf8&outCharset=utf-8&notice=0&platform=yqq.json&needNewCode=0&data={\"comm\":{\"ct\":24,\"cv\":0},\"songinfo\":{\"method\":\"get_song_detail_yqq\",\"param\":{\"song_type\":0,\"song_mid\":\"\",\"song_id\":%s},\"module\":\"music.pf_song_detail_svr\"}}", songID)
 
 	// 发送GET请求
-	resp, err := http.Get(url)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
 	if err != nil {
 		return "", fmt.Errorf("error making request: %v", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return "", fmt.Errorf("QQ音乐响应 HTTP %d", resp.StatusCode)
+	}
+	if resp.ContentLength > maxQQMusicResponseBytes {
+		return "", fmt.Errorf("QQ音乐响应超过 %d 字节", maxQQMusicResponseBytes)
+	}
 
 	// 读取响应体
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxQQMusicResponseBytes+1))
 	if err != nil {
 		return "", fmt.Errorf("error reading response body: %v", err)
 	}
+	if int64(len(body)) > maxQQMusicResponseBytes {
+		return "", fmt.Errorf("QQ音乐响应超过 %d 字节", maxQQMusicResponseBytes)
+	}
 
 	return string(body), nil
-}
-
-// ProcessCQFile 解析 [CQ:file,file=xxx,file_name=yyy] 并移除
-// file_name 为可选参数，不填时由后续处理自动从路径/URL 提取文件名
-func ProcessCQFile(text string, foundItems map[string][]string) string {
-	re := regexp.MustCompile(`\[CQ:file,([^\]]*)\]`)
-	text = re.ReplaceAllStringFunc(text, func(match string) string {
-		inner := match[len("[CQ:file,") : len(match)-1]
-		var filePath, fileName string
-		for _, part := range strings.Split(inner, ",") {
-			kv := strings.SplitN(part, "=", 2)
-			if len(kv) == 2 {
-				switch strings.TrimSpace(kv[0]) {
-				case "file":
-					filePath = strings.TrimSpace(kv[1])
-				case "file_name":
-					fileName = strings.TrimSpace(kv[1])
-				}
-			}
-		}
-		if filePath == "" {
-			return match
-		}
-		// 根据 file 前缀确定类型
-		var itemKey, cleanValue string
-		switch {
-		case strings.HasPrefix(filePath, "file://"):
-			itemKey = "local_file"
-			safePath, err := resolveLocalMedia(filePath)
-			if err != nil {
-				mylog.Printf("安全校验失败，跳过本地文件: %v", err)
-				return match
-			}
-			cleanValue = safePath
-		case strings.HasPrefix(filePath, "http://"):
-			itemKey = "url_file"
-			cleanValue = strings.TrimPrefix(filePath, "http://")
-		case strings.HasPrefix(filePath, "https://"):
-			itemKey = "url_files"
-			cleanValue = strings.TrimPrefix(filePath, "https://")
-		case strings.HasPrefix(filePath, "base64://"):
-			itemKey = "base64_file"
-			cleanValue = strings.TrimPrefix(filePath, "base64://")
-		default:
-			return match
-		}
-		foundItems[itemKey] = append(foundItems[itemKey], cleanValue)
-		if fileName != "" {
-			foundItems["file_name"] = append(foundItems["file_name"], fileName)
-		}
-		return ""
-	})
-	return text
-}
-
-// ProcessCQActive 解析 [CQ:active] 或 [CQ:active,type=xxx,sub_type=yyy] 并移除
-func ProcessCQActive(text string, foundItems map[string][]string) string {
-	// 先匹配带参数的 [CQ:active,type=xxx,sub_type=yyy]
-	re := regexp.MustCompile(`\[CQ:active,([^\]]*)\]`)
-	text = re.ReplaceAllStringFunc(text, func(match string) string {
-		inner := match[1 : len(match)-1]
-		if idx := strings.Index(inner, ","); idx >= 0 {
-			paramsStr := inner[idx+1:]
-			for _, part := range strings.Split(paramsStr, ",") {
-				kv := strings.SplitN(part, "=", 2)
-				if len(kv) == 2 {
-					switch strings.TrimSpace(kv[0]) {
-					case "type":
-						foundItems["active_type"] = append(foundItems["active_type"], strings.TrimSpace(kv[1]))
-					case "sub_type":
-						foundItems["active_sub_type"] = append(foundItems["active_sub_type"], strings.TrimSpace(kv[1]))
-					}
-				}
-			}
-		}
-		foundItems["active"] = []string{"true"}
-		return ""
-	})
-	// 再匹配裸 [CQ:active]（无参数）
-	bareRe := regexp.MustCompile(`\[CQ:active\]`)
-	if bareRe.MatchString(text) {
-		foundItems["active"] = []string{"true"}
-	}
-	text = bareRe.ReplaceAllString(text, "")
-	return text
-}
-
-// ProcessCQMemberOutbound 处理出站 [CQ:member,type=add/remove,group_id=虚拟群ID,user_id=虚拟用户ID]
-// 返回: (清理后的文本, 转换后的真实GroupOpenID, 转换后的真实UserOpenID)
-// type=add: 使用存储的 event_id 进行被动回复
-// type=remove: 转为主动消息发送
-func ProcessCQMemberOutbound(text string, eventID *string, groupID string, apiv2 openapi.OpenAPI) (string, string, string) {
-	var cqGroupID string
-	var cqUserID string
-	var realTargetGroupID string
-	re := regexp.MustCompile(`\[CQ:member,([^\]]*)\]`)
-	result := re.ReplaceAllStringFunc(text, func(match string) string {
-		inner := match[1 : len(match)-1]
-		var memberType string
-		if idx := strings.Index(inner, ","); idx >= 0 {
-			paramsStr := inner[idx+1:]
-			for _, part := range strings.Split(paramsStr, ",") {
-				kv := strings.SplitN(part, "=", 2)
-				if len(kv) == 2 {
-					switch strings.TrimSpace(kv[0]) {
-					case "type":
-						memberType = strings.TrimSpace(kv[1])
-					case "group_id":
-						cqGroupID = strings.TrimSpace(kv[1])
-					case "user_id":
-						cqUserID = strings.TrimSpace(kv[1])
-					}
-				}
-			}
-		}
-
-		// 将虚拟 user_id 反向转换为 OpenID
-		openID, err := idmap.RetrieveRowByIDv2(cqUserID)
-		if err != nil || openID == "" {
-			mylog.Printf("[CQ:member] user_id=%s 转换为 OpenID 失败: %v", cqUserID, err)
-		} else {
-			mylog.Printf("[CQ:member] user_id=%s → OpenID=%s", cqUserID, openID)
-		}
-
-		// 从 CQ 码中取 group_id，优先于入参
-		if cqGroupID == "" {
-			cqGroupID = groupID
-		}
-
-		// 将 CQ 码中的虚拟 group_id 转为真实 OpenID（作为目标群）
-		realGroupOpenID, err := idmap.RetrieveRowByIDv2(cqGroupID)
-		if err != nil || realGroupOpenID == "" {
-			mylog.Printf("[CQ:member] groupID=%s 转换为 OpenID 失败: %v", cqGroupID, err)
-			realGroupOpenID = cqGroupID
-		} else {
-			mylog.Printf("[CQ:member] groupID=%s → OpenID=%s", cqGroupID, realGroupOpenID)
-		}
-		realTargetGroupID = realGroupOpenID
-
-		switch memberType {
-		case "add":
-			appID := config.GetAppIDStr()
-			key := appID + "_" + realGroupOpenID
-			storedEventID := echo.GetEventIDByKey(key)
-			if storedEventID != "" {
-				*eventID = storedEventID
-				mylog.Printf("[CQ:member] 入群回复: 使用 event_id=%s (group->%s, user->%s)", storedEventID, realGroupOpenID, openID)
-			} else {
-				mylog.Printf("[CQ:member] 入群回复: 未找到 event_id (group=%s)", cqGroupID)
-			}
-
-		case "remove":
-			*eventID = ""
-			mylog.Printf("[CQ:member] 退群消息: 转为主动推送 (group_id=%s, user->%s)", cqGroupID, openID)
-		}
-
-		return ""
-	})
-
-	return result, realTargetGroupID, cqUserID
-}
-
-// ProcessCQRemoveOutbound 处理出站 [CQ:remove,user_id=虚拟ID,msg_id=虚拟msg_id]
-// 通过 QQ API 撤回指定消息，并从 messageText 中移除 CQ 码
-func ProcessCQRemoveOutbound(text string, apiv2 openapi.OpenAPI, groupID string) string {
-	re := regexp.MustCompile(`\[CQ:remove,([^\]]*)\]`)
-	return re.ReplaceAllStringFunc(text, func(match string) string {
-		inner := match[1 : len(match)-1]
-		var userID, msgID string
-		for _, part := range strings.Split(inner, ",") {
-			kv := strings.SplitN(part, "=", 2)
-			if len(kv) == 2 {
-				switch strings.TrimSpace(kv[0]) {
-				case "user_id":
-					userID = strings.TrimSpace(kv[1])
-				case "msg_id":
-					msgID = strings.TrimSpace(kv[1])
-				}
-			}
-		}
-		if userID == "" || msgID == "" {
-			if userID != "" && msgID == "" {
-				// 缺 msg_id 时自动查该用户最新消息
-				realUserID, err := idmap.RetrieveRowByIDv2(userID)
-				if err != nil {
-					mylog.Printf("[CQ:remove] 解析 user_id=%s 失败: %v", userID, err)
-					return match
-				}
-				latestRealMsgID, err := idmap.GetLatestMsgID(groupID, realUserID)
-				if err != nil {
-					mylog.Printf("[CQ:remove] 获取用户 %s 最新消息失败: %v", userID, err)
-					return match
-				}
-				mylog.Printf("[CQ:remove] 自动获取用户 %s 最新消息: %s", userID, latestRealMsgID)
-				if err := apiv2.RetractGroupMessage(context.TODO(), groupID, latestRealMsgID); err != nil {
-					mylog.Printf("[CQ:remove] 撤回消息失败 group=%s msg=%s: %v", groupID, latestRealMsgID, err)
-				} else {
-					mylog.Printf("[CQ:remove] 已撤回消息 group=%s msg=%s", groupID, latestRealMsgID)
-				}
-				return ""
-			}
-			mylog.Printf("[CQ:remove] user_id 或 msg_id 为空: %s", match)
-			return match
-		}
-
-		// 解析虚拟 user_id 为真实 OpenID（仅用于校验）
-		_, err := idmap.RetrieveRowByIDv2(userID)
-		if err != nil {
-			mylog.Printf("[CQ:remove] 解析 user_id=%s 失败: %v", userID, err)
-			return ""
-		}
-
-		// 解析虚拟 msg_id 为真实 message_id
-		realMsgID, err := idmap.RetrieveRowByCachev2(msgID)
-		if err != nil {
-			mylog.Printf("[CQ:remove] 解析 msg_id=%s 失败: %v", msgID, err)
-			return ""
-		}
-		// RetrieveRowByCachev2 返回格式 "groupID msgID"，取后半段
-		parts := strings.Split(realMsgID, " ")
-		realMsgID = parts[len(parts)-1]
-
-		// 调用撤回 API
-		if err := apiv2.RetractGroupMessage(context.TODO(), groupID, realMsgID); err != nil {
-			mylog.Printf("[CQ:remove] 撤回消息失败 group=%s msg=%s: %v", groupID, realMsgID, err)
-		} else {
-			mylog.Printf("[CQ:remove] 已撤回消息 group=%s msg=%s", groupID, realMsgID)
-		}
-
-		return "" // 从 messageText 中移除 CQ 码，无论成败都不发送原文
-	})
 }
 
 // parseMarkdownFromMessage 从 base64 编码的 markdown JSON 数据中解析 dto.Markdown + keyboard

@@ -1,5 +1,7 @@
 # [CQ:stream]
 
+> 🧪 **测试插件**：[CQ-stream](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/CQ-stream) — 发送「流式测试」体验
+
 ## 用途
 
 `[CQ:stream]` 用于在单聊（C2C）中发送流式消息，实现打字机效果。消息会逐片展示，而非一次性显示。分为三个生命周期阶段：`start`（首片）→ `mid`（续片）→ `finish`（终片）。

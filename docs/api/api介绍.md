@@ -6,26 +6,26 @@
 
 | Action | 文件 | 场景 | 行为 |
 |--------|------|------|------|
-| `send_msg` | send_msg.go | `私聊 (C2C)` / `q群 (Group Chat)` / `q頻 (QQ Guild)` | 按 echo/msgType 缓存和 ID 映射分流到对应发送处理器。 |
+| `send_msg` | send_msg.go | `私聊 (C2C)` / `q群 (Group Chat)` | 按 echo/msgType 缓存和 ID 映射分流到对应发送处理器。 |
 | `send_msg_async` | send_msg_async.go | 同 `send_msg` | 注册到 `HandleSendMsg`，处理逻辑同 `send_msg`。 |
 | `send_group_msg` | send_group_msg.go | `q群 (Group Chat)` | 发送消息，支持 Gensokyo 的消息解析和 ID 转换。 |
 | `send_group_msg_async` | send_group_msg_async.go | `q群 (Group Chat)` | 注册到 `HandleSendGroupMsg`，处理逻辑同 `send_group_msg`。 |
 | `send_group_msg_raw` | send_group_msg_raw.go | `q群 (Group Chat)` | 发送消息，保留更多原始参数，少做预处理。 |
 | `send_private_msg` | send_private_msg.go | `私聊 (C2C)` | 发送 C2C 私聊消息。 |
 | `send_private_msg_async` | send_private_msg_async.go | `私聊 (C2C)` | 注册到 `HandleSendPrivateMsg`，处理逻辑同 `send_private_msg`。 |
-| `delete_msg` | delete_msg.go | `私聊 (C2C)` / `q群 (Group Chat)` / `q頻 (QQ Guild)` | 按消息所属场景调用对应撤回接口。 |
+| `delete_msg` | delete_msg.go | `私聊 (C2C)` / `q群 (Group Chat)` | 按消息所属场景调用对应撤回接口。 |
 | `get_login_info` | get_login_info.go | `-` | 获取当前机器人登录信息。 |
 | `get_friend_list` | get_friend_list.go | `私聊 (C2C)` | 获取好友列表。 |
 | `get_group_list` | get_group_list.go | `q群 (Group Chat)` | 获取列表。 |
-| `get_group_info` | get_group_info.go | `q群 (Group Chat)` / `q頻 (QQ Guild)` | 按 ID 映射返回目标信息。 |
+| `get_group_info` | get_group_info.go | `q群 (Group Chat)` | 调用 QQ 官方 v2 群信息接口返回真实群名/简介/成员数。 |
 | `get_group_member_info` | get_group_member_info.go | `q群 (Group Chat)` | 获取成员信息。 |
 | `get_group_member_list` | get_group_member_list.go | `q群 (Group Chat)` | 获取成员列表。 |
 | `get_status` | get_status.go | `-` | 获取运行状态。 |
 | `get_version_info` | get_version_info.go | `-` | 获取版本信息。 |
 | `get_online_clients` | get_online_clients.go | `-` | 获取在线客户端。 |
 | `send_group_forward_msg` | send_group_forward_msg.go | `q群 (Group Chat)` | 发送合并转发消息。 |
-| `set_group_ban` | set_group_ban.go | `q群 (Group Chat)` | 单人禁言。 |
-| `set_group_whole_ban` | set_group_whole_ban.go | `q群 (Group Chat)` | 全员禁言。 |
+| `set_group_ban` | set_group_ban.go | `q群 (Group Chat)` | 单人禁言，`duration` 秒数（0=解除禁言）。与 `[CQ:set_group,action=ban]` 共享实现底层。 |
+| `set_group_whole_ban` | set_group_whole_ban.go | `q群 (Group Chat)` | 全员禁言，`enable` 开关。与 `[CQ:set_group,action=whole_ban]` 共享实现底层。 |
 | `.handle_quick_operation` | handle_quick_operation.go | `-` | OneBot 快速操作。 |
 | `.handle_quick_operation_async` | handle_quick_operation_async.go | `-` | OneBot 快速操作的 async action 名称。 |
 | `mark_msg_as_read` | mark_msg_as_read.go | `-` | 标记消息已读。 |
@@ -44,13 +44,22 @@
 |--------|------|------|------|
 | [`get_avatar`](./扩展api/扩展api-get_avatar.md) | get_avatar.go | `-` | 按虚拟用户 ID 反查 OpenID 并返回头像直链。 |
 | [`get_robot_share_link`](./扩展api/扩展api-get_robot_share_link.md) | get_robot_share_link.go | `-` | 获取机器人资料页分享链接。 |
-| [`put_interaction`](./扩展api/扩展api-put_interaction.md) | put_interaction.go | `q群 (Group Chat)` / `q頻 (QQ Guild)` | 回复按钮交互结果。 |
+| [`put_interaction`](./扩展api/扩展api-put_interaction.md) | put_interaction.go | `q群 (Group Chat)` | 回复按钮交互结果。 |
 | [`send_private_msg_wakeup`](./扩展api/扩展api-send_private_msg_wakeup.md) | send_private_msg_wakeup.go | `私聊 (C2C)` | 发送 `is_wakeup=true` 的 C2C 召回消息。 |
 | `send_private_msg_sse` | send_private_msg_sse.go | `私聊 (C2C)` | SSE 私聊消息。 |
 | `get_group_ban` | set_group_ban.go | `q群 (Group Chat)` | 兼容入口，处理逻辑等同 `set_group_ban`。 |
 | `get_group_whole_ban` | set_group_whole_ban.go | `q群 (Group Chat)` | 兼容入口，处理逻辑等同 `set_group_whole_ban`。 |
+| `set_group_add_request` | set_group_add_request.go | `q群 (Group Chat)` | 入群申请审批。与 `[CQ:set_group,action=add_request]` 共享实现底层。 |
 | `send_to_group` | send_group_msg.go | `q群 (Group Chat)` | `send_group_msg` 别名。 |
 | [`delete_group_msg`](./扩展api/扩展api-delete_group_msg.md) | delete_group_msg.go | `q群 (Group Chat)` | 撤回群内指定用户或 Bot 自身的消息；支持自动查找最后一条消息。 |
+| [`get_group_join_request_list`](./扩展api/扩展api-get_group_join_request_list.md) | get_group_join_request_list.go | `q群 (Group Chat)` | 拉取入群申请列表，`next_index` 分页；返回的 `group_id`/`user_id`/`flag` 可直接回传 `set_group_add_request` 审批。 |
+| [`get_group_bot_state`](./扩展api/扩展api-get_group_bot_state.md) | get_group_bot_state.go | `q群 (Group Chat)` | 获取机器人在群内状态（入群时间/可推送/角色）。 |
+| [`join_approval_strategy_create`](./扩展api/扩展api-join_approval_strategy.md) | join_approval_strategy.go | `-` | 创建入群自动审批策略（`group_openids`/`group_ids` 二选一）。 |
+| [`join_approval_strategy_list`](./扩展api/扩展api-join_approval_strategy.md) | join_approval_strategy.go | `-` | 查询策略列表（`cursor`/`limit` 分页）。 |
+| [`join_approval_strategy_update`](./扩展api/扩展api-join_approval_strategy.md) | join_approval_strategy.go | `-` | 修改策略（`strategy_id` + `is_enable`/`expire_at`/`remark`/`op`+关联群）。 |
+| [`join_approval_strategy_execute`](./扩展api/扩展api-join_approval_strategy.md) | join_approval_strategy.go | `-` | 执行策略全量扫描（异步约 10 分钟）。 |
+| [`join_approval_strategy_whitelist`](./扩展api/扩展api-join_approval_strategy.md) | join_approval_strategy.go | `-` | 修改策略白名单（`strategy_id` + `op` + `whitelist_users`）。 |
+| [`join_approval_strategy_delete`](./扩展api/扩展api-join_approval_strategy.md) | join_approval_strategy.go | `-` | 删除策略（`strategy_id`）。 |
 
 ## 消息事件扩展字段
 

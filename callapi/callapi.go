@@ -78,6 +78,23 @@ type ParamsContent struct {
 	UserID    interface{} `json:"user_id,omitempty"`    // 这里使用interface{}因为它可能是多种类型
 	Duration  int         `json:"duration,omitempty"`   // 可选的整数
 	Enable    bool        `json:"enable,omitempty"`     // 可选的布尔值
+	// set_group_add_request 入群申请审批
+	Approve              bool   `json:"approve,omitempty"`                 // 是否同意入群申请
+	Flag                 string `json:"flag,omitempty"`                    // 申请标识(join_request_id)
+	Reason               string `json:"reason,omitempty"`                  // 拒绝理由(扩展参数)
+	AddToMemberBlacklist bool   `json:"add_to_member_blacklist,omitempty"` // 是否同时拉黑(扩展参数)
+	// 群聊管理扩展 action 参数
+	NextIndex      int      `json:"next_index,omitempty"`      // 入群申请列表分页游标
+	Cursor         string   `json:"cursor,omitempty"`          // 策略列表分页游标
+	Limit          int      `json:"limit,omitempty"`           // 策略列表单页数量
+	StrategyID     string   `json:"strategy_id,omitempty"`     // 策略 ID
+	GroupOpenIDs   []string `json:"group_openids,omitempty"`   // 关联群 openid 列表
+	GroupIDs       []uint64 `json:"group_ids,omitempty"`       // 关联 QQ 群号列表
+	IsEnable       string   `json:"is_enable,omitempty"`       // 策略启用状态 on/off
+	ExpireAt       string   `json:"expire_at,omitempty"`       // 策略过期时间(RFC3339)
+	Remark         string   `json:"remark,omitempty"`          // 策略备注
+	Op             string   `json:"op,omitempty"`              // 白名单/关联群操作 add/del
+	WhitelistUsers []string `json:"whitelist_users,omitempty"` // 白名单 QQ 号码列表
 	// handle quick operation
 	Context      Context   `json:"context,omitempty"`       // context 字段
 	Operation    Operation `json:"operation,omitempty"`     // operation 字段

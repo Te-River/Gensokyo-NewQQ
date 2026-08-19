@@ -26,7 +26,7 @@ settings:
   text_intent:                                       # 请根据公域 私域来选择intent,错误的intent将连接失败
     # - "ReadyHandler"                               # 连接成功
     # - "ErrorNotifyHandler"                         # 连接关闭
-    # - "InteractionHandler"                         # 添加频道互动回应 卡片按钮data回调事件
+    # - "InteractionHandler"                         # 添加按钮互动回应 卡片按钮data回调事件
     # - "GroupATMessageEventHandler"                 # 群at信息
     # - "GroupMessageEventHandler"                   # 普通群消息（无需@机器人）
     # - "C2CMessageEventHandler"                     # 群私聊
@@ -36,6 +36,7 @@ settings:
     # - "C2CMsgReceiveHandler"                       # 用户开启(接收)C2C消息推送
     # - "GroupMemberAddEventHandler"                 # 群成员新增（非文档化事件）
     # - "GroupMemberRemoveEventHandler"              # 群成员移除（非文档化事件）
+    # - "GroupJoinRequestEventHandler"               # 入群申请事件（需群管理员身份）
   #转换类
   global_interaction_to_message : false              # 是否将按钮和表态回调转化为消息 仅在设置了按钮回调中的message时有效
   global_group_msg_rre_to_message : false            # 是否将用户开关机器人资料页的机器人推送开关 产生的事件转换为文本信息并发送给应用端.false将使用onebotv11的notice类型上报.
@@ -114,14 +115,14 @@ settings:
   remove_prefix : false             #是否忽略公域机器人指令前第一个/
   remove_at : false                 #是否忽略公域机器人指令前第一个[CQ:aq,qq=机器人] 场景(公域机器人,但插件未适配at开头)
   convert_other_at : false          #是否将消息中非机器人自身的<@OpenID>转成已有idmap映射; false时保留原文,避免假at创建映射
-  remove_bot_at_group : true        #因为群聊机器人不支持发at,开启本开关会自动隐藏群机器人发出的at(不影响频道场景)
+  remove_bot_at_group : true        #因为群聊机器人不支持发at,开启本开关会自动隐藏群机器人发出的at
   add_at_group : false              #自动在群聊指令前加上at,某些机器人写法特别,必须有at才反应时,请打开,默认请关闭(如果需要at,不需要at指令混杂,请优化代码适配群场景,群场景目前没有at概念)
 
   white_prefix_mode : false         #公域 过审用 指令白名单模式开关 如果审核严格 请开启并设置白名单指令 以白名单开头的指令会被通过,反之被拦截
   v_white_prefix_mode : true        #虚拟二级指令(虚拟前缀)的白名单,默认开启,有二级指令帮助的效果
   white_prefixs : [""]              #可设置多个 比如设置 机器人 测试 则只有信息以机器人 测试开头会相应 remove_prefix remove_at 需为true时生效
   white_bypass : []                 #格式[1,2,3],白名单不生效的群或用户(私聊时),用于设置自己的灰度沙箱群/灰度沙箱私聊,避免开发测试时反复开关白名单的不便,请勿用于生产环境.
-  white_enable : [true,true,true,true,true] #指令白名单生效范围,5个分别对应,频道公(ATMessageEventHandler),频道私(CreateMessageHandler),频道私聊,群,群私聊,改成false,这个范围就不生效指令白名单(使用场景:群全量,频道私域的机器人,或有私信资质的机器人)
+  white_enable : [true,true,true,true,true] #指令白名单生效范围,5个分别对应,群,群私聊,以及保留占位,改成false,这个范围就不生效指令白名单(使用场景:群全量,群私聊)
   white_bypass_reverse : false      #反转white_bypass的效果,可仅在white_bypass应用white_prefix_mode,场景:您的不同用户群,可以开放不同层次功能,便于您的运营和规化(测试/正式环境)
   No_White_Response : ""            #默认不兜底,强烈建议设置一个友善的兜底回复,告知审核机器人已无隐藏指令,如:你输入的指令不对哦,@机器人来获取可用指令
 
@@ -148,7 +149,7 @@ settings:
   #开发增强类
   develop_access_token_dir : ""     #开发者测试环境access_token自定义获取地址 默认留空 请留空忽略
   develop_bot_id : "1234"           #开发者环境需自行获取botid 填入 用户请不要设置这两行...开发者调试用
-  sandbox_mode : false              #默认false 如果你只希望沙箱频道使用,请改为true
+  sandbox_mode : false              #默认false 如果你只希望沙箱环境使用,请改为true
   dev_message_id : false            #在沙盒和测试环境使用无限制msg_id 仅沙盒有效,正式环境请关闭,内测结束后,tx侧未来会移除
   send_error : true                 #将报错用文本发出,避免机器人被审核报无响应
   save_error : false                #将保存保存在log文件夹,方便开发者定位发送错误.
@@ -200,7 +201,7 @@ settings:
   lazy_message_id : false           #false=message_id 条条准确对应 true=message_id 按时间范围随机对应(适合主动推送bot)前提,有足够多的活跃信息刷新id池
   ramdom_seq : false                #当多开gensokyo时,如果遇到群信息只能发出一条,请开启每个gsk的此项.(建议使用一个gsk连接多个应用)
   bot_forum_title : "机器人帖子"                      # 机器人发帖子回复默认标题 
-  AMsgRetryAsPMsg_Count : 30        #当主动信息发送失败时,自动转为后续的被动信息发送,需要开启Lazy message id,该配置项为所有群、频道的主动转被动消息队列最大长度,建议30-100,无上限
+  AMsgRetryAsPMsg_Count : 30        #当主动信息发送失败时,自动转为后续的被动信息发送,需要开启Lazy message id,该配置项为所有群的主动转被动消息队列最大长度,建议30-100,无上限
   send_delay : 300                  #单位 毫秒 默认300ms 可以视情况减少到100或者50
   enableChangeWord : false          #敏感词替换系统,具有IN和OUT两个文本维度,会在运行目录下释放txt文件,一行一个,格式为aaa####bbb,作用是将aaa替换为bbb,输入替换是对用户输入进行替换,输出则是替换机器人发出的文本信息.
   defaultChangeWord : "*"           #默认替换词,当开启
@@ -208,14 +209,14 @@ settings:
   #错误临时修复类
   fix_11300: false                  #修复11300报错,需要在develop_bot_id填入自己机器人的appid. 11300原因暂时未知,临时修复方案.
   http_only_bot : false             #这个配置项会自动配置,请不要修改,保持false.
-  do_not_replace_appid : false      #在频道内机器人尝试at自己回at不到,保持false.群内机器人有发送用户头像url的需求时,true(因为用户头像url包含了appid,如果false就会出错.)
+  do_not_replace_appid : false      #群内机器人有发送用户头像url的需求时,true(因为用户头像url包含了appid,如果false就会出错.)
   
   #内置指令类
   bind_prefix : "/bind"             #需设置   #增强配置项  master_id 可触发
   me_prefix : "/me"                 #需设置   #增强配置项  master_id 可触发
   status_prefix : "/gskstatus"      #运行状态查询指令; 设为 ""、/disabled 或 /disabled... 可禁用
   broadcast_prefix : "/gskbroadcast" #广播指令; 设为 ""、/disabled 或 /disabled... 可禁用
-  unlock_prefix : "/unlock"         #频道私信卡住了? gsk可以帮到你 在任意子频道发送unlock 你会收到来自机器人的频道私信
+  unlock_prefix : "/unlock"         #保留兼容 该功能已随频道剔除失效
   link_prefix : "/link"             #友情链接配置 配置custom_template_id后可用(https://www.yuque.com/km57bt/hlhnxg/tzbr84y59dbz6pib)
   auto_link : false                 #友情链接最高礼仪,机器人被添加到群内时发送友情链接.
   music_prefix : "点歌"             #[CQ:music,type=qq,id=123] 在消息文本组合qq音乐歌曲id,可以发送点歌,这是歌曲按钮第二个按钮的填充内容,应为你的机器人点歌插件的指令.

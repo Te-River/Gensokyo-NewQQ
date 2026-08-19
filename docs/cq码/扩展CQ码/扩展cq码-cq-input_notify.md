@@ -1,5 +1,7 @@
 # [CQ:input_notify]
 
+> 🧪 **测试插件**：[CQ-input_notify](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/CQ-input_notify) — 发送「输入测试」体验
+
 ## 用途
 
 `[CQ:input_notify]` 用于在单聊（C2C）消息发送前，先向用户展示"正在输入"的状态通知（`msg_type=6`）。适合需要等待后端处理较长时间的场景，给用户即时反馈。

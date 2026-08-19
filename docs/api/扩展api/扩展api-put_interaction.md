@@ -1,5 +1,7 @@
 # 处理按钮交互回调
 
+> 🧪 **测试插件**：[gsk-put_interaction](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/gsk-put_interaction) — 发送「交互测试」体验
+
 ## 说明
 
 用于回复按钮交互（Button Interaction），向 QQ API 返回交互结果。

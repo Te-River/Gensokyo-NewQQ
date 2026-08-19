@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"math/rand"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/hoshinonyaruko/gensokyo/config"
 	"github.com/hoshinonyaruko/gensokyo/idmap"
+	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/tencent-connect/botgo/dto"
 )
 
@@ -30,6 +32,7 @@ func startCleanupRoutine() {
 func cleanupGlobalMaps() {
 	cleanupSyncMap(&globalSyncMapMsgid)
 	cleanupSyncMap(&globalReverseMapMsgid)
+	cleanupSyncMap(&globalRefIdxMap)
 	cleanupMessageGroupStack(globalMessageGroupStack)
 	cleanupEchoMapping(globalEchoMapping)
 	cleanupInt64ToIntMapping(globalInt64ToIntMapping)
@@ -95,8 +98,10 @@ type StringToIntMappingSeq struct {
 
 // MessageGroupPair 用于存储 group 和 groupMessage
 type MessageGroupPair struct {
-	Group        string
-	GroupMessage *dto.MessageToCreate
+	Group         string
+	GroupMessage  *dto.MessageToCreate
+	EnqueueTime   time.Time // 入队时间，用于诊断补发延迟
+	CorrelationID string    // 关联标识，用于跨入队/补发边界的日志关联
 }
 
 // 定义全局栈的结构体
@@ -111,6 +116,8 @@ var (
 	globalReverseMapMsgid sync.Map // 用于存储反向键值对
 	cleanupTicker         *time.Ticker
 	onceMsgid             sync.Once
+	// globalRefIdxMap 存储 消息ID → REFIDX（引用消息索引）映射，供出站 [CQ:reply] 引用时使用
+	globalRefIdxMap sync.Map
 )
 
 // 初始化一个全局栈实例
@@ -239,8 +246,12 @@ func GetMapping(key int64) int {
 	return value.(int)
 }
 
-// AddMappingSeq 添加一个新的映射
+// AddMappingSeq 添加一个新的映射。
+// Deprecated: 新代码应使用 NextMappingSeq 或 CurrentAndIncrementMappingSeq，
+// 以避免 GetMappingSeq 和 AddMappingSeq 组合产生读-改-写竞态。
 func AddMappingSeq(key string, value int) {
+	globalStringToIntMappingSeq.mu.Lock()
+	defer globalStringToIntMappingSeq.mu.Unlock()
 	globalStringToIntMappingSeq.mapping.Store(key, value)
 }
 
@@ -257,34 +268,72 @@ func GetMappingSeq(key string) int {
 	return value.(int)
 }
 
-// IncrementMappingSeq 原子递增 seq 并返回递增后的值。
-// 多段回复快速调用时，GetMappingSeq+AddMappingSeq 两步模式存在读-改-写竞态，
-// 两段可能拿到相同 seq 导致 QQ 侧 40054005 去重。用互斥锁保护递增：
-// 多个 goroutine 并发调用时每段拿到独立递增的 seq，彻底消除竞态。
-func IncrementMappingSeq(key string) int {
+// nextMappingSeqLocked 读取当前值并原子推进到下一个值。
+// 调用方必须持有 globalStringToIntMappingSeq.mu。
+func nextMappingSeqLocked(key string) (current, next int) {
+	value, ok := globalStringToIntMappingSeq.mapping.Load(key)
+	if ok {
+		current = value.(int)
+	} else if config.GetRamDomSeq() {
+		rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+		current = rng.Intn(10000) + 1
+	}
+	next = current + 1
+	globalStringToIntMappingSeq.mapping.Store(key, next)
+	return current, next
+}
+
+// NextMappingSeq 原子递增 seq 并返回递增后的值。
+func NextMappingSeq(key string) int {
 	globalStringToIntMappingSeq.mu.Lock()
 	defer globalStringToIntMappingSeq.mu.Unlock()
-	old, ok := globalStringToIntMappingSeq.mapping.Load(key)
-	var newVal int
-	if !ok {
-		if config.GetRamDomSeq() {
-			rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-			newVal = rng.Intn(10000) + 1
-		} else {
-			newVal = 1
-		}
-	} else {
-		newVal = old.(int) + 1
+	_, next := nextMappingSeqLocked(key)
+	return next
+}
+
+// CurrentAndIncrementMappingSeq 原子读取当前 seq，并推进内部值。
+// 该接口用于兼容历史上“使用当前值、再写入下一个值”的调用路径。
+func CurrentAndIncrementMappingSeq(key string) int {
+	globalStringToIntMappingSeq.mu.Lock()
+	defer globalStringToIntMappingSeq.mu.Unlock()
+	current, _ := nextMappingSeqLocked(key)
+	return current
+}
+
+// IncrementMappingSeq 保留旧 API，行为等同于 NextMappingSeq。
+func IncrementMappingSeq(key string) int {
+	return NextMappingSeq(key)
+}
+
+// ssmCounter 用于生成 SSM 补发队列的唯一关联标识
+var ssmCounter uint64
+var ssmMu sync.Mutex
+
+// NextSSMCorrelationID 生成 SSM 补发队列的唯一关联标识
+func NextSSMCorrelationID(groupID string) string {
+	ssmMu.Lock()
+	ssmCounter++
+	c := ssmCounter
+	ssmMu.Unlock()
+	// groupID 可能为短字符串（如虚拟ID），长度不足8时取全部，避免切片越界
+	prefix := groupID
+	if len(groupID) > 8 {
+		prefix = groupID[:8]
 	}
-	globalStringToIntMappingSeq.mapping.Store(key, newVal)
-	return newVal
+	return fmt.Sprintf("ssm-%s-%d", prefix, c)
 }
 
 // PushGlobalStack 向全局栈中添加一个新的 MessageGroupPair
 func PushGlobalStack(pair MessageGroupPair) {
+	pair.EnqueueTime = time.Now()
+	if pair.CorrelationID == "" {
+		pair.CorrelationID = NextSSMCorrelationID(pair.Group)
+	}
 	globalMessageGroupStack.mu.Lock()
-	defer globalMessageGroupStack.mu.Unlock()
 	globalMessageGroupStack.stack = append(globalMessageGroupStack.stack, pair)
+	stackLen := len(globalMessageGroupStack.stack)
+	globalMessageGroupStack.mu.Unlock()
+	mylog.Printf("[SSM][%s] 已入队 group=%s 队列长度=%d", pair.CorrelationID, pair.Group, stackLen)
 }
 
 // PopGlobalStackMulti 从全局栈中取出指定数量的 MessageGroupPair，但不删除它们
@@ -358,6 +407,51 @@ func GetCacheIDFromMemoryByRowID(rowID string) (string, bool) {
 		return value.(string), true
 	}
 	return "", false
+}
+
+// StoreRefIdx 存储 消息ID → REFIDX（引用消息索引）映射
+func StoreRefIdx(msgID, refIDX string) {
+	if msgID == "" || refIDX == "" {
+		return
+	}
+	globalRefIdxMap.Store(msgID, refIDX)
+}
+
+// GetRefIdx 反查消息ID对应的 REFIDX，无则返回空串
+func GetRefIdx(msgID string) string {
+	if msgID == "" {
+		return ""
+	}
+	value, ok := globalRefIdxMap.Load(msgID)
+	if !ok {
+		return ""
+	}
+	s, _ := value.(string)
+	return s
+}
+
+// DeleteRefIdx 删除指定消息ID的 REFIDX 映射
+func DeleteRefIdx(msgID string) {
+	if msgID != "" {
+		globalRefIdxMap.Delete(msgID)
+	}
+}
+
+// StoreRefIdxFromScene 从入站消息事件的 message_scene.ext[] 提取 msg_idx=REFIDX_* 并存储
+// ext 元素为 key=value 格式，如 "msg_idx=REFIDX_xxx" / "ref_msg_idx=TMP_xxx" / "auth_token=xxx"
+func StoreRefIdxFromScene(msgID string, scene *dto.MessageScene) {
+	if msgID == "" || scene == nil {
+		return
+	}
+	for _, item := range scene.Ext {
+		if strings.HasPrefix(item, "msg_idx=") {
+			refIDX := strings.TrimPrefix(item, "msg_idx=")
+			if refIDX != "" {
+				StoreRefIdx(msgID, refIDX)
+			}
+			return
+		}
+	}
 }
 
 // StartCleanupRoutine 启动定时清理函数，每5分钟清空 globalSyncMapMsgid 和 globalReverseMapMsgid

@@ -82,13 +82,13 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 -  event_id 存储，支持被动消息
 -  消息事件新增 `to_me` 字段，标识是否 @ 了机器人
 -  多 WS 地址连接
--  q頻 (QQ Guild) 虚拟成 q群 事件、私信虚拟成 q頻 事件
 -  WebUI 管理界面
 -  指令黑白名单、URL 自动转换
 -  可自定义图片压缩/图床/OSS 服务（oss_type 统一选择，支持 11 种后端）
 -  `[CQ:file]` 文件上传（支持本地路径/HTTP/base64 三种方式）
 -  `send_private_msg_wakeup` C2C 互动召回消息
 -  `[CQ:active]` 主动消息标记，强制走主动推送通道
+-  `[CQ:wakeup,userid=xxx]` C2C 互动召回消息标记（在 send_private_msg 中指定目标用户）
 -  `[CQ:card]` 群聊图文卡片消息（msg_type=8）
 -  `[CQ:input_notify]` 单聊输入状态通知（msg_type=6）
 -  `[CQ:stream]` 单聊流式消息（打字机效果）
@@ -97,6 +97,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 -  支持文字、图片、语音、视频、Markdown 等多种消息类型
 -  主动信息失败自动转被动
 -  完善的重连机制
+-  分层架构基础设施（`internal/` 类型化消息/身份/出站/入站/媒体/队列/配置管线，双轨并存）
 
 ## 文档
 
@@ -121,6 +122,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 > - **[CQ:markdown]** Markdown 卡片消息
 > - **[CQ:member]** 群成员变动
 > - **[CQ:active,type=...,sub_type=...]** active 标记
+> - **[CQ:wakeup,userid=...]** C2C 互动召回消息标记
 > - **[CQ:file,file=...,file_name=...]** 文件上传
 > - **[CQ:card,title=...,desc=...,pic=...,url=...]** 群聊图文卡片消息
 > - **[CQ:input_notify,type=...,second=...]** 单聊输入状态通知
@@ -153,11 +155,13 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 | [CQ:avatar]    | [头像获取] |
 | [CQ:member]    | [q群成员变动] |
 | [CQ:active]    | [active 标记] |
+| [CQ:wakeup]    | [C2C 互动召回消息标记] |
 | [CQ:tts]       | [文本转语音]                      |
 | [CQ:file]      | [文件上传]                        |
 | [CQ:card]      | [群聊图文卡片消息]                  |
 | [CQ:input_notify] | [单聊输入状态通知]               |
 | [CQ:stream]      | [单聊流式消息]                    |
+| [CQ:set_group]  | [群管理动作统一码(禁言/全员禁言/入群审批/策略, 出站动作)] |
 
 
 </details>
@@ -188,19 +192,19 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 | /delete_msg              | [撤回信息]             |
 | /delete_group_msg        | [撤回QQ群用户或Bot消息] |
 | /set_group_kick          | [群 (Group Chat) 踢人] |
-| /set_group_ban | [群单人禁言] |
-| /set_group_whole_ban | [群全员禁言] |
+| /set_group_ban | [群单人禁言(禁言/解禁)] |
+| /set_group_whole_ban | [群全员禁言(开/关)] |
 | /set_group_admin         | [群设置管理员] |
 | /set_group_card          | [设置群名片] |
 | /set_group_name          | [设置群名称] |
 | /set_group_leave         | [退出群] |
 | /set_group_special_title | [设置群专属头衔] |
 | /set_friend_add_request  | [处理加好友请求]       |
-| /set_group_add_request   | [处理加群请求/邀请] |
+| /set_group_add_request   | [处理加群请求(真实审批)] |
 | /get_login_info | [获取登录号信息] |
 | /get_stranger_info | [获取陌生人信息] |
 | /get_friend_list | [获取好友列表] |
-| /get_group_info | [获取群聊信息] |
+| /get_group_info | [获取群聊信息(真实)] |
 | /get_group_list | [获取群列表] |
 | /get_group_member_info | [获取群成员信息] |
 | /get_group_member_list | [获取群成员列表] |
@@ -229,6 +233,14 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 | /get_group_files_by_folder  | [获取群子目录文件列表] |
 | /get_group_file_url         | [获取群文件资源链接]   |
 | /get_status | [获取状态] |
+| /get_group_join_request_list | [获取入群申请列表] |
+| /get_group_bot_state | [获取机器人群内状态] |
+| /join_approval_strategy_create | [创建入群自动审批策略] |
+| /join_approval_strategy_list | [查询入群自动审批策略列表] |
+| /join_approval_strategy_update | [修改入群自动审批策略] |
+| /join_approval_strategy_execute | [执行入群自动审批策略] |
+| /join_approval_strategy_whitelist | [修改策略白名单号码] |
+| /join_approval_strategy_delete | [删除入群自动审批策略] |
 
 
 </details>
@@ -298,6 +310,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 > - **GroupMsgReceiveHandler**（群推送开启）
 > - **GroupMemberAddEventHandler**（群成员新增）
 > - **GroupMemberRemoveEventHandler**（群成员移除）
+> - **GroupJoinRequestEventHandler**（入群申请）
 
 | 事件名称                   | 代表含义                         |
 | --------------------------- | ------------------------------- |
@@ -312,6 +325,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 | GroupMsgReceiveHandler     | [群聊请求开启推送]                 |
 | GroupMemberAddEventHandler | [群聊成员新增]                     |
 | GroupMemberRemoveEventHandler | [群聊成员移除]                  |
+| GroupJoinRequestEventHandler | [入群申请]                       |
 | C2CMsgRejectHandler        | [用户拒绝私聊 (C2C) 消息推送]      |
 | C2CMsgReceiveHandler       | [用户同意私聊 (C2C) 消息推送]      |
 
@@ -355,6 +369,7 @@ settings:
     # - "GroupDelRobotEventHandler"                  # 群聊机器人删除
     # - "GroupMemberAddEventHandler"                 # 群成员新增
     # - "GroupMemberRemoveEventHandler"              # 群成员移除
+    # - "GroupJoinRequestEventHandler"               # 入群申请事件（需群管理员身份）
 
   #── 消息转换 ────────────────────────────────────────
   hash_id: true                       # 使用 hash 生成虚拟 ID
@@ -460,7 +475,7 @@ settings:
 - [`QQ 机器人官方文档`](https://bot.q.qq.com/wiki/)：本项目许多处理均参考该文档
 - [`tencent-connect/botgo`](https://github.com/tencent-connect/botgo): 本项目引用了此项目并做了一些改动
 - [`ElainaCore/ElainaBot_v2`](https://github.com/ElainaCore/ElainaBot_v2)：本项目的图床服务部分基于其相关源代码修改
-
+- [`Te-River/Gensokyo-NewQQ-Test-plugins`](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins): 基于Nonebot2的测试插件
 
 ## ⭐ Star History
 

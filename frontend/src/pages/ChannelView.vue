@@ -42,6 +42,7 @@
 </template>
 <script setup lang="ts">
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { ref, reactive, computed, onMounted } from 'vue';
 import { api } from 'src/boot/axios';
 import ChannelList from 'src/components/ChannelList.vue';
@@ -96,7 +97,7 @@ async function fetchData(): Promise<void> {
 }
 
 // 更新pager以获取下一页
-const getNextPage = async (_lastItemId: string) => {
+const getNextPage = async () => {
   // 设置after为最后一个item的id，before清空
   pager.After = props.channelid;
   pager.Before = props.channelid;
@@ -105,7 +106,7 @@ const getNextPage = async (_lastItemId: string) => {
 };
 
 // 更新pager以获取上一页
-const getPreviousPage = async (_firstItemId: string) => {
+const getPreviousPage = async () => {
   // 设置before为第一个item的id，after清空
   pager.Before = props.channelid;
   pager.After = props.channelid;
@@ -117,10 +118,7 @@ const getPreviousPage = async (_firstItemId: string) => {
 const nextPage = async () => {
   if (currentPage.value < totalPages.value) {
     currentPage.value++;
-    const lastItemId = String(
-      channelList.value[channelList.value.length - 1].id
-    );
-    await getNextPage(lastItemId).catch((e) => console.error(e));
+    await getNextPage().catch((e) => console.error(e));
   }
 };
 
@@ -144,8 +142,7 @@ const handleSelectAll = (selectedItemIds: string[]) => {
 const previousPage = async () => {
   if (currentPage.value > 1) {
     currentPage.value--;
-    const firstItemId = String(channelList.value[0].id);
-    await getPreviousPage(firstItemId).catch((e) => console.error(e));
+    await getPreviousPage().catch((e) => console.error(e));
   }
 };
 

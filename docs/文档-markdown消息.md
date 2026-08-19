@@ -1,5 +1,7 @@
 # Markdown 消息
 
+> 🧪 **测试插件**：[CQ-markdown](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/CQ-markdown)（发送「md测试」）、[gsk-md_pic](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/gsk-md_pic)（本地图片转 Markdown，发送「pic」）体验
+
 Gensokyo 支持 QQ 官方 API 的 Markdown 卡片消息（`msg_type=2`），是对 OneBot V11 的扩展。
 
 ## 发送方式

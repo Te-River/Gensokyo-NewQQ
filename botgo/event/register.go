@@ -29,6 +29,9 @@ var DefaultHandlers struct {
 	// [新增] 群成员变动事件
 	GroupMemberAdd    GroupMemberAddEventHandler
 	GroupMemberRemove GroupMemberRemoveEventHandler
+
+	// [新增] 入群申请事件
+	GroupJoinRequest GroupJoinRequestEventHandler
 }
 
 // ReadyHandler 可以处理 ws 的 ready 事件
@@ -89,6 +92,9 @@ type GroupMemberAddEventHandler func(event *dto.WSPayload, data *dto.GroupMember
 // GroupMemberRemoveEventHandler 群成员移除事件 handler (GROUP_MEMBER_REMOVE)
 type GroupMemberRemoveEventHandler func(event *dto.WSPayload, data *dto.GroupMemberEvent) error
 
+// GroupJoinRequestEventHandler 入群申请事件 handler (GROUP_JOIN_REQUEST)
+type GroupJoinRequestEventHandler func(event *dto.WSPayload, data *dto.GroupJoinRequestEvent) error
+
 // *******************************************************************
 
 // RegisterHandlers 注册事件回调，并返回 intent 用于 websocket 的鉴权
@@ -129,6 +135,9 @@ func RegisterHandlers(handlers ...interface{}) dto.Intent {
 		case GroupMemberRemoveEventHandler:
 			DefaultHandlers.GroupMemberRemove = handle
 			i = i | dto.EventToIntent(dto.EventGroupMemberRemove)
+		case GroupJoinRequestEventHandler:
+			DefaultHandlers.GroupJoinRequest = handle
+			i = i | dto.EventToIntent(dto.EventGroupJoinRequest)
 		default:
 		}
 	}

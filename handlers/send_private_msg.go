@@ -14,6 +14,7 @@ import (
   "github.com/hoshinonyaruko/gensokyo/config"
   "github.com/hoshinonyaruko/gensokyo/echo"
   "github.com/hoshinonyaruko/gensokyo/idmap"
+  "github.com/hoshinonyaruko/gensokyo/internal/domain/identity"
   "github.com/hoshinonyaruko/gensokyo/mylog"
   "github.com/tencent-connect/botgo/dto"
   "github.com/tencent-connect/botgo/dto/keyboard"
@@ -83,7 +84,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 		}
 	}
 
-	if message.Params.UserID != nil && len(message.Params.UserID.(string)) != 32 {
+	if message.Params.UserID != nil && !identity.IsOpenID(message.Params.UserID.(string)) {
 		if msgType == "" && message.Params.UserID != nil && checkZeroUserID(message.Params.UserID) {
 			msgType = GetMessageTypeByUserid(config.GetAppIDStr(), message.Params.UserID)
 		}
@@ -108,7 +109,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 	var idInt64 int64
 	var err error
 
-	if message.Params.UserID != nil && len(message.Params.UserID.(string)) == 32 {
+	if message.Params.UserID != nil && identity.IsOpenID(message.Params.UserID.(string)) {
 		idInt64, err = idmap.GenerateRowID(message.Params.UserID.(string), 9)
 		// 临时的
 		msgType = "group_private"
@@ -126,8 +127,8 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 		if err != nil {
 			mylog.Printf("错误：无法转换 ID %v\n", err)
 		} else {
-			// 递归3次
-			echo.AddMapping(idInt64, 4)
+			// 递归1次（枚举剩余消息类型，当前仅 group）
+			echo.AddMapping(idInt64, 2)
 			// 递归调用handleSendPrivateMsg，使用设置的消息类型
 			echo.AddMsgType(config.GetAppIDStr(), idInt64, "group_private")
 			HandleSendPrivateMsg(client, api, apiv2, messageCopy)
@@ -143,7 +144,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 	case "group_private", "group":
 		//私聊信息
 		var UserID string
-		if len(message.Params.UserID.(string)) != 32 {
+		if !identity.IsOpenID(message.Params.UserID.(string)) {
 			if config.GetIdmapPro() {
 				//还原真实的userid
 				//mylog.Printf("group_private:%v", message.Params.UserID.(string))
@@ -167,6 +168,15 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 
 		// 解析消息内容
 		messageText, foundItems := parseMessageContent(message.Params, message, client, api, apiv2)
+
+		// [CQ:wakeup,userid=xxx] 标记：改为向指定用户发送 C2C 召回消息
+		if wakeupIDs, ok := foundItems["wakeup"]; ok && len(wakeupIDs) > 0 {
+			targetUserID := wakeupIDs[0]
+			mylog.Printf("[CQ:wakeup] 目标用户: %s，转为召回消息发送", targetUserID)
+			// 覆盖 user_id 为目标用户，交由召回 handler 统一处理（含虚拟ID→OpenID转换）
+			message.Params.UserID = targetUserID
+			return HandleSendPrivateMsgWakeup(client, api, apiv2, message)
+		}
 
 		// 使用 echo 获取消息ID
 		var messageID string
@@ -192,7 +202,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 		if messageID == "2000" {
 			messageID = ""
 			mylog.Println("通过lazymsgid发送群私聊主动信息,每月可发送1次")
-			if len(message.Params.UserID.(string)) != 32 {
+			if !identity.IsOpenID(message.Params.UserID.(string)) {
 				eventID = GetEventIDByUseridOrGroupid(config.GetAppIDStr(), message.Params.UserID)
 			} else {
 				eventID = GetEventIDByUseridOrGroupidv2(config.GetAppIDStr(), message.Params.UserID)
@@ -447,6 +457,26 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			         groupMessage.Content = resolvePlainTextAtMentions(groupMessage.Content)
 			        }
 
+			        // 没有内嵌 keyboard 时，处理独立 [CQ:keyboard] → 附加内嵌键盘（可与 markdown 共存）
+			        if groupMessage.Keyboard == nil {
+			         if kbItems, ok := foundItems["keyboard"]; ok && len(kbItems) > 0 {
+			          kb, err := parseKeyboardData([]byte(kbItems[0]))
+			          if err != nil || kb == nil {
+			           mylog.Printf("[CQ:keyboard] 解析键盘数据失败: %v", err)
+			          } else {
+			           // 替换 keyboard 中 __USER_ID__ 占位符为实际用户 OpenID
+			           userOpenID := idmap.ResolveOriginalID(UserID)
+			           ResolvePlaceholderUserIDs(kb, userOpenID)
+			           // 处理 keyboard 按钮中的本地图片路径
+			           ResolveKeyboardImages(kb, apiv2)
+			           groupMessage.Keyboard = kb
+			           // 从 foundItems 中移除 keyboard，避免下方循环重复发送
+			           delete(foundItems, "keyboard")
+			           mylog.Printf("[CQ:keyboard] 私聊消息附加内嵌键盘")
+			          }
+			         }
+			        }
+
 			        // 处理 [CQ:reply,id=数字] → message_reference + msg_id（私聊场景校验避免越权）
 			    if replyIDs, ok := foundItems["reply_msg_id"]; ok && len(replyIDs) > 0 && messageText != "" {
 			        applyPrivateReply(groupMessage, replyIDs, UserID)
@@ -457,7 +487,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 				mylog.Printf("发送文本私聊信息失败: %v", err)
 				mylog.Printf("%s", FormatQQError(err))
 				// 22009: 主动消息超过频控限制，记录日志 (被动回复场景无需补偿)
-				if strings.Contains(err.Error(), `"code":22009`) {
+    if IsQQError(err, 22009) {
 					mylog.Printf("私聊主动消息受限(code:22009)，消息被丢弃: %s", messageText)
 					if config.GetSaveError() {
 						mylog.ErrLogToFile("type", "PostC2CMessage-22009")
@@ -468,7 +498,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 					return "", nil
 				}
 				// 请求参数 event_id 无效，清空后重试一次
-				if strings.Contains(err.Error(), `"code":40034025`) {
+    if IsQQError(err, 40034025) {
 					groupMessage.EventID = ""
 					resp, err = apiv2.PostC2CMessage(context.TODO(), UserID, groupMessage)
 					if err != nil {
@@ -477,7 +507,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 					}
 				}
 				// 超时重试
-				if strings.Contains(err.Error(), "context deadline exceeded") {
+    if IsDeliveryTimeout(err) {
 					resp, err = postC2CMessageWithRetry(apiv2, UserID, groupMessage)
 					if err != nil {
 						return "", nil
@@ -522,6 +552,24 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 						        applyPrivateReply(groupMessage, replyIDs, UserID)
 						       }
 
+						       // 将独立 [CQ:keyboard] 合并到 markdown 消息中（markdown JSON 未内嵌 keyboard 时）
+						       if groupMessage.Keyboard == nil {
+						        if kbItems, ok := foundItems["keyboard"]; ok && len(kbItems) > 0 {
+						         kb, err := parseKeyboardData([]byte(kbItems[0]))
+						         if err != nil || kb == nil {
+						          mylog.Printf("[CQ:keyboard] 解析键盘数据失败: %v", err)
+						         } else {
+						          // 替换 keyboard 中 __USER_ID__ 占位符为实际用户 OpenID
+						          userOpenID := idmap.ResolveOriginalID(UserID)
+						          ResolvePlaceholderUserIDs(kb, userOpenID)
+						          ResolveKeyboardImages(kb, apiv2)
+						          groupMessage.Keyboard = kb
+						          delete(foundItems, "keyboard")
+						          mylog.Printf("[CQ:keyboard] 私聊 markdown 消息附加内嵌键盘")
+						         }
+						        }
+						       }
+
 						       // 首次发送私聊 MessageToCreate
 						resp, err = apiv2.PostC2CMessage(context.TODO(), UserID, groupMessage)
 						if err != nil {
@@ -535,7 +583,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 							}
 						}
 
-						if err != nil && strings.Contains(err.Error(), `"code":22009`) {
+      if IsQQError(err, 22009) {
 						 mylog.Printf("私聊主动消息受限(code:22009)，消息被丢弃")
 						 if config.GetSaveError() {
 						  mylog.ErrLogToFile("type", "PostC2CMessage-22009")
@@ -543,7 +591,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 						  mylog.ErrLogToFile("error", err.Error())
 						 }
 
-						} else if err != nil && strings.Contains(err.Error(), `"code":40034025`) {
+      } else if IsQQError(err, 40034025) {
 							// 请求参数 event_id 无效，清空后重试一次
 							groupMessage.EventID = ""
 							//重新为err赋值
@@ -558,7 +606,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 								}
 							}
 
-						} else if err != nil && strings.Contains(err.Error(), "context deadline exceeded") {
+      } else if IsDeliveryTimeout(err) {
 							// 仅对超时做有限次重试
 							resp, err = postC2CMessageWithRetry(apiv2, UserID, groupMessage)
 						}
@@ -583,7 +631,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 				}
 
 				// 22009: 主动消息超过频控限制
-				if err != nil && strings.Contains(err.Error(), `"code":22009`) {
+    if IsQQError(err, 22009) {
 					mylog.Printf("私聊富媒体主动消息受限(code:22009): %s", key)
 					if config.GetSaveError() {
 						mylog.ErrLogToFile("type", "PostC2CMessage-22009")
@@ -593,7 +641,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 				}
 
 				// 仅对超时做重试，使用原始富媒体消息，不再构造错误文本消息
-				if err != nil && (strings.Contains(err.Error(), "context deadline exceeded") || strings.Contains(err.Error(), "富媒体文件上传超时")) {
+    if IsDeliveryTimeout(err) {
 					message_return, err = postC2CRichMediaMessageWithRetry(apiv2, UserID, richMediaMessage)
 				}
 
@@ -688,7 +736,7 @@ func applyPrivateReply(groupMessage *dto.MessageToCreate, replyIDs []string, pri
 	parts := strings.Split(realReplyID, " ")
 	refID := parts[len(parts)-1]
 	groupMessage.MessageReference = &dto.MessageReference{
-		MessageID:             refID,
+		MessageID:             ResolveReplyRefID(refID),
 		IgnoreGetMessageError: false,
 	}
 	groupMessage.MsgID = refID
@@ -792,7 +840,7 @@ func postC2CRichMediaMessageWithRetry(
 	for i := 0; i < retryCount; i++ {
 		resp, err = apiv2.PostC2CMessage(context.TODO(), userID, richMediaMessage)
 
-		if err != nil && strings.Contains(err.Error(), "context deadline exceeded") {
+		if err != nil && defaultRetryPolicy.ShouldRetry(err, i) {
 			// 仅对超时做重试
 			mylog.Printf("私聊富媒体超时重试第 %d 次: %v", i+1, err)
 			if config.GetSaveError() {
@@ -800,7 +848,7 @@ func postC2CRichMediaMessageWithRetry(
 				mylog.ErrInterfaceToFile("request", richMediaMessage)
 				mylog.ErrLogToFile("error", err.Error())
 			}
-			time.Sleep(1 * time.Second) // 重试间隔 1 秒
+			time.Sleep(defaultRetryPolicy.Backoff(i + 1))
 			continue
 		}
 
@@ -827,19 +875,18 @@ func postC2CMessageWithRetry(apiv2 openapi.OpenAPI, userID string, msg *dto.Mess
 	retryCount := 3 // 设置最大重试次数为 3
 	for i := 0; i < retryCount; i++ {
 		// 递增 msgseq（沿用你群聊那套映射逻辑）
-		msgseq := echo.GetMappingSeq(msg.MsgID)
-		echo.AddMappingSeq(msg.MsgID, msgseq+1)
-		msg.MsgSeq = msgseq + 1
+		msgseq := echo.NextMappingSeq(msg.MsgID)
+		msg.MsgSeq = msgseq
 
 		resp, err = apiv2.PostC2CMessage(context.TODO(), userID, msg)
-		if err != nil && (strings.Contains(err.Error(), "context deadline exceeded") || strings.Contains(err.Error(), "富媒体文件上传超时")) {
+		if err != nil && defaultRetryPolicy.ShouldRetry(err, i) {
 			mylog.Printf("私聊超时重试第 %d 次: %v", i+1, err)
 			if config.GetSaveError() {
 				mylog.ErrLogToFile("type", "PostC2CMessage-context-deadline-exceeded-retry-"+strconv.Itoa(i+1))
 				mylog.ErrInterfaceToFile("request", msg)
 				mylog.ErrLogToFile("error", err.Error())
 			}
-			time.Sleep(3 * time.Second) // 重试间隔 3 秒
+			time.Sleep(defaultRetryPolicy.Backoff(i + 1))
 			continue
 		} else {
 			// 成功 或 非超时错误，统一在这里收尾

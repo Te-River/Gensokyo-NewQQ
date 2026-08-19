@@ -1,5 +1,7 @@
 # [CQ:remove]
 
+> 🧪 **测试插件**：[CQ-remove](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/CQ-remove) — 发送「撤回测试」体验
+
 ## 用途
 
 `[CQ:remove]` 用于在出站 `send_group_msg` 消息中撤回指定群消息。必须同时提供 `user_id` 和 `msg_id`，缺少任一参数时该 CQ 码不做任何处理。
@@ -39,7 +41,7 @@
 
 - 仅支持出站（outbound）场景，通过 `send_group_msg` 发送。没有入站 `[CQ:remove]`。
 - 需要同时提供 `user_id` 和 `msg_id`。不支持仅提供 `user_id` 自动撤回最新一条消息（该功能由 `delete_group_msg` API action 提供）。
-- 范围仅限 `q群 (Group Chat)`，频道消息撤回请使用 `delete_msg` API action。
+- 范围仅限 `q群 (Group Chat)`。
 
 ## nonebot2 示例
 

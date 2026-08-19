@@ -1,5 +1,7 @@
 # [CQ:member]
 
+> 🧪 **测试插件**：[gsk-welcome](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/gsk-welcome)（入群欢迎，自动触发）体验
+
 ## 用途
 
 `[CQ:member]` 用于 q群成员入群/退群事件和后续回复路由。`group_id`、`user_id` 都是 Gensokyo 映射后的虚拟 ID。

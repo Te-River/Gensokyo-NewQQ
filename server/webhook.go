@@ -74,11 +74,16 @@ func InitPrivateKey(botSecret string) {
 
 func CreateHandleValidationSafe(wh *WebhookHandler) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// 读取 HTTP Body
+		// 在签名校验和异步入队前限制请求体，避免恶意 body 直接占满内存。
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, MaxWebhookBodyBytes)
 		httpBody, err := io.ReadAll(c.Request.Body)
 		if err != nil {
-			log.Println("Failed to read HTTP body:", err)
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read request body"})
+			if _, ok := err.(*http.MaxBytesError); ok {
+				c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "Request body too large"})
+			} else {
+				log.Println("Failed to read HTTP body:", err)
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read request body"})
+			}
 			return
 		}
 
@@ -86,7 +91,7 @@ func CreateHandleValidationSafe(wh *WebhookHandler) gin.HandlerFunc {
 		c.Request.Body = io.NopCloser(bytes.NewReader(httpBody))
 
 		// 签名校验
-		if err := validateSignature(c.Request, publicKey); err != nil {
+		if err := validateSignatureBody(c.Request, publicKey, httpBody); err != nil {
 			log.Printf("Signature validation failed: %v", err)
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid signature"})
 			return
@@ -143,6 +148,18 @@ func CreateHandleValidationSafe(wh *WebhookHandler) gin.HandlerFunc {
 
 // 签名验证逻辑
 func validateSignature(req *http.Request, publicKey ed25519.PublicKey) error {
+	body, err := io.ReadAll(io.LimitReader(req.Body, MaxWebhookBodyBytes+1))
+	if err != nil {
+		return errors.New("failed to read HTTP body")
+	}
+	if int64(len(body)) > MaxWebhookBodyBytes {
+		return errors.New("request body too large")
+	}
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	return validateSignatureBody(req, publicKey, body)
+}
+
+func validateSignatureBody(req *http.Request, publicKey ed25519.PublicKey, body []byte) error {
 	// 获取 X-Signature-Ed25519 Header
 	signature := req.Header.Get("X-Signature-Ed25519")
 	if signature == "" {
@@ -163,13 +180,6 @@ func validateSignature(req *http.Request, publicKey ed25519.PublicKey) error {
 	if timestamp == "" {
 		return errors.New("missing X-Signature-Timestamp header")
 	}
-
-	// 读取 HTTP Body
-	body, err := io.ReadAll(req.Body)
-	if err != nil {
-		return errors.New("failed to read HTTP body")
-	}
-	req.Body = io.NopCloser(bytes.NewReader(body)) // 恢复 Body 以供后续使用
 
 	// 组合签名体: timestamp + body
 	var msg bytes.Buffer

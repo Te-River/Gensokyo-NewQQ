@@ -7,7 +7,6 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"mime/multipart"
 	"net/http"
 	"strings"
@@ -47,12 +46,13 @@ func tryQQChannel(data []byte, filename string) (string, error) {
 	q.Add("msg_id", "1")
 	req.URL.RawQuery = q.Encode()
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := providerHTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("上传请求失败: %w", err)
 	}
-	defer resp.Body.Close()
-	io.ReadAll(resp.Body)
+	if _, readErr := readClose(resp); readErr != nil {
+		return "", fmt.Errorf("读取 QQ 频道响应失败: %w", readErr)
+	}
 
 	md5hash := md5.Sum(data)
 	md5str := strings.ToUpper(hex.EncodeToString(md5hash[:]))

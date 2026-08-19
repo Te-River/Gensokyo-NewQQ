@@ -100,11 +100,21 @@ func (sm *ShardManager) newConnect(session dto.Session, shardID uint32) {
 			currentSession.ID = ""
 			currentSession.LastSeq = 0
 		}
-		// 一些错误不能够鉴权，比如机器人被封禁，这里就直接退出了
+		// 一些错误不能够鉴权，比如机器人被封禁、或连续鉴权失败（token/密钥配置错误）
 		if manager.CanNotIdentify(err) {
-			msg := fmt.Sprintf("can not identify because server return %+v, so process exit", err)
+			// 未达整轮重试上限时，清零连续失败计数并将 session 放回队列，自动从头整轮重试
+			// （重新连接 → 重新鉴权），覆盖服务器停电重启等瞬时抖动；彻底失败达上限后才真正停止
+			if currentSession.AuthRetryCount < manager.MaxAuthRetryCount {
+				currentSession.AuthRetryCount++
+				currentSession.AuthFailCount = 0
+				log.Errorf("鉴权失败已触发自动整轮重试(%d/%d): %v", currentSession.AuthRetryCount, manager.MaxAuthRetryCount, err)
+				sm.SessionChans[shardID] <- *currentSession // Reconnect
+				return
+			}
+			msg := fmt.Sprintf("无法通过QQ网关鉴权, 可能原因: config.yml中appid/client_secret/token配置错误, 或机器人被封禁/下架: %+v, 已重试%d轮仍未成功, 停止重连, 请检查配置后重启", err, currentSession.AuthRetryCount)
 			log.Errorf(msg)
-			panic(msg) // 当机器人被下架，或者封禁，将不能再连接，所以 panic
+			// 不再把 session 放回队列，终止无限重连
+			return
 		}
 		// 将 session 放到 session chan 中，用于启动新的连接，当前连接退出
 		sm.SessionChans[shardID] <- *currentSession // Reconnect

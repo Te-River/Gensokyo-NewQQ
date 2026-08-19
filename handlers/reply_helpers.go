@@ -8,11 +8,22 @@ import (
 	"os"
 	"time"
 
+	"github.com/hoshinonyaruko/gensokyo/echo"
 	"github.com/hoshinonyaruko/gensokyo/images"
 
 	"github.com/tencent-connect/botgo/dto"
 	"github.com/tencent-connect/botgo/openapi"
 )
+
+// ResolveReplyRefID 解析 [CQ:reply] 引用的真实消息ID：若该消息关联了 REFIDX（引用非机器人消息时
+// QQ 官方要求使用 REFIDX 索引），则返回 REFIDX，否则回退普通消息ID。
+// 该返回值用于 MessageReference.MessageID；MsgID 字段应继续使用普通消息ID（被动回复语义）。
+func ResolveReplyRefID(refID string) string {
+	if refIdx := echo.GetRefIdx(refID); refIdx != "" {
+		return refIdx
+	}
+	return refID
+}
 
 // GenerateReplyMessage 根据消息内容生成回复消息对象
 func GenerateReplyMessage(id string, foundItems map[string][]string, messageText string, msgseq int, api2 openapi.OpenAPI) (*dto.MessageToCreate, bool) {
@@ -111,6 +122,8 @@ func GenerateReplyMessage(id string, foundItems map[string][]string, messageText
 
 // downloadImageAndConvertToBase64 下载图片并转换为 base64 编码字符串
 func downloadImageAndConvertToBase64(url string) (string, error) {
+	const maxReplyImageBytes int64 = 16 << 20
+
 	// SSRF 校验：禁止访问私有地址、回环地址、链路本地地址
 	if isPrivateOrLoopback(url) {
 		return "", fmt.Errorf("SSRF 阻止: 目标地址为私有地址: %s", url)
@@ -127,11 +140,20 @@ func downloadImageAndConvertToBase64(url string) (string, error) {
 		return "", err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return "", fmt.Errorf("图片下载返回 HTTP %d", resp.StatusCode)
+	}
+	if resp.ContentLength > maxReplyImageBytes {
+		return "", fmt.Errorf("图片响应超过 %d 字节", maxReplyImageBytes)
+	}
 
-	// 读取响应的内容
-	data, err := io.ReadAll(resp.Body)
+	// 限制响应体，避免远端响应导致无界内存增长。
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxReplyImageBytes+1))
 	if err != nil {
 		return "", err
+	}
+	if int64(len(data)) > maxReplyImageBytes {
+		return "", fmt.Errorf("图片响应超过 %d 字节", maxReplyImageBytes)
 	}
 
 	// 将图片数据转换为 base64 编码

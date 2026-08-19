@@ -9,6 +9,7 @@ import (
 	"github.com/hoshinonyaruko/gensokyo/config"
 	"github.com/hoshinonyaruko/gensokyo/echo"
 	"github.com/hoshinonyaruko/gensokyo/idmap"
+	"github.com/hoshinonyaruko/gensokyo/internal/domain/identity"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/tencent-connect/botgo/openapi"
 )
@@ -44,7 +45,7 @@ func DeleteMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI
 	//撤回群信息
 	if message.Params.GroupID != nil && message.Params.GroupID != "" {
 		// 判断是否是原始id
-		if len(message.Params.GroupID.(string)) != 32 {
+		if !identity.IsOpenID(message.Params.GroupID.(string)) {
 			var originalGroupID string
 			originalGroupID, err := idmap.RetrieveRowByIDv2(message.Params.GroupID.(string))
 			if err != nil {
