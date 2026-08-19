@@ -169,6 +169,15 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 		// 解析消息内容
 		messageText, foundItems := parseMessageContent(message.Params, message, client, api, apiv2)
 
+		// [CQ:wakeup,userid=xxx] 标记：改为向指定用户发送 C2C 召回消息
+		if wakeupIDs, ok := foundItems["wakeup"]; ok && len(wakeupIDs) > 0 {
+			targetUserID := wakeupIDs[0]
+			mylog.Printf("[CQ:wakeup] 目标用户: %s，转为召回消息发送", targetUserID)
+			// 覆盖 user_id 为目标用户，交由召回 handler 统一处理（含虚拟ID→OpenID转换）
+			message.Params.UserID = targetUserID
+			return HandleSendPrivateMsgWakeup(client, api, apiv2, message)
+		}
+
 		// 使用 echo 获取消息ID
 		var messageID string
 		// EventID

@@ -769,6 +769,15 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 				}
 				// [CQ:active] 不在 messageText 中留痕
 
+			case "wakeup":
+				dataMap, ok := segmentMap["data"].(map[string]interface{})
+				if ok && dataMap != nil {
+					if wakeupUserID, ok := dataMap["userid"].(string); ok && wakeupUserID != "" {
+						foundItems["wakeup"] = append(foundItems["wakeup"], wakeupUserID)
+					}
+				}
+				// [CQ:wakeup] 不在 messageText 中留痕
+
 			case "avatar":
 				qqNumber, _ := segmentMap["data"].(map[string]interface{})["qq"].(string)
 				var avatarCQCode string
@@ -1124,6 +1133,15 @@ func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.Ac
 		    if replyID != "" {
 		     foundItems["reply_msg_id"] = append(foundItems["reply_msg_id"], replyID)
 		    }
+
+		   case "wakeup":
+		    dataMap, _ := message["data"].(map[string]interface{})
+		    if dataMap != nil {
+		     if wakeupUserID, ok := dataMap["userid"].(string); ok && wakeupUserID != "" {
+		      foundItems["wakeup"] = append(foundItems["wakeup"], wakeupUserID)
+		     }
+		    }
+		    // [CQ:wakeup] 不在 messageText 中留痕
 
 		   case "avatar":
 		    qqNumber, _ := message["data"].(map[string]interface{})["qq"].(string)

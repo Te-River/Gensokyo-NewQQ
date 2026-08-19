@@ -77,6 +77,16 @@ func TestParseMessageContentFoundItems(t *testing.T) {
 			wantKeys: map[string]int{"card": 1, "input_notify": 1, "stream": 1, "active_type": 1, "active_sub_type": 1},
 		},
 		{
+			name: "wakeup 段提取 userid",
+			message: []interface{}{
+				seg("wakeup", map[string]interface{}{"userid": "0123456789abcdef0123456789abcdef"}),
+				seg("text", map[string]interface{}{"text": "唤醒消息"}),
+			},
+			wantText:   "唤醒消息",
+			wantKeys:   map[string]int{"wakeup": 1},
+			wantValues: map[string][]string{"wakeup": {"0123456789abcdef0123456789abcdef"}},
+		},
+		{
 			name: "markdown 段 data 为 map 时 base64 编码",
 			message: []interface{}{
 				seg("markdown", map[string]interface{}{"data": map[string]interface{}{"content": "hello"}}),
@@ -152,6 +162,16 @@ func TestParseMessageContentFoundItems(t *testing.T) {
 				"data": map[string]interface{}{"type": "add", "group_id": "123", "user_id": "456"},
 			},
 			wantText: "[CQ:member,type=add,group_id=123,user_id=456]",
+		},
+		{
+			name: "wakeup 段提取 userid（TRSS map 路径）",
+			message: map[string]interface{}{
+				"type": "wakeup",
+				"data": map[string]interface{}{"userid": "0123456789abcdef0123456789abcdef"},
+			},
+			wantText:   "",
+			wantKeys:   map[string]int{"wakeup": 1},
+			wantValues: map[string][]string{"wakeup": {"0123456789abcdef0123456789abcdef"}},
 		},
 	}
 

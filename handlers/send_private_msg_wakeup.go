@@ -172,8 +172,8 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 
 	// --- 场景 C: 遍历 foundItems (核心复刻部分) ---
 	for key, urls := range foundItems {
-		// [CQ:active] 已被消费，跳过
-		if key == "active" || key == "active_type" || key == "active_sub_type" {
+		// [CQ:active] / [CQ:wakeup] 已被消费，跳过
+		if key == "active" || key == "active_type" || key == "active_sub_type" || key == "wakeup" {
 			continue
 		}
 		for _, url := range urls {
@@ -271,10 +271,10 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 		}
 	}
 
-	// 如果所有场景都跳过了（如纯 [CQ:active] 无实际内容），至少发送唤醒请求
+	// 如果所有场景都跳过了（如纯 [CQ:active]/[CQ:wakeup] 无实际内容），至少发送唤醒请求
 	hasRealContent := false
 	for k := range foundItems {
-		if k != "active" && k != "active_type" && k != "active_sub_type" {
+		if k != "active" && k != "active_type" && k != "active_sub_type" && k != "wakeup" {
 			hasRealContent = true
 			break
 		}
