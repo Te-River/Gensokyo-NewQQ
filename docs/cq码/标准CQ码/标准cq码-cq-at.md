@@ -1,5 +1,7 @@
 # [CQ:at]
 
+> 🧪 **测试插件**：[CQ-at](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/CQ-at)（发送「at检测」）、[CQ-normal_at](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/CQ-normal_at)（发送「普通at」）体验
+
 ## 用途
 
 `[CQ:at]` 用于在群聊中 @ 提及某个用户或机器人。在 QQ Bot API 中，@ 行为通过 `<@OpenID>` 语法实现，Gensokyo 负责在虚拟 ID 和真实 OpenID 之间进行转换。

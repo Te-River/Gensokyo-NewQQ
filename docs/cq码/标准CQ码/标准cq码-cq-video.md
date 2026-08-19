@@ -1,5 +1,7 @@
 # [CQ:video]
 
+> 🧪 **测试插件**：[CQ-video](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/CQ-video) — 发送「视频测试」体验
+
 ## 用途
 
 `[CQ:video]` 用于发送视频消息。QQ Bot API v2 支持 `file_type=2`（视频）的富媒体上传。

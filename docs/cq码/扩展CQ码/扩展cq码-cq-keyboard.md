@@ -1,5 +1,7 @@
 # [CQ:keyboard]
 
+> 🧪 **测试插件**：[CQ-keyboard](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/CQ-keyboard) — 发送「键盘测试」体验
+
 ## 用途
 
 `[CQ:keyboard]` 用于在文本消息上附加 QQ 官方内嵌键盘（按钮消息）。键盘按钮支持跳转、回调与指令三种行为，展示在消息下方。

@@ -1,5 +1,7 @@
 # [CQ:image]
 
+> 🧪 **测试插件**：[CQ-image](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/CQ-image) — 发送「图片测试」体验
+
 ## 用途
 
 `[CQ:image]` 用于发送和接收图片消息。QQ Bot API v2 支持 `file_type=1`（图片）的富媒体上传，可通过 CDN 直接上传或通过 URL 链接发送。

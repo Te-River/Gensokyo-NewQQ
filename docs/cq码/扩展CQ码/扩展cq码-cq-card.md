@@ -1,5 +1,7 @@
 # [CQ:card]
 
+> 🧪 **测试插件**：[CQ-card](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/CQ-card) — 发送「card」体验
+
 ## 用途
 
 `[CQ:card]` 用于在群聊中发送图文卡片消息（`msg_type=8`）。卡片消息会展示标题、描述、图片和跳转链接。

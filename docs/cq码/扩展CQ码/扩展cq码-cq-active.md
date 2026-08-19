@@ -1,5 +1,7 @@
 # [CQ:active]
 
+> 🧪 **测试插件**：[CQ-active](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/CQ-active) — 发送「推送状态 / 群列表 / 推送」体验
+
 ## 用途
 
 `[CQ:active]` 用于标记出站消息为主动推送模式。当消息内容中包含此 CQ 码时，Gensokyo 会强制走主动消息通道（清空缓存的 `msg_id` 和 `event_id`），即使有可用的被动回复上下文。

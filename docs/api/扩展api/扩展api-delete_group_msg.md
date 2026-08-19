@@ -1,5 +1,7 @@
 # `delete_group_msg`
 
+> 🧪 **测试插件**：[CQ-remove](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/CQ-remove) — 发送「撤回测试」体验
+
 范围：`q群 (Group Chat)`
 
 撤回群内指定用户或 QQ Bot 自身发送的消息。该功能是独立 OneBot action，不使用 CQ 码；正向／反向 WebSocket action 和正向 HTTP `/delete_group_msg` 均可调用。

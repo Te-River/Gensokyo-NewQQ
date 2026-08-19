@@ -1,5 +1,7 @@
 # [CQ:at]
 
+> 🧪 **测试插件**：[CQ-at](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/CQ-at)（发送「at检测」）、[CQ-normal_at](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/CQ-normal_at)（发送「普通at」）体验
+
 ## 说明
 
 `[CQ:at,qq=<虚拟用户ID>]` 在出站时根据消息类型做不同处理。

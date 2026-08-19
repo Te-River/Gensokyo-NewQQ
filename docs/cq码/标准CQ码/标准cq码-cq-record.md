@@ -1,5 +1,7 @@
 # [CQ:record]
 
+> 🧪 **测试插件**：[CQ-record](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/CQ-record) — 发送「语音」体验
+
 ## 用途
 
 `[CQ:record]` 用于发送和接收语音消息。Gensokyo 会将语音文件自动转码为 silk 格式后上传至 QQ CDN。

@@ -1,5 +1,7 @@
 # 获取机器人分享链接
 
+> 🧪 **测试插件**：[gsk-robot_share_link](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/gsk-robot_share_link) — 发送「分享链接」体验
+
 ## 说明
 
 调用 QQ API 生成机器人资料页的分享链接，结果通过 `notice` 事件推送回客户端。

@@ -2,6 +2,8 @@
 
 Gensokyo 兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 标准 CQ 码协议，并在此基础上扩展了多种 CQ 码以适配 QQ Bot API 的特有能力。
 
+> 🧪 **测试插件仓库**：[Gensokyo-NewQQ-Test-plugins](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins) — 每个 CQ 码 / 扩展 API 均配有对应的 NoneBot2 测试插件，各文档头部已贴出对应插件与触发命令，可直接部署体验。
+
 ---
 
 ## 标准 CQ 码

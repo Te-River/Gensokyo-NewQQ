@@ -1,5 +1,7 @@
 # [CQ:music]
 
+> 🧪 **测试插件**：[CQ-music](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/CQ-music) — 发送「音乐测试」体验
+
 ## 用途
 
 `[CQ:music]` 用于发送音乐分享消息。Gensokyo 当前仅支持 QQ 音乐（`type=qq`），通过 QQ Bot API 的音乐卡片能力发送。

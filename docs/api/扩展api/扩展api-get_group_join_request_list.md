@@ -1,5 +1,7 @@
 # `get_group_join_request_list`
 
+> 🧪 **测试插件**：[join_approval](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/join_approval) — 入群申请转发审批（配合 `join_approval_strategy` / `set_group_add_request`）
+
 范围：`q群 (Group Chat)`
 
 拉取群内入群申请列表（QQ 官方 v2 接口 `GET /v2/groups/{group_openid}/join_request_list`）。机器人需拥有群管理员身份。

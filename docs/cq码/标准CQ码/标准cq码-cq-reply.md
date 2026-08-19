@@ -1,5 +1,7 @@
 # [CQ:reply]
 
+> 🧪 **测试插件**：[CQ-reply](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/CQ-reply) — 发送「引用」体验
+
 ## 用途
 
 `[CQ:reply]` 用于回复指定的消息。在 QQ Bot API 中，回复通过设置 `MessageReference` 或 `MsgID`/`EventID` 实现，Gensokyo 负责将虚拟消息 ID 映射回真实的 QQ 消息 ID。

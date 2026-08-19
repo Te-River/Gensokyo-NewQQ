@@ -1,5 +1,7 @@
 # API: get_avatar
 
+> 🧪 **测试插件**：[gsk-avatar](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/gsk-avatar) — 发送「头像 / 获取头像 / avatar」体验
+
 获取用户 QQ 头像直链（Gensokyo 扩展 API）。
 
 ## 请求

@@ -1,5 +1,7 @@
 # [CQ:file]
 
+> 🧪 **测试插件**：[CQ-file](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/CQ-file) — 发送「文件测试」体验
+
 ## 用途
 
 `[CQ:file]` 用于发送文件消息。QQ Bot API v2 支持 `file_type=4`（文件）的富媒体上传，可通过 CDN 直接上传或通过 URL 链接发送。

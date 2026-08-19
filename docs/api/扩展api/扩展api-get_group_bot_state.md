@@ -1,5 +1,7 @@
 # `get_group_bot_state`
 
+> 🧪 **测试插件**：[gsk-group_bot_state](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/gsk-group_bot_state) — 发送「群状态」体验
+
 范围：`q群 (Group Chat)`
 
 获取机器人在指定群内的状态（QQ 官方 v2 接口 `GET /v2/groups/{group_openid}/bot_state`），包括入群时间、是否可主动推送、消息推送设置与群内角色。

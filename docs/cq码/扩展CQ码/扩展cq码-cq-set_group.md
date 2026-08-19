@@ -1,5 +1,7 @@
 # [CQ:set_group]
 
+> 🧪 **测试插件**：[CQ-set_group](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/CQ-set_group)（发送「群禁言测试 / 群全员禁言测试 / 入群审批测试」）、[CQ-set_group_ban](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/CQ-set_group_ban)（发送「禁言测试」）、[CQ-set_group_whole_ban](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/CQ-set_group_whole_ban)（发送「全员禁言测试」）、[join_approval](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/join_approval)（入群申请转发审批）体验
+
 ## 概述
 
 `[CQ:set_group]` 是出站单向动作 CQ 码：后端（OneBot 客户端）在发送群消息时，通过它触发 Gensokyo 执行群管理操作（禁言 / 全员禁言 / 入群审批 / 审批策略），执行后该 CQ 码从消息文本中移除，不会发送到群里。

@@ -1,5 +1,7 @@
 # 入群自动审批策略
 
+> 🧪 **测试插件**：[join_approval](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins/tree/main/join_approval) — 入群申请转发审批（配合 `get_group_join_request_list` / `set_group_add_request`）
+
 范围：`-`（不区分群，策略关联群由参数指定）
 
 入群自动审批策略（QQ 官方 v2 接口 `/v2/groups/join_approval_strategy*`）：为群配置白名单，命中白名单 QQ 号码的入群申请自动通过。一个机器人最多 **20 个策略**；设置的规则仅在机器人拥有群管理员身份时生效。
