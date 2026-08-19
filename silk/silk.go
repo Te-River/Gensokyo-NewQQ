@@ -3,6 +3,7 @@ package silk
 import (
 	"bytes"
 	"crypto/md5"
+	"embed"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -21,6 +22,9 @@ import (
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 )
 
+//go:embed exec/*
+var silkCodecs embed.FS
+
 const (
 	// HeaderAmr AMR文件头
 	HeaderAmr = "#!AMR"
@@ -33,51 +37,51 @@ const silkCachePath = "data/cache"
 const limit = 4 * 1024
 
 func getSilkCodecPath() (string, error) {
-	var codecFilePath string
+	var codecFileName string
 	switch runtime.GOOS {
 	case "windows":
 		switch runtime.GOARCH {
 		case "amd64":
-			codecFilePath = "exec/windows-amd64/silk_codec-windows-static-x64.exe"
+			codecFileName = "silk_codec-windows-static-x64.exe"
 		case "386":
-			codecFilePath = "exec/windows-386/silk_codec-windows-static-x86.exe"
+			codecFileName = "silk_codec-windows-static-x86.exe"
 		default:
 			return "", fmt.Errorf("unsupported architecture: %s", runtime.GOARCH)
 		}
 	case "linux":
 		switch runtime.GOARCH {
 		case "amd64":
-			codecFilePath = "exec/linux-amd64/silk_codec-linux-x64"
+			codecFileName = "silk_codec-linux-x64"
 		case "arm64":
-			codecFilePath = "exec/linux-arm64/silk_codec-linux-arm64"
+			codecFileName = "silk_codec-linux-arm64"
 		default:
 			return "", fmt.Errorf("unsupported architecture for Linux: %s", runtime.GOARCH)
 		}
 	case "darwin":
 		switch runtime.GOARCH {
 		case "amd64":
-			codecFilePath = "exec/darwin/silk_codec-macos"
+			codecFileName = "silk_codec-macos"
 		case "arm64":
-			codecFilePath = "exec/darwin/silk_codec-macos"
+			codecFileName = "silk_codec-macos"
 		default:
 			return "", fmt.Errorf("unsupported architecture for macOS: %s", runtime.GOARCH)
 		}
 	case "android":
 		switch runtime.GOARCH {
 		case "arm64":
-			codecFilePath = "exec/android-arm64/silk_codec-android-arm64"
+			codecFileName = "silk_codec-android-arm64"
 		case "x86":
-			codecFilePath = "exec/android-x86/silk_codec-android-x86"
+			codecFileName = "silk_codec-android-x86"
 		case "x86_64":
-			codecFilePath = "exec/android-x86_64/silk_codec-android-x86_64"
+			codecFileName = "silk_codec-android-x86_64"
 		default:
-			return "", fmt.Errorf("unsupported architecture for Android: %s", runtime.GOARCH)
+			return "", fmt.Errorf("unsupported architecture for macOS: %s", runtime.GOARCH)
 		}
 	default:
 		return "", fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}
 
-	return codecFilePath, nil
+	return "exec/" + codecFileName, nil
 }
 
 // EncoderSilk 将音频编码为Silk
