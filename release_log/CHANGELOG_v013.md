@@ -39,6 +39,14 @@ QQ v2 群聊/C2C 发送 API 要求引用「非机器人发的消息」时，`mes
 - 行为：引用机器人自己发的消息时（发送响应 `ext_info.ref_idx`）与无 REFIDX 的老消息，回退原有 `message_id` 逻辑，零回归
 - 测试：`echo/echo_test.go` 新增 `TestStoreRefIdxAndGetRefIdx` / `TestStoreRefIdxFromScene`
 
+### 独立 `[CQ:keyboard]` 可与 markdown 消息共存
+
+`[CQ:markdown]` + 独立 `[CQ:keyboard,data=base64://...]` 组合发送时，按钮不再被忽略：
+
+- `handlers/send_group_msg.go` / `handlers/send_private_msg.go`：独立 `[CQ:keyboard]` 的合并条件由 `md == nil` 改为 `groupMessage.Keyboard == nil`——markdown 消息未内嵌 keyboard（`parseMarkdownFromMessage` 返回的 `kb` 为 nil）时，独立 `[CQ:keyboard]` 仍会附加到 `groupMessage.Keyboard`，实现「MD 内容 + 独立键盘按钮」
+- 行为：markdown JSON 已内嵌 keyboard 时优先使用内嵌键盘（`Keyboard` 非 nil 跳过合并），无 markdown 时行为与原先完全一致，零回归
+- 私聊路径保留 `ResolvePlaceholderUserIDs`（`__USER_ID__` 占位符替换）与 `ResolveKeyboardImages`
+
 ### set_group 系列 CQ 码统一为 `[CQ:set_group,action=...]`
 
 将原 4 个出站动作 CQ 码合并为 1 个统一 CQ 码，统一参数解析与 ID 反查，CQ 码路径与 OneBot API handler 共享同一底层实现：

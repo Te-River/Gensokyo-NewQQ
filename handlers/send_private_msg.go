@@ -448,8 +448,8 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			         groupMessage.Content = resolvePlainTextAtMentions(groupMessage.Content)
 			        }
 
-			        // 没有 markdown 时，处理独立 [CQ:keyboard] → 文本消息附加内嵌键盘
-			        if md == nil {
+			        // 没有内嵌 keyboard 时，处理独立 [CQ:keyboard] → 附加内嵌键盘（可与 markdown 共存）
+			        if groupMessage.Keyboard == nil {
 			         if kbItems, ok := foundItems["keyboard"]; ok && len(kbItems) > 0 {
 			          kb, err := parseKeyboardData([]byte(kbItems[0]))
 			          if err != nil || kb == nil {
@@ -463,7 +463,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			           groupMessage.Keyboard = kb
 			           // 从 foundItems 中移除 keyboard，避免下方循环重复发送
 			           delete(foundItems, "keyboard")
-			           mylog.Printf("[CQ:keyboard] 私聊文本消息附加内嵌键盘")
+			           mylog.Printf("[CQ:keyboard] 私聊消息附加内嵌键盘")
 			          }
 			         }
 			        }
