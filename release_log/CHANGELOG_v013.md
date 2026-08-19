@@ -72,6 +72,18 @@ QQ v2 群聊/C2C 发送 API 要求引用「非机器人发的消息」时，`mes
 - 修复：`handlers/send_group_msg.go` / `send_private_msg.go` / `send_group_msg_raw.go` / `send_msg.go` 的递归计数 `AddMapping(idInt64, 4)` 调整为 `AddMapping(idInt64, 2)`，枚举数组与 1 元素匹配（仅剩 `group_private` + `group` 两种类型可尝试），索引最大为 `[0]`，不再越界
 - 行为不变：正常带 `Echo` 类型的 OneBot 请求不经过该递归路径；仅直接投递无类型 action 时触发，修复后递归 1 次尝试 `group` 类型
 
+### 入群申请事件增强：上报申请者昵称 + verify_info 兼容对象格式
+
+- **上报申请者昵称**：QQ 入群申请事件（`GROUP_JOIN_REQUEST`）原始数据含 `username`（如"清风"），此前 `GroupRequestEvent` 未上报该字段，插件只能依赖 `get_stranger_info`（Gensokyo 不支持该 action）。现 `Processor/ProcessGroupAddBot.go` 的 `GroupRequestEvent` 新增 `Username` 字段（`json:"username,omitempty"`），`Processor/ProcessGroupJoinRequest.go` 上报时填充 `data.Username`
+- **verify_info 兼容对象格式**：QQ 官方将入群申请事件的 `verify_info` 由纯字符串改为对象（`{"method":"verify_message","verify_message":"111"}`），原 `dto` 定义为 string 导致 WS 事件解析失败（`json: cannot unmarshal object into ... of type string`）。新增 `dto.VerifyInfo` 类型（自定义 `UnmarshalJSON` 兼容字符串与对象两种格式，`String()` 提取 `verify_message` 文本），`JoinRequest` / `GroupJoinRequestEvent` 的 `VerifyInfo` 字段改用该类型；`ProcessGroupJoinRequest.go` 的 `Comment` 与 `handlers/get_group_join_request_list.go` 的列表响应 `VerifyInfo` 均用 `.String()` 提取
+- **`VerifyInfo.String()` 不再降级返回 method 名**：verify_info 为对象且仅含 method（如 `{"method":"verify_message"}`）时，原 `String()` 会返回 method 名作为验证信息，导致插件卡片显示"验证信息：verify_message"。method 只是验证方式名而非内容，无 `verify_message` 字段时应返回空串
+
+### 工程与文档变更
+
+- **`.gitignore` 忽略本地 AI 工具目录**：新增 `.qoder-cn/` 忽略规则，避免本地工具目录污染 git 状态（`chore: 将 .qoder-cn/ 加入 .gitignore`）
+- **清理文档中残留的频道(QQ Guild)引用**：8b69368 剔除频道出站 handler 后，`docs/` 与 `template/` 仍残留 `send_guild_channel_msg`、`q頻 (QQ Guild)`、频道场景等过时引用，统一清理：`Gensokyo语法参考.md` / `api介绍.md` / `CQ码汇总.md` / `扩展cq码-cq-at.md` / `扩展cq码-cq-remove.md` / `本版新增功能.md` / `template/config_template.go` 等
+- **文档头部贴测试插件引导链接**：为标准/扩展 CQ 码文档、扩展 API 文档、Markdown 消息文档、CQ 码汇总文档共 26 个文档头部贴出 [Gensokyo-NewQQ-Test-plugins](https://github.com/Te-River/Gensokyo-NewQQ-Test-plugins) 对应测试插件引导（含插件目录与触发命令），方便直接部署体验
+
 ---
 
 ## 🧪 测试
@@ -124,7 +136,25 @@ v012（P3-4.6）曾固定两个 MCP 服务版本，本轮移除 `context7`（`@u
 d303879  fix: SSM 补发链入队路径补齐共享关联标识日志
 68c6921  test: 用 vitest 替换前端占位测试脚本并补充真实断言
 cedb2f6  docs: 修正 CHANGELOG 依赖章节为 Dependabot 停用与依赖回退
+6725d07  docs: 修正 v011 无效 hash 并补全 v013 changelog 记录
+d542e59  chore: 移除 context7 MCP 服务并同步 changelog
+47032c9  fix: 修复消息类型递归枚举越界导致的 panic
+eab1629  fix: 补齐 send_group_msg_raw/send_msg 递归枚举越界修复
+3f9f93c  docs: 清理文档中残留的频道(QQ Guild)引用
+626544b  fix: access_token 定时刷新提前45s并支持失败快速重试
 d2b74fe  feat: 将 set_group 系列 CQ 码统一为 [CQ:set_group,action=...]
+ee1f4f7  fix: set_group 统一 CQ 码审查问题修复
+c3152f6  fix: GROUP_JOIN_REQUEST 事件 verify_info 兼容对象格式
+7ca221e  feat: request 事件上报申请者昵称 username
+9e5ca64  fix: VerifyInfo.String() 不再降级返回 method 名
+95d6c27  fix: 鉴权失败达到上限后自动整轮重试，避免停电重启后永久断连
+3a5003e  feat: [CQ:reply] 支持 REFIDX 引用非机器人消息
+3701e13  chore: 将 .qoder-cn/ 加入 .gitignore
+6bd54d6  feat: 独立 [CQ:keyboard] 可与 markdown 消息共存
+b0eff5e  fix: 消息段数组/TRSS 路径补齐 keyboard case，按钮不再被丢弃
+5cb540e  fix: foundItems 循环 markdown 分支合并独立 keyboard，按钮真正生效
+aa7e271  docs: 各 CQ 码 / 扩展 API 文档头部贴测试插件引导链接
+88ac691  Update readme.md
 ```
 
 ## 🧪 验证
