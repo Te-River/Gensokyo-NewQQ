@@ -38,7 +38,8 @@
 
 1. 应用端传入 Gensokyo 分配的虚拟消息 ID。
 2. Gensokyo 通过 echo 系统反查真实消息 ID（格式 `"GroupID MessageID"` 或 `"UserID MessageID"`）。
-3. 将真实消息 ID 设置到发送消息的 `MessageReference` 和 `MsgID` 字段。
+3. **REFIDX 优先（v013 新增）**：若该消息关联了 REFIDX（非机器人消息的引用索引，来自入站事件 `message_scene.ext[]` 的 `msg_idx=`），`MessageReference.MessageID` 优先使用 REFIDX；引用机器人自己发的消息时（发送响应 `ext_info.ref_idx`）与无 REFIDX 的老消息，回退普通消息 ID。
+4. 将解析后的引用 ID 设置到发送消息的 `MessageReference` 字段；`MsgID` 字段始终使用普通消息 ID（被动回复语义不变）。
 
 ## 发送行为
 

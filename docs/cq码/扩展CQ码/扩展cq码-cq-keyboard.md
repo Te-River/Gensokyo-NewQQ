@@ -182,7 +182,7 @@
 [CQ:markdown,data={"content":"你好，欢迎使用签到功能"}][CQ:keyboard,data=base64://<键盘JSON>]
 ```
 
-- 若同一消息同时携带 `[CQ:markdown]`，其附带键盘优先生效，独立 `[CQ:keyboard]` 被忽略（markdown 路径的 keyboard 解析自 markdown JSON 的 `keyboard` 字段）。
+- 若同一消息同时携带 `[CQ:markdown]`，markdown JSON 内嵌的 keyboard 优先生效；markdown 未内嵌 keyboard 时，独立 `[CQ:keyboard]` 仍会附加（v013 起支持共存，`groupMessage.Keyboard == nil` 时合并）。
 
 ## 解析行为
 
@@ -198,7 +198,7 @@
 2. 剩余文本以 `msg_type=0` 文本消息发送，`keyboard` 字段携带按钮（文本 + 内嵌键盘）。
 3. `specify_user_ids` 中的数字虚拟 ID 自动转换为 QQ 官方 OpenID；私聊场景下 `__USER_ID__` 占位符替换为实际用户 OpenID。
 4. 按钮图片（`render_data` 中的本地路径）自动解析上传。
-5. 如果同一消息同时包含 `[CQ:markdown]`，markdown 优先（其附带键盘生效，独立 keyboard 被忽略）。
+5. 如果同一消息同时包含 `[CQ:markdown]`：markdown JSON 内嵌的 keyboard 优先；markdown 未内嵌 keyboard 时独立 `[CQ:keyboard]` 仍会附加（v013 起共存）。
 
 ## 使用示例
 
@@ -233,4 +233,4 @@ await bot.send_group_msg(group_id=821404315, message=msg)
 - 键盘按钮的消息以文本消息（`msg_type=0`）发送，群聊与单聊均支持。
 - `action.type=2` 指令按钮的 `enter`/`reply` 参数仅单聊可用（官方版本 8983+）。
 - 同一键盘内按钮 `id` 需唯一。
-- 消息中同时携带 `[CQ:markdown]` 时，markdown 优先，独立 keyboard 不生效。
+- 消息中同时携带 `[CQ:markdown]` 时，markdown JSON 内嵌的 keyboard 优先；markdown 未内嵌 keyboard 时独立 `[CQ:keyboard]` 仍生效（v013 起共存）。
