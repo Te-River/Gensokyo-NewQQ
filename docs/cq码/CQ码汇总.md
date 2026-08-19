@@ -34,6 +34,7 @@ Gensokyo 为适配 QQ Bot API 特有能力而扩展的 CQ 码类型。
 |-------|------|------|------|
 | `[CQ:member]` | `q群 (Group Chat)` | 群成员入群/退群通知及回复路由。 | [查看](./扩展CQ码/扩展cq码-cq-member.md) |
 | `[CQ:active]` | `-` | 主动消息标记，强制走主动推送通道。 | [查看](./扩展CQ码/扩展cq码-cq-active.md) |
+| `[CQ:wakeup]` | `私聊 (C2C)` | C2C 互动召回（唤醒）消息标记，`userid` 指定目标用户（OpenID 或虚拟 ID）。 | [查看](./扩展CQ码/扩展cq码-cq-wakeup.md) |
 | `[CQ:remove]` | `q群 (Group Chat)` | 撤回指定群消息（出站单向，需 user_id + msg_id）。 | [查看](./扩展CQ码/扩展cq码-cq-remove.md) |
 | `[CQ:at]` | `q群 (Group Chat)` | @ 标签：纯文本出站转为 `@用户名 `，Markdown 出站转为 `<qqbot-at-user>` 标签。图文混合消息（msg_type=7）同样走纯文本转换路径；图文混合走 Markdown 路径（auto_md，msg_type=2）同样走 Markdown 转换路径（2026-08 修复）。 | [查看](./扩展CQ码/扩展cq码-cq-at.md) |
 | `[CQ:card]` | `q群 (Group Chat)` | 群聊图文卡片消息（msg_type=8），参数顺序无关。 | [查看](./扩展CQ码/扩展cq码-cq-card.md) |

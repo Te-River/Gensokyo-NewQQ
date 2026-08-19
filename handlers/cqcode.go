@@ -37,6 +37,7 @@ var (
 	keyboardPattern      = regexp.MustCompile(`\[CQ:keyboard,data=base64://(.+?)\]`)
 	keyboardJSONPattern  = regexp.MustCompile(`\[CQ:keyboard,data=(\{.*\})\]`)
 	replyRe              = regexp.MustCompile(`\[CQ:reply,id=(\d+)\]`)
+	wakeupPattern        = regexp.MustCompile(`\[CQ:wakeup,userid=([^\]]+)\]`)
 	localImagePattern    *regexp.Regexp
 	localRecordPattern   *regexp.Regexp
 	localVideoPattern    *regexp.Regexp
@@ -165,6 +166,21 @@ func ProcessCQActive(text string, foundItems map[string][]string) string {
 	}
 	text = bareRe.ReplaceAllString(text, "")
 	return text
+}
+
+// ProcessCQWakeup 解析 [CQ:wakeup,userid=xxxxx] 并移除
+// 目标用户（OpenID 或虚拟数字 ID）写入 foundItems["wakeup"]，
+// 由 send_private_msg 消费并走 C2C 召回（is_wakeup）发送通道
+func ProcessCQWakeup(text string, foundItems map[string][]string) string {
+	return wakeupPattern.ReplaceAllStringFunc(text, func(match string) string {
+		if submatch := wakeupPattern.FindStringSubmatch(match); len(submatch) > 1 {
+			userID := strings.TrimSpace(submatch[1])
+			if userID != "" {
+				foundItems["wakeup"] = append(foundItems["wakeup"], userID)
+			}
+		}
+		return ""
+	})
 }
 
 // ---------- 出站动作型 CQ 码（单次扫描 + 类型分发） ----------

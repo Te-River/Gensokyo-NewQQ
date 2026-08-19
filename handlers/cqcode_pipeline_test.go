@@ -89,6 +89,18 @@ func TestProcessCQCodePipeline(t *testing.T) {
 			wantKeys: map[string]int{"active": 1, "active_type": 1, "active_sub_type": 1},
 		},
 		{
+			name:     "wakeup标记",
+			input:    "[CQ:wakeup,userid=123456789]召回消息",
+			wantText: "召回消息",
+			wantKeys: map[string]int{"wakeup": 1},
+		},
+		{
+			name:     "wakeup带OpenID",
+			input:    "唤醒[CQ:wakeup,userid=0123456789abcdef0123456789abcdef]",
+			wantText: "唤醒",
+			wantKeys: map[string]int{"wakeup": 1},
+		},
+		{
 			name:     "reply提取",
 			input:    "[CQ:reply,id=829]这是回复",
 			wantText: "这是回复",

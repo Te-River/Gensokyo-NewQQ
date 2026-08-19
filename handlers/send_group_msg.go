@@ -756,7 +756,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		   for key, urls := range foundItems {
 		    // 跳过控制型 key，避免误发送空消息
 		    if key == "active" || key == "active_type" || key == "active_sub_type" ||
-		     key == "reply_msg_id" || key == "file_name" {
+		     key == "reply_msg_id" || key == "file_name" || key == "wakeup" {
 		     continue
 		    }
 		    for i, url := range urls {

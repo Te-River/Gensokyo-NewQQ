@@ -37,10 +37,11 @@ func ProcessCQCodePipeline(text string, foundItems map[string][]string, groupID 
 	// 6. QQ 音乐 [CQ:music,type=qq,id=...]
 	text = processCQQQMusicPipeline(text, foundItems)
 
-	// 7. active / file / keyboard（复用既有集中函数）
+	// 7. active / file / keyboard / wakeup（复用既有集中函数）
 	text = ProcessCQActive(text, foundItems)
 	text = ProcessCQFile(text, foundItems)
 	text = ProcessCQKeyboard(text, foundItems)
+	text = ProcessCQWakeup(text, foundItems)
 
 	// 8. 回复引用 [CQ:reply,id=数字]
 	text = processCQReplyPipeline(text, foundItems)
