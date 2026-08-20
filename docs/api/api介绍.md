@@ -15,7 +15,7 @@
 | `send_private_msg_async` | send_private_msg_async.go | `私聊 (C2C)` | 注册到 `HandleSendPrivateMsg`，处理逻辑同 `send_private_msg`。 |
 | `delete_msg` | delete_msg.go | `私聊 (C2C)` / `q群 (Group Chat)` | 按消息所属场景调用对应撤回接口。 |
 | `get_login_info` | get_login_info.go | `-` | 获取当前机器人登录信息。 |
-| `get_friend_list` | get_friend_list.go | `私聊 (C2C)` | 获取好友列表。 |
+| `get_friend_list` | get_friend_list.go | `私聊 (C2C)` | 获取好友列表（含全部 C2C 私聊用户的虚拟 ID）。 |
 | `get_group_list` | get_group_list.go | `q群 (Group Chat)` | 获取列表。 |
 | `get_group_info` | get_group_info.go | `q群 (Group Chat)` | 调用 QQ 官方 v2 群信息接口返回真实群名/简介/成员数。 |
 | `get_group_member_info` | get_group_member_info.go | `q群 (Group Chat)` | 获取成员信息。 |
