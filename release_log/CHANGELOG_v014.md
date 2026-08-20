@@ -29,3 +29,10 @@
 
 - **修改**：移除 `isNumeric` 过滤（顺带删除 `regexp` 导入），仅过滤空 UserID，保留全部私聊用户（含虚拟数字 ID）
 - **影响**：`get_friend_list` 现在能正常返回所有 C2C 私聊用户，插件可遍历后配合 `send_private_msg_wakeup` 实现私聊广播
+
+### Windows 下 Markdown/Keyboard 本地图片 `file:///` 路径解析错误
+
+`handlers/message_parser.go` 中 `ResolveMarkdownImages` 与 `ResolveKeyboardImages`（Label/VisitedLabel 两个回调）直接用 `strings.TrimPrefix(mediaPath, "file://")` 剥离协议前缀。Windows 上路径为 `file:///C:/Users/...`（三斜杠），剥掉 `file://` 后残留前导 `/`，`safeLocalPath` 经 `filepath.Abs` 将其拼到工作目录后，实际读取路径变成 `D:\C:\Users\...`，导致 `Error reading local image for markdown: open D:\C:\...: The filename, directory name, or volume label syntax is incorrect`，Markdown 图片无法上传 CDN、显示空白。
+
+- **修改**：三处统一改用仓库已有的 `trimFilePrefix()`（Windows 剥 `file:///`、Unix 剥 `file://`），与 `resolveLocalMedia` 等其他 file:// 处理路径行为一致
+- **影响**：Windows 下 Markdown 与 keyboard 按钮中的 `file:///C:/...` 本地图片可正确读取并上传替换为 CDN 直链
