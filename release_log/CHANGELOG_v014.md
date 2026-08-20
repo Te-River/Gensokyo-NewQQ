@@ -18,3 +18,14 @@
 - **测试**：`handlers/cqcode_pipeline_test.go` 新增 wakeup 字符串路径用例；`handlers/message_parser_test.go` 新增数组段与 TRSS 路径用例
 
 文档：[CQ wakeup](../docs/cq码/扩展CQ码/扩展cq码-cq-wakeup.md)
+
+---
+
+## 🐛 修复
+
+### `get_friend_list` 不再过滤虚拟数字 ID
+
+`handlers/get_friend_list.go` 原先用 `!isNumeric(user.UserID)` 过滤掉纯数字的 user_id，导致**所有 C2C 私聊用户（虚拟数字 ID）被全部滤掉**，接口一直返回空列表。而 `StoreUserInfo` 全项目只在 `ProcessC2CMessage.go`（C2C 私聊处理）中调用，UserInfoBucket 里存的本来就是私聊用户，过滤逻辑属于误伤。
+
+- **修改**：移除 `isNumeric` 过滤（顺带删除 `regexp` 导入），仅过滤空 UserID，保留全部私聊用户（含虚拟数字 ID）
+- **影响**：`get_friend_list` 现在能正常返回所有 C2C 私聊用户，插件可遍历后配合 `send_private_msg_wakeup` 实现私聊广播
