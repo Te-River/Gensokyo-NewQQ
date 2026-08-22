@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
-	"time"
 
 	"github.com/hoshinonyaruko/gensokyo/callapi"
 	"github.com/hoshinonyaruko/gensokyo/config"
@@ -121,22 +120,33 @@ func HandleGetGroupInfo(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		}
 		groupInfo = ConvertGuildToGroupInfo(guild, guildID, message)
 	default:
-		var groupid int64
-		groupid, _ = strconv.ParseInt(message.Params.GroupID.(string), 10, 64)
-		groupCreateTime := time.Now().Unix()
-		// 创建 GroupInfo 实例
-		groupInfo1 := &GroupInfo{
-			GroupID:         groupid,
-			GroupName:       "测试群",
-			GroupMemo:       "这是一个测试群",
-			GroupCreateTime: int32(groupCreateTime),
-			GroupLevel:      0,
-			MemberCount:     500,
-			MaxMemberCount:  1000,
+		// 真实群聊：通过官方群信息 API 获取真实群信息
+		groupID := message.Params.GroupID.(string)
+		// 反查真实 OpenID（32 位原生 OpenID 直接使用）
+		groupOpenID := groupID
+		if len(groupID) != 32 {
+			realGroupID, err := idmap.RetrieveRowByIDv2(groupID)
+			if err != nil || realGroupID == "" {
+				mylog.Printf("get_group_info: 反查 group_openid 失败: %v", err)
+				return sendGroupInfoError(client, message, "无法反查群 OpenID")
+			}
+			groupOpenID = realGroupID
 		}
-		// 创建 OnebotGroupInfo 实例并嵌入 GroupInfo
+
+		info, err := apiv2.GroupInfo(context.TODO(), groupOpenID)
+		if err != nil {
+			mylog.Printf("get_group_info: 获取群信息失败: %v", err)
+			return sendGroupInfoError(client, message, err.Error())
+		}
+
+		groupid, _ := strconv.ParseInt(groupID, 10, 64)
 		groupInfo = &OnebotGroupInfo{
-			Data:    *groupInfo1, // 将 groupInfo 添加到 Data 切片中
+			Data: GroupInfo{
+				GroupID:     groupid,
+				GroupName:   info.GroupName,
+				GroupMemo:   info.GroupFingerMemo,
+				MemberCount: int32(info.GroupMemberNum),
+			},
 			Message: "success",
 			RetCode: 0,
 			Status:  "ok",
@@ -162,6 +172,32 @@ func HandleGetGroupInfo(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		mylog.Printf("Error marshaling data: %v", err)
 		//todo 符合onebotv11 ws返回的错误码
 		return "", nil
+	}
+	return string(result), nil
+}
+
+// sendGroupInfoError 构造并回传错误响应
+func sendGroupInfoError(client callapi.Client, message callapi.ActionMessage, errMsg string) (string, error) {
+	response := struct {
+		Message string      `json:"message"`
+		RetCode int         `json:"retcode"`
+		Status  string      `json:"status"`
+		Echo    interface{} `json:"echo,omitempty"`
+	}{
+		Message: errMsg,
+		RetCode: 100,
+		Status:  "failed",
+		Echo:    message.Echo,
+	}
+	outputMap := structToMap(response)
+	if client != nil {
+		if err := client.SendMessage(outputMap); err != nil {
+			mylog.Printf("get_group_info: 发送错误响应失败: %v", err)
+		}
+	}
+	result, err := json.Marshal(response)
+	if err != nil {
+		return "", err
 	}
 	return string(result), nil
 }

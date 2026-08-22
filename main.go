@@ -712,6 +712,10 @@ func ATMessageEventHandler() event.ATMessageEventHandler {
 // GuildEventHandler 处理频道事件
 func GuildEventHandler() event.GuildEventHandler {
 	return func(event *dto.WSPayload, data *dto.WSGuildData) error {
+		// GUILD_CREATE：机器人被加入频道，上报 notice 事件
+		if event.Type == dto.EventGuildCreate {
+			go p.ProcessGuildCreate(data)
+		}
 		log.Println(data)
 		return nil
 	}

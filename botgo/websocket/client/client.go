@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"regexp"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -22,6 +23,10 @@ import (
 
 // DefaultQueueSize 监听队列的缓冲长度
 const DefaultQueueSize = 10000
+
+// maxAuthFailCount 连续鉴权失败次数上限，超过后转为不可鉴权错误并停止重连，
+// 避免 token/密钥配置错误时无限重连打爆网关
+const maxAuthFailCount = 3
 
 // 定义全局变量
 var Global_s int64
@@ -103,6 +108,11 @@ func (c *Client) Listening() error {
 			// accessToken过期
 			if wss.IsCloseError(err, 4004) {
 				c.session.Token.UpAccessToken(context.Background(), err)
+				// 刷新过token后仍然连续鉴权失败，说明配置/密钥本身有问题，终止重连
+				if c.session.AuthFailCount++; c.session.AuthFailCount >= maxAuthFailCount {
+					err = errs.New(errs.CodeConnCloseCantIdentify,
+						"鉴权失败(websocket 4004)连续"+fmt.Sprint(maxAuthFailCount)+"次, 请检查config.yml中appid/client_secret/token是否正确, 以及应用是否为群聊机器人")
+				}
 			}
 			// 这里用 UnexpectedCloseError，如果有需要排除在外的 close error code，可以补充在第二个参数上
 			// 4009: session time out, 发了 reconnect 之后马上关闭连接时候的错误码，这个是允许 resumeSignal 的
@@ -131,7 +141,7 @@ func (c *Client) Listening() error {
 // Write 往 ws 写入数据
 func (c *Client) Write(message *dto.WSPayload) error {
 	m, _ := json.Marshal(message)
-	log.Infof("%s write %s message, %v", c.session, dto.OPMeans(message.OPCode), string(m))
+	log.Infof("%s write %s message, %s", c.session, dto.OPMeans(message.OPCode), redactTokenInJSON(string(m)))
 
 	if err := c.conn.WriteMessage(wss.TextMessage, m); err != nil {
 		log.Errorf("%s WriteMessage failed, %v", c.session, err)
@@ -219,6 +229,28 @@ func GetGlobalS() int64 {
 	return atomic.LoadInt64(&Global_s)
 }
 
+// tokenFieldRe 匹配 JSON 中的 "token" 字段（含引号与冒号）
+var tokenFieldRe = regexp.MustCompile(`("token"\s*:\s*")([^"]*)(")`)
+
+// redactTokenInJSON 对日志中的 JSON token 字段值脱敏，只保留前 4 位，防止凭证泄露
+func redactTokenInJSON(s string) string {
+	return tokenFieldRe.ReplaceAllStringFunc(s, func(m string) string {
+		parts := tokenFieldRe.FindStringSubmatch(m)
+		if len(parts) != 4 {
+			return m
+		}
+		return parts[1] + redactToken(parts[2]) + parts[3]
+	})
+}
+
+// redactToken 对令牌进行脱敏，只显示前 4 位
+func redactToken(s string) string {
+	if len(s) <= 4 {
+		return "****"
+	}
+	return s[:4] + "****"
+}
+
 func (c *Client) listenMessageAndHandle() {
 	defer func() {
 		// panic，一般是由于业务自己实现的 handle 不完善导致
@@ -266,6 +298,15 @@ func (c *Client) isHandleBuildIn(payload *dto.WSPayload) bool {
 	case dto.WSReconnect: // 达到连接时长，需要重新连接，此时可以通过 resume 续传原连接上的事件
 		c.closeChan <- errs.ErrNeedReConnect
 	case dto.WSInvalidSession: // 无效的 sessionLog，需要重新鉴权
+		// d=false 表示鉴权失败且无法 resume，需要重新 identify；连续失败说明配置/密钥有问题
+		if resumable, ok := payload.Data.(bool); !ok || !resumable {
+			c.session.AuthFailCount++
+			if c.session.AuthFailCount >= maxAuthFailCount {
+				c.closeChan <- errs.New(errs.CodeConnCloseCantIdentify,
+					"鉴权失败(InvalidSession)连续"+fmt.Sprint(maxAuthFailCount)+"次, 请检查config.yml中appid/client_secret/token是否正确, 以及应用是否为群聊机器人")
+				return true
+			}
+		}
 		c.closeChan <- errs.ErrInvalidSession
 	default:
 		return false
@@ -294,6 +335,8 @@ func (c *Client) readyHandler(payload *dto.WSPayload) {
 	c.session.ID = readyData.SessionID
 	c.session.Shards.ShardID = readyData.Shard[0]
 	c.session.Shards.ShardCount = readyData.Shard[1]
+	// 鉴权成功后重置连续失败计数
+	c.session.AuthFailCount = 0
 	c.user = &dto.WSUser{
 		ID:       readyData.User.ID,
 		Username: readyData.User.Username,

@@ -81,6 +81,8 @@ type MessageAPI interface {
 
 	// PostGroupMessage 发送群消息
 	PostGroupMessage(ctx context.Context, groupID string, msg dto.APIMessage) (*dto.GroupMessageResponse, error)
+	// GroupInfo 获取群基本信息（对应官方接口 GET /v2/groups/{group_openid}/info）
+	GroupInfo(ctx context.Context, groupOpenID string) (*dto.GroupInfo, error)
 	// PostC2CMessage 发送C2C消息
 	PostC2CMessage(ctx context.Context, userID string, msg dto.APIMessage) (*dto.C2CMessageResponse, error)
 	// PostC2CMessage 发送C2CSSE消息

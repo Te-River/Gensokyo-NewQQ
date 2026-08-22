@@ -43,6 +43,10 @@ type Session struct {
 	Intent  Intent
 	LastSeq uint32
 	Shards  ShardConfig
+	// AuthFailCount 连续鉴权失败次数（InvalidSession d=false / 4004），达到上限后停止重连
+	AuthFailCount int
+	// AuthRetryCount 已达连续鉴权失败上限后，自动从头整轮重试的次数上限（见 local/multi 的 newConnect）
+	AuthRetryCount int
 }
 
 // String 输出session字符串

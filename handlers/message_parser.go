@@ -2365,7 +2365,7 @@ func ResolveMarkdownImages(content string, apiv2 openapi.OpenAPI) string {
 		if strings.HasPrefix(mediaPath, "data:") {
 			return "", false
 		}
-		localPath := strings.TrimPrefix(mediaPath, "file://")
+		localPath := trimFilePrefix(mediaPath)
 		// 安全校验：防止路径穿越
 		safePath, err := safeLocalPath(localPath, ".")
 		if err != nil {
@@ -2410,7 +2410,7 @@ func ResolveKeyboardImages(kb *keyboard.MessageKeyboard, apiv2 openapi.OpenAPI) 
 					if strings.HasPrefix(mediaPath, "data:") {
 						return "", false
 					}
-					localPath := strings.TrimPrefix(mediaPath, "file://")
+					localPath := trimFilePrefix(mediaPath)
 					safePath, err := safeLocalPath(localPath, ".")
 					if err != nil {
 						mylog.Printf("安全校验失败，跳过Keyboard本地图片: %v", err)
@@ -2439,7 +2439,7 @@ func ResolveKeyboardImages(kb *keyboard.MessageKeyboard, apiv2 openapi.OpenAPI) 
 					if strings.HasPrefix(mediaPath, "data:") {
 						return "", false
 					}
-					localPath := strings.TrimPrefix(mediaPath, "file://")
+					localPath := trimFilePrefix(mediaPath)
 					safePath, err := safeLocalPath(localPath, ".")
 					if err != nil {
 						mylog.Printf("安全校验失败，跳过Keyboard本地图片: %v", err)
