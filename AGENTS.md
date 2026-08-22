@@ -148,7 +148,7 @@ replace github.com/tencent-connect/botgo => ./botgo
 replace github.com/wdvxdr1123/go-silk => ./go-silk
 ```
 
-- `botgo/`：QQ Bot SDK 的 Fork，包含自定义事件类型（群消息、C2C、好友等官方 SDK 未暴露的事件）
+- `botgo/`：QQ Bot SDK 的 Fork，包含自定义事件类型（群消息、C2C、好友、频道等官方 SDK 未暴露的事件）与群信息 API（`GroupInfo`：获取群基本信息）
 - `go-silk/`：Silk 音频编码 SDK 的 Fork
 
 修改这两个目录等同于修改外部依赖，需谨慎。

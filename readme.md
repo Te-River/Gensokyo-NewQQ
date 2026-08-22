@@ -201,7 +201,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 | /get_login_info | [获取登录号信息] |
 | /get_stranger_info | [获取陌生人信息] |
 | /get_friend_list | [获取好友列表] |
-| /get_group_info | [获取群聊/频道信息] |
+| /get_group_info | [获取群聊/频道信息（群聊走官方 GroupInfo API）] |
 | /get_group_list | [获取群列表] |
 | /get_group_member_info | [获取群成员信息] |
 | /get_group_member_list | [获取群成员列表] |
@@ -282,6 +282,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 | 通知事件 | [按钮交互回调] |
 | 通知事件 | [私聊 (C2C) 消息推送关闭] |
 | 通知事件 | [私聊 (C2C) 消息推送开启] |
+| 通知事件 | [频道创建 (GUILD_CREATE)] |
 
 </details>
 
