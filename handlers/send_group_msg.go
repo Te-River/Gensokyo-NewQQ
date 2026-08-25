@@ -155,25 +155,18 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 	}
 
 	if message.Params.GroupID != nil && !identity.IsOpenID(message.Params.GroupID.(string)) {
-		// stringob11通过字段判断类型,不需要递归
-		if !config.GetStringOb11() {
-			//设置递归 对直接向gsk发送action时有效果
-			if msgType == "" {
-				messageCopy := message
-				if err != nil {
-					mylog.Printf("错误：无法转换 ID %v\n", err)
-				} else {
-					// 递归1次（枚举剩余消息类型，当前仅 group）
-					echo.AddMapping(idInt64, 2)
-					// 递归调用handleSendGroupMsg，使用设置的消息类型
-					echo.AddMsgType(config.GetAppIDStr(), idInt64, "group_private")
-					retmsg, _ = HandleSendGroupMsg(client, api, apiv2, messageCopy)
-				}
-			} else if echo.GetMapping(idInt64) <= 0 {
-				// 特殊值代表不递归
-				echo.AddMapping(idInt64, 10)
-			}
-		}
+	 // stringob11通过字段判断类型,不需要递归
+	 if !config.GetStringOb11() {
+	  // send_group_msg action 本身即群消息：msgType 未知时默认按 group 处理。
+	  // 不能兜底猜测 group_private——那会把群虚拟ID经 idmap 还原成群的 OpenID
+	  // 当作 用户OpenID 发私聊，导致 11255 用户/群已注销（见入群欢迎语误发私聊 issue）
+	  if msgType == "" {
+	   msgType = "group"
+	  } else if echo.GetMapping(idInt64) <= 0 {
+	   // 特殊值代表不递归
+	   echo.AddMapping(idInt64, 10)
+	  }
+	 }
 	}
 
 	switch msgType {

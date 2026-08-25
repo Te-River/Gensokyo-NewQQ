@@ -44,3 +44,11 @@
 - **修改**：图文混合路径补齐 `*dto.MessageToCreate` 兜底断言——若返回已上传完成的 `MessageToCreate`，直接补文本（`resolvePlainTextAtMentions`）、`MsgID`/`EventID`/`Timestamp` 后发送；仅在 `RichMediaMessage` 时才调用 `uploadMediaPrivate` 上传
 - **失败回执**：发送失败不再裸 `return`，按 22009 / 40034025 / 超时重试 分类处理并统一 `SendC2CResponse` 回执，避免客户端超时
 - **影响**：私聊本地图片 / base64 图片 + 文本的图文混合消息可正常发送，不再超时
+
+### send_group_msg 误入私聊路径（11255 用户/群已注销）
+
+群成员入群等 notice 触发框架主动调用 `send_group_msg` 时（如入群欢迎语，group_id 为虚拟数字 ID），`HandleSendGroupMsg` 无法从 echo/idmap 缓存判断该群的消息类型（新群尚无群消息入站，`msgType` 为空），兜底递归逻辑硬编码猜测 `group_private` 并递归，命中 `case "group_private"` 后把 `UserID = GroupID`，经 idmap 将**群的虚拟 ID 还原成群的 OpenID**，当作 用户OpenID 发 `POST /v2/users/{群OpenID}/messages` 私聊，必然报 `11255 请求的资源不存在(用户/群已注销)`，同时消耗主动推送次数。
+
+- **修改**（`handlers/send_group_msg.go`、`handlers/send_group_msg_raw.go`）：`send_group_msg`/`send_group_msg_raw` action 本身即群消息，`msgType` 未知时**默认按 `group` 处理**，不再兜底猜测 `group_private` 并递归
+- **同步**（`handlers/send_msg.go`）：通用 `send_msg` action 带 `group_id` 时按群处理，仅带 `user_id` 时按私聊处理，与群消息语义一致
+- **影响**：入群欢迎等主动群消息正常发送到群，不再误发私聊、不再报 11255；已能通过 echo/idmap 缓存识别出的 `group_private`（C2C 虚拟成群私聊）路径不受影响

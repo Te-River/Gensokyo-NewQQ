@@ -97,15 +97,17 @@ func HandleSendMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.Ope
 
 	//设置递归 对直接向gsk发送action时有效果
 	if msgType == "" {
-		messageCopy := message
 		if err != nil {
 			mylog.Printf("错误：无法转换 ID %v\n", err)
 		} else {
-			// 递归1次（枚举剩余消息类型，当前仅 group）
-			echo.AddMapping(idInt64, 2)
-			// 递归调用handleSendMsg，使用设置的消息类型
-			echo.AddMsgType(config.GetAppIDStr(), idInt64, "group_private")
-			retmsg, _ = HandleSendMsg(client, api, apiv2, messageCopy)
+			// send_msg 是通用 action：带 group_id 时按群消息处理，仅带 user_id 时按私聊处理。
+			// 不能对带 group_id 的请求兜底猜测 group_private——那会把群虚拟ID经 idmap
+			// 还原成群的 OpenID 当作 用户OpenID 发私聊，导致 11255 用户/群已注销
+			if message.Params.GroupID != nil && checkZeroGroupID(message.Params.GroupID) {
+				msgType = "group"
+			} else {
+				msgType = "group_private"
+			}
 		}
 	} else if echo.GetMapping(idInt64) <= 0 {
 		// 特殊值代表不递归
