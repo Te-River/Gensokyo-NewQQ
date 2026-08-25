@@ -52,3 +52,10 @@
 - **修改**（`handlers/send_group_msg.go`、`handlers/send_group_msg_raw.go`）：`send_group_msg`/`send_group_msg_raw` action 本身即群消息，`msgType` 未知时**默认按 `group` 处理**，不再兜底猜测 `group_private` 并递归
 - **同步**（`handlers/send_msg.go`）：通用 `send_msg` action 带 `group_id` 时按群处理，仅带 `user_id` 时按私聊处理，与群消息语义一致
 - **影响**：入群欢迎等主动群消息正常发送到群，不再误发私聊、不再报 11255；已能通过 echo/idmap 缓存识别出的 `group_private`（C2C 虚拟成群私聊）路径不受影响
+
+### Markdown / Keyboard 中 `mqqapi://` 等协议链接被误当本地图片读取
+
+欢迎语等 Markdown 内容含 `[/自定义欢迎语](mqqapi://aio/inlinecmd?command=...)` 形式链接时，`resolveMarkdownMediaReferences` 正则把 `mqqapi://...` 当作媒体路径传入，`ResolveMarkdownImages` / `ResolveKeyboardImages` 仅排除 `http(s)` 与 `data:`，其余一律走本地文件分支，导致 `os.ReadFile` 去读 `mqqapi:/aio/inlinecmd?...` 报 `Error reading local image for markdown: open ...: no such file or directory`（欢迎语主链路不受影响，但日志持续报错）。
+
+- **修改**（`handlers/message_parser.go`）：三处 resolve 回调（Markdown、Keyboard Label、Keyboard VisitedLabel）在本地文件分支前增加 `://` 协议判断——非 `file://` 协议链接直接跳过，不再尝试读取本地文件
+- **影响**：`mqqapi://`、`qun.qq.com://` 等协议链接原样保留在 Markdown/按钮文案中，不再产生误读错误日志

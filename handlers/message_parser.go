@@ -2338,6 +2338,10 @@ func ResolveMarkdownImages(content string, apiv2 openapi.OpenAPI) string {
 		if strings.HasPrefix(mediaPath, "data:") {
 			return "", false
 		}
+		// mqqapi:// 等非 file 协议链接不作为本地图片处理
+		if strings.Contains(mediaPath, "://") && !strings.HasPrefix(mediaPath, "file://") {
+			return "", false
+		}
 		localPath := trimFilePrefix(mediaPath)
 		// 安全校验：防止路径穿越
 		safePath, err := safeLocalPath(localPath, ".")
@@ -2383,6 +2387,10 @@ func ResolveKeyboardImages(kb *keyboard.MessageKeyboard, apiv2 openapi.OpenAPI) 
 					if strings.HasPrefix(mediaPath, "data:") {
 						return "", false
 					}
+					// mqqapi:// 等非 file 协议链接不作为本地图片处理
+					if strings.Contains(mediaPath, "://") && !strings.HasPrefix(mediaPath, "file://") {
+						return "", false
+					}
 					localPath := trimFilePrefix(mediaPath)
 					safePath, err := safeLocalPath(localPath, ".")
 					if err != nil {
@@ -2410,6 +2418,10 @@ func ResolveKeyboardImages(kb *keyboard.MessageKeyboard, apiv2 openapi.OpenAPI) 
 						return "", false
 					}
 					if strings.HasPrefix(mediaPath, "data:") {
+						return "", false
+					}
+					// mqqapi:// 等非 file 协议链接不作为本地图片处理
+					if strings.Contains(mediaPath, "://") && !strings.HasPrefix(mediaPath, "file://") {
 						return "", false
 					}
 					localPath := trimFilePrefix(mediaPath)
