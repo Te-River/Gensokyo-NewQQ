@@ -52,12 +52,12 @@ func safeLocalPath(filePath string, baseDir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("路径解码失败: %w", err)
 	}
-	// 清理路径（移除 . 和 .. 等）
-	clean := filepath.Clean(decoded)
-	// 明确拒绝包含 .. 的路径
-	if strings.Contains(clean, "..") {
+	// 明确拒绝包含 .. 的路径（须在 Clean 之前检查，否则 /../ 在根路径会被折叠后绕过校验）
+	if strings.Contains(decoded, "..") {
 		return "", fmt.Errorf("路径包含非法字符: ..")
 	}
+	// 清理路径（移除 . 等）
+	clean := filepath.Clean(decoded)
 	// 转为绝对路径（防止相对路径绕过）
 	abs, err := filepath.Abs(clean)
 	if err != nil {

@@ -44,3 +44,10 @@
 - **修改**：图文混合路径补齐 `*dto.MessageToCreate` 兜底断言——若返回已上传完成的 `MessageToCreate`，直接补文本（`resolvePlainTextAtMentions`）、`MsgID`/`EventID`/`Timestamp` 后发送；仅在 `RichMediaMessage` 时才调用 `uploadMediaPrivate` 上传
 - **失败回执**：发送失败不再裸 `return`，按 22009 / 40034025 / 超时重试 分类处理并统一 `SendC2CResponse` 回执，避免客户端超时
 - **影响**：私聊本地图片 / base64 图片 + 文本的图文混合消息可正常发送，不再超时
+
+### 入群通知回复被误判为群私聊（code:11255）
+
+`GROUP_MEMBER_ADD` / `GROUP_MEMBER_REMOVE` 通知经 `Processor/ProcessGroupMember.go` 处理时，群 OpenID 通过 `idmap.StoreIDv2` 生成虚拟 group_id，但**未登记该虚拟 ID 的消息类型**（对比常规群消息 `ProcessGroupNormalMessage.go` 会写 `echo.AddMsgType(..., "group")` 与 `idmap.WriteConfigv2(id, "type", "group")`）。于是插件针对入群通知回包 `send_group_msg` 时，`HandleSendGroupMsg` 的 `GetMessageTypeByGroupid` / `GetMessageTypeByGroupidV2` 均查不到类型，落入未知类型兜底逻辑（`send_group_msg.go` 中 `echo.AddMsgType(..., "group_private")`）被误判为群私聊，进而把群 OpenID 当作用户走 C2C 接口 `POST /v2/users/{群OpenID}/messages`，报 `11255 请求的资源不存在(用户/群已注销)`。
+
+- **修改**：`Processor/ProcessGroupMember.go` 在生成虚拟 group_id 后，补充 `echo.AddMsgType(config.GetAppIDStr(), groupID, "group")` 与 `idmap.WriteConfigv2(fmt.Sprint(groupID), "type", "group")`，与常规群消息路径保持一致
+- **影响**：入群/退群欢迎语等针对成员变动的 `send_group_msg` 回包将正确走群聊 `POST /v2/groups/{群OpenID}/messages`，不再误发 C2C 导致 11255
