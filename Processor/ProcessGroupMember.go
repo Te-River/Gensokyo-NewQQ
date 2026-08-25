@@ -29,6 +29,12 @@ func (p *Processors) ProcessGroupMember(data *dto.GroupMemberEvent, eventType st
 		return
 	}
 
+	// 缓存该虚拟群ID的类型为 group：入群/退群 notice 触发框架主动调 send_group_msg 时，
+	// GetMessageTypeByGroupidV2 可直接命中，避免兜底误判 group_private 导致群消息误发私聊(11255)
+	AppIDString := strconv.FormatInt(selfID, 10)
+	echo.AddMsgType(AppIDString, groupID, "group")
+	idmap.WriteConfigv2(fmt.Sprint(groupID), "type", "group")
+
 	// 将 member_openid 转为虚拟 user_id（入群/退群成员）
 	userID, err := idmap.StoreIDv2(data.MemberOpenID)
 	if err != nil {

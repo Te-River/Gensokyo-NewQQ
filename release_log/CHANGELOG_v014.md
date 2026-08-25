@@ -51,6 +51,7 @@
 
 - **修改**（`handlers/send_group_msg.go`、`handlers/send_group_msg_raw.go`）：`send_group_msg`/`send_group_msg_raw` action 本身即群消息，`msgType` 未知时**默认按 `group` 处理**，不再兜底猜测 `group_private` 并递归
 - **同步**（`handlers/send_msg.go`）：通用 `send_msg` action 带 `group_id` 时按群处理，仅带 `user_id` 时按私聊处理，与群消息语义一致
+- **入站根治**（`Processor/ProcessGroupMember.go`）：入群/退群 notice 处理时，将虚拟群 ID 的类型缓存为 `group`（`echo.AddMsgType` + `idmap.WriteConfigv2`），框架后续主动调 `send_group_msg` 时 `GetMessageTypeByGroupidV2` 直接命中，从源头避免兜底分支
 - **影响**：入群欢迎等主动群消息正常发送到群，不再误发私聊、不再报 11255；已能通过 echo/idmap 缓存识别出的 `group_private`（C2C 虚拟成群私聊）路径不受影响
 
 ### Markdown / Keyboard 中 `mqqapi://` 等协议链接被误当本地图片读取
