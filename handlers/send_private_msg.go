@@ -253,48 +253,84 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			groupReply := generatePrivateMessage(messageID, eventID, singleItem, "", msgseq, apiv2, UserID)
 			// 进行类型断言
 			richMediaMessage, ok := groupReply.(*dto.RichMediaMessage)
+			// 如果断言为RichMediaMessage失败
+			var groupMessage *dto.MessageToCreate
 			if !ok {
-				mylog.Printf("Error: Expected RichMediaMessage type for key ")
-				return "", nil
+				// 尝试断言为MessageToCreate（local_image/base64_image 等已在生成时完成上传）
+				groupMessage, ok = groupReply.(*dto.MessageToCreate)
+				if !ok {
+					mylog.Printf("Error: Expected RichMediaMessage type for key,value:%v", groupReply)
+					return "", nil // 或其他错误处理
+				}
 			}
-			// 上传图片并获取FileInfo
-			fileInfo, err := uploadMediaPrivate(context.TODO(), UserID, richMediaMessage, apiv2)
-			if err != nil {
-				mylog.Printf("上传图片失败: %v", err)
-				return "", nil // 或其他错误处理
+			// 如果groupMessage是nil 说明groupReply是richMediaMessage类型 如果groupMessage不是nil 说明groupReply是MessageToCreate
+			if groupMessage == nil {
+				// 上传图片并获取FileInfo
+				fileInfo, err := uploadMediaPrivate(context.TODO(), UserID, richMediaMessage, apiv2)
+				if err != nil {
+					mylog.Printf("上传图片失败: %v", err)
+					return "", nil // 或其他错误处理
+				}
+				// 图文混合消息同样需要转换 [CQ:at] 为 @用户名，与纯文本路径对齐
+				// 否则 QQ 官方 API 不识别 CQ 码，会原文显示 [CQ:at,qq=数字]
+				messageText = resolvePlainTextAtMentions(messageText)
+				// 创建包含文本和图像信息的消息
+				msgseq = echo.IncrementMappingSeq(messageID)
+				groupMessage = &dto.MessageToCreate{
+					Content: messageText, // 添加文本内容
+					Media: &dto.Media{
+						FileInfo: fileInfo, // 添加图像信息
+					},
+					MsgID:   messageID,
+					EventID: eventID,
+					MsgSeq:  msgseq,
+					MsgType: 7, // 假设7是组合消息类型
+				}
+				groupMessage.Timestamp = time.Now().Unix() // 设置时间戳
+			} else {
+				// 已上传完成的富媒体（local_image/base64_image 等），补充文本后成为图文混合消息
+				groupMessage.Content = resolvePlainTextAtMentions(messageText)
+				groupMessage.MsgID = messageID
+				groupMessage.EventID = eventID
+				groupMessage.Timestamp = time.Now().Unix() // 设置时间戳
 			}
-			// 图文混合消息同样需要转换 [CQ:at] 为 @用户名，与纯文本路径对齐
-			// 否则 QQ 官方 API 不识别 CQ 码，会原文显示 [CQ:at,qq=数字]
-			messageText = resolvePlainTextAtMentions(messageText)
-			// 创建包含文本和图像信息的消息
-			msgseq = echo.IncrementMappingSeq(messageID)
-			groupMessage := &dto.MessageToCreate{
-				Content: messageText, // 添加文本内容
-				Media: &dto.Media{
-					FileInfo: fileInfo, // 添加图像信息
-				},
-				MsgID:   messageID,
-				EventID: eventID,
-				MsgSeq:  msgseq,
-				MsgType: 7, // 假设7是组合消息类型
-			}
-			groupMessage.Timestamp = time.Now().Unix() // 设置时间戳
 
-			// 处理 [CQ:reply,id=数字] → message_reference + msg_id
-			    // 处理 [CQ:reply,id=数字] → message_reference + msg_id（私聊场景校验避免越权）
-			    if replyIDs, ok := foundItems["reply_msg_id"]; ok && len(replyIDs) > 0 && messageText != "" {
-			        applyPrivateReply(groupMessage, replyIDs, UserID)
-			    }
+			// 处理 [CQ:reply,id=数字] → message_reference + msg_id（私聊场景校验避免越权）
+			if replyIDs, ok := foundItems["reply_msg_id"]; ok && len(replyIDs) > 0 && messageText != "" {
+				applyPrivateReply(groupMessage, replyIDs, UserID)
+			}
 
 			// 发送组合消息
 			resp, err = apiv2.PostC2CMessage(context.TODO(), UserID, groupMessage)
 			if err != nil {
 				mylog.Printf("发送组合消息失败: %v", err)
 				mylog.Printf("%s", FormatQQError(err))
-				return "", nil // 或其他错误处理
+				// 错误保存到本地
+				if config.GetSaveError() {
+					mylog.ErrLogToFile("type", "PostC2CMessage")
+					mylog.ErrInterfaceToFile("request", groupMessage)
+					mylog.ErrLogToFile("error", err.Error())
+				}
+				// 22009: 主动消息超过频控限制，记录日志 (被动回复场景无需补偿)
+				if IsQQError(err, 22009) {
+					mylog.Printf("私聊主动消息受限(code:22009)，消息被丢弃")
+					retmsg, _ = SendC2CResponse(client, err, &message, resp)
+					return "", nil
+				}
+				// 请求参数 event_id 无效，清空后重试一次
+				if IsQQError(err, 40034025) {
+					groupMessage.EventID = ""
+					resp, err = apiv2.PostC2CMessage(context.TODO(), UserID, groupMessage)
+					if err != nil {
+						mylog.Printf("发送组合消息失败 on code 40034025: %v", err)
+					}
+				}
+				// 超时重试
+				if IsDeliveryTimeout(err) {
+					resp, err = postC2CMessageWithRetry(apiv2, UserID, groupMessage)
+				}
 			}
-
-			// 发送成功回执
+			// 发送成功/最终失败回执（err 体现结果，避免客户端超时）
 			retmsg, _ = SendC2CResponse(client, err, &message, resp)
 
 			delete(foundItems, imageType) // 从foundItems中删除已处理的图片项

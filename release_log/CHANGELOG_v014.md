@@ -36,3 +36,11 @@
 
 - **修改**：三处统一改用仓库已有的 `trimFilePrefix()`（Windows 剥 `file:///`、Unix 剥 `file://`），与 `resolveLocalMedia` 等其他 file:// 处理路径行为一致
 - **影响**：Windows 下 Markdown 与 keyboard 按钮中的 `file:///C:/...` 本地图片可正确读取并上传替换为 CDN 直链
+
+### 私聊图文混合消息图片发送失败（send_msg 超时）
+
+`handlers/send_private_msg.go` 图文混合路径（`imageCount == 1 && messageText != ""`）对 `groupReply` 只做了 `*dto.RichMediaMessage` 断言：`local_image` / `base64_image` 等在 `generatePrivateMessage` 内已完成上传、返回的是 `*dto.MessageToCreate`，断言失败后直接 `return "", nil`，**既未发送消息也未给 OneBot 客户端回执**，插件侧表现为 `WebSocket call api send_msg timeout`。群聊同路径（`send_group_msg.go`）已有 `*dto.MessageToCreate` 兜底断言，因此群聊正常。
+
+- **修改**：图文混合路径补齐 `*dto.MessageToCreate` 兜底断言——若返回已上传完成的 `MessageToCreate`，直接补文本（`resolvePlainTextAtMentions`）、`MsgID`/`EventID`/`Timestamp` 后发送；仅在 `RichMediaMessage` 时才调用 `uploadMediaPrivate` 上传
+- **失败回执**：发送失败不再裸 `return`，按 22009 / 40034025 / 超时重试 分类处理并统一 `SendC2CResponse` 回执，避免客户端超时
+- **影响**：私聊本地图片 / base64 图片 + 文本的图文混合消息可正常发送，不再超时
