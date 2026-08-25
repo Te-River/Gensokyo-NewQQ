@@ -29,6 +29,12 @@ func (p *Processors) ProcessGroupMember(data *dto.GroupMemberEvent, eventType st
 		return
 	}
 
+	// 登记该虚拟 group_id 的消息类型为群聊，与 ProcessGroupNormalMessage 等常规群消息路径保持一致。
+	// 否则插件针对入群/退群通知回包 send_group_msg 时，因类型未知会被 send_group_msg.go 的兜底逻辑
+	// 误判为群私聊(group_private)，把群 OpenID 当作用户走 C2C 接口发送，导致 11255 资源不存在错误。
+	echo.AddMsgType(config.GetAppIDStr(), groupID, "group")
+	idmap.WriteConfigv2(fmt.Sprint(groupID), "type", "group")
+
 	// 将 member_openid 转为虚拟 user_id（入群/退群成员）
 	userID, err := idmap.StoreIDv2(data.MemberOpenID)
 	if err != nil {
