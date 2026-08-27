@@ -49,3 +49,35 @@ Gensokyo 支持 QQ 官方 Markdown 的图片尺寸语法：
 ```
 
 详见 [Markdown 消息文档](./文档-markdown消息.md)。
+
+## 图文混排（非 Markdown）
+
+文本 + 单张图片会自动合并为一条 QQ 富媒体消息（`msg_type=7`）发送，不需要 Markdown：
+
+| 项 | 说明 |
+|----|------|
+| 触发条件 | 恰好 1 张图片，且文本非空 |
+| 范围 | `q群 (Group Chat)`、`私聊 (C2C)`（含 `send_group_msg_raw`、`send_private_msg_wakeup`） |
+| 图片来源 | `file://` 本地路径、`http(s)://` 链接、`base64://` 数据（对应 `local_image` / `url_image` / `url_images` / `base64_image`） |
+| `[CQ:at]` | 文本段中的 `[CQ:at,qq=虚拟ID]` 转为 `@用户名 `，与纯文本路径一致 |
+| `[CQ:reply]` | 支持回复引用，转换为 `message_reference` 并设置 `msg_id`（群聊与私聊均支持） |
+
+示例：
+
+```text
+[CQ:image,file=https://example.com/pic.png]这是图片说明
+```
+
+消息段模式写法（`[CQ:image,file=...]` 与 `{"type":"image","data":{"file":"..."}}` 等价，均进入同一套解析逻辑）：
+
+```json
+[
+  {"type": "image", "data": {"file": "https://example.com/pic.png"}},
+  {"type": "text", "data": {"text": "这是图片说明"}}
+]
+```
+
+注意：
+
+- 多张图片（或纯图片无文本）不会合并，会按 foundItems 逐条作为富媒体消息发送。
+- 群聊中若开启 `two_way_echo`，图文混排可能被自动转为 Markdown（`msg_type=2`）发送。
