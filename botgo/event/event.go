@@ -181,6 +181,9 @@ func c2cMessageHandler(payload *dto.WSPayload, message []byte) error {
 	if err := ParseData(message, data); err != nil {
 		return err
 	}
+	if _, loaded := processedIDs.LoadOrStore(data.ID, struct{}{}); loaded {
+		return nil
+	}
 	if DefaultHandlers.C2CMessage != nil {
 		return DefaultHandlers.C2CMessage(payload, data)
 	}
