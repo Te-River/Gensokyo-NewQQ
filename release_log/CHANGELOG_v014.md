@@ -1,5 +1,7 @@
 # Changelog — Release014
 
+> 🚀 **已封版**：Release014 已封版，后续变更请记录到 [CHANGELOG_v015.md](./CHANGELOG_v015.md)。
+
 > 自 Release013 以来的所有变更。
 
 ---
@@ -51,3 +53,57 @@
 
 - **修改**：`Processor/ProcessGroupMember.go` 在生成虚拟 group_id 后，补充 `echo.AddMsgType(config.GetAppIDStr(), groupID, "group")` 与 `idmap.WriteConfigv2(fmt.Sprint(groupID), "type", "group")`，与常规群消息路径保持一致
 - **影响**：入群/退群欢迎语等针对成员变动的 `send_group_msg` 回包将正确走群聊 `POST /v2/groups/{群OpenID}/messages`，不再误发 C2C 导致 11255
+
+### `safeLocalPath` 先拒绝 `..` 再 Clean，修复 Linux 下路径穿越校验绕过
+
+`handlers/message_parser.go` 的 `safeLocalPath` 原先先 `filepath.Clean(decoded)` 再检查 `..` 字符串。`filepath.Clean` 会把根路径下的 `/../` 折叠成 `/`（如 `/../secret.txt` → `/secret.txt`），先 Clean 再检查的字符串匹配在 Linux（CI）上被绕过，`file:///../secret.txt` 得以进入 `local_file` / `local_image` 本地读取路径，形成路径穿越。
+
+- **修改**：`..` 检查移到 `filepath.Clean` 之前，对 URL 解码后的原始路径判断；Clean 仅用于移除 `.` 与规整路径，`filepath.Abs` 相对路径防护保留
+- **影响**：Windows/Linux 行为一致，路径穿越校验不再依赖平台，`file:///../secret.txt` 等恶意路径被统一拒绝
+
+### `c2cMessageHandler` 按消息 ID 去重，修复私聊消息偶发收到两遍
+
+群消息 handler（`groupAtMessageHandler` / `groupMessageHandler`）早已通过 `processedIDs.LoadOrStore` 按消息 ID 去重，挡住 QQ 网关断线重连 / RESUME 时的重复投递；`c2cMessageHandler` 缺少同样的去重，导致私聊消息偶发重复上报。
+
+- **修改**：`botgo/event/event.go` 的 `c2cMessageHandler` 在 `ParseData` 后补充 `processedIDs.LoadOrStore(data.ID, struct{}{})` 去重，命中已处理 ID 直接返回 nil
+- **影响**：C2C 私聊消息与群消息行为对齐，网关重连恢复时不再重复上报
+
+---
+
+## 📝 工程与文档变更
+
+### 入群/退群通知登记群类型时增加诊断日志
+
+`Processor/ProcessGroupMember.go` 在每次 `GROUP_MEMBER_ADD` / `GROUP_MEMBER_REMOVE` 登记虚拟 group_id 为群聊类型时打印一条 INFO 日志（`[ProcessGroupMember] 虚拟 group_id %d 已登记为群聊类型`），便于确认 11255 修复（见上）已部署生效。
+
+### Gensokyo语法参考新增图文混排（非 Markdown）说明
+
+`docs/Gensokyo语法参考.md` 补充 `msg_type=7` 图文混合消息的触发条件、范围与图片来源：
+
+- 示例覆盖 CQ 码字符串与消息段数组两种写法
+- 说明多图/纯图行为及 `two_way_echo` 转 Markdown 的边界
+
+### reply REFIDX 与 keyboard 共存行为同步到 CQ 码文档
+
+封版前补齐相关 CQ 码文档，与实际代码行为对齐：
+
+- `标准cq码-cq-reply.md`：ID 映射流程补充 REFIDX 优先说明（非机器人消息引用使用 `message_scene.ext[].msg_idx`，无 REFIDX 回退普通消息 ID，`MsgID` 始终为普通消息 ID）
+- `扩展cq码-cq-keyboard.md`：修正 3 处过时描述（"markdown 优先、独立 keyboard 被忽略" → markdown 未内嵌 keyboard 时独立 `[CQ:keyboard]` 仍会附加，v013 起共存）
+- `本版新增功能.md`：reply 补充 REFIDX 说明；keyboard 补充消息段路径支持与共存行为
+
+---
+
+## ✅ 提交记录
+
+```
+452bca8  fix: c2cMessageHandler 按消息ID去重，修复私聊消息偶发收到两遍
+a8f4e61  docs: Gensokyo语法参考新增图文混排（非 Markdown）说明
+f98f6df  fix: safeLocalPath 先拒绝 .. 再 Clean，修复 Linux 下路径穿越校验被 /../ 折叠绕过
+deb119a  chore: 入群/退群通知登记群类型时增加诊断日志
+3276f0a  fix: 入群/退群通知回包 send_group_msg 被误判为群私聊 (code:11255)
+5d40b32  fix: 私聊图文混合消息图片发送失败导致 send_msg 超时
+fd2ccc3  fix: Windows 下 Markdown/Keyboard 本地图片 file:/// 路径解析错误
+a68cd65  fix: get_friend_list 不再过滤虚拟数字 ID
+c563e68  feat: 新增 [CQ:wakeup,userid=xxx] C2C 互动召回消息标记
+9f9cc0a  docs: 同步 reply REFIDX 与 keyboard 共存行为到 CQ 码文档
+```
