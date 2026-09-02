@@ -1,12 +1,15 @@
-// Ukaka / 星野 图床 — 签名上传
-// 免费，无需配置，共用签名服务器 https://bed-sign.vercel.0013107.xyz
+// Ukaka / 星野图床 — 第三方签名上传。
+// 仅在管理员显式允许第三方图床后使用。
 package imagehosting
 
 import (
 	"bytes"
 	"fmt"
 	"mime/multipart"
+	"net"
 	"net/http"
+	"net/url"
+	"strings"
 )
 
 const (
@@ -26,7 +29,6 @@ func signedUpload(data []byte, filename, module string) (string, error) {
 	filename = ensureExt(filename, data)
 	mime := detectMIME(data)
 
-	// 1. 获取签名
 	signResp, err := httpGet(_signURL, map[string]string{
 		"module":   module,
 		"filename": filename,
@@ -37,10 +39,10 @@ func signedUpload(data []byte, filename, module string) (string, error) {
 	}
 
 	var signData struct {
-		URL          string            `json:"url"`
-		ResourceURL  string            `json:"resourceUrl"`
-		Header       map[string]string `json:"header"`
-		Body         map[string]string `json:"body"`
+		URL         string            `json:"url"`
+		ResourceURL string            `json:"resourceUrl"`
+		Header      map[string]string `json:"header"`
+		Body        map[string]string `json:"body"`
 	}
 	if err := jsonUnmarshal(signResp, &signData); err != nil {
 		return "", fmt.Errorf("解析签名响应失败: %w", err)
@@ -48,33 +50,38 @@ func signedUpload(data []byte, filename, module string) (string, error) {
 	if signData.URL == "" || signData.ResourceURL == "" {
 		return "", fmt.Errorf("签名返回数据不完整")
 	}
+	if err := requireHTTPSURL(signData.URL); err != nil {
+		return "", fmt.Errorf("签名上传地址无效: %w", err)
+	}
+	if err := requireHTTPSURL(signData.ResourceURL); err != nil {
+		return "", fmt.Errorf("资源地址无效: %w", err)
+	}
 
-	// 2. 上传
 	if module == "xingye" {
-		// 星野：PUT 直传
-		ct := signData.Header["Content-Type"]
-		if ct == "" {
-			ct = mime
+		contentType := signData.Header["Content-Type"]
+		if contentType == "" {
+			contentType = mime
 		}
-		resp, err := httpPut(signData.URL, ct, bytes.NewReader(data), nil)
+		resp, err := httpPut(signData.URL, contentType, bytes.NewReader(data), nil)
 		if err != nil {
 			return "", fmt.Errorf("星野上传失败: %w", err)
 		}
-		if _, readErr := readClose(resp); readErr != nil {
+		responseBody, readErr := readClose(resp)
+		if readErr != nil {
 			return "", fmt.Errorf("读取星野响应失败: %w", readErr)
 		}
-		if resp.StatusCode >= 300 {
-			return "", fmt.Errorf("星野返回 HTTP %d", resp.StatusCode)
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return "", fmt.Errorf("星野返回 HTTP %d: %s", resp.StatusCode, string(responseBody))
 		}
 	} else {
-		// Ukaka：POST multipart
 		body := &bytes.Buffer{}
 		writer := multipart.NewWriter(body)
-
-		// 写入 body 中的额外字段
-		for k, v := range signData.Body {
-			if k != "file" && v != "" {
-				writer.WriteField(k, v)
+		for key, value := range signData.Body {
+			if key == "file" || value == "" {
+				continue
+			}
+			if err := writer.WriteField(key, value); err != nil {
+				return "", fmt.Errorf("写入上传字段失败: %w", err)
 			}
 		}
 
@@ -82,43 +89,76 @@ func signedUpload(data []byte, filename, module string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("创建 form 失败: %w", err)
 		}
-		part.Write(data)
-		writer.Close()
+		if _, err := part.Write(data); err != nil {
+			return "", fmt.Errorf("写入图片失败: %w", err)
+		}
+		if err := writer.Close(); err != nil {
+			return "", fmt.Errorf("关闭 multipart writer 失败: %w", err)
+		}
 
-		resp, err := providerHTTPClient.Post(signData.URL, writer.FormDataContentType(), body)
+		resp, err := httpPost(signData.URL, writer.FormDataContentType(), body, nil)
 		if err != nil {
 			return "", fmt.Errorf("Ukaka 上传失败: %w", err)
 		}
-		if _, readErr := readClose(resp); readErr != nil {
+		responseBody, readErr := readClose(resp)
+		if readErr != nil {
 			return "", fmt.Errorf("读取 Ukaka 响应失败: %w", readErr)
 		}
-		if resp.StatusCode >= 300 {
-			return "", fmt.Errorf("Ukaka 返回 HTTP %d", resp.StatusCode)
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return "", fmt.Errorf("Ukaka 返回 HTTP %d: %s", resp.StatusCode, string(responseBody))
 		}
 	}
 
 	return signData.ResourceURL, nil
 }
 
-// httpGet 简化的 HTTP GET 请求
-func httpGet(url string, params map[string]string) ([]byte, error) {
-	req, err := http.NewRequest("GET", url, nil)
+func httpGet(rawURL string, params map[string]string) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	q := req.URL.Query()
-	for k, v := range params {
-		q.Add(k, v)
+	query := req.URL.Query()
+	for key, value := range params {
+		query.Add(key, value)
 	}
-	req.URL.RawQuery = q.Encode()
+	req.URL.RawQuery = query.Encode()
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Origin", _signOrigin)
 	req.Header.Set("Referer", _signOrigin+"/")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	req.Header.Set("User-Agent", "Gensokyo-NewQQ/imagehosting")
 
 	resp, err := providerHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	return readClose(resp)
+	body, err := readClose(resp)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("签名服务返回 HTTP %d", resp.StatusCode)
+	}
+	return body, nil
 }
+
+func requireHTTPSURL(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return err
+	}
+	if parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+		return fmt.Errorf("仅允许不含用户信息的有效 HTTPS URL")
+	}
+
+	hostname := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+	if hostname == "localhost" || strings.HasSuffix(hostname, ".localhost") {
+		return fmt.Errorf("不允许本机地址")
+	}
+	if ip := net.ParseIP(hostname); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return fmt.Errorf("不允许私有、回环或链路本地 IP 地址")
+		}
+	}
+	return nil
+}
+

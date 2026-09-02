@@ -1,74 +1,71 @@
 # 统一图床/OSS 服务
 
-本包是 `oss_type` 的后端实现，**不再由用户同时启用多个图床**。具体使用哪个后端由配置项 `oss_type` 决定：
+图片图床由 `settings.oss_type` 单选。`0~3` 使用原有本机或云 OSS，`4~10` 使用本包的后端；不会同时轮询多个图床。
 
 | oss_type | 后端 | 说明 |
-|----------|------|------|
-| 0 | 本机 | 上传到 Gensokyo 本地 HTTP 服务器（默认） |
-| 1 | 腾讯云 COS | 旧 `t_COS_*` 字段，走 `oss/tencent.go` |
-| 2 | 百度云 BOS | `b_BOS_*` 字段，走 `oss/baidu.go` |
-| 3 | 阿里云 OSS | `a_OSS_*` 字段，走 `oss/aliyun.go` |
-| 4 | COS 自签 | `cos.*` 字段，走本包 `cos.go` |
-| 5 | Bilibili | `bilibili.*` 字段，走本包 `bilibili.go` |
-| 6 | QQ频道 | `qq_channel.*` 字段，走本包 `qq_channel.go` |
-| 7 | ChatGLM | 免费，开箱即用，走本包 `chatglm.go` |
-| 8 | Ukaka | 免费，开箱即用，走本包 `signed.go` |
-| 9 | 星野 | 免费，开箱即用，走本包 `signed.go` |
-| 10 | Nature | 免费，密钥内置，走本包 `nature.go` |
+|---:|---|---|
+| 0 | 本机 | Gensokyo 本地 HTTP 上传（默认） |
+| 1 | 腾讯云 COS | 原有 `t_COS_*` 配置 |
+| 2 | 百度云 BOS | 原有 `b_BOS_*` 配置 |
+| 3 | 阿里云 OSS | 原有 `a_OSS_*` 配置 |
+| 4 | COS 自签 | `cos.*`，需要自行配置凭据 |
+| 5 | Bilibili | `bilibili.*`，需要 Cookie |
+| 6 | QQ频道 | `qq_channel.*`，需要频道 ID 和 Authorization |
+| 7 | ChatGLM | 第三方免配置服务，需显式允许 |
+| 8 | Ukaka | 第三方签名服务，需显式允许 |
+| 9 | 星野 | 第三方签名服务，需显式允许 |
+| 10 | Nature | 已禁用，不再使用公开源码中的内置凭据 |
 
-> **注意：** `oss_type` 仅控制图片上传路径；语音上传不受此选项影响（仍走本机或 1~3 云OSS）。
-
-## 配置 (config.yml)
-
-以下仅展示 oss_type 及图床凭证相关字段在 `config.yml` 中的实际位置。更多完整配置请参考 `readme.md`。
+## 配置示例
 
 ```yaml
-# oss_type 选择后端（位于 settings 的"云存储/图床"区域）
-oss_type: 0  # 0=本机 1=腾讯云COS 2=百度云BOS ... 10=Nature
-
-# 腾讯云配置 — cos: 紧贴在此
-t_COS_BUCKETNAME : ""
-t_COS_SECRETID : ""
-...
-cos:                            # 腾讯云COS自签（oss_type=4）
-  secret_id: ""                 # 腾讯云 API SecretId
-  secret_key: ""                # 腾讯云 API SecretKey
-  region: "ap-guangzhou"        # 存储桶地域
-  bucket: ""                    # 存储桶名称
-  domain: ""                    # 自定义域名（留空使用COS默认域名）
-
-# 阿里云配置 — bilibili/qq_channel/免费图床紧贴在此
-a_OSS_EndPoint : ""
-...
-bilibili:                       # B站图床（oss_type=5）
-  csrf_token: ""                # B站bili_jct
-  sessdata: ""                  # B站SESSDATA
+oss_type: 0
+cos:
+  secret_id: ""
+  secret_key: ""
+  region: "ap-guangzhou"
+  bucket: ""
+  domain: ""
+bilibili:
+  csrf_token: ""
+  sessdata: ""
   bucket: "openplatform"
-qq_channel:                     # QQ频道图床（oss_type=6）
+qq_channel:
   channel_id: ""
-  token: ""                     # Authorization值，如 "QQBot xxx.yyy"
-chatglm:                        # 智谱免费图床（oss_type=7，开箱即用）
-ukaka:                          # Ukaka免费图床（oss_type=8，开箱即用）
-xingye:                         # 星野免费图床（oss_type=9，开箱即用）
-nature:                         # Nature腾讯COS直传（oss_type=10，密钥内置）
+  token: ""
 ```
+
+ChatGLM、Ukaka、星野需要管理员明确接受图片上传到第三方服务后设置：
+
+```text
+GENSOKYO_ENABLE_THIRD_PARTY_IMAGE_HOSTS=1
+```
+
+## 安全限制
+
+- 单张图片最大 10 MiB，最多 4000 万像素。
+- 只接受 PNG、JPEG、GIF、WebP，并检查可解析性。
+- 文件名会移除路径穿越和控制字符。
+- 图床 HTTP 请求总超时 15 秒，响应体最多读取 1 MiB。
+- 只允许 HTTPS 外部 URL，拒绝本机、私有网段和不安全重定向。
+- 已出现在 Git 历史或公开页面中的凭据无法通过一次提交恢复保密性，应立即撤销或轮换。
 
 ## 集成点
 
-- `images/upload_api.go` 中的 `UploadBase64ImageToServer` 根据 `oss_type` 分发到本包对应后端
-- `handlers/message_parser.go` 中的 `ResolveMarkdownImages` 受益于图床获取公开 URL
+- `images/upload_api.go` 根据 `oss_type` 调用 `UploadProvider`。
+- `handlers/message_parser.go` 可使用图床获取公开 URL。
 
-## 代码结构
+## 目录
 
-```
+```text
 imagehosting/
-├── hosting.go       # 统一接口 + 调度器 + 辅助函数
-├── cos.go           # 腾讯云 COS (HMAC 自签)
+├── hosting.go       # provider 调度、校验和 HTTP 辅助函数
+├── cos.go           # 腾讯云 COS 自签
 ├── bilibili.go      # B站图床
 ├── qq_channel.go    # QQ频道图床
-├── chatglm.go       # 智谱免费图床
-├── signed.go        # Ukaka + 星野 (签名上传)
-├── nature.go        # Nature 腾讯 COS 直传 (密钥内置)
-├── utils.go         # 辅助函数
-└── README.md        # 本文档
+├── chatglm.go       # ChatGLM
+├── signed.go        # Ukaka + 星野
+├── nature.go        # 已禁用的 Nature 后端
+└── README.md
 ```
+
