@@ -1,6 +1,7 @@
 name: Security hardening verification
 
 on:
+  pull_request:
   push:
     branches:
       - main
