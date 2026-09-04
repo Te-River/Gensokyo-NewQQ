@@ -57,6 +57,7 @@ nature:                         # Nature腾讯COS直传（oss_type=10，密钥�
 
 - `images/upload_api.go` 中的 `UploadBase64ImageToServer` 根据 `oss_type` 分发到本包对应后端
 - `handlers/message_parser.go` 中的 `ResolveMarkdownImages` 受益于图床获取公开 URL
+- 上传失败自动重试：最多 3 次总尝试（间隔 1s/2s）
 
 ## 代码结构
 

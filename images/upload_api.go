@@ -98,32 +98,68 @@ func CreateAndUploadMediaMessagePrivate(ctx context.Context, base64EncodedData, 
 	return privateMessage, nil
 }
 
+// maxMediaUploadAttempts QQ CDN 富媒体上传的最大总尝试次数（含首次）
+const maxMediaUploadAttempts = 3
+
+// isTimeoutError 判断是否为超时类错误（context 超时）
+func isTimeoutError(err error) bool {
+	return err != nil && (errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "context deadline exceeded"))
+}
+
 // uploadMedia 上传媒体并返回FileInfo
-// 使用 300s 超时 context 避免大文件上传超时
+// 使用 300s 超时 context 避免大文件上传超时；超时类错误自动重试（最多 3 次总尝试，线性退避）
 func uploadMedia(ctx context.Context, groupID string, richMediaMessage *dto.RichMediaMessage, apiv2 openapi.OpenAPI) (string, error) {
-	uploadCtx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
-	defer cancel()
-	// 调用API来上传媒体
-	messageReturn, err := apiv2.PostGroupMessage(uploadCtx, groupID, richMediaMessage)
-	if err != nil {
-		return "", err
+	var lastErr error
+	for attempt := 1; attempt <= maxMediaUploadAttempts; attempt++ {
+		uploadCtx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+		// 调用API来上传媒体
+		messageReturn, err := apiv2.PostGroupMessage(uploadCtx, groupID, richMediaMessage)
+		cancel()
+		if err == nil {
+			// 返回上传后的FileInfo
+			return messageReturn.MediaResponse.FileInfo, nil
+		}
+		lastErr = err
+		// 业务错误不重试，避免重复上传
+		if !isTimeoutError(err) {
+			return "", err
+		}
+		if attempt < maxMediaUploadAttempts {
+			mylog.Printf("QQ CDN 富媒体上传超时，第 %d 次重试: %v", attempt, err)
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
 	}
-	// 返回上传后的FileInfo
-	return messageReturn.MediaResponse.FileInfo, nil
+	// 走到循环外说明末次尝试仍是超时错误（业务错误已在循环内提前返回）
+	mylog.Printf("QQ CDN 富媒体上传超时，已重试 %d 次仍失败: %v", maxMediaUploadAttempts-1, lastErr)
+	return "", lastErr
 }
 
 // uploadMediaPrivate 上传媒体并返回FileInfo
-// 使用 300s 超时 context 避免大文件上传超时
+// 使用 300s 超时 context 避免大文件上传超时；超时类错误自动重试（最多 3 次总尝试，线性退避）
 func uploadMediaPrivate(ctx context.Context, UserID string, richMediaMessage *dto.RichMediaMessage, apiv2 openapi.OpenAPI) (string, error) {
-	uploadCtx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
-	defer cancel()
-	// 调用API来上传媒体
-	messageReturn, err := apiv2.PostC2CMessage(uploadCtx, UserID, richMediaMessage)
-	if err != nil {
-		return "", err
+	var lastErr error
+	for attempt := 1; attempt <= maxMediaUploadAttempts; attempt++ {
+		uploadCtx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+		// 调用API来上传媒体
+		messageReturn, err := apiv2.PostC2CMessage(uploadCtx, UserID, richMediaMessage)
+		cancel()
+		if err == nil {
+			// 返回上传后的FileInfo
+			return messageReturn.MediaResponse.FileInfo, nil
+		}
+		lastErr = err
+		// 业务错误不重试，避免重复上传
+		if !isTimeoutError(err) {
+			return "", err
+		}
+		if attempt < maxMediaUploadAttempts {
+			mylog.Printf("QQ CDN 富媒体上传超时，第 %d 次重试: %v", attempt, err)
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
 	}
-	// 返回上传后的FileInfo
-	return messageReturn.MediaResponse.FileInfo, nil
+	// 走到循环外说明末次尝试仍是超时错误（业务错误已在循环内提前返回）
+	mylog.Printf("QQ CDN 富媒体上传超时，已重试 %d 次仍失败: %v", maxMediaUploadAttempts-1, lastErr)
+	return "", lastErr
 }
 
 // UploadBase64ImageToServer 将base64图片转换成公开URL

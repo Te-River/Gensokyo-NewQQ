@@ -35,30 +35,56 @@ import (
 
 const maxProviderResponseBytes int64 = 4 << 20
 
+// maxUploadAttempts 图床上传的最大总尝试次数（含首次）
+const maxUploadAttempts = 3
+
 var providerHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 // UploadProvider 按指定 provider 上传图片。
 // provider 名称与 config.GetOssTypeName(config.OssTypeXXX) 保持一致。
 func UploadProvider(provider string, imageData []byte, filename string) (string, error) {
 	mylog.Printf("图床上传 provider=%s", provider)
+	var upload func([]byte, string) (string, error)
 	switch provider {
 	case "cos":
-		return tryCOS(imageData, filename)
+		upload = tryCOS
 	case "bilibili":
-		return tryBilibili(imageData, filename)
+		upload = tryBilibili
 	case "qq_channel":
-		return tryQQChannel(imageData, filename)
+		upload = tryQQChannel
 	case "chatglm":
-		return tryChatGLM(imageData, filename)
+		upload = tryChatGLM
 	case "ukaka":
-		return tryUkaka(imageData, filename)
+		upload = tryUkaka
 	case "xingye":
-		return tryXingye(imageData, filename)
+		upload = tryXingye
 	case "nature":
-		return tryNature(imageData, filename)
+		upload = tryNature
 	default:
 		return "", fmt.Errorf("未知或不支持的图床 provider: %s", provider)
 	}
+	return retryUpload(func() (string, error) { return upload(imageData, filename) })
+}
+
+// retryUpload 对上传操作进行重试，最多 maxUploadAttempts 次尝试，失败间隔线性退避 1s/2s。
+func retryUpload(fn func() (string, error)) (string, error) {
+	var lastErr error
+	for attempt := 0; attempt < maxUploadAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
+		result, err := fn()
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
+		if attempt+1 < maxUploadAttempts {
+			mylog.Printf("图床上传失败，第 %d 次重试: %v", attempt+1, err)
+		} else {
+			mylog.Printf("图床上传失败，已重试 %d 次仍失败: %v", maxUploadAttempts-1, lastErr)
+		}
+	}
+	return "", lastErr
 }
 
 // UploadBase64Provider 解码 base64 后按指定 provider 上传。
