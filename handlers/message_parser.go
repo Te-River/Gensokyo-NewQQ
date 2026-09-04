@@ -314,7 +314,8 @@ func SendResponse(client callapi.Client, err error, message *callapi.ActionMessa
 		}
 	} else {
 		// Default ID handling
-		response.Data.MessageID = 123
+		// 无真实 message_id 不再伪造固定假值,诚实置 0;RetCode/Status 保持现状(官方审核异步假失败但消息可能已发)
+		response.Data.MessageID = 0
 	}
 
 	//mylog.Printf("convert GroupID64 to int: %v", GroupID64) 测试
@@ -470,7 +471,8 @@ func SendGuildResponse(client callapi.Client, err error, message *callapi.Action
 		botstats.RecordMessageSent()
 	} else {
 		// Default ID handling
-		response.Data.MessageID = 123
+		// 无真实 message_id 不再伪造固定假值,诚实置 0;RetCode/Status 保持现状(官方审核异步假失败但消息可能已发)
+		response.Data.MessageID = 0
 	}
 	//转换成int
 	ChannelID64, errr := idmap.StoreIDv2(message.Params.ChannelID.(string))
@@ -536,7 +538,8 @@ func SendC2CResponse(client callapi.Client, err error, message *callapi.ActionMe
 		botstats.RecordMessageSent()
 	} else {
 		// Default ID handling
-		response.Data.MessageID = 123
+		// 无真实 message_id 不再伪造固定假值,诚实置 0;RetCode/Status 保持现状(官方审核异步假失败但消息可能已发)
+		response.Data.MessageID = 0
 	}
 	//将真实id转为int userid64
 	userid64, errr := idmap.StoreIDv2(message.Params.UserID.(string))
@@ -599,7 +602,8 @@ func SendGuildPrivateResponse(client callapi.Client, err error, message *callapi
 		response.Data.MessageID = int(messageID64)
 	} else {
 		// Default ID handling
-		response.Data.MessageID = 123
+		// 无真实 message_id 不再伪造固定假值,诚实置 0;RetCode/Status 保持现状(官方审核异步假失败但消息可能已发)
+		response.Data.MessageID = 0
 	}
 	response.Echo = message.Echo
 	response.GuildID = guildID
@@ -2152,6 +2156,11 @@ func parseMDData(mdData []byte) (*dto.Markdown, *keyboard.MessageKeyboard, error
 		}
 	}
 
+	// D2: 官方强校验图片转存结果开关,群/单聊 markdown 共用此唯一注入点
+	if md != nil && config.GetForceVerifyImageResource() {
+		md.ForceVerifyImageResource = true
+	}
+
 	// 处理 Keyboard
 	var kb *keyboard.MessageKeyboard
 	if temp.Content != nil {
@@ -2483,6 +2492,10 @@ func parseQQMuiscMDData(musicid string) (*dto.Markdown, *keyboard.MessageKeyboar
 	md = &dto.Markdown{
 		CustomTemplateID: CustomTemplateID,
 		Params:           mdParams,
+	}
+	// D2: 与 parseMDData 保持一致,受 force_verify_image_resource 开关控制
+	if config.GetForceVerifyImageResource() {
+		md.ForceVerifyImageResource = true
 	}
 	// 使用gjson获取musicUrl
 	//musicUrl := gjson.Get(pinfo, "url_mid.data.midurlinfo.0.purl").String()

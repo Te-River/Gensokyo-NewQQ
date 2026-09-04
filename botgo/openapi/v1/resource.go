@@ -4,8 +4,8 @@ import (
 	"fmt"
 )
 
-const domain = "api.sgroup.qq.com"
-const sandBoxDomain = "sandbox.api.sgroup.qq.com"
+const domain = "api.bot.qq.com"
+const sandBoxDomain = "api.bot.qq.com" // 官方 api-call-guide 已统一为 api.bot.qq.com,不再单列 sandbox 域名
 
 const scheme = "https"
 

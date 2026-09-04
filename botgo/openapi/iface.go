@@ -117,4 +117,33 @@ type GroupAPI interface {
 	UpdateJoinApprovalStrategyWhitelist(ctx context.Context, strategyID string, req *dto.WhitelistUsersRequest) (*dto.WhitelistUsersResponse, error)
 	// DeleteJoinApprovalStrategy 删除入群自动审批策略
 	DeleteJoinApprovalStrategy(ctx context.Context, strategyID string) error
+	// ---------- 群成员管理 ----------
+	// GroupMemberList 群成员列表 (cursor 分页, 单页≤30)
+	GroupMemberList(ctx context.Context, groupOpenID, cursor string, limit int) (*dto.GroupMemberList, error)
+	// GroupMemberInfo 获取单个群成员信息
+	GroupMemberInfo(ctx context.Context, groupOpenID, memberOpenID string) (*dto.GroupMember, error)
+	// BatchRemoveMembers 批量移出群成员 (member_openids≤20)
+	BatchRemoveMembers(ctx context.Context, groupOpenID string, req *dto.BatchRemoveMembersRequest) (*dto.BatchRemoveMembersResponse, error)
+	// MemberBlacklistList 群黑名单列表 (cursor 分页, 单页≤100)
+	MemberBlacklistList(ctx context.Context, groupOpenID, cursor string, limit int) (*dto.MemberBlacklistList, error)
+	// UpdateMemberBlacklist 群黑名单增删 (op: "add"|"del", member_openids≤20)
+	UpdateMemberBlacklist(ctx context.Context, groupOpenID string, req *dto.MemberBlacklistRequest) (*dto.MemberBlacklistResponse, error)
+	// ---------- 自定义菜单 ----------
+	// GetMenu 获取自定义菜单
+	GetMenu(ctx context.Context) (*dto.MenuResponse, error)
+	// PutMenu 设置自定义菜单 (覆盖式)
+	PutMenu(ctx context.Context, req *dto.PutMenuRequest) (*dto.MenuVersionResponse, error)
+	// ---------- 指令面板 ----------
+	// GetPanels 指令面板列表 (cursor 分页)
+	GetPanels(ctx context.Context, scope, cursor string, limit int) (*dto.PanelList, error)
+	// CreatePanel 创建指令面板
+	CreatePanel(ctx context.Context, req *dto.CreatePanelRequest) (*dto.CreatePanelResponse, error)
+	// GetPanel 获取单个指令面板详情
+	GetPanel(ctx context.Context, panelID string) (*dto.PanelRecordDetail, error)
+	// UpdatePanel 更新指令面板元素与备注 (覆盖式,不影响关联对象)
+	UpdatePanel(ctx context.Context, panelID string, req *dto.UpdatePanelRequest) (*dto.PanelVersionResponse, error)
+	// DeletePanel 删除指令面板 (响应空 {})
+	DeletePanel(ctx context.Context, panelID string) error
+	// UpdatePanelTarget 增删指令面板关联对象 (响应无)
+	UpdatePanelTarget(ctx context.Context, panelID string, req *dto.PanelTargetRequest) error
 }

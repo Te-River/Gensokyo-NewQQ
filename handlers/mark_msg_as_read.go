@@ -26,8 +26,7 @@ func MarkThisMessageAsRead(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 
 	var response MarkThisMessageAsReadAPIResponse
 
-	response.Data.Str = "123"
-	response.Msg = "123"
+	// QQ官方API无已读上报接口,空实现:Data/Msg 保持零值,仅回执 ok
 	response.RetCode = 0
 	response.Status = "ok"
 	response.Echo = message.Echo

@@ -161,7 +161,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 | [CQ:card]      | [群聊图文卡片消息]                  |
 | [CQ:input_notify] | [单聊输入状态通知]               |
 | [CQ:stream]      | [单聊流式消息]                    |
-| [CQ:set_group]  | [群管理动作统一码(禁言/全员禁言/入群审批/策略, 出站动作)] |
+| [CQ:set_group]  | [群管理动作统一码(禁言/全员禁言/入群审批/策略/踢人/黑名单, 出站动作)] |
 
 
 </details>
@@ -191,7 +191,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 | /send_msg | [发送消息] |
 | /delete_msg              | [撤回信息]             |
 | /delete_group_msg        | [撤回QQ群用户或Bot消息] |
-| /set_group_kick          | [群 (Group Chat) 踢人] |
+| /set_group_kick          | [群批量踢人(≤20,真实API,可同步拉黑)] |
 | /set_group_ban | [群单人禁言(禁言/解禁)] |
 | /set_group_whole_ban | [群全员禁言(开/关)] |
 | /set_group_admin         | [群设置管理员] |
@@ -241,6 +241,16 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 | /join_approval_strategy_execute | [执行入群自动审批策略] |
 | /join_approval_strategy_whitelist | [修改策略白名单号码] |
 | /join_approval_strategy_delete | [删除入群自动审批策略] |
+| /get_group_member_blacklist | [获取群黑名单列表] |
+| /set_group_member_blacklist | [群黑名单增删(≤20)] |
+| /get_custom_menu | [获取 C2C 自定义菜单] |
+| /set_custom_menu | [设置 C2C 自定义菜单] |
+| /get_panel_list | [获取指令面板列表] |
+| /create_panel | [创建指令面板] |
+| /get_panel | [获取指令面板详情] |
+| /set_panel | [更新指令面板] |
+| /delete_panel | [删除指令面板] |
+| /set_panel_target | [增删面板关联对象] |
 
 
 </details>

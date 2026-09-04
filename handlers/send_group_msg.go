@@ -2736,6 +2736,11 @@ func auto_md(message callapi.ActionMessage, messageText string, richMediaMessage
 				}
 			}
 
+			// D2: auto_md 直构路径同样注入 force_verify_image_resource(与 parseMDData 注入同构)
+			if md != nil && config.GetForceVerifyImageResource() {
+				md.ForceVerifyImageResource = true
+			}
+
 			whiteList := matchedPrefix.WhiteList
 			// 创建 CustomKeyboard
 			customKeyboard := &keyboard.CustomKeyboard{

@@ -55,17 +55,17 @@ func GetStatus(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI
 		AppEnabled:     true,
 		PluginsGood:    true,
 		AppGood:        true,
-		Online:         true, //测试数据
-		Good:           true, //测试数据
+		Online:         true, // 进程存活即在线(中性值,官方无心跳状态查询接口)
+		Good:           true, // 进程存活即在线(中性值,官方无心跳状态查询接口)
 		Stat: Statistics{
-			PacketReceived:  1000,            //测试数据
-			PacketSent:      950,             //测试数据
-			PacketLost:      50,              //测试数据
-			MessageReceived: messageReceived, //实际数据
-			MessageSent:     messageSent,     //实际数据
-			DisconnectTimes: 5,               //测试数据
-			LostTimes:       2,               //测试数据
-			LastMessageTime: lastMessageTime, //实际数据
+			PacketReceived:  0,               // 官方API无包收发统计,诚实置0
+			PacketSent:      0,               // 官方API无包收发统计,诚实置0
+			PacketLost:      0,               // 官方API无包收发统计,诚实置0
+			MessageReceived: messageReceived, // botstats 真实数据
+			MessageSent:     messageSent,     // botstats 真实数据
+			DisconnectTimes: 0,               // 官方API无断线统计且 wsclient 无导出连接计数,诚实置0
+			LostTimes:       0,               // 官方API无丢包统计,诚实置0
+			LastMessageTime: lastMessageTime, // botstats 真实数据
 		},
 	}
 	response.Message = ""

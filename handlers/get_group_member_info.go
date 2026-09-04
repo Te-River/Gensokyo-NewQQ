@@ -1,7 +1,11 @@
 package handlers
 
 import (
+	"context"
+	"strconv"
+
 	"github.com/hoshinonyaruko/gensokyo/callapi"
+	"github.com/hoshinonyaruko/gensokyo/idmap"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/tencent-connect/botgo/openapi"
 )
@@ -64,27 +68,13 @@ func buildResponseForSingleMember(memberInfo *MemberInfo, echoValue interface{})
 	return response
 }
 
-// getGroupMemberInfo是处理获取群成员信息的函数
+// GetGroupMemberInfo 是处理获取群成员信息的函数。
+// 优先调用官方 v2 单成员接口取真实数据；接口失败时回退中性值兜底 body（不伪造成员信息）。
 func GetGroupMemberInfo(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, message callapi.ActionMessage) (string, error) {
-	// 使用虚拟数据构造 MemberInfo
-	memberInfo := &MemberInfo{
-		UserID:          123456789, // 虚拟的 QQ 号
-		GroupID:         987654321, // 虚拟的群号
-		Nickname:        "主人",      // 虚拟昵称
-		Card:            "主人",
-		Sex:             "unknown", // 性别未知
-		Age:             20,        // 虚拟年龄
-		Area:            "虚拟地区",
-		JoinTime:        1630416000, // 虚拟加群时间戳
-		LastSentTime:    1630502400, // 虚拟最后发言时间戳
-		Level:           "1",        // 虚拟成员等级
-		Role:            "member",   // 角色为普通成员
-		Unfriendly:      false,      // 没有不良记录
-		Title:           "虚拟头衔",
-		TitleExpireTime: 1630598800, // 虚拟头衔过期时间
-		CardChangeable:  true,       // 允许修改群名片
-		ShutUpTimestamp: 0,          // 不在禁言中
-	}
+	groupID, _ := message.Params.GroupID.(string)
+	userID, _ := message.Params.UserID.(string)
+
+	memberInfo := fetchMemberInfoByAPI(apiv2, groupID, userID)
 
 	// 构建响应JSON
 	responseJSON := buildResponseForSingleMember(memberInfo, message.Echo)
@@ -102,4 +92,65 @@ func GetGroupMemberInfo(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		return "", nil
 	}
 	return string(result), nil
+}
+
+// fetchMemberInfoByAPI 调用官方单成员接口构造 MemberInfo，失败时返回中性值兜底。
+func fetchMemberInfoByAPI(apiv2 openapi.OpenAPI, groupID, userID string) *MemberInfo {
+	// 反查真实 OpenID（32 位原生 OpenID 直接使用）
+	groupOpenID, err := resolveGroupOpenID(groupID)
+	if err != nil {
+		mylog.Printf("get_group_member_info: 反查 group_openid 失败,使用中性值兜底: %v", err)
+		return buildFallbackMemberInfo(groupID, userID)
+	}
+	memberOpenID, err := resolveMemberOpenID(userID)
+	if err != nil {
+		mylog.Printf("get_group_member_info: 反查 member_openid 失败,使用中性值兜底: %v", err)
+		return buildFallbackMemberInfo(groupID, userID)
+	}
+
+	member, err := apiv2.GroupMemberInfo(context.TODO(), groupOpenID, memberOpenID)
+	if err != nil {
+		mylog.Printf("get_group_member_info: 官方接口调用失败,使用中性值兜底: %v", err)
+		return buildFallbackMemberInfo(groupID, userID)
+	}
+
+	// 虚拟 ID 输出：参数可解析则直接用，否则经 StoreIDv2 反查
+	userIDInt, err := strconv.ParseInt(userID, 10, 64)
+	if err != nil {
+		userIDInt, _ = idmap.StoreIDv2(memberOpenID)
+	}
+	groupIDInt, err := strconv.ParseInt(groupID, 10, 64)
+	if err != nil {
+		groupIDInt, _ = idmap.StoreIDv2(groupOpenID)
+	}
+
+	return &MemberInfo{
+		UserID:   userIDInt,
+		GroupID:  groupIDInt,
+		Nickname: member.Username,
+		Card:     member.Username,
+		Sex:      "unknown", // 官方无性别字段,中性值
+		JoinTime: parseRFC3339ToInt32(member.JoinedAt, "joined_at"),
+		Role:     normalizeMemberRole(member.MemberRole),
+		// Age/Area/LastSentTime/Level/Title 等官方无对应字段,保留中性值
+	}
+}
+
+// buildFallbackMemberInfo 官方接口失败时的中性值兜底 body（保留原 body 结构,不再伪造具体成员信息）。
+func buildFallbackMemberInfo(groupID, userID string) *MemberInfo {
+	userIDInt, err := strconv.ParseInt(userID, 10, 64)
+	if err != nil {
+		userIDInt = 0
+	}
+	groupIDInt, err := strconv.ParseInt(groupID, 10, 64)
+	if err != nil {
+		groupIDInt = 0
+	}
+	return &MemberInfo{
+		UserID:  userIDInt,
+		GroupID: groupIDInt,
+		Sex:     "unknown",
+		Role:    "member",
+		Level:   "0",
+	}
 }

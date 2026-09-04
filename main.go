@@ -192,6 +192,8 @@ func main() {
 			apiV2 = botgo.NewOpenAPI(token).WithTimeout(120 * time.Second)
 			log.Println("创建 apiv2 成功")
 		} else {
+			// D1 后官方已统一域名,sandbox_mode 不再指向独立沙箱域名,提示用户请求仍发往正式域名
+			log.Println("Warning: sandbox_mode=true,官方已统一域名,沙箱请求现指向 api.bot.qq.com(与正式环境相同)")
 			// 创建 v1 版本的 OpenAPI 实例
 			if err := botgo.SelectOpenAPIVersion(openapi.APIv1); err != nil {
 				log.Fatalln(err)

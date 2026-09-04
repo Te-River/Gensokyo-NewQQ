@@ -156,10 +156,11 @@ type Settings struct {
 	UnionWebhook string `yaml:"union_webhook"`
 	UnionID      bool   `yaml:"union_id"`
 	//MD相关
-	CustomTemplateID string `yaml:"custom_template_id"`
-	KeyBoardID       string `yaml:"keyboard_id"`
-	NativeMD         bool   `yaml:"native_md"`
-	EntersAsBlock    bool   `yaml:"enters_as_block"`
+	CustomTemplateID         string `yaml:"custom_template_id"`
+	KeyBoardID               string `yaml:"keyboard_id"`
+	NativeMD                 bool   `yaml:"native_md"`
+	EntersAsBlock            bool   `yaml:"enters_as_block"`
+	ForceVerifyImageResource bool   `yaml:"force_verify_image_resource"`
 	//发送行为修改
 	LazyMessageId     bool   `yaml:"lazy_message_id"`
 	RamDomSeq         bool   `yaml:"ramdom_seq"`

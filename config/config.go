@@ -1036,6 +1036,18 @@ func GetLazyMessageId() bool {
 	return instance.Settings.LazyMessageId
 }
 
+// 获取ForceVerifyImageResource状态
+func GetForceVerifyImageResource() bool {
+	mu.RLock()
+	defer mu.RUnlock()
+
+	if instance == nil {
+		fmt.Println("Warning: instance is nil when trying to get ForceVerifyImageResource value.")
+		return false
+	}
+	return instance.Settings.ForceVerifyImageResource
+}
+
 // 获取HashID
 func GetHashIDValue() bool {
 	mu.RLock()

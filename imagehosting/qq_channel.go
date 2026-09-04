@@ -33,7 +33,7 @@ func tryQQChannel(data []byte, filename string) (string, error) {
 
 	// 用 config 中配置的 token
 	token := config.GetImageHostingQQChannelToken()
-	url := fmt.Sprintf("https://api.sgroup.qq.com/channels/%s/messages", cfg.ChannelID)
+	url := fmt.Sprintf("https://api.bot.qq.com/channels/%s/messages", cfg.ChannelID)
 	req, err := http.NewRequest("POST", url, body)
 	if err != nil {
 		return "", fmt.Errorf("创建请求失败: %w", err)

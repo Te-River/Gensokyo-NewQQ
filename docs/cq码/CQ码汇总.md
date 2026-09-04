@@ -41,7 +41,7 @@ Gensokyo 为适配 QQ Bot API 特有能力而扩展的 CQ 码类型。
 | `[CQ:input_notify]` | `私聊 (C2C)` | 输入状态通知，正文发送前先展示"正在输入"。 | [查看](./扩展CQ码/扩展cq码-cq-input_notify.md) |
 | `[CQ:stream]` | `私聊 (C2C)` | 流式消息，逐片展示实现打字机效果（start→mid→finish）。 | [查看](./扩展CQ码/扩展cq码-cq-stream.md) |
 | `[CQ:keyboard]` | `q群 (Group Chat)` / `C2C (私聊)` | 文本消息附加内嵌键盘（按钮消息）。⚠️ 按钮仅在 Markdown 消息下渲染，建议与 `[CQ:markdown]` 配合。 | [查看](./扩展CQ码/扩展cq码-cq-keyboard.md) |
-| `[CQ:set_group]` | `q群 (Group Chat)` | 出站动作统一码：成员禁言/解禁（`action=ban`）、全员禁言开关（`action=whole_ban`）、入群申请审批（`action=add_request`）、审批策略执行/删除（`action=strategy_execute`/`strategy_delete`）。 | [查看](./扩展CQ码/扩展cq码-cq-set_group.md) |
+| `[CQ:set_group]` | `q群 (Group Chat)` | 出站动作统一码：成员禁言/解禁（`action=ban`）、全员禁言开关（`action=whole_ban`）、入群申请审批（`action=add_request`）、审批策略执行/删除（`action=strategy_execute`/`strategy_delete`）、成员踢出（`action=kick`，批量≤20可同步拉黑）、黑名单增删（`action=blacklist_add`/`blacklist_del`）。 | [查看](./扩展CQ码/扩展cq码-cq-set_group.md) |
 
 ---
 

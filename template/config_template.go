@@ -163,7 +163,7 @@ settings:
 
 
   #API修改
-  get_g_list_delay : 500            #轮询时的延迟时间,毫秒数.
+  get_g_list_delay : 500            #get_group_list 逐群拉取间隔(毫秒)
   forward_msg_limit : 3             #发送折叠转发信息时的最大限制条数 若要发转发信息 请设置lazy_message_id为true
   custom_bot_name : "Gensokyo全域机器人"   #自定义api返回的机器人名字,会在api调用中返回,默认Gensokyo全域机器人
   transform_api_ids : true          #对get_group_menmber_list\get_group_member_info\get_group_list生效,是否在其中返回转换后的值(默认转换,不转换请自行处理插件逻辑,比如调用gsk的http api转换)
@@ -196,6 +196,7 @@ settings:
   keyboard_id : ""                  #自动转换图文信息到md所需要的按钮id *需要应用端支持双方向echo
   native_md : false                 #自动转换图文信息到md,使用原生markdown能力.
   enters_as_block : false           #自动转换图文信息到md,\r \r\n \n 替换为空格.
+  force_verify_image_resource : false  #发送markdown消息时官方校验图片转存结果,转存失败将返回错误(40034004)且消息不发送;仅需要确保图片必然可显示时开启
 
   #发送行为修改
   lazy_message_id : false           #false=message_id 条条准确对应 true=message_id 按时间范围随机对应(适合主动推送bot)前提,有足够多的活跃信息刷新id池

@@ -147,3 +147,78 @@ func (o *openAPIv2) DeleteJoinApprovalStrategy(ctx context.Context, strategyID s
 		Delete(o.getURL(groupJoinApprovalStrategyItemURI))
 	return err
 }
+
+// GroupMemberList 群成员列表
+func (o *openAPIv2) GroupMemberList(ctx context.Context, groupOpenID, cursor string, limit int) (*dto.GroupMemberList, error) {
+	request := o.request(ctx).
+		SetResult(dto.GroupMemberList{}).
+		SetPathParam("group_id", groupOpenID)
+	if cursor != "" {
+		request = request.SetQueryParam("cursor", cursor)
+	}
+	if limit > 0 {
+		request = request.SetQueryParam("limit", strconv.Itoa(limit))
+	}
+	resp, err := request.Get(o.getURL(groupMembersURI))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Result().(*dto.GroupMemberList), nil
+}
+
+// GroupMemberInfo 获取单个群成员信息
+func (o *openAPIv2) GroupMemberInfo(ctx context.Context, groupOpenID, memberOpenID string) (*dto.GroupMember, error) {
+	resp, err := o.request(ctx).
+		SetResult(dto.GroupMember{}).
+		SetPathParam("group_id", groupOpenID).
+		SetPathParam("member_openid", memberOpenID).
+		Get(o.getURL(groupMemberInfoURI))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Result().(*dto.GroupMember), nil
+}
+
+// BatchRemoveMembers 批量移出群成员
+func (o *openAPIv2) BatchRemoveMembers(ctx context.Context, groupOpenID string, req *dto.BatchRemoveMembersRequest) (*dto.BatchRemoveMembersResponse, error) {
+	resp, err := o.request(ctx).
+		SetResult(dto.BatchRemoveMembersResponse{}).
+		SetPathParam("group_id", groupOpenID).
+		SetBody(req).
+		Post(o.getURL(groupBatchRemoveMembersURI))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Result().(*dto.BatchRemoveMembersResponse), nil
+}
+
+// MemberBlacklistList 群黑名单列表
+func (o *openAPIv2) MemberBlacklistList(ctx context.Context, groupOpenID, cursor string, limit int) (*dto.MemberBlacklistList, error) {
+	request := o.request(ctx).
+		SetResult(dto.MemberBlacklistList{}).
+		SetPathParam("group_id", groupOpenID)
+	if cursor != "" {
+		request = request.SetQueryParam("cursor", cursor)
+	}
+	if limit > 0 {
+		request = request.SetQueryParam("limit", strconv.Itoa(limit))
+	}
+	resp, err := request.Get(o.getURL(groupMemberBlacklistURI))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Result().(*dto.MemberBlacklistList), nil
+}
+
+// UpdateMemberBlacklist 群黑名单增删
+func (o *openAPIv2) UpdateMemberBlacklist(ctx context.Context, groupOpenID string, req *dto.MemberBlacklistRequest) (*dto.MemberBlacklistResponse, error) {
+	resp, err := o.request(ctx).
+		SetResult(dto.MemberBlacklistResponse{}).
+		SetPathParam("group_id", groupOpenID).
+		SetBody(req).
+		Post(o.getURL(groupMemberBlacklistURI))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Result().(*dto.MemberBlacklistResponse), nil
+}

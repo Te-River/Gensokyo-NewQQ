@@ -66,3 +66,68 @@ func (o *openAPI) UpdateJoinApprovalStrategyWhitelist(ctx context.Context, strat
 func (o *openAPI) DeleteJoinApprovalStrategy(ctx context.Context, strategyID string) error {
 	return fmt.Errorf("v1 openapi does not support DeleteJoinApprovalStrategy")
 }
+
+// GroupMemberList v1 不支持群聊接口
+func (o *openAPI) GroupMemberList(ctx context.Context, groupOpenID, cursor string, limit int) (*dto.GroupMemberList, error) {
+	return nil, fmt.Errorf("v1 openapi does not support GroupMemberList")
+}
+
+// GroupMemberInfo v1 不支持群聊接口
+func (o *openAPI) GroupMemberInfo(ctx context.Context, groupOpenID, memberOpenID string) (*dto.GroupMember, error) {
+	return nil, fmt.Errorf("v1 openapi does not support GroupMemberInfo")
+}
+
+// BatchRemoveMembers v1 不支持群聊接口
+func (o *openAPI) BatchRemoveMembers(ctx context.Context, groupOpenID string, req *dto.BatchRemoveMembersRequest) (*dto.BatchRemoveMembersResponse, error) {
+	return nil, fmt.Errorf("v1 openapi does not support BatchRemoveMembers")
+}
+
+// MemberBlacklistList v1 不支持群聊接口
+func (o *openAPI) MemberBlacklistList(ctx context.Context, groupOpenID, cursor string, limit int) (*dto.MemberBlacklistList, error) {
+	return nil, fmt.Errorf("v1 openapi does not support MemberBlacklistList")
+}
+
+// UpdateMemberBlacklist v1 不支持群聊接口
+func (o *openAPI) UpdateMemberBlacklist(ctx context.Context, groupOpenID string, req *dto.MemberBlacklistRequest) (*dto.MemberBlacklistResponse, error) {
+	return nil, fmt.Errorf("v1 openapi does not support UpdateMemberBlacklist")
+}
+
+// GetMenu v1 不支持群聊接口
+func (o *openAPI) GetMenu(ctx context.Context) (*dto.MenuResponse, error) {
+	return nil, fmt.Errorf("v1 openapi does not support GetMenu")
+}
+
+// PutMenu v1 不支持群聊接口
+func (o *openAPI) PutMenu(ctx context.Context, req *dto.PutMenuRequest) (*dto.MenuVersionResponse, error) {
+	return nil, fmt.Errorf("v1 openapi does not support PutMenu")
+}
+
+// GetPanels v1 不支持群聊接口
+func (o *openAPI) GetPanels(ctx context.Context, scope, cursor string, limit int) (*dto.PanelList, error) {
+	return nil, fmt.Errorf("v1 openapi does not support GetPanels")
+}
+
+// CreatePanel v1 不支持群聊接口
+func (o *openAPI) CreatePanel(ctx context.Context, req *dto.CreatePanelRequest) (*dto.CreatePanelResponse, error) {
+	return nil, fmt.Errorf("v1 openapi does not support CreatePanel")
+}
+
+// GetPanel v1 不支持群聊接口
+func (o *openAPI) GetPanel(ctx context.Context, panelID string) (*dto.PanelRecordDetail, error) {
+	return nil, fmt.Errorf("v1 openapi does not support GetPanel")
+}
+
+// UpdatePanel v1 不支持群聊接口
+func (o *openAPI) UpdatePanel(ctx context.Context, panelID string, req *dto.UpdatePanelRequest) (*dto.PanelVersionResponse, error) {
+	return nil, fmt.Errorf("v1 openapi does not support UpdatePanel")
+}
+
+// DeletePanel v1 不支持群聊接口
+func (o *openAPI) DeletePanel(ctx context.Context, panelID string) error {
+	return fmt.Errorf("v1 openapi does not support DeletePanel")
+}
+
+// UpdatePanelTarget v1 不支持群聊接口
+func (o *openAPI) UpdatePanelTarget(ctx context.Context, panelID string, req *dto.PanelTargetRequest) error {
+	return fmt.Errorf("v1 openapi does not support UpdatePanelTarget")
+}

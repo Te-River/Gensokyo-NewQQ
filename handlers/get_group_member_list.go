@@ -1,10 +1,12 @@
 package handlers
 
 import (
+	"context"
 	"strconv"
 	"time"
 
 	"github.com/hoshinonyaruko/gensokyo/callapi"
+	"github.com/hoshinonyaruko/gensokyo/config"
 	"github.com/hoshinonyaruko/gensokyo/idmap"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/tencent-connect/botgo/openapi"
@@ -37,6 +39,9 @@ type MemberList struct {
 	ShutUpTimestamp int64  `json:"shut_up_timestamp"`
 }
 
+// groupMemberListMaxPages 分页安全上限(单页≤30,100页=3000人),防止异常响应导致死循环
+const groupMemberListMaxPages = 100
+
 func init() {
 	callapi.RegisterHandler("get_group_member_list", GetGroupMemberList)
 }
@@ -51,54 +56,22 @@ func GetGroupMemberList(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 
 	switch msgType {
 	case "group":
-		mylog.Printf("getGroupMemberList(group): 开始从本地获取群成员列表(请在config打开idmap-pro以缓存群成员列表)")
-		// 实现的功能
+		groupIDStr := message.Params.GroupID.(string)
 		var members []MemberList
 
-		// 使用 message.Params.GroupID.(string) 作为 id 来调用 FindSubKeysById
-		userIDs, err := idmap.FindSubKeysByIdPro(message.Params.GroupID.(string))
+		// 反查真实群 OpenID，调用官方成员列表分页接口
+		groupOpenID, err := resolveGroupOpenID(groupIDStr)
 		if err != nil {
-			mylog.Printf("Error retrieving user IDs: %v", err)
-			return "", nil // 或者处理错误
+			mylog.Printf("get_group_member_list(group): 反查群 OpenID 失败,回退本地成员列表: %v", err)
+			members = fetchFallbackMembers(groupIDStr)
+		} else {
+			members = fetchMembersByAPI(apiv2, groupOpenID, groupIDStr)
 		}
 
-		// 获取当前时间的前一天，并转换为10位时间戳
-		yesterday := time.Now().AddDate(0, 0, -1).Unix()
-
-		for _, userID := range userIDs {
-			userIDInt, err := strconv.ParseUint(userID, 10, 64)
-			if err != nil {
-				mylog.Printf("Error ParseInt73: %v", err)
-			}
-			groupIDInt, err := strconv.ParseUint(message.Params.GroupID.(string), 10, 64)
-			if err != nil {
-				mylog.Printf("Error ParseInt76: %v", err)
-			}
-			joinTimeInt := int32(yesterday)
-			member := MemberList{
-				UserID:          userIDInt,
-				GroupID:         groupIDInt,
-				Nickname:        "主人",
-				Card:            "主人",
-				Sex:             "0",
-				Age:             0,
-				Area:            "0",
-				JoinTime:        joinTimeInt,
-				LastSentTime:    0,
-				Level:           "0",
-				Role:            "member",
-				Unfriendly:      false,
-				Title:           "0",
-				TitleExpireTime: 0,
-				CardChangeable:  false,
-				ShutUpTimestamp: 0,
-			}
-			members = append(members, member)
-		}
 		mylog.Printf("member message.Echors: %+v\n", message.Echo)
 
 		responseJSON := buildResponse(members, message.Echo)
-		mylog.Printf("getGroupMemberList(群): %s\n", responseJSON)
+		mylog.Printf("getGroupMemberList(群): 共 %d 名成员\n", len(members))
 
 		err = client.SendMessage(responseJSON)
 		if err != nil {
@@ -118,6 +91,138 @@ func GetGroupMemberList(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		mylog.Printf("Unknown msgType: %s", msgType)
 	}
 	return "", nil
+}
+
+// fetchMembersByAPI 通过官方 v2 成员列表接口游标分页拉取全量成员。
+// 首次调用失败回退本地缓存路径；中途页失败返回已收集数据（不静默丢整表）。
+func fetchMembersByAPI(apiv2 openapi.OpenAPI, groupOpenID, groupIDStr string) []MemberList {
+	var members []MemberList
+	groupIDInt, err := strconv.ParseUint(groupIDStr, 10, 64)
+	if err != nil {
+		// 群 OpenID 形态时无法回填虚拟群号,置 0 由应用端自行处理
+		groupIDInt = 0
+	}
+
+	cursor := ""
+	for page := 1; page <= groupMemberListMaxPages; page++ {
+		list, err := apiv2.GroupMemberList(context.TODO(), groupOpenID, cursor, 30)
+		if err != nil {
+			if page == 1 {
+				// 首页失败：官方接口不可用（如无权限/未开放），回退本地缓存路径
+				mylog.Printf("get_group_member_list(group): 官方接口调用失败,回退本地成员列表: %v", err)
+				return fetchFallbackMembers(groupIDStr)
+			}
+			// 中途页失败：返回已收集数据，避免整表丢失
+			mylog.Printf("get_group_member_list(group): 第 %d 页拉取失败,返回已收集的 %d 名成员: %v", page, len(members), err)
+			return members
+		}
+
+		for _, member := range list.Members {
+			// 真实 openid → 虚拟 user_id（陌生成员自动生成新虚拟 ID）
+			userID, err := idmap.StoreIDv2(member.MemberOpenID)
+			if err != nil {
+				mylog.Printf("get_group_member_list(group): 成员 openid 转虚拟 ID 失败,跳过: %v", err)
+				continue
+			}
+			members = append(members, MemberList{
+				UserID:   uint64(userID),
+				GroupID:  groupIDInt,
+				Nickname: member.Username,
+				Card:     member.Username,
+				Sex:      "unknown", // 官方无性别字段,中性值
+				JoinTime: parseRFC3339ToInt32(member.JoinedAt, "joined_at"),
+				Role:     normalizeMemberRole(member.MemberRole),
+				// Age/Area/LastSentTime/Level/Title 等官方无对应字段,保留中性值
+			})
+		}
+
+		if list.NextCursor == "" {
+			break // 末页
+		}
+		// 页间节流,防止大群连续请求触发官方 QPM 限制(delay=0 时不休眠)
+		if delay := config.GetGroupListDelay(); delay > 0 {
+			time.Sleep(time.Duration(delay) * time.Millisecond)
+		}
+		cursor = list.NextCursor
+	}
+	if len(members) == 0 {
+		// 官方返回空列表时回退本地缓存,保持旧行为可用
+		mylog.Printf("get_group_member_list(group): 官方接口返回空列表,回退本地成员列表")
+		return fetchFallbackMembers(groupIDStr)
+	}
+	return members
+}
+
+// fetchFallbackMembers 官方接口不可用时的本地缓存回退路径（原 FindSubKeysByIdPro 逻辑）。
+// 基于 idmap-pro 缓存的成员虚拟 ID 列表构造成员条目。
+func fetchFallbackMembers(groupIDStr string) []MemberList {
+	var members []MemberList
+
+	// 使用 groupID 作为 id 来调用 FindSubKeysByIdPro
+	userIDs, err := idmap.FindSubKeysByIdPro(groupIDStr)
+	if err != nil {
+		mylog.Printf("Error retrieving user IDs: %v", err)
+		return nil
+	}
+
+	// 获取当前时间的前一天，并转换为10位时间戳
+	yesterday := time.Now().AddDate(0, 0, -1).Unix()
+
+	for _, userID := range userIDs {
+		userIDInt, err := strconv.ParseUint(userID, 10, 64)
+		if err != nil {
+			mylog.Printf("Error ParseInt73: %v", err)
+		}
+		groupIDInt, err := strconv.ParseUint(groupIDStr, 10, 64)
+		if err != nil {
+			mylog.Printf("Error ParseInt76: %v", err)
+		}
+		joinTimeInt := int32(yesterday)
+		member := MemberList{
+			UserID:          userIDInt,
+			GroupID:         groupIDInt,
+			Nickname:        "未知", // 本地缓存无用户名,中性占位
+			Card:            "未知",
+			Sex:             "0",
+			Age:             0,
+			Area:            "0",
+			JoinTime:        joinTimeInt,
+			LastSentTime:    0,
+			Level:           "0",
+			Role:            "member",
+			Unfriendly:      false,
+			Title:           "0",
+			TitleExpireTime: 0,
+			CardChangeable:  false,
+			ShutUpTimestamp: 0,
+		}
+		members = append(members, member)
+	}
+	return members
+}
+
+// parseRFC3339ToInt32 解析 RFC3339 时间字符串为 Unix 秒（int32）。
+// 空串/非法格式置 0 并日志，不中断列表。
+func parseRFC3339ToInt32(value, field string) int32 {
+	if value == "" {
+		return 0
+	}
+	t, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		// 中性前缀:本函数被 get_group_member_list 与 get_group_member_info 共用,不归属单一 action
+		mylog.Printf("parseRFC3339ToInt32: %s 解析失败(%s),置 0: %v", field, value, err)
+		return 0
+	}
+	return int32(t.Unix())
+}
+
+// normalizeMemberRole 官方 member_role 枚举(member|owner|admin)与 OneBot role 直通,未知值保底 member
+func normalizeMemberRole(role string) string {
+	switch role {
+	case "owner", "admin", "member":
+		return role
+	}
+	return "member"
 }
 
 func buildResponse(members []MemberList, echoValue interface{}) map[string]interface{} {
