@@ -510,7 +510,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		}
 
 		// 优先发送文本信息
-		if messageText != "" || len(msgPendings) > 0 {
+		if messageText != "" || len(msgPendings) > 0 || len(foundItems["markdown"]) > 0 || len(foundItems["keyboard"]) > 0 {
 			// 统一处理出站动作型 CQ 码（member/remove/禁言/入群审批/策略）
 			// legacy/shadow：旧正则管道单次扫描执行；new：ExecutePending 在原时序点执行
 			// （时序与重构前逐字节相同），返回 member 的 realGroupID 供跨群路由
@@ -554,7 +554,8 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 					 messageText = ResolveMarkdownAtMentions(messageText)
 					 // 步骤 2: 将整个 messageText 合并到 markdown 内容头部（qq 官方 md 整个消息以 md 语法渲染）
 					 // 仅当 md 非 nil 时才合并，避免 parseMarkdownFromMessage 解析失败返回 nil 时触发 panic
-					 if md != nil {
+					 // md-only（messageText 为空）时跳过拼接，避免产出前导换行
+					 if md != nil && messageText != "" {
 					  md.Content = messageText + "\n" + md.Content
 					 }
 					 // 步骤 3: 清理 messageText 中的 [CQ:markdown] 标记

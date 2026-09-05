@@ -457,7 +457,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			return retmsg, nil
 		}
 
-		if strings.TrimSpace(messageText) != "" {
+		if strings.TrimSpace(messageText) != "" || len(msgPendings) > 0 || len(foundItems["markdown"]) > 0 || len(foundItems["keyboard"]) > 0 {
 			msgseq := echo.IncrementMappingSeq(messageID)
 			groupReply := generatePrivateMessage(messageID, eventID, nil, messageText, msgseq, apiv2, UserID)
 

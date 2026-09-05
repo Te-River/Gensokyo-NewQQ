@@ -47,4 +47,5 @@
 ## Fixed
 
 - CodeQL 整数转换告警：Processor 包 9 处消息 ID 的 `int64→int` 无界转换统一收敛到 `safeMessageID` 边界检查（统一按 int32 边界收紧；越界记日志回退 `-1` 哨兵，杜绝截断产生错误 ID）。
+- 修复纯 markdown/keyboard 段消息（无文本段）在群聊与私聊被静默丢弃的问题（存量：发送门槛只看文本段），现在 md-only/kb-only 消息正常发送。
 
