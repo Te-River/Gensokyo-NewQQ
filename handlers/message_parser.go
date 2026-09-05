@@ -2333,14 +2333,55 @@ func ConvertMapToJSONString(m map[string]interface{}) (string, error) {
 	return jsonString, nil
 }
 
+// unwrapNestedMarkdown 尝试从可能的嵌套/非标准 JSON 中提取 markdown 字段。
+// 处理两种场景：
+//  1. 双层包装 {"markdown":{"markdown":{"content":"..."}}} → 取内层 markdown
+//  2. 顶层 content 为字符串 {"content":"markdown text"} → 降级视为 markdown content
+//
+// 返回提取到的 mdFields 和 true，或零值和 false（无需解包 / 解包失败）。
+func unwrapNestedMarkdown(raw []byte) (struct {
+	CustomTemplateID *string               `json:"custom_template_id,omitempty"`
+	Params           []*dto.MarkdownParams `json:"params,omitempty"`
+	Content          string                `json:"content,omitempty"`
+}, bool) {
+	type mdFields struct {
+		CustomTemplateID *string               `json:"custom_template_id,omitempty"`
+		Params           []*dto.MarkdownParams `json:"params,omitempty"`
+		Content          string                `json:"content,omitempty"`
+	}
+	var zero mdFields
+
+	s := string(raw)
+	// 场景1: 检查顶层 "markdown" 键
+	if md := gjson.Get(s, "markdown"); md.Exists() && md.Type == gjson.JSON {
+		var inner mdFields
+		// 先尝试直接解析为 markdown 内容（{"content":"..."}/{"custom_template_id":"..."}）
+		if err := json.Unmarshal([]byte(md.Raw), &inner); err == nil && (inner.Content != "" || inner.CustomTemplateID != nil) {
+			return inner, true
+		}
+		// 若失败，检查是否双层包装 {"markdown":{"markdown":{...}}}
+		if nested := gjson.Get(md.Raw, "markdown"); nested.Exists() && nested.Type == gjson.JSON {
+			if err := json.Unmarshal([]byte(nested.Raw), &inner); err == nil && (inner.Content != "" || inner.CustomTemplateID != nil) {
+				return inner, true
+			}
+		}
+	}
+	// 场景2: 顶层无 "markdown" 但有 "content" 字符串 → 降级视为 markdown content
+	if c := gjson.Get(s, "content"); c.Exists() && c.Type == gjson.String {
+		return mdFields{Content: c.String()}, true
+	}
+	return zero, false
+}
+
 func parseMDData(mdData []byte) (*dto.Markdown, *keyboard.MessageKeyboard, error) {
 	// 定义一个用于解析 JSON 的临时结构体
+	type mdFields struct {
+		CustomTemplateID *string               `json:"custom_template_id,omitempty"`
+		Params           []*dto.MarkdownParams `json:"params,omitempty"`
+		Content          string                `json:"content,omitempty"`
+	}
 	var temp struct {
-		Markdown struct {
-			CustomTemplateID *string               `json:"custom_template_id,omitempty"`
-			Params           []*dto.MarkdownParams `json:"params,omitempty"`
-			Content          string                `json:"content,omitempty"`
-		} `json:"markdown,omitempty"`
+		Markdown mdFields `json:"markdown,omitempty"`
 		Keyboard struct {
 			ID      string                   `json:"id,omitempty"`
 			Content *keyboard.CustomKeyboard `json:"content,omitempty"`
@@ -2352,9 +2393,24 @@ func parseMDData(mdData []byte) (*dto.Markdown, *keyboard.MessageKeyboard, error
 		Rows    []*keyboard.Row          `json:"rows,omitempty"`
 	}
 
-	// 解析 JSON
-	if err := json.Unmarshal(mdData, &temp); err != nil {
-		return nil, nil, err
+	// 解析 JSON（允许失败——后续降级处理嵌套/解包场景）
+	unmarshalErr := json.Unmarshal(mdData, &temp)
+
+	// 当首次 Unmarshal 失败（如顶层 content 为 string 与 *keyboard.CustomKeyboard 类型冲突）
+	// 或 markdown 字段为空时，尝试从嵌套包装中解包 markdown。
+	// 典型场景：
+	//   1. 双层包装 {"markdown":{"markdown":{"content":"..."}}} → 递进一层
+	//   2. 顶层 content 为字符串的非标准格式 {"content":"markdown text"} → 降级提取
+	if unmarshalErr != nil || (temp.Markdown.Content == "" && temp.Markdown.CustomTemplateID == nil) {
+		if extracted, ok := unwrapNestedMarkdown(mdData); ok {
+			temp.Markdown = extracted
+			// 降级成功：清除首次 Unmarshal 的错误（keyboard 等字段可能部分丢失，但 markdown 是主路径）
+			unmarshalErr = nil
+		}
+	}
+
+	if unmarshalErr != nil {
+		return nil, nil, unmarshalErr
 	}
 
 	// 处理 Markdown
