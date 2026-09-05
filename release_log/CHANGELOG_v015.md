@@ -48,4 +48,11 @@
 
 - CodeQL 整数转换告警：Processor 包 9 处消息 ID 的 `int64→int` 无界转换统一收敛到 `safeMessageID` 边界检查（统一按 int32 边界收紧；越界记日志回退 `-1` 哨兵，杜绝截断产生错误 ID）。
 - 修复纯 markdown/keyboard 段消息（无文本段）在群聊与私聊被静默丢弃的问题（存量：发送门槛只看文本段），现在 md-only/kb-only 消息正常发送。
+- 修复消息段嵌套 `data.data` 双层包装（`{"type":"markdown","data":{"data":{"markdown":{"content":...}}}}`，keyboard 同构）在 `cq_parse_mode: shadow/new` 下内容丢失的问题：cqparse 段路径未按 legacy 取法解包 `segment["data"]["data"]`，内层 map 被 `coerceString` 归空后 markdown/keyboard 静默丢弃（`new` 模式发送门槛不开 → 日志停在"群组发信息使用messageID"、群里无消息、无报错；`shadow` 模式持续上报 `[cqparse-shadow]` diff）。现 normalize 层对齐 legacy 解包（仅一层，markdown marshal+base64 / keyboard marshal 原样 JSON），三模式 `foundItems` payload 逐字节一致；内层 JSON 字符串与 `base64://` 形态行为不变。
+- 修复入站 @ 转换"前移/丢失"问题（真实环境：`@bot at检测 @同道中人 @备用 @晓山瑞希` 上报成 `[at:qq=..]at检测  <@备用裸文本>`，at 被拼到消息最前、部分 mention 丢失）：
+  - **@前移**：`array=true` 时 `ConvertToSegmentedMessage` 产出的所有 at 段被 `sortMessageSegments` 统一排到消息最前，与原文位置脱钩。现改为按 `<@OpenID>` 原位逐段扫描：at 段在原位置展开（text/at 交错保序），反查失败的 `<@OpenID>` 原样保留在原位文本中，不前移、不重排、不丢失；图片段保持"内容段之后"的既有语义。字符串路径本就原位替换，两路径行为对齐（新增一致性断言）。
+  - **@bot 识别（mentions 联合判定）**：`GROUP_AT_MESSAGE_CREATE`（AT 路径）此前不注册 mentions 中 `is_you/bot` 标记的 OpenID，`<@bot>` 判定落入 idmap 反查，失败时裸文本残留或被误转换；全量群消息路径的注册循环带 `break`，首个误标项会挤掉真正的 @bot。现两条路径均全量注册，且 `RevertTransformedText`/`ConvertToSegmentedMessage` 改为"事件 mentions(is_you/bot) ∪ 全局注册"联合判定。
+  - **is_you 误标发送者导致 @ 丢失**：`is_you` 在多实例等场景可能误标到发送者上，发送者的 @ 会被当作 @bot 剥离。现判定时排除消息作者（发送者自身绝不视为 @bot），性能模式（`disable_error_chan=true`）的 @bot 剥离同步排除作者；@bot 自身的解析结果仍按 `use_uin` 映射 UIN/AppID，不会映射成发送者 ID。
+  - 附带加固：`BotID` 为空（Ready 事件异常未设置）时跳过 `BotID→AppID` 全文替换，防止空串替换把消息逐字符穿插污染。
+  - 新增回归网 `handlers/zzzz_inbound_at_order_test.go`：8 个场景（@bot+多他人 / @bot 在中间 / 仅 @bot / 反查失败他人 / convertOtherAt=false / removeAt=true·false / is_you 误标发送者 / 全量群消息），逐场景断言 string 输出与 array 段序列完全保位，并校验两路径一致。
 

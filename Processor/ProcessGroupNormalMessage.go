@@ -91,7 +91,8 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 	// 前置兼容：注册 bot 自身的 OpenID 到 selfAtIDs。
 	// QQ 平台在 GROUP_MESSAGE_CREATE 中使用 OpenID 格式标识被 @ 的用户，
 	// 与 handlers.BotID（来自 Ready 事件）不同，必须从 Mentions 中获取真实 ID。
-	// is_you 字段可能不准确（如多实例场景），因此 bot:true 的 OpenID 也注册。
+	// is_you 字段可能不准确（如多实例场景），因此 bot:true 的 OpenID 也注册；
+	// 遍历不提前 break，全部匹配项都注册，避免首个误标项挤掉真正的 @bot。
 	// 不在此处剥离 <@OpenID>，统一交给 RevertTransformedText 处理：
 	//   - 自身 @ → 全量群消息始终剥离，不依赖 remove_at 配置
 	//   - 其他 @ → 转换为 [CQ:at,qq=虚拟ID]
@@ -103,7 +104,6 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 				toMe = true
 			}
 			handlers.RememberSelfAtID(mention.ID)
-			break
 		}
 	}
 
@@ -134,10 +134,11 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 	// 全量群消息(GROUP_MESSAGE_CREATE)中 @Bot 始终剥离，不依赖 remove_at 配置。
 	// 当 DisableErrorChan=true 时 RevertTransformedText 不会被调用，
 	// 因此需要在此处独立处理 <@OpenID> 的剥离，确保 @Bot 不会出现在上报内容中。
+	// 消息作者（发送者）自身除外：is_you 误标发送者时不能把发送者的 @ 剥掉。
 	if GetDisableErrorChan {
 		messageText = perfSelfAtRe.ReplaceAllStringFunc(messageText, func(m string) string {
 			submatches := perfSelfAtRe.FindStringSubmatch(m)
-			if len(submatches) > 1 && handlers.IsSelfAtID(submatches[1]) {
+			if len(submatches) > 1 && submatches[1] != data.Author.ID && handlers.IsSelfAtID(submatches[1]) {
 				return ""
 			}
 			return m

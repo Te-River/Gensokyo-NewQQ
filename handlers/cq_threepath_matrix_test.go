@@ -344,3 +344,58 @@ func TestCQParseModeDispatch_DefaultIsLegacy(t *testing.T) {
 			viaDispatch, itemsDispatch, viaLegacy, itemsLegacy)
 	}
 }
+
+// TestCQParseThreeModeMatrix_NestedDataWrapperSegment 用户真实嵌套形态（2026-09 线上案例）：
+// md-only 段 data.data 双层 map 包装 + keyboard 段同款包装 × 三模式。
+// 修复前 new 模式 normalize 对内层 map coerceString 得空串 → resolveMarkdown/
+// resolveKeyboard 段路径静默丢弃 → send_group_msg:513 门不开 → 消息静默丢失
+// （QQ 200 无报错、无 [CQ:markdown] 日志）。修复后三模式 payload 逐字节一致。
+func TestCQParseThreeModeMatrix_NestedDataWrapperSegment(t *testing.T) {
+	content := "### AT 检测结果\n> ❌ 消息未 @ 机器人"
+	params := callapi.ParamsContent{
+		GroupID: "g0123456789abcdef0123456789abcde",
+		UserID:  "u0123456789abcdef0123456789abcde",
+		Message: []interface{}{mdSegment(content), keyboardSegment("tpl_1")},
+	}
+	msg := callapi.ActionMessage{Action: "send_group_msg", Params: params}
+
+	// 三模式分支函数直驱（与 message_parser.go:661-671 分发链逐分支等价）
+	legacyText, legacyItems := parseMessageContentLegacy(params, msg, nil, nil, nil)
+	newText, newItems, newPend := parseMessageContentCQParse(params, msg, nil, nil, nil)
+	shadowLog := captureStdout(t, func() {
+		runCQParseShadow(params, msg, nil, nil, nil, legacyText, legacyItems)
+	})
+
+	// --- payload 三模式逐字节一致（foundItems 直接对拍） ---
+	if !reflect.DeepEqual(legacyItems["markdown"], newItems["markdown"]) {
+		t.Errorf("markdown payload 三模式不一致:\n  legacy=%v\n  new=%v", legacyItems["markdown"], newItems["markdown"])
+	}
+	if !reflect.DeepEqual(legacyItems["keyboard"], newItems["keyboard"]) {
+		t.Errorf("keyboard payload 三模式不一致:\n  legacy=%v\n  new=%v", legacyItems["keyboard"], newItems["keyboard"])
+	}
+	if newText != legacyText {
+		t.Errorf("文本不一致: legacy=%q new=%q", legacyText, newText)
+	}
+
+	// --- :513 门（send_group_msg.go:513 门条件复刻）三模式同开，消息不再静默丢失 ---
+	legacyGate := legacyText != "" || len(legacyItems["markdown"]) > 0 || len(legacyItems["keyboard"]) > 0
+	newGate := newText != "" || len(newPend) > 0 || len(newItems["markdown"]) > 0 || len(newItems["keyboard"]) > 0
+	if !legacyGate || !newGate {
+		t.Fatalf("md/kb-only 段 :513 门应开启: legacy=%v new=%v", legacyGate, newGate)
+	}
+
+	// --- md.Content / kb.ID 正确（经下游同源解析函数） ---
+	md, _ := parseMarkdownFromMessage(newItems["markdown"][0])
+	if md == nil || md.Content != content {
+		t.Errorf("md.Content: got %+v, want %q", md, content)
+	}
+	kb, err := parseKeyboardData([]byte(newItems["keyboard"][0]))
+	if err != nil || kb == nil || kb.ID != "tpl_1" {
+		t.Errorf("kb.ID: kb=%+v err=%v, want id=tpl_1", kb, err)
+	}
+
+	// --- shadow：修复后无差异（无 [cqparse-shadow] diff 日志），且 legacy 产物只读 ---
+	if strings.Contains(shadowLog, "[cqparse-shadow]") {
+		t.Errorf("修复后 shadow 不应再报 diff: got %q", shadowLog)
+	}
+}

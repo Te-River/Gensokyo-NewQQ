@@ -119,17 +119,21 @@ func IsSelfAtID(id string) bool {
 	return ok
 }
 
+// selfAtTargetID 返回 @bot 自身应映射到的 OneBot qq 值（use_uin 决定 UIN 或 AppID），
+// 与消息 SelfID 字段保持一致，否则下游无法识别 @ 的是自己。
+func selfAtTargetID() string {
+	if config.GetUseUin() {
+		return config.GetUinStr()
+	}
+	if AppID != "" {
+		return AppID
+	}
+	return config.GetAppIDStr()
+}
+
 func resolveIncomingAtID(id string) (string, bool) {
 	if IsSelfAtID(id) {
-		// 与消息 SelfID 字段保持一致：use_uin=true 时用 UIN，否则用 AppID。
-		// 否则下游会因 [CQ:at] 的 qq 与 self_id 不匹配而无法识别 @ 的是自己。
-		if config.GetUseUin() {
-			return config.GetUinStr(), true
-		}
-		if AppID != "" {
-			return AppID, true
-		}
-		return config.GetAppIDStr(), true
+		return selfAtTargetID(), true
 	}
 	if !config.GetConvertOtherAt() {
 		return "", false
@@ -139,6 +143,40 @@ func resolveIncomingAtID(id string) (string, bool) {
 		return "", false
 	}
 	return virtualID, true
+}
+
+// eventSelfAtIDs 从事件自身的 mentions 数组提取被标记为 @bot 的 OpenID 集合。
+// 与全局 selfAtIDs 联合使用：mentions[].is_you/bot 是群场景 OpenID 格式下
+// 唯一可靠的 @bot 信号（Ready 的 me.ID 与群内 openid 格式不同）。
+func eventSelfAtIDs(msg *dto.Message) map[string]struct{} {
+	selfIDs := make(map[string]struct{})
+	for _, mention := range msg.Mentions {
+		if mention == nil {
+			continue
+		}
+		if mention.IsYou || mention.Bot {
+			selfIDs[mention.ID] = struct{}{}
+		}
+	}
+	return selfIDs
+}
+
+// isIncomingSelfAt 联合判定入站 <@userID> 是否为 @bot 自身：
+// 事件 mentions 标记与全局注册（selfAtIDs/BotID/AppID）联合决定，
+// 并兼容 UIN/AppID 形态的解析结果。消息作者（发送者）绝不视为 @bot——
+// is_you 在部分场景（多实例等）会误标到发送者上，误判会把发送者的 @
+// 当作 @bot 剥离，造成 @ 丢失或把 @bot 映射成发送者 ID。
+func isIncomingSelfAt(userID string, atID string, authorID string, selfIDs map[string]struct{}) bool {
+	if userID == "" || userID == authorID {
+		return false
+	}
+	if _, ok := selfIDs[userID]; ok {
+		return true
+	}
+	if IsSelfAtID(userID) {
+		return true
+	}
+	return atID == config.GetUinStr() || atID == config.GetAppIDStr()
 }
 
 // 定义响应结构体
@@ -1739,27 +1777,42 @@ func RevertTransformedText(data interface{}, msgtype string, api openapi.OpenAPI
 	//mylog.Printf("1[%v]", messageText)
 
 	// 将messageText里的BotID替换成AppID
-	messageText = strings.ReplaceAll(messageText, BotID, AppID)
+	// BotID 为空时跳过（Ready 事件异常时未设置），防止空串替换把全文逐字符穿插污染
+	if BotID != "" {
+		messageText = strings.ReplaceAll(messageText, BotID, AppID)
+	}
+
+	// 事件级 @bot 判定素材：mentions(is_you/bot) 标记 + 消息作者（发送者）
+	selfIDs := eventSelfAtIDs(msg)
+	authorID := ""
+	if msg.Author != nil {
+		authorID = msg.Author.ID
+	}
 
 	// 同时匹配 <@!数字>、<@!OpenID>、<@数字>、<@OpenID>（包级预编译，修 M7）
+	// 逐匹配原位替换：转换/剥离/保留都发生在原位，绝不前移、不重排、不丢失
 	messageText = incomingAtRe.ReplaceAllStringFunc(messageText, func(m string) string {
 		submatches := incomingAtRe.FindStringSubmatch(m)
 		if len(submatches) > 1 {
 			userID := submatches[1]
 			atID, ok := resolveIncomingAtID(userID)
-			if !ok {
-				return m
-			}
-			// 判断是否为 @Bot 自身：
-			// 1) IsSelfAtID 检查原始 ID（BotID/AppID/selfAtIDs）
-			// 2) 解析后的 atID 等于 bot 的 UIN 或 AppID（兼容 QQ 平台不同场景使用不同 ID 格式）
-			isSelf := IsSelfAtID(userID) || atID == config.GetUinStr() || atID == config.GetAppIDStr()
+			// 判断是否为 @Bot 自身（mentions 与全局注册联合判定，作者除外；
+			// 解析后的 atID 等于 bot 的 UIN 或 AppID 时兼容命中）。
+			// isSelf 判定必须先于 !ok 保留分支：mentions 判定的 @bot 可能
+			// 不在 idmap 中（resolve 失败），但仍是自身，不能裸保留。
+			isSelf := isIncomingSelfAt(userID, atID, authorID, selfIDs)
 			if isSelf {
 				// 全量群消息(GROUP_MESSAGE_CREATE)中的 @Bot 始终剥离，不依赖 remove_at 配置
 				if isFullGroupMsg || config.GetRemoveAt() {
 					return ""
 				}
+				if atID == "" {
+					atID = selfAtTargetID()
+				}
 				return "[CQ:at,qq=" + atID + "]"
+			}
+			if !ok {
+				return m
 			}
 			return "[CQ:at,qq=" + atID + "]"
 		}
@@ -2079,6 +2132,7 @@ func ConvertToSegmentedMessage(data interface{}) []map[string]interface{} {
 		menumsg = true
 	}
 	var messageSegments []map[string]interface{}
+	var imageSegments []map[string]interface{}
 
 	// 处理Attachments字段来构建图片消息
 	// 修 M2-B：array 模式按 ContentType 过滤，视频/语音附件不再误标 image 段
@@ -2099,38 +2153,65 @@ func ConvertToSegmentedMessage(data interface{}) []map[string]interface{} {
 				"url":     attachment.URL,
 			},
 		}
-		messageSegments = append(messageSegments, imageSegment)
+		imageSegments = append(imageSegments, imageSegment)
 
 		// 在msg.Content中替换旧的图片链接
 		//newImagePattern := "[CQ:image,file=" + attachment.URL + "]"
 		//msg.Content = msg.Content + newImagePattern
 	}
 	// 将msg.Content里的BotID替换成AppID
-	msg.Content = strings.ReplaceAll(msg.Content, BotID, AppID)
+	// BotID 为空时跳过（Ready 事件异常时未设置），防止空串替换把全文逐字符穿插污染
+	if BotID != "" {
+		msg.Content = strings.ReplaceAll(msg.Content, BotID, AppID)
+	}
+
+	// 事件级 @bot 判定素材：mentions(is_you/bot) 标记 + 消息作者（发送者）
+	selfIDs := eventSelfAtIDs(msg)
+	authorID := ""
+	if msg.Author != nil {
+		authorID = msg.Author.ID
+	}
 
 	// 匹配所有可能的 at 格式（包括 OpenID）（包级预编译，修 M7）
-	atMatches := incomingAtRe.FindAllStringSubmatch(msg.Content, -1)
-	for _, match := range atMatches {
-		userID := match[1]
+	// 原位逐段扫描：转换/剥离都发生在 <@OpenID> 的原位置，绝不前移、不重排；
+	// 反查失败的 <@OpenID> 原样保留在原位文本中，不丢失。
+	// 已解析的 at 暂以占位符替换，待下方文本级处理（Trim/前缀移除）完成后按原序展开成段。
+	type atPlaceholder struct{ ph, atID string }
+	var placeholders []atPlaceholder
+	var contentB strings.Builder
+	last := 0
+	atMatches := incomingAtRe.FindAllStringSubmatchIndex(msg.Content, -1)
+	for _, loc := range atMatches {
+		userID := msg.Content[loc[2]:loc[3]]
 		atID, ok := resolveIncomingAtID(userID)
-		if !ok {
+		isSelf := isIncomingSelfAt(userID, atID, authorID, selfIDs)
+		if isSelf && (isFullGroupMsg || config.GetRemoveAt()) {
+			// 原位剥离 @bot：仅移除 <@OpenID> 本身，前后文本保持原序
+			contentB.WriteString(msg.Content[last:loc[0]])
+			last = loc[1]
 			continue
 		}
-		atSegment := map[string]interface{}{
-			"type": "at",
-			"data": map[string]interface{}{
-				"qq": atID,
-			},
+		contentB.WriteString(msg.Content[last:loc[0]])
+		if isSelf {
+			// mentions 判定的自身但 idmap 无映射（resolve 失败）时，按自身语义转换
+			if atID == "" {
+				atID = selfAtTargetID()
+			}
+			ph := fmt.Sprintf("\x00ATPH%d\x00", len(placeholders))
+			placeholders = append(placeholders, atPlaceholder{ph: ph, atID: atID})
+			contentB.WriteString(ph)
+		} else if ok {
+			ph := fmt.Sprintf("\x00ATPH%d\x00", len(placeholders))
+			placeholders = append(placeholders, atPlaceholder{ph: ph, atID: atID})
+			contentB.WriteString(ph)
+		} else {
+			// 反查失败/未开启转换：原样保留在原位
+			contentB.WriteString(msg.Content[loc[0]:loc[1]])
 		}
-		// 判断是否为 @Bot 自身（兼容 QQ 平台不同 ID 格式）
-		isSelf := IsSelfAtID(userID) || atID == config.GetUinStr() || atID == config.GetAppIDStr()
-		if isSelf && (isFullGroupMsg || config.GetRemoveAt()) {
-		    msg.Content = strings.Replace(msg.Content, match[0], "", 1)
-		    continue
-		   }
-		messageSegments = append(messageSegments, atSegment)
-		msg.Content = strings.Replace(msg.Content, match[0], "", 1)
+		last = loc[1]
 	}
+	contentB.WriteString(msg.Content[last:])
+	msg.Content = contentB.String()
 
 	// 移除 at 后，如果内容以空格开头，可选去除
 	  if isFullGroupMsg || config.GetRemoveAt() {
@@ -2146,18 +2227,35 @@ func ConvertToSegmentedMessage(data interface{}) []map[string]interface{} {
 			msg.Content = msg.Content[:idx] + msg.Content[idx+1:]
 		}
 	}
-	// 如果还有其他内容，那么这些内容被视为文本部分
-	if msg.Content != "" {
-		textSegment := map[string]interface{}{
-			"type": "text",
-			"data": map[string]interface{}{
-				"text": msg.Content,
-			},
+	// 按原序展开：占位符 → at 段，其余为 text 段（文本与 at 交错保位，不重排）
+	rest := msg.Content
+	for _, p := range placeholders {
+		idx := strings.Index(rest, p.ph)
+		if idx < 0 {
+			// 占位符被异常破坏（理论不可达）：跳过该 at，不中断
+			continue
 		}
-		messageSegments = append(messageSegments, textSegment)
+		if before := rest[:idx]; before != "" {
+			messageSegments = append(messageSegments, map[string]interface{}{
+				"type": "text",
+				"data": map[string]interface{}{"text": before},
+			})
+		}
+		messageSegments = append(messageSegments, map[string]interface{}{
+			"type": "at",
+			"data": map[string]interface{}{"qq": p.atID},
+		})
+		rest = rest[idx+len(p.ph):]
 	}
-	//排列
-	messageSegments = sortMessageSegments(messageSegments)
+	// 如果还有其他内容，那么这些内容被视为文本部分
+	if rest != "" {
+		messageSegments = append(messageSegments, map[string]interface{}{
+			"type": "text",
+			"data": map[string]interface{}{"text": rest},
+		})
+	}
+	// 图片段按既有语义排在内容段之后（原由 sortMessageSegments 保证，现显式追加以保位）
+	messageSegments = append(messageSegments, imageSegments...)
 	return messageSegments
 }
 
@@ -2174,25 +2272,6 @@ func ConvertToInt64(value interface{}) (int64, error) {
 		// 当无法处理该类型时返回错误
 		return 0, fmt.Errorf("无法将类型 %T 转换为 int64", value)
 	}
-}
-
-// 排列MessageSegments
-func sortMessageSegments(segments []map[string]interface{}) []map[string]interface{} {
-	var atSegments, textSegments, imageSegments []map[string]interface{}
-
-	for _, segment := range segments {
-		switch segment["type"] {
-		case "at":
-			atSegments = append(atSegments, segment)
-		case "text":
-			textSegments = append(textSegments, segment)
-		case "image":
-			imageSegments = append(imageSegments, segment)
-		}
-	}
-
-	// 按照指定的顺序合并这些切片
-	return append(append(atSegments, textSegments...), imageSegments...)
 }
 
 // SendMessage 发送消息根据不同的类型

@@ -103,6 +103,16 @@ func (p *Processors) ProcessGroupMessage(data *dto.WSGroupATMessageData) error {
 		}
 	}
 
+	// 联合 mentions 数组识别 @bot：GROUP_AT_MESSAGE_CREATE 的群内 OpenID 与
+	// Ready 事件的 me.ID 格式不同，若不在此注册，RevertTransformedText 无法把
+	// <@bot> 判定为自身，会落入 idmap 反查（反查失败时 <@bot> 裸文本残留或被误转换）。
+	// is_you 字段在部分场景可能不准确，因此 bot:true 的 OpenID 也一并注册。
+	for _, mention := range data.Mentions {
+		if mention.IsYou || mention.Bot {
+			handlers.RememberSelfAtID(mention.ID)
+		}
+	}
+
 	var messageText string
 	GetDisableErrorChan := config.GetDisableErrorChan()
 

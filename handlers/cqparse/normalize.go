@@ -1,6 +1,7 @@
 package cqparse
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -70,6 +71,12 @@ func normalizeSegments(segs []map[string]interface{}) Doc {
 				// 未知段类型：不产 Token 不留痕（与今日 Unhandled 分支一致）
 				continue
 			}
+			if segType == "markdown" || segType == "keyboard" {
+				// legacy 段路径取 segment["data"]["data"]（仅一层），cqparse 必须对齐，
+				// 否则嵌套 data.data 双层 map 在 coerceString 下变空串被静默丢弃
+				// （修 2026-09 线上案例：md-only 段 new 模式空消息发出）
+				data = unwrapNestedDataPayload(segType, data)
+			}
 			toks = append(toks, Token{
 				Kind: kind, Action: segType,
 				Params: dataParams(data),
@@ -87,6 +94,39 @@ func dataParams(data map[string]interface{}) map[string]string {
 		params[k] = coerceString(v)
 	}
 	return params
+}
+
+// unwrapNestedDataPayload 对齐 legacy 段路径取法：markdown/keyboard 段的载荷
+// 位于 segment["data"]["data"]（仅一层包装，message_parser.go 段路径两分支同款）。
+// 内层为 map 时拷贝改写为预编码字符串（不变异调用方共享的段 map）：
+//   - markdown：marshal+base64（legacy map 分支同款）→ resolveMarkdown 段路径
+//     b64 直通分支原样入 foundItems，不经实体解码，与 legacy payload 逐字节一致；
+//   - keyboard：marshal 原样 JSON（legacy map 分支同款）。
+//
+// 其余内层形态（JSON 字符串 / base64:// 前缀 / 缺失）原样返回，交由
+// resolveMarkdown/resolveKeyboard 既有语义处理；字符串路径（Tokenize）不受影响。
+func unwrapNestedDataPayload(action string, data map[string]interface{}) map[string]interface{} {
+	inner, ok := data["data"]
+	if !ok {
+		return data
+	}
+	m, isMap := inner.(map[string]interface{})
+	if !isMap {
+		return data
+	}
+	encoded, err := json.Marshal(m)
+	if err != nil {
+		return data
+	}
+	if action == "markdown" {
+		encoded = []byte(base64.StdEncoding.EncodeToString(encoded))
+	}
+	out := make(map[string]interface{}, len(data))
+	for k, v := range data {
+		out[k] = v
+	}
+	out["data"] = string(encoded)
+	return out
 }
 
 // setGroupParamKeys 与 buildSetGroupCQCode 的固定字段序一致，保证段路径

@@ -787,6 +787,108 @@ func TestCQParseRegress_NG_GroupInfoDedupKeyNormalized(t *testing.T) {
 	}
 }
 
+// ---------- 用户嵌套 data.data 段形态（2026-09 线上案例修复） ----------
+
+// TestCQParseRegress_NestedDataWrapper_Markdown md-only 嵌套 data.data 双层 map：
+// legacy 段路径取 segment["data"]["data"] → marshal+base64；cqparse normalize 层
+// 对齐解包后 payload 逐字节一致、md.Content 正确。修复前 new 模式
+// coerceString(map)="" → resolveMarkdown 段路径静默丢弃 → :513 门不开 → 空消息。
+func TestCQParseRegress_NestedDataWrapper_Markdown(t *testing.T) {
+	content := "### AT 检测结果\n> ❌ 消息未 @ 机器人"
+	in := regSegIn([]map[string]interface{}{
+		{"type": "markdown", "data": map[string]interface{}{
+			"data": map[string]interface{}{
+				"markdown": map[string]interface{}{"content": content},
+			},
+		}},
+	}, regGroupID)
+	text, items, _ := regParse(t, in, regDeps(nil, nil))
+
+	if text != "" {
+		t.Errorf("md 段不应留痕: got %q", text)
+	}
+	// legacy 同款 payload：b64(marshal(map))，json.Marshal 键序确定 → 逐字节可对拍
+	wantPayload, err := json.Marshal(map[string]interface{}{
+		"markdown": map[string]interface{}{"content": content},
+	})
+	if err != nil {
+		t.Fatalf("构造期望 payload 失败: %v", err)
+	}
+	regFound(t, items, "markdown", base64.StdEncoding.EncodeToString(wantPayload))
+
+	md, _ := parseMarkdownFromMessage(items["markdown"][0])
+	if md == nil || md.Content != content {
+		t.Errorf("md.Content: got %+v, want %q", md, content)
+	}
+}
+
+// TestCQParseRegress_NestedDataWrapper_Keyboard keyboard 嵌套 data.data 双层 map：
+// legacy 段路径取 segment["data"]["data"] → marshal 原样 JSON（不 base64），
+// cqparse 对齐后 payload 一致、kb.ID 正确。
+func TestCQParseRegress_NestedDataWrapper_Keyboard(t *testing.T) {
+	in := regSegIn([]map[string]interface{}{
+		{"type": "keyboard", "data": map[string]interface{}{
+			"data": map[string]interface{}{"id": "tpl_1"},
+		}},
+	}, regGroupID)
+	text, items, _ := regParse(t, in, regDeps(nil, nil))
+
+	if text != "" {
+		t.Errorf("kb 段不应留痕: got %q", text)
+	}
+	regFound(t, items, "keyboard", `{"id":"tpl_1"}`)
+
+	kb, err := parseKeyboardData([]byte(items["keyboard"][0]))
+	if err != nil || kb == nil || kb.ID != "tpl_1" {
+		t.Errorf("kb.ID: kb=%+v err=%v, want id=tpl_1", kb, err)
+	}
+}
+
+// TestCQParseRegress_NestedDataWrapper_InnerStringAndBase64 非回归钉死：
+// 内层为 JSON 字符串 / base64:// 前缀时既有语义不变（与 legacy 字符串内层分支一致）。
+func TestCQParseRegress_NestedDataWrapper_InnerStringAndBase64(t *testing.T) {
+	t.Run("markdown内层JSON字符串", func(t *testing.T) {
+		in := regSegIn([]map[string]interface{}{
+			{"type": "markdown", "data": map[string]interface{}{
+				"data": `{"markdown":{"content":"hi"}}`,
+			}},
+		}, regGroupID)
+		text, items, _ := regParse(t, in, regDeps(nil, nil))
+		if text != "" {
+			t.Errorf("md 段不应留痕: got %q", text)
+		}
+		regFound(t, items, "markdown", base64.StdEncoding.EncodeToString([]byte(`{"markdown":{"content":"hi"}}`)))
+	})
+
+	t.Run("markdown内层base64前缀", func(t *testing.T) {
+		b64MD := base64.StdEncoding.EncodeToString([]byte(`{"content":"hi"}`))
+		in := regSegIn([]map[string]interface{}{
+			{"type": "markdown", "data": map[string]interface{}{
+				"data": "base64://" + b64MD,
+			}},
+		}, regGroupID)
+		text, items, _ := regParse(t, in, regDeps(nil, nil))
+		if text != "" {
+			t.Errorf("md 段不应留痕: got %q", text)
+		}
+		regFound(t, items, "markdown", b64MD)
+	})
+
+	t.Run("keyboard内层base64前缀", func(t *testing.T) {
+		b64KB := base64.StdEncoding.EncodeToString([]byte(`{"id":"tpl_1"}`))
+		in := regSegIn([]map[string]interface{}{
+			{"type": "keyboard", "data": map[string]interface{}{
+				"data": "base64://" + b64KB,
+			}},
+		}, regGroupID)
+		text, items, _ := regParse(t, in, regDeps(nil, nil))
+		if text != "" {
+			t.Errorf("kb 段不应留痕: got %q", text)
+		}
+		regFound(t, items, "keyboard", `{"id":"tpl_1"}`)
+	})
+}
+
 // ---------- 私聊/转发拦截（§9 N-M1） ----------
 
 // TestCQParseRegress_NM1_PrivateActionIntercepted N-M1（M1 修复）— 期望=迁移后行为
