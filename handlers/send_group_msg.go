@@ -20,6 +20,7 @@ import (
 
 	"github.com/hoshinonyaruko/gensokyo/callapi"
 	"github.com/hoshinonyaruko/gensokyo/config"
+	"github.com/hoshinonyaruko/gensokyo/handlers/cqparse"
 	"github.com/hoshinonyaruko/gensokyo/echo"
 	"github.com/hoshinonyaruko/gensokyo/idmap"
 	"github.com/hoshinonyaruko/gensokyo/internal/domain/identity"
@@ -179,7 +180,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 	switch msgType {
 	case "group":
 		// 解析消息内容
-		messageText, foundItems := parseMessageContent(message.Params, message, client, api, apiv2)
+		messageText, foundItems, msgPendings := parseMessageContent(message.Params, message, client, api, apiv2)
 		var SSM bool
 		// 使用 echo 获取消息ID
 		var messageID string
@@ -509,11 +510,18 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		}
 
 		// 优先发送文本信息
-		if messageText != "" {
+		if messageText != "" || len(msgPendings) > 0 {
 			// 统一处理出站动作型 CQ 码（member/remove/禁言/入群审批/策略）
-			// 单次扫描全文，执行动作并从文本移除；返回 member 的 realGroupID 供跨群路由
+			// legacy/shadow：旧正则管道单次扫描执行；new：ExecutePending 在原时序点执行
+			// （时序与重构前逐字节相同），返回 member 的 realGroupID 供跨群路由
 			var realGroupID string
-			messageText, realGroupID = ProcessOutboundCQCodes(messageText, message.Params.GroupID.(string), &eventID, apiv2)
+			if len(msgPendings) > 0 {
+				// 修 M-fix：取最后一个非空 RealGroupID（last-wins），对齐 legacy
+				// ProcessOutboundCQCodes 逐码覆写语义（此前 first-wins 会静默改变跨群路由目标）
+				realGroupID = pickLastRealGroupID(cqparse.ExecutePending(msgPendings, DefaultDeps(apiv2), &eventID))
+			} else {
+				messageText, realGroupID = ProcessOutboundCQCodes(messageText, message.Params.GroupID.(string), &eventID, apiv2)
+			}
 			if realGroupID != "" {
 				mylog.Printf("[CQ:member] CQ 码 group_id 已转为 OpenID=%s", realGroupID)
 			}

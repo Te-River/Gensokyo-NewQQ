@@ -24,6 +24,7 @@ import (
 	"github.com/hoshinonyaruko/gensokyo/botstats"
 	"github.com/hoshinonyaruko/gensokyo/callapi"
 	"github.com/hoshinonyaruko/gensokyo/config"
+	"github.com/hoshinonyaruko/gensokyo/handlers/cqparse"
 	"github.com/hoshinonyaruko/gensokyo/echo"
 	"github.com/hoshinonyaruko/gensokyo/idmap"
 	"github.com/hoshinonyaruko/gensokyo/images"
@@ -41,6 +42,19 @@ var BotID string
 var AppID string
 var selfAtMu sync.RWMutex
 var selfAtIDs = make(map[string]struct{})
+
+// ---------- 包级正则（入站热路径预编译，修 M7/n1；新 cqparse 包内正则同样包级 var） ----------
+
+var (
+	// incomingAtRe 同时匹配 <@!数字>、<@!OpenID>、<@数字>、<@OpenID>
+	incomingAtRe = regexp.MustCompile(`<@!?([0-9A-Fa-f]+)>`)
+	// cqAnyRe 临时保护 CQ 码（AppID→BotID 替换时避免破坏码参数）
+	cqAnyRe = regexp.MustCompile(`\[CQ:[^\]]*\]`)
+	// replyNumRe 清理残留的 [CQ:reply,id=数字]
+	replyNumRe = regexp.MustCompile(`\[CQ:reply,id=\d+\]`)
+	// cqAtNumRe 匹配正文中的 [CQ:at,qq=数字]
+	cqAtNumRe = regexp.MustCompile(`\[CQ:at,qq=(\d+)\]`)
+)
 
 // ---------- 安全工具函数 ----------
 
@@ -638,8 +652,137 @@ func SendGuildPrivateResponse(client callapi.Client, err error, message *callapi
 	return string(jsonResponse), nil
 }
 
-// 信息处理函数
-func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.ActionMessage, client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI) (string, map[string][]string) {
+// parseMessageContent 是消息解析的统一入口（架构设计 §8.1）。
+// 按 cq_parse_mode 分发：
+//   - legacy（默认）：旧正则管道，行为与重构前逐字节一致；
+//   - shadow：legacy 产物生效，新解析器并行纯解析并 diff 上报（mylog）；
+//   - new：全走 cqparse 统一解析器，动作码以 PendingAction 返回。
+func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.ActionMessage, client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI) (string, map[string][]string, []cqparse.PendingAction) {
+	switch config.GetCQParseMode() {
+	case "new":
+		return parseMessageContentCQParse(paramsMessage, message, client, api, apiv2)
+	case "shadow":
+		messageText, foundItems := parseMessageContentLegacy(paramsMessage, message, client, api, apiv2)
+		runCQParseShadow(paramsMessage, message, client, api, apiv2, messageText, foundItems)
+		return messageText, foundItems, nil
+	default:
+		messageText, foundItems := parseMessageContentLegacy(paramsMessage, message, client, api, apiv2)
+		return messageText, foundItems, nil
+	}
+}
+
+// buildCQParseInput 将 ParamsContent 归一为 cqparse.Input（字符串/段数组/TRSS 三形态）。
+// enableChangeWord 的敏感词过滤在 cqparse 之外应用（cqparse 不依赖业务包）。
+func buildCQParseInput(paramsMessage callapi.ParamsContent) (cqparse.Input, bool) {
+	in := cqparse.Input{}
+	if gid, ok := paramsMessage.GroupID.(string); ok {
+		in.GroupID = gid
+	}
+	// M7：GroupID 缺省(nil)与 "" 统一视为无私聊群
+	in.HasGroup = paramsMessage.GroupID != nil && in.GroupID != ""
+	if uid, ok := paramsMessage.UserID.(string); ok {
+		in.UserID = uid
+	}
+	switch msg := paramsMessage.Message.(type) {
+	case string:
+		in.Kind = cqparse.InputString
+		in.String = msg
+		if config.GetEnableChangeWord() {
+			in.String = acnode.CheckWordOUT(in.String)
+		}
+	case []interface{}:
+		in.Kind = cqparse.InputSegments
+		in.Segments = normalizeSegmentsForCQParse(msg)
+	case map[string]interface{}:
+		in.Kind = cqparse.InputMap
+		in.Segments = normalizeSegmentsForCQParse([]interface{}{msg})
+	default:
+		return in, false
+	}
+	return in, true
+}
+
+// normalizeSegmentsForCQParse 过滤非法段并对 text 段应用敏感词过滤；
+// 采用拷贝改写，不变异调用方共享的段 map。
+func normalizeSegmentsForCQParse(segs []interface{}) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(segs))
+	checkWord := config.GetEnableChangeWord()
+	for _, s := range segs {
+		m, ok := s.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if checkWord {
+			if t, _ := m["type"].(string); t == "text" {
+				if dm, dmOK := m["data"].(map[string]interface{}); dmOK {
+					if txt, txtOK := dm["text"].(string); txtOK {
+						nd := make(map[string]interface{}, len(dm))
+						for k, v := range dm {
+							nd[k] = v
+						}
+						nd["text"] = acnode.CheckWordOUT(txt)
+						nm := make(map[string]interface{}, len(m))
+						for k, v := range m {
+							nm[k] = v
+						}
+						nm["data"] = nd
+						out = append(out, nm)
+						continue
+					}
+				}
+			}
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// parseMessageContentCQParse new 模式：全走 cqparse 统一解析器。
+// M7 修复：GroupID 缺省(nil)与 "" 统一走私聊分支（与 legacy 群分支行为分叉已被收敛）。
+func parseMessageContentCQParse(paramsMessage callapi.ParamsContent, message callapi.ActionMessage, client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI) (string, map[string][]string, []cqparse.PendingAction) {
+	in, ok := buildCQParseInput(paramsMessage)
+	if !ok {
+		mylog.Println("Unsupported message format: params.message field is not a string, map or slice")
+		return "", make(map[string][]string), nil
+	}
+	text, foundItems, pendings, err := cqparse.Parse(in, DefaultDeps(apiv2))
+	if err != nil {
+		mylog.Printf("cqparse 解析失败: %v", err)
+		return "", make(map[string][]string), nil
+	}
+	if in.HasGroup {
+		//处理at
+		text = transformMessageTextAt(text, in.GroupID, in.UserID)
+	} else {
+		//处理at
+		text = transformMessageTextAtNoGroupID(text)
+	}
+	//最后再处理Url
+	text = transformMessageTextUrl(text, message, client, api, apiv2)
+	return text, foundItems, pendings
+}
+
+// runCQParseShadow shadow 模式：新解析器并行纯解析并与 legacy 产物 diff 上报。
+// 产物仍用 legacy，动作副作用只由 legacy 执行。
+func runCQParseShadow(paramsMessage callapi.ParamsContent, message callapi.ActionMessage, client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, legacyText string, legacyItems map[string][]string) {
+	in, ok := buildCQParseInput(paramsMessage)
+	if !ok {
+		return
+	}
+	// 修 Minor：shadow 只读对比，置空 GroupInfo 依赖——cqparse 侧对 nil 容忍
+	// （group_info 码走 fallback 语义），避免 shadow 期间真实发起 GET 白耗 30 QPM
+	deps := DefaultDeps(apiv2)
+	deps.GroupInfo = nil
+	text, foundItems, pendings, err := cqparse.Parse(in, deps)
+	if err != nil {
+		mylog.Printf("[cqparse-shadow] 新解析器失败: %v", err)
+		return
+	}
+	cqparse.ShadowCompare(legacyText, legacyItems, text, foundItems, pendings)
+}
+
+// parseMessageContentLegacy legacy/shadow 模式的旧解析管道（重构前原逻辑）。
+func parseMessageContentLegacy(paramsMessage callapi.ParamsContent, message callapi.ActionMessage, client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI) (string, map[string][]string) {
 	messageText := ""
 
 	foundItems := make(map[string][]string)
@@ -1419,8 +1562,7 @@ func transformMessageTextAt(messageText string, groupid string, userid string) s
 		// 临时保护 CQ 码，避免 AppID→BotID 替换破坏 CQ 码参数
 		type cqHolder struct{ orig, placeholder string }
 		var holders []cqHolder
-		cqRE := regexp.MustCompile(`\[CQ:[^\]]*\]`)
-		messageText = cqRE.ReplaceAllStringFunc(messageText, func(m string) string {
+		messageText = cqAnyRe.ReplaceAllStringFunc(messageText, func(m string) string {
 			ph := fmt.Sprintf("\x00CQ_PH_%d\x00", len(holders))
 			holders = append(holders, cqHolder{orig: m, placeholder: ph})
 			return ph
@@ -1432,18 +1574,13 @@ func transformMessageTextAt(messageText string, groupid string, userid string) s
 	}
 
 	// 去除所有[CQ:reply,id=数字] todo 更好的处理办法
-	replyRE := regexp.MustCompile(`\[CQ:reply,id=\d+\]`)
-	messageText = replyRE.ReplaceAllString(messageText, "")
+	messageText = replyNumRe.ReplaceAllString(messageText, "")
 
-	// 使用正则表达式来查找所有[CQ:at,qq=UserID]的模式（仅匹配 用户 自身）
-	re := regexp.MustCompile(`\[CQ:at,qq=` + userid + `\]`)
-	messageText = re.ReplaceAllStringFunc(messageText, func(m string) string {
-		// 如果 remove_bot_at_group 开启，移除 触发被动消息@用户，避免重复
-		if config.GetRemoveBotAtGroup() {
-			return ""
-		}
-		return m
-	})
+	// 仅匹配 用户 自身的 [CQ:at,qq=UserID]：
+	// C2 修复：user_id 为外部输入，不再拼接正则（防 MustCompile panic），改精确字符串匹配
+	if config.GetRemoveBotAtGroup() {
+		messageText = strings.ReplaceAll(messageText, "[CQ:at,qq="+userid+"]", "")
+	}
 	// 如果内容为空且原始内容仅含 at（不含 reply），退回原始 at 文本
 	if strings.TrimSpace(messageText) == "" && strings.Contains(originalText, "[CQ:at") {
 		messageText = originalText
@@ -1460,8 +1597,7 @@ func transformMessageTextAtNoGroupID(messageText string) string {
 		// 临时保护 CQ 码，避免 AppID→BotID 替换破坏 CQ 码参数
 		type cqHolder struct{ orig, placeholder string }
 		var holders []cqHolder
-		cqRE := regexp.MustCompile(`\[CQ:[^\]]*\]`)
-		messageText = cqRE.ReplaceAllStringFunc(messageText, func(m string) string {
+		messageText = cqAnyRe.ReplaceAllStringFunc(messageText, func(m string) string {
 			ph := fmt.Sprintf("\x00CQ_PH_%d\x00", len(holders))
 			holders = append(holders, cqHolder{orig: m, placeholder: ph})
 			return ph
@@ -1473,13 +1609,11 @@ func transformMessageTextAtNoGroupID(messageText string) string {
 	}
 
 	// 去除所有[CQ:reply,id=数字] todo 更好的处理办法
-	replyRE := regexp.MustCompile(`\[CQ:reply,id=\d+\]`)
-	messageText = replyRE.ReplaceAllString(messageText, "")
+	messageText = replyNumRe.ReplaceAllString(messageText, "")
 
 	// 使用正则表达式来查找所有[CQ:at,qq=数字]的模式
-	re := regexp.MustCompile(`\[CQ:at,qq=(\d+)\]`)
-	messageText = re.ReplaceAllStringFunc(messageText, func(m string) string {
-		submatches := re.FindStringSubmatch(m)
+	messageText = cqAtNumRe.ReplaceAllStringFunc(messageText, func(m string) string {
+		submatches := cqAtNumRe.FindStringSubmatch(m)
 		if len(submatches) > 1 {
 			var err error
 			if config.GetIdmapPro() {
@@ -1573,7 +1707,6 @@ func RevertTransformedText(data interface{}, msgtype string, api openapi.OpenAPI
 	case *dto.WSGroupMessageData:
 		msg = (*dto.Message)(v)
 		isFullGroupMsg = true
-		msg = (*dto.Message)(v)
 	case *dto.WSC2CMessageData:
 		msg = (*dto.Message)(v)
 	default:
@@ -1608,10 +1741,9 @@ func RevertTransformedText(data interface{}, msgtype string, api openapi.OpenAPI
 	// 将messageText里的BotID替换成AppID
 	messageText = strings.ReplaceAll(messageText, BotID, AppID)
 
-	// 同时匹配 <@!数字>、<@!OpenID>、<@数字>、<@OpenID>
-	re := regexp.MustCompile(`<@!?([0-9A-Fa-f]+)>`)
-	messageText = re.ReplaceAllStringFunc(messageText, func(m string) string {
-		submatches := re.FindStringSubmatch(m)
+	// 同时匹配 <@!数字>、<@!OpenID>、<@数字>、<@OpenID>（包级预编译，修 M7）
+	messageText = incomingAtRe.ReplaceAllStringFunc(messageText, func(m string) string {
+		submatches := incomingAtRe.FindStringSubmatch(m)
 		if len(submatches) > 1 {
 			userID := submatches[1]
 			atID, ok := resolveIncomingAtID(userID)
@@ -1931,8 +2063,10 @@ func ConvertToSegmentedMessage(data interface{}) []map[string]interface{} {
 	case *dto.WSGroupATMessageData:
 		msg = (*dto.Message)(v)
 	case *dto.WSGroupMessageData:
+		// 修 H1：全量群消息（GROUP_MESSAGE_CREATE）在 array 模式同样剥离 @bot，
+		// 对齐字符串路径与 AGENTS.md 语义
 		msg = (*dto.Message)(v)
-		msg = (*dto.Message)(v)
+		isFullGroupMsg = true
 	case *dto.WSC2CMessageData:
 		msg = (*dto.Message)(v)
 	default:
@@ -1947,7 +2081,12 @@ func ConvertToSegmentedMessage(data interface{}) []map[string]interface{} {
 	var messageSegments []map[string]interface{}
 
 	// 处理Attachments字段来构建图片消息
+	// 修 M2-B：array 模式按 ContentType 过滤，视频/语音附件不再误标 image 段
+	// （对齐 RevertTransformedText 字符串路径的 image/ 前缀过滤）
 	for _, attachment := range msg.Attachments {
+		if !strings.HasPrefix(attachment.ContentType, "image/") {
+			continue
+		}
 		imageFileMD5 := attachment.FileName
 		for _, ext := range []string{"{", "}", ".png", ".jpg", ".gif", "-"} {
 			imageFileMD5 = strings.ReplaceAll(imageFileMD5, ext, "")
@@ -1969,9 +2108,8 @@ func ConvertToSegmentedMessage(data interface{}) []map[string]interface{} {
 	// 将msg.Content里的BotID替换成AppID
 	msg.Content = strings.ReplaceAll(msg.Content, BotID, AppID)
 
-	// 匹配所有可能的 at 格式（包括 OpenID）
-	r := regexp.MustCompile(`<@!?([0-9A-Fa-f]+)>`)
-	atMatches := r.FindAllStringSubmatch(msg.Content, -1)
+	// 匹配所有可能的 at 格式（包括 OpenID）（包级预编译，修 M7）
+	atMatches := incomingAtRe.FindAllStringSubmatch(msg.Content, -1)
 	for _, match := range atMatches {
 		userID := match[1]
 		atID, ok := resolveIncomingAtID(userID)
@@ -2264,9 +2402,8 @@ func ResolvePlaceholderUserIDs(kb *keyboard.MessageKeyboard, realUserOpenID stri
 // ResolveMarkdownAtMentions 将 markdown 内容中的 [CQ:at,qq=数字] 替换为
 // QQ API 官方 @ 语法 <qqbot-at-user id="OpenID" />，使其在群聊/频道中可渲染为蓝色 @。
 func ResolveMarkdownAtMentions(content string) string {
-	re := regexp.MustCompile(`\[CQ:at,qq=(\d+)\]`)
-	return re.ReplaceAllStringFunc(content, func(m string) string {
-		submatches := re.FindStringSubmatch(m)
+	return cqAtNumRe.ReplaceAllStringFunc(content, func(m string) string {
+		submatches := cqAtNumRe.FindStringSubmatch(m)
 		if len(submatches) > 1 {
 			realUserID, err := idmap.RetrieveRowByIDv2(submatches[1])
 			if err != nil {
@@ -2282,9 +2419,8 @@ func ResolveMarkdownAtMentions(content string) string {
 // resolvePlainTextAtMentions 将普通文本中的 [CQ:at,qq=数字] 替换为 QQ API 可识别的 @ 格式。
 // 优先使用缓存的用户名（@用户名），缓存失效时回退为 <@OpenID> 格式。
 func resolvePlainTextAtMentions(messageText string) string {
-	re := regexp.MustCompile(`\[CQ:at,qq=(\d+)\]`)
-	return re.ReplaceAllStringFunc(messageText, func(m string) string {
-		submatches := re.FindStringSubmatch(m)
+	return cqAtNumRe.ReplaceAllStringFunc(messageText, func(m string) string {
+		submatches := cqAtNumRe.FindStringSubmatch(m)
 		if len(submatches) > 1 {
 			username := idmap.GetUserName(submatches[1])
 			if username != "" {

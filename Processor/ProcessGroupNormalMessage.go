@@ -3,7 +3,6 @@ package Processor
 import (
 	"fmt"
 	"log"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -136,9 +135,8 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 	// 当 DisableErrorChan=true 时 RevertTransformedText 不会被调用，
 	// 因此需要在此处独立处理 <@OpenID> 的剥离，确保 @Bot 不会出现在上报内容中。
 	if GetDisableErrorChan {
-		selfAtAtPattern := regexp.MustCompile(`<@!?([0-9A-Fa-f]+)>\s*`)
-		messageText = selfAtAtPattern.ReplaceAllStringFunc(messageText, func(m string) string {
-			submatches := selfAtAtPattern.FindStringSubmatch(m)
+		messageText = perfSelfAtRe.ReplaceAllStringFunc(messageText, func(m string) string {
+			submatches := perfSelfAtRe.FindStringSubmatch(m)
 			if len(submatches) > 1 && handlers.IsSelfAtID(submatches[1]) {
 				return ""
 			}

@@ -145,6 +145,8 @@ type Settings struct {
 	DisableErrorChan bool `yaml:"disable_error_chan"`
 	StringOb11       bool `yaml:"string_ob11"`
 	StringAction     bool `yaml:"string_action"`
+	//CQ码解析器模式: legacy(旧正则管道,默认)/shadow(新旧并行解析差异仅日志)/new(统一解析器cqparse)
+	CQParseMode string `yaml:"cq_parse_mode"`
 	//url相关
 	VisibleIp    bool `yaml:"visible_ip"`
 	UrlToQrimage bool `yaml:"url_to_qrimage"`

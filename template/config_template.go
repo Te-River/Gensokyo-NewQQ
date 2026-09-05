@@ -17,6 +17,7 @@ settings:
   idmap_isolation : false                            # 数据库key加UIN前缀隔离多个Bot（多个Bot连同一数据库时开启）
   idmap_legacy_compat : false                        # 同时写入旧格式key兼容官方Gensokyo（开启idmap_isolation时有效）
   token: "<YOUR_APP_TOKEN>"                          # 你的应用令牌
+  # 注意:该字段已不参与 API 鉴权(仅兼容旧版保留);程序使用 appid+client_secret 自动获取动态 AccessToken,无需在此填写任何值
   client_secret: "<YOUR_CLIENT_SECRET>"              # 你的客户端密钥
   shard_count: 1                    #分片数量 默认1
   shard_id: 0                       #当前分片id 默认从0开始,详细请看 https://bot.q.qq.com/wiki/develop/api/gateway/reference.html
@@ -178,6 +179,7 @@ settings:
   disable_error_chan : false        #禁用ws断开时候将信息放入补发频道,当信息非常多时可能导致冲垮应用端,可以设置本选项为true.
   string_ob11 : false               #api不再返回转换后的int类型,而是直接转换,需应用端适配.
   string_action : false             #开启后将兼容action调用中使用string形式的user_id和group_id.
+  cq_parse_mode : legacy            #CQ码解析器模式: legacy(默认,旧正则管道,行为零变化)/shadow(新旧解析器并行,差异仅日志上报,行为仍走legacy)/new(统一解析器cqparse:修C1贪婪JSON/C3批量user_ids/M1私聊动作拦截等,支持[CQ:group_info]).建议先shadow观察日志无diff再切new,可随时改回legacy回滚.
 
   #URL相关
   visible_ip : false                #转换url时,如果server_dir是ip true将以ip形式发出url 默认隐藏url 将server_dir配置为自己域名可以转换url

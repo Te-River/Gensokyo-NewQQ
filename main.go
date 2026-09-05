@@ -45,6 +45,7 @@ import (
 	"github.com/tencent-connect/botgo/dto"
 	"github.com/tencent-connect/botgo/event"
 	"github.com/tencent-connect/botgo/openapi"
+	openapiv2 "github.com/tencent-connect/botgo/openapi/v2"
 	"github.com/tencent-connect/botgo/token"
 	"github.com/tencent-connect/botgo/websocket"
 )
@@ -137,6 +138,7 @@ func main() {
 	var apiV2 openapi.OpenAPI
 	var wsClients []*wsclient.WebSocketClient
 	var nologin bool
+	var meFetchErr error // 保存获取机器人详情失败的原始错误,供登录失败红字提示复用
 
 	//logger
 	logLevel := mylog.GetLogLevelFromConfig(config.GetLogLevel())
@@ -191,6 +193,8 @@ func main() {
 			}
 			apiV2 = botgo.NewOpenAPI(token).WithTimeout(120 * time.Second)
 			log.Println("创建 apiv2 成功")
+			// 输出当前 API 域名,便于用户确认新旧构建(旧版固定Token构建使用旧域名)
+			log.Printf("API 域名: %s", openapiv2.PublicAPIEndpoint)
 		} else {
 			// D1 后官方已统一域名,sandbox_mode 不再指向独立沙箱域名,提示用户请求仍发往正式域名
 			log.Println("Warning: sandbox_mode=true,官方已统一域名,沙箱请求现指向 api.bot.qq.com(与正式环境相同)")
@@ -215,7 +219,10 @@ func main() {
 		if configURL == "" && !fix11300 { // 执行API请求 显示机器人信息
 			me, err = api.Me(ctx) // Adjusted to pass only the context
 			if err != nil {
+				meFetchErr = err
 				log.Printf("Error fetching bot details: %v\n", err)
+				// 按官方错误码输出针对性排障指引(11245=固定Token已禁用,11243=Token错误)
+				log.Println(botDetailsErrorHint(err))
 				//return
 				nologin = true
 			}
@@ -428,8 +435,8 @@ func main() {
 		} else {
 			// 设置颜色为红色
 			red := color.New(color.FgRed)
-			// 输出红色文本
-			red.Println("请设置正确的appid、token、clientsecret再试")
+			// 输出红色文本:按错误类型给出对应指引,不再笼统让用户"设置正确的token"
+			red.Println(botDetailsErrorHint(meFetchErr))
 		}
 	}
 
@@ -1120,4 +1127,40 @@ func HealthzHandler(c *gin.Context) {
 		"goroutines": runtime.NumGoroutine(),
 		"memory_mb": float64(m.Alloc) / 1024 / 1024,
 	})
+}
+
+// extractTraceID 从错误文本中提取 traceID:xxx 子串,未找到时返回空串(简单切割,不引入正则)
+func extractTraceID(errText string) string {
+	const key = "traceID:"
+	idx := strings.Index(errText, key)
+	if idx < 0 {
+		return ""
+	}
+	rest := errText[idx+len(key):]
+	// trace id 以空格/逗号等分隔符结束,取到下一个分隔符为止
+	end := strings.IndexAny(rest, " ,\r\n\t")
+	if end < 0 {
+		return strings.TrimSpace(rest)
+	}
+	return rest[:end]
+}
+
+// botDetailsErrorHint 根据获取机器人详情失败的错误文本输出针对性排障指引,
+// 命中官方错误码时给出对应方案,附带 trace_id 便于官方排查
+func botDetailsErrorHint(err error) string {
+	hint := "获取机器人信息失败,请检查 config.yml 中 appid 与 client_secret 是否正确(动态 AccessToken 模式无需填写 token 字段)"
+	if err == nil {
+		return hint
+	}
+	errText := err.Error()
+	switch {
+	case strings.Contains(errText, "11245"):
+		hint = "检测到官方已禁用固定Token(11245)：当前程序使用 appid+client_secret 自动获取动态 AccessToken，无需手动填写 token 字段；若仍失败请确认已升级到使用 api.bot.qq.com 域名的新版本构建"
+	case strings.Contains(errText, "11243"):
+		hint = "AccessToken 鉴权被拒(11243)：请到 QQ 开放平台核对 appid 与 client_secret 是否正确/轮换"
+	}
+	if traceID := extractTraceID(errText); traceID != "" {
+		hint += " (trace_id:" + traceID + ")"
+	}
+	return hint
 }

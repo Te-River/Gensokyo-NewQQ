@@ -127,6 +127,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 > - **[CQ:card,title=...,desc=...,pic=...,url=...]** 群聊图文卡片消息
 > - **[CQ:input_notify,type=...,second=...]** 单聊输入状态通知
 > - **[CQ:stream,type:start,qq:...]** 单聊流式消息（start→mid→finish）
+> - **[CQ:group_info,field=...,group_id=...,fallback=...]** 群信息内容展开码（群名/群简报/成员数/三字段 JSON；需 `cq_parse_mode: new`，legacy/shadow 下该码不被识别会原文发出）
 
 #### 符合 OneBot 标准的 CQ 码
 
@@ -385,6 +386,7 @@ settings:
   hash_id: true                       # 使用 hash 生成虚拟 ID
   op_userid_type: "vuin"             # user_id 来源
   array: false                        # segment 数组格式上报
+  cq_parse_mode: legacy               # CQ 码解析器：legacy(默认，旧正则管道)/shadow(新旧并行解析，差异仅日志上报，行为仍走 legacy)/new(统一解析器 cqparse，修复 C1 贪婪 JSON/C3 批量 user_ids/私聊动作码拦截等，支持 [CQ:group_info]；建议先 shadow 观察日志无 diff 再切 new，可随时改回 legacy 回滚)
 
   #── Gensokyo 互联 ──────────────────────────────────
   server_dir: "your_server_ip"        # 图床/互联地址

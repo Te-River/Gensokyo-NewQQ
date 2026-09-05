@@ -119,7 +119,11 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 	switch msgType {
 	case "group":
 		// 解析消息内容
-		messageText, foundItems := parseMessageContent(message.Params, message, client, api, apiv2)
+		messageText, foundItems, msgPendings := parseMessageContent(message.Params, message, client, api, apiv2)
+		// 修 M1：raw 路径无动作执行点，显式拦截动作码（Parse 内已按 Scope 拦截，此处兜底丢弃）
+		if len(msgPendings) > 0 {
+			mylog.Printf("[cqparse] raw 路径拦截 %d 个动作码,不执行不发送", len(msgPendings))
+		}
 		var SSM bool
 
 		var originalGroupID, originalUserID string

@@ -7,6 +7,10 @@ import (
 const domain = "api.bot.qq.com"
 const sandBoxDomain = "api.bot.qq.com" // 官方 api-call-guide 已统一为 api.bot.qq.com,不再单列 sandbox 域名
 
+// PublicAPIEndpoint 对外暴露的 API 域名,直接引用 domain 保证两处永不失同步;
+// 供主程序启动日志输出,便于用户确认当前构建使用的是新域名还是旧版固定 Token+旧域名构建
+const PublicAPIEndpoint = domain
+
 const scheme = "https"
 
 type uri string

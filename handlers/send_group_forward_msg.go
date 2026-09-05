@@ -5,6 +5,7 @@ import (
 
 	"github.com/hoshinonyaruko/gensokyo/callapi"
 	"github.com/hoshinonyaruko/gensokyo/config"
+	"github.com/hoshinonyaruko/gensokyo/handlers/cqparse"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/tencent-connect/botgo/openapi"
 )
@@ -44,7 +45,12 @@ func HandleSendGroupForwardMsg(client callapi.Client, api openapi.OpenAPI, apiv2
 		content, ok := nodeData["content"].([]interface{})
 		if ok {
 			// 处理 segment 类型的 content
-			messageText, _ = parseMessageContent(callapi.ParamsContent{Message: content}, message, client, api, apiv2)
+			var intercepted []cqparse.PendingAction
+			messageText, _, intercepted = parseMessageContent(callapi.ParamsContent{Message: content}, message, client, api, apiv2)
+			// 修 M1：转发节点显式拦截动作码（Parse 内已按 Scope 拦截，此处兜底丢弃）
+			if len(intercepted) > 0 {
+				mylog.Printf("[cqparse] 转发路径拦截 %d 个动作码,不执行不发送", len(intercepted))
+			}
 		} else {
 			// 处理直接包含的文本内容
 			contentString, ok := nodeData["content"].(string)

@@ -44,7 +44,7 @@ var restartRequiredFields = []string{
 	"IdentifyFile", "IdentifyAppids", "Crt", "Key",
 	"DeveloperLog", "LogLevel", "SaveLogs",
 	"DisableWebui", "Username", "Password",
-	"Title", // 继续检查和增加
+	"Title", "CQParseMode", // 继续检查和增加
 }
 
 // LoadConfig 从文件中加载配置并初始化单例配置
@@ -2830,6 +2830,34 @@ func GetStringOb11() bool {
 		return false
 	}
 	return instance.Settings.StringOb11
+}
+
+// cqParseModeWarnOnce 非法 cq_parse_mode 警告只输出一次，防热重载/高频调用刷屏。
+// 注意：config 不能 import mylog（mylog 反向依赖 config 会成环），按本文件
+// 既有惯例以 fmt.Println 输出。
+var cqParseModeWarnOnce sync.Once
+
+// 获取CQParseMode的值（CQ 码解析器模式）
+// 取值 legacy|shadow|new；空值/非法值一律回退 legacy（合并后零行为变化，用户显式 opt-in）
+func GetCQParseMode() string {
+	mu.RLock()
+	defer mu.RUnlock()
+
+	if instance == nil {
+		return "legacy"
+	}
+	switch instance.Settings.CQParseMode {
+	case "shadow", "new":
+		return instance.Settings.CQParseMode
+	default:
+		if instance.Settings.CQParseMode != "" {
+			// 修 Minor：首次命中非法值（含大小写错写）输出警告，值仍回退 legacy
+			cqParseModeWarnOnce.Do(func() {
+				fmt.Println("Warning: 配置项 cq_parse_mode=\"" + instance.Settings.CQParseMode + "\" 非法（大小写敏感，可选 legacy|shadow|new），已回退 legacy")
+			})
+		}
+		return "legacy"
+	}
 }
 
 // 获取StringAction的值

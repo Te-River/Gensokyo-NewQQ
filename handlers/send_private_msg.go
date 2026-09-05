@@ -167,7 +167,11 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 		}
 
 		// 解析消息内容
-		messageText, foundItems := parseMessageContent(message.Params, message, client, api, apiv2)
+		messageText, foundItems, msgPendings := parseMessageContent(message.Params, message, client, api, apiv2)
+		// 修 M1：私聊路径显式拦截动作码（Parse 内已按 Scope 拦截，此处兜底丢弃）
+		if len(msgPendings) > 0 {
+			mylog.Printf("[cqparse] 私聊路径拦截 %d 个动作码,不执行不发送", len(msgPendings))
+		}
 
 		// [CQ:wakeup,userid=xxx] 标记：改为向指定用户发送 C2C 召回消息
 		if wakeupIDs, ok := foundItems["wakeup"]; ok && len(wakeupIDs) > 0 {

@@ -126,13 +126,13 @@
 ## 行为细节
 
 - **纯动作消息**：若消息仅含 CQ 码、处理后无文本且无媒体（foundItems 为空），Gensokyo 不向 QQ 发送任何消息，仅向 OneBot 客户端返回成功回执。
-- **参数缺失/无效**：`action` 缺失或未知 → CQ 码原样保留在文本中；`group_id`/`user_id`/`flag`/`strategy_id` 缺失 → CQ 码原样保留；`duration`/`enable`/`approve` 解析失败 → 使用默认值。
+- **参数缺失/无效**：`action` 缺失或未知 → CQ 码原样保留在文本中；`group_id` 缺失 → 先回退当前会话群（legacy 与 new 一致），仅 `group_id` 与 `user_id` 双缺才保留原文；`user_id`/`flag`/`strategy_id` 缺失 → 记录日志、动作不执行，CQ 码从文本移除（`cq_parse_mode: new` 及 2026-09 重构后行为；legacy 模式仍保留原文）；`enable`/`approve` 解析失败 → 记录日志、动作不执行、码不泄漏（`cq_parse_mode: new` 行为，legacy 模式 whole_ban 仍保留原文）。
 - **反查失败**：ID 反查 OpenID 失败 → 动作不执行，CQ 码从文本移除（不发送原文）；kick / blacklist 动作逐个反查，失败的单个成员跳过不中断整批。
 - **批量上限**：kick / blacklist 单批最多 20 人（官方接口上限），超出截断并记录警告日志；单个成员也走批量接口。
 - **黑名单 add 限制**：群内成员加入黑名单会被官方拒绝（群内成员应使用 `kick` 的 `add_blacklist`），错误透传日志，不影响消息发送。
 - **执行失败**：QQ API 调用失败仅记录日志，不阻断消息中其余文本的发送。
 - **移除语义**：CQ 码执行后一律从文本移除，无论成败都不会把 CQ 码原文发到群里。
-- **动作型 CQ 码仅群聊生效**：`[CQ:set_group]` 只在 `send_group_msg` 路径处理，私聊（C2C）场景不适用。
+- **动作型 CQ 码仅群聊生效**：`[CQ:set_group]` 在群聊路径（`send_group_msg`）执行；私聊（C2C）/转发节点路径一律**拦截**——码从文本移除、记录日志、不执行不发送（2026-09 修复，此前私聊/转发会原样泄漏为聊天文本）。
 - **与 OneBot API 的关系**：`/set_group_ban`、`/set_group_whole_ban`、`/set_group_add_request`、`/set_group_kick` 等 API handler 与 `[CQ:set_group]` 共享同一底层实现，行为一致；API 路径有结构化回执（retcode），CQ 码路径无结构化回执。
 
 ## 数据流（传输模式）
