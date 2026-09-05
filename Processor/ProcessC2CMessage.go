@@ -91,7 +91,7 @@ func (p *Processors) ProcessC2CMessage(data *dto.WSC2CMessageData) error {
 					log.Fatalf("Error storing ID: %v", err)
 				}
 			}
-			messageID = int(messageID64)
+			messageID = safeMessageID(messageID64)
 			mylog.Printf("[message] c2c msg_id mapped: raw_msg=%s vMsg=%d", data.ID, messageID64)
 		}
 		if config.GetAutoBind() {

@@ -187,7 +187,7 @@ func (p *Processors) ProcessInlineSearch(data *dto.WSInteractionData) error {
 					}
 				}
 
-				messageID := int(messageID64)
+				messageID := safeMessageID(messageID64)
 
 				var selfid64 int64
 				if config.GetUseUin() {
@@ -449,9 +449,9 @@ func (p *Processors) ProcessInlineSearch(data *dto.WSInteractionData) error {
 				}
 
 				//平台事件,不是真实信息,无需messageID
-				messageID64 := 123
+				messageID64 := int64(123)
 
-				messageID := int(messageID64)
+				messageID := safeMessageID(messageID64)
 				var selfid64 int64
 				if config.GetUseUin() {
 					selfid64 = config.GetUinint64()
