@@ -46,5 +46,5 @@
 
 ## Fixed
 
-- CodeQL 整数转换告警：Processor 包 9 处消息 ID 的 `int64→int` 无界转换统一收敛到 `safeMessageID` 边界检查（64 位构建零开销直通；32 位构建越界时记日志并回退 `-1` 哨兵，杜绝截断产生错误 ID）。
+- CodeQL 整数转换告警：Processor 包 9 处消息 ID 的 `int64→int` 无界转换统一收敛到 `safeMessageID` 边界检查（统一按 int32 边界收紧；越界记日志回退 `-1` 哨兵，杜绝截断产生错误 ID）。
 

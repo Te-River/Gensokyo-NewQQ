@@ -7,13 +7,12 @@ import (
 )
 
 // safeMessageID 将 int64 虚拟消息 ID 安全转换为 int；
-// 超出 int 位宽（仅 32 位构建可能）时记录日志并返回 -1。
-// -1 的选择依据：虚拟 ID 池从 1 起顺序分配、0 是解绑残留哨兵、负值永不分配，
-// 因此 -1 不会与真实 ID 撞车，避免截断产生错误 ID（与 M5-B 的 -1 惯例一致）。
-// 64 位构建下比较恒为假，零开销直通；仅 32 位构建会实际拦截。
+// 虚拟 msg_id 为顺序分配计数器，int32 上界（约 21.4 亿）远超实际规模，
+// 统一按 int32 边界收紧以兼容 32 位 int 构建并满足静态检查；
+// 越界时记录日志并返回 -1（虚拟池从 1 起分配、0 为解绑残留哨兵、负值永不分配，不会与真实 ID 撞车）。
 func safeMessageID(v int64) int {
-	if v > int64(math.MaxInt) || v < int64(math.MinInt) {
-		mylog.Errorf("消息 ID 超出 int 位宽: %d", v)
+	if v < math.MinInt32 || v > math.MaxInt32 {
+		mylog.Errorf("消息 ID 超出安全位宽: %d", v)
 		return -1
 	}
 	return int(v)
