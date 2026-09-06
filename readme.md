@@ -181,6 +181,16 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 > - **get_group_whole_ban**（查询 q群 全员禁言）
 > - **send_to_group**（send_group_msg 别名）
 > - **send_group_msg_raw**（发送原始消息）
+> - **get_group_member_blacklist**（获取群黑名单列表）
+> - **set_group_member_blacklist**（群黑名单增删，≤20）
+> - **get_custom_menu**（获取 C2C 自定义菜单）
+> - **set_custom_menu**（设置 C2C 自定义菜单）
+> - **get_panel_list**（获取指令面板列表）
+> - **create_panel**（创建指令面板）
+> - **get_panel**（获取指令面板详情）
+> - **set_panel**（更新指令面板）
+> - **delete_panel**（删除指令面板）
+> - **set_panel_target**（增删面板关联对象）
 
 
 #### 符合 OneBot 标准的 API
@@ -402,6 +412,7 @@ settings:
   twoway_echo: false                  # 双向 echo
   custom_template_id: ""              # 图文转 MD 模板 ID
   keyboard_id: ""                     # 图文转 MD 按钮 ID
+  force_verify_image_resource: false  # Markdown 图片转存结果校验（转存失败返回 40034004 且不发送；仅需确保图片必然可显示时开启）
 
   #── 消息发送 ──────────────────────────────────────
   lazy_message_id: false              # 惰性 message_id（主动推送用）
