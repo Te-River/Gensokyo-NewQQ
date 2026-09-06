@@ -122,8 +122,8 @@ func (p *Processors) ProcessGroupMsgRecive(data *dto.GroupMsgReceiveEvent) error
 				IsBindedGroupId = idmap.CheckValuev2(GroupID64)
 			}
 			//平台事件,不是真实信息,无需messageID
-			messageID64 := 123
-			messageID := int(messageID64)
+			messageID64 := int64(123)
+			messageID := safeMessageID(messageID64)
 			var selfid64 int64
 			if config.GetUseUin() {
 				selfid64 = config.GetUinint64()

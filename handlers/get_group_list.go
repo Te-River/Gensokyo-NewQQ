@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -67,12 +68,12 @@ func GetGroupList(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.Open
 	if err != nil {
 		mylog.Printf("Error FindKeysBySubAndType %s", err)
 	}
-	// 当前时间的 10 位 Unix 时间戳
-	currentTimestamp := int32(time.Now().Unix())
+	// 逐群节流间隔(毫秒),防超官方 QPM
+	delay := config.GetGroupListDelay()
 
 	// 判断是否string返回
 	if !config.GetStringOb11() {
-		for _, idStr := range groupIDs {
+		for i, idStr := range groupIDs {
 			groupID, err := strconv.ParseInt(idStr, 10, 64)
 			if err != nil {
 				mylog.Printf("Error converting group ID %s to int64: %v", idStr, err)
@@ -80,16 +81,22 @@ func GetGroupList(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.Open
 			}
 
 			group := Group{
-				GroupCreateTime: currentTimestamp, // 使用当前时间的时间戳
+				GroupCreateTime: 0, // 官方 API 无群创建时间字段,诚实置 0
 				GroupID:         groupID,
-				GroupLevel:      0,
+				GroupLevel:      0, // 官方无对应字段,保留 0
 				GroupMemo:       "",
 				GroupName:       "",
-				MaxMemberCount:  0,
+				MaxMemberCount:  0, // 官方无对应字段,保留 0
 				MemberCount:     0,
 			}
+			// 逐群拉取真实信息,失败该群字段留空并日志,继续下一群
+			group.GroupName, group.GroupMemo, group.MemberCount = fetchGroupBriefInfo(apiv2, idStr)
 
 			groupList.Data = append(groupList.Data, group)
+			// 逐群节流,最后一群后不等待
+			if i < len(groupIDs)-1 && delay > 0 {
+				time.Sleep(time.Duration(delay) * time.Millisecond)
+			}
 		}
 		groupList.Message = ""
 		groupList.RetCode = 0
@@ -106,6 +113,7 @@ func GetGroupList(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.Open
 		isNumeric := func(s string) bool {
 			return regexp.MustCompile(`^\d+$`).MatchString(s)
 		}
+		count := 0
 		for _, idStr := range groupIDs {
 			var originalGroupID string
 			if isNumeric(idStr) {
@@ -114,15 +122,23 @@ func GetGroupList(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.Open
 				originalGroupID = idStr
 			}
 			group := GroupString{
-				GroupCreateTime: currentTimestamp, // 使用当前时间的时间戳
+				GroupCreateTime: 0, // 官方 API 无群创建时间字段,诚实置 0
 				GroupID:         originalGroupID,
-				GroupLevel:      0,
+				GroupLevel:      0, // 官方无对应字段,保留 0
 				GroupMemo:       "",
 				GroupName:       "",
-				MaxMemberCount:  0,
+				MaxMemberCount:  0, // 官方无对应字段,保留 0
 				MemberCount:     0,
 			}
+			// 逐群拉取真实信息,失败该群字段留空并日志,继续下一群
+			group.GroupName, group.GroupMemo, group.MemberCount = fetchGroupBriefInfo(apiv2, idStr)
+
 			groupListString.Data = append(groupListString.Data, group)
+			// 逐群节流,最后一群后不等待
+			count++
+			if count < len(groupIDs) && delay > 0 {
+				time.Sleep(time.Duration(delay) * time.Millisecond)
+			}
 		}
 		groupListString.Message = ""
 		groupListString.RetCode = 0
@@ -161,4 +177,20 @@ func GetGroupList(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.Open
 
 	//mylog.Printf("get_group_list: %s", result)
 	return string(result), nil
+}
+
+// fetchGroupBriefInfo 拉取单个群的真实信息（群名/群简介/成员数）。
+// API 失败返回空值由调用方留空处理，不中断其余群的拉取。
+func fetchGroupBriefInfo(apiv2 openapi.OpenAPI, idStr string) (string, string, int32) {
+	groupOpenID, err := resolveGroupOpenID(idStr)
+	if err != nil {
+		mylog.Printf("get_group_list: 反查 group_openid 失败 group=%s: %v", idStr, err)
+		return "", "", 0
+	}
+	info, err := apiv2.GroupInfo(context.TODO(), groupOpenID)
+	if err != nil {
+		mylog.Printf("get_group_list: 获取群信息失败 group=%s: %v", idStr, err)
+		return "", "", 0
+	}
+	return info.GroupName, info.GroupFingerMemo, int32(info.GroupMemberNum)
 }

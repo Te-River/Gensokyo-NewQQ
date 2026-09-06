@@ -3,6 +3,7 @@ package callapi
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/tencent-connect/botgo/openapi"
@@ -88,17 +89,48 @@ type ParamsContent struct {
 	Cursor         string   `json:"cursor,omitempty"`          // 策略列表分页游标
 	Limit          int      `json:"limit,omitempty"`           // 策略列表单页数量
 	StrategyID     string   `json:"strategy_id,omitempty"`     // 策略 ID
-	GroupOpenIDs   []string `json:"group_openids,omitempty"`   // 关联群 openid 列表
+	GroupOpenIDs   StringList `json:"group_openids,omitempty"`   // 关联群 openid 列表
 	GroupIDs       []uint64 `json:"group_ids,omitempty"`       // 关联 QQ 群号列表
 	IsEnable       string   `json:"is_enable,omitempty"`       // 策略启用状态 on/off
 	ExpireAt       string   `json:"expire_at,omitempty"`       // 策略过期时间(RFC3339)
 	Remark         string   `json:"remark,omitempty"`          // 策略备注
 	Op             string   `json:"op,omitempty"`              // 白名单/关联群操作 add/del
 	WhitelistUsers []string `json:"whitelist_users,omitempty"` // 白名单 QQ 号码列表
+	// 菜单/面板与成员管理扩展 action 参数
+	Scope        string      `json:"scope,omitempty"`         // 面板 scope (c2c/group/channel/dm)
+	TargetType   string      `json:"target_type,omitempty"`   // 面板对象范围 all|specific(仅 c2c/group 支持 specific)
+	PanelID      string      `json:"panel_id,omitempty"`      // 面板 ID
+	UserIDs      StringList  `json:"user_ids,omitempty"`      // 批量踢人/拉黑成员列表(虚拟 ID 数组,≤20)
+	UserOpenIDs  StringList  `json:"user_openids,omitempty"`  // 面板创建/关联对象列表(虚拟 ID 数组)
+	AddBlacklist bool        `json:"add_blacklist,omitempty"` // kick 时移出同时拉黑
+	Menu         interface{} `json:"menu,omitempty"`          // 菜单原始对象(handler 内 Marshal→Unmarshal 成 dto.Menu)
+	Panel        interface{} `json:"panel,omitempty"`         // 面板原始对象(同上,透传官方校验)
 	// handle quick operation
 	Context      Context   `json:"context,omitempty"`       // context 字段
 	Operation    Operation `json:"operation,omitempty"`     // operation 字段
 	CallbackData string    `json:"callback_data,omitempty"` // 新增: 用于接收 GenerateURLLink 的参数
+}
+
+// StringList 柔性字符串数组:OneBot 客户端对 user_id 类字段习惯发数字数组(JSON 数值),
+// 固定 []string 会在整请求 Unmarshal 阶段报错、消息被 wsclient 静默丢弃(客户端收不到任何回执)。
+// 元素级归一化:字符串直通、数字转十进制字符串、其他类型跳过。
+type StringList []string
+
+// UnmarshalJSON 兼容 ["123"] / [123] / 混合 / null 四种输入
+func (s *StringList) UnmarshalJSON(b []byte) error {
+	var raw []interface{}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	for _, v := range raw {
+		switch x := v.(type) {
+		case string:
+			*s = append(*s, x)
+		case float64:
+			*s = append(*s, strconv.FormatFloat(x, 'f', -1, 64))
+		}
+	}
+	return nil
 }
 
 // Context 结构体用于存储 context 字段相关信息

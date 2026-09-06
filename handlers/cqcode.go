@@ -13,6 +13,7 @@ import (
 	"github.com/hoshinonyaruko/gensokyo/echo"
 	"github.com/hoshinonyaruko/gensokyo/idmap"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
+	"github.com/tencent-connect/botgo/dto"
 	"github.com/tencent-connect/botgo/openapi"
 )
 
@@ -372,7 +373,7 @@ func cqParseParams(paramsStr string) map[string]string {
 	return params
 }
 
-// cqSetGroupAction 处理 [CQ:set_group,action=ban/whole_ban/add_request/strategy_execute/strategy_delete,...]
+// cqSetGroupAction 处理 [CQ:set_group,action=ban/whole_ban/add_request/strategy_execute/strategy_delete/kick/blacklist_add/blacklist_del,...]
 // 统一分发 set_group 系列动作；未知 action 原样保留
 func cqSetGroupAction(paramsStr, match, defaultGroupID string, apiv2 openapi.OpenAPI) string {
 	params := cqParseParams(paramsStr)
@@ -388,6 +389,10 @@ func cqSetGroupAction(paramsStr, match, defaultGroupID string, apiv2 openapi.Ope
 		return cqSetGroupStrategyAction(params, match, apiv2, true)
 	case "strategy_delete":
 		return cqSetGroupStrategyAction(params, match, apiv2, false)
+	case "kick":
+		return cqSetGroupKickAction(params, match, defaultGroupID, apiv2)
+	case "blacklist_add", "blacklist_del":
+		return cqSetGroupBlacklistAction(params, match, defaultGroupID, apiv2, action)
 	default:
 		mylog.Printf("[CQ:set_group] 未知 action=%s: %s", action, match)
 		return match // 未知 action 原样保留
@@ -529,4 +534,133 @@ func cqSetGroupStrategyAction(params map[string]string, match string, apiv2 open
 		}
 	}
 	return ""
+}
+
+// cqSetGroupKickAction 处理 [CQ:set_group,action=kick,group_id=虚拟群ID,user_id=虚拟用户ID,user_ids=逗号分隔批量,add_blacklist=true/false]
+// 单个/批量移出群成员（≤20，单个也走官方批量接口）；add_blacklist=true 移出同时拉黑
+func cqSetGroupKickAction(params map[string]string, match, defaultGroupID string, apiv2 openapi.OpenAPI) string {
+	groupID := params["group_id"]
+	if groupID == "" {
+		groupID = defaultGroupID
+	}
+	ids := cqSetGroupUserIDs(params, match)
+	if groupID == "" || len(ids) == 0 {
+		mylog.Printf("[CQ:set_group] kick: group_id 或 user_id/user_ids 为空: %s", match)
+		return match
+	}
+	groupOpenID, err := resolveGroupOpenID(groupID)
+	if err != nil {
+		mylog.Printf("[CQ:set_group] kick: 群 OpenID 反查失败: %v", err)
+		return ""
+	}
+	openIDs := cqSetGroupResolveMembers(ids, "kick")
+	if len(openIDs) == 0 {
+		return "" // 全部反查失败,无成员可操作
+	}
+	addBlacklist := false
+	if params["add_blacklist"] != "" {
+		b, err := strconv.ParseBool(params["add_blacklist"])
+		if err != nil {
+			mylog.Printf("[CQ:set_group] kick: add_blacklist 参数无效,按 false 处理: %s", params["add_blacklist"])
+		} else {
+			addBlacklist = b
+		}
+	}
+	req := &dto.BatchRemoveMembersRequest{
+		MemberOpenIDs:        openIDs,
+		AddToMemberBlacklist: addBlacklist,
+	}
+	resp, err := apiv2.BatchRemoveMembers(context.TODO(), groupOpenID, req)
+	if err != nil {
+		mylog.Printf("[CQ:set_group] kick: 批量移出失败: %v", err)
+	} else {
+		mylog.Printf("[CQ:set_group] kick: 已提交移出 group=%s 共 %d 人(add_blacklist=%v, result=%s)", groupOpenID, len(openIDs), addBlacklist, resp.RemoveMembersResult)
+	}
+	return "" // 无论成败都不发送原文
+}
+
+// cqSetGroupBlacklistAction 处理 [CQ:set_group,action=blacklist_add/blacklist_del,group_id=虚拟群ID,user_id=虚拟用户ID|user_ids=逗号分隔批量]
+// 群黑名单增删（≤20）；群内成员 add 会被官方拒绝，错误透传日志
+func cqSetGroupBlacklistAction(params map[string]string, match, defaultGroupID string, apiv2 openapi.OpenAPI, action string) string {
+	op := "add"
+	if action == "blacklist_del" {
+		op = "del"
+	}
+	groupID := params["group_id"]
+	if groupID == "" {
+		groupID = defaultGroupID
+	}
+	ids := cqSetGroupUserIDs(params, match)
+	if groupID == "" || len(ids) == 0 {
+		mylog.Printf("[CQ:set_group] %s: group_id 或 user_id/user_ids 为空: %s", action, match)
+		return match
+	}
+	groupOpenID, err := resolveGroupOpenID(groupID)
+	if err != nil {
+		mylog.Printf("[CQ:set_group] %s: 群 OpenID 反查失败: %v", action, err)
+		return ""
+	}
+	openIDs := cqSetGroupResolveMembers(ids, action)
+	if len(openIDs) == 0 {
+		return "" // 全部反查失败,无成员可操作
+	}
+	req := &dto.MemberBlacklistRequest{
+		Op:            op,
+		MemberOpenIDs: openIDs,
+	}
+	resp, err := apiv2.UpdateMemberBlacklist(context.TODO(), groupOpenID, req)
+	if err != nil {
+		mylog.Printf("[CQ:set_group] %s: 黑名单操作失败: %v", action, err)
+	} else if len(resp.FailOpenids) > 0 {
+		mylog.Printf("[CQ:set_group] %s: 部分失败 %d 人: %v", action, len(resp.FailOpenids), resp.FailOpenids)
+	} else {
+		mylog.Printf("[CQ:set_group] %s: 已提交黑名单 op=%s group=%s 共 %d 人", action, op, groupOpenID, len(openIDs))
+	}
+	return "" // 无论成败都不发送原文
+}
+
+// cqSetGroupUserIDs 解析 kick/blacklist 的 user_id 与 user_ids 参数：
+// user_ids 按逗号切分；两者同时存在时合并后去重保序；空项过滤；超 20 截断并警告。
+func cqSetGroupUserIDs(params map[string]string, match string) []string {
+	var ids []string
+	if v := strings.TrimSpace(params["user_id"]); v != "" {
+		ids = append(ids, v)
+	}
+	if v := strings.TrimSpace(params["user_ids"]); v != "" {
+		for _, part := range strings.Split(v, ",") {
+			ids = append(ids, strings.TrimSpace(part))
+		}
+	}
+	seen := make(map[string]struct{}, len(ids))
+	result := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	if len(result) > 20 {
+		mylog.Printf("[CQ:set_group] user_ids 数量 %d 超过官方单批上限 20,已截断: %s", len(result), match)
+		result = result[:20]
+	}
+	return result
+}
+
+// cqSetGroupResolveMembers 逐个反查成员 OpenID（32 位原生 OpenID 直接使用），
+// 反查失败的跳过并日志、不中断整批。
+func cqSetGroupResolveMembers(ids []string, action string) []string {
+	openIDs := make([]string, 0, len(ids))
+	for _, id := range ids {
+		openID, err := resolveMemberOpenID(id)
+		if err != nil {
+			mylog.Printf("[CQ:set_group] %s: user_id=%s 反查失败,已跳过: %v", action, id, err)
+			continue
+		}
+		openIDs = append(openIDs, openID)
+	}
+	return openIDs
 }

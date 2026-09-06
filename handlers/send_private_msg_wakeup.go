@@ -60,7 +60,11 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 	var selfID int64 = int64(config.GetAppID())
 
 	// 2. 解析消息内容
-	messageText, foundItems := parseMessageContent(message.Params, message, client, api, apiv2)
+	messageText, foundItems, msgPendings := parseMessageContent(message.Params, message, client, api, apiv2)
+	// 修 M1：wakeup（私聊）路径显式拦截动作码（Parse 内已按 Scope 拦截，此处兜底丢弃）
+	if len(msgPendings) > 0 {
+		mylog.Printf("[cqparse] wakeup 私聊路径拦截 %d 个动作码,不执行不发送", len(msgPendings))
+	}
 
 	mylog.Printf("发送互动召回消息 UserID:[%s]", userID)
 

@@ -16,6 +16,7 @@ func seg(segType string, data map[string]interface{}) map[string]interface{} {
 
 // parseGroupContent 简化 parseMessageContent 调用：群消息路径固定 GroupID/UserID
 // 传入 nil 客户端：未开启 transfer_url 时解析路径不会触达 client/api/apiv2
+// （cqparse 引入后第三返回值为 PendingAction，legacy 模式下恒为 nil，此处忽略）
 func parseGroupContent(t *testing.T, message interface{}) (string, map[string][]string) {
 	t.Helper()
 	params := callapi.ParamsContent{
@@ -23,7 +24,8 @@ func parseGroupContent(t *testing.T, message interface{}) (string, map[string][]
 		UserID:  "u-test-openid",
 		Message: message,
 	}
-	return parseMessageContent(params, callapi.ActionMessage{Action: "send_group_msg", Params: params}, nil, nil, nil)
+	text, items, _ := parseMessageContent(params, callapi.ActionMessage{Action: "send_group_msg", Params: params}, nil, nil, nil)
+	return text, items
 }
 
 // TestParseMessageContentFoundItems 聚焦测试：消息段数组路径的 foundItems 解析与文本拼接
@@ -288,7 +290,7 @@ func TestParseMessageContentNoGroupID(t *testing.T) {
 		},
 	}
 
-	gotText, gotItems := parseMessageContent(params, callapi.ActionMessage{Action: "send_private_msg", Params: params}, nil, nil, nil)
+	gotText, gotItems, _ := parseMessageContent(params, callapi.ActionMessage{Action: "send_private_msg", Params: params}, nil, nil, nil)
 
 	if gotText != "私聊消息" {
 		t.Errorf("文本不匹配: %q", gotText)

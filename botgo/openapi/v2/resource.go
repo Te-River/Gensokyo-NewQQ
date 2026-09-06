@@ -4,8 +4,12 @@ import (
 	"fmt"
 )
 
-const domain = "api.sgroup.qq.com"
-const sandBoxDomain = "sandbox.api.sgroup.qq.com"
+const domain = "api.bot.qq.com"
+const sandBoxDomain = "api.bot.qq.com" // 官方 api-call-guide 已统一为 api.bot.qq.com,不再单列 sandbox 域名
+
+// PublicAPIEndpoint 对外暴露的 API 域名,直接引用 domain 保证两处永不失同步;
+// 供主程序启动日志输出,便于用户确认当前构建使用的是新域名还是旧版固定 Token+旧域名构建
+const PublicAPIEndpoint = domain
 
 const scheme = "https"
 
@@ -43,6 +47,20 @@ const (
 	groupJoinApprovalStrategyItemURI  uri = "/v2/groups/join_approval_strategy/{strategy_id}"
 	groupJoinApprovalStrategyExecURI  uri = "/v2/groups/join_approval_strategy/{strategy_id}/execute"
 	groupJoinApprovalStrategyWhiteURI uri = "/v2/groups/join_approval_strategy/{strategy_id}/whitelist_users"
+
+	// [新增] 群成员管理接口
+	groupMembersURI            uri = "/v2/groups/{group_id}/members"
+	groupMemberInfoURI         uri = "/v2/groups/{group_id}/members/{member_openid}"
+	groupBatchRemoveMembersURI uri = "/v2/groups/{group_id}/batch_remove_members"
+	groupMemberBlacklistURI    uri = "/v2/groups/{group_id}/member_blacklist"
+
+	// [新增] 自定义菜单接口
+	menuURI uri = "/v2/menu"
+
+	// [新增] 指令面板接口
+	panelsURI      uri = "/v2/panels"
+	panelURI       uri = "/v2/panels/{panel_id}"
+	panelTargetURI uri = "/v2/panels/{panel_id}/target"
 
 	c2cMessagesURI  uri = "/v2/users/{user_id}/messages"
 	c2cRichMediaURI uri = "/v2/users/{user_id}/files"

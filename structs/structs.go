@@ -145,6 +145,8 @@ type Settings struct {
 	DisableErrorChan bool `yaml:"disable_error_chan"`
 	StringOb11       bool `yaml:"string_ob11"`
 	StringAction     bool `yaml:"string_action"`
+	//CQ码解析器模式: legacy(旧正则管道,默认)/shadow(新旧并行解析差异仅日志)/new(统一解析器cqparse)
+	CQParseMode string `yaml:"cq_parse_mode"`
 	//url相关
 	VisibleIp    bool `yaml:"visible_ip"`
 	UrlToQrimage bool `yaml:"url_to_qrimage"`
@@ -156,10 +158,11 @@ type Settings struct {
 	UnionWebhook string `yaml:"union_webhook"`
 	UnionID      bool   `yaml:"union_id"`
 	//MD相关
-	CustomTemplateID string `yaml:"custom_template_id"`
-	KeyBoardID       string `yaml:"keyboard_id"`
-	NativeMD         bool   `yaml:"native_md"`
-	EntersAsBlock    bool   `yaml:"enters_as_block"`
+	CustomTemplateID         string `yaml:"custom_template_id"`
+	KeyBoardID               string `yaml:"keyboard_id"`
+	NativeMD                 bool   `yaml:"native_md"`
+	EntersAsBlock            bool   `yaml:"enters_as_block"`
+	ForceVerifyImageResource bool   `yaml:"force_verify_image_resource"`
 	//发送行为修改
 	LazyMessageId     bool   `yaml:"lazy_message_id"`
 	RamDomSeq         bool   `yaml:"ramdom_seq"`

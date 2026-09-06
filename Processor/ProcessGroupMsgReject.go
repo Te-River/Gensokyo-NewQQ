@@ -123,8 +123,9 @@ func (p *Processors) ProcessGroupMsgReject(data *dto.GroupMsgRejectEvent) error 
 				IsBindedGroupId = idmap.CheckValuev2(GroupID64)
 			}
 			//平台事件,不是真实信息,无需messageID
-			messageID64 := 123
-			messageID := int(messageID64)
+			// M5-B 诚实化：保留值 -1（虚拟映射池永不取负值），下游不得对它 reply/撤回
+			messageID64 := int64(-1)
+			messageID := safeMessageID(messageID64)
 			var selfid64 int64
 			if config.GetUseUin() {
 				selfid64 = config.GetUinint64()

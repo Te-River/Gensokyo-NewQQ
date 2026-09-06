@@ -17,6 +17,7 @@ settings:
   idmap_isolation : false                            # 数据库key加UIN前缀隔离多个Bot（多个Bot连同一数据库时开启）
   idmap_legacy_compat : false                        # 同时写入旧格式key兼容官方Gensokyo（开启idmap_isolation时有效）
   token: "<YOUR_APP_TOKEN>"                          # 你的应用令牌
+  # 注意:该字段已不参与 API 鉴权(仅兼容旧版保留);程序使用 appid+client_secret 自动获取动态 AccessToken,无需在此填写任何值
   client_secret: "<YOUR_CLIENT_SECRET>"              # 你的客户端密钥
   shard_count: 1                    #分片数量 默认1
   shard_id: 0                       #当前分片id 默认从0开始,详细请看 https://bot.q.qq.com/wiki/develop/api/gateway/reference.html
@@ -163,7 +164,7 @@ settings:
 
 
   #API修改
-  get_g_list_delay : 500            #轮询时的延迟时间,毫秒数.
+  get_g_list_delay : 500            #get_group_list 逐群拉取间隔(毫秒)
   forward_msg_limit : 3             #发送折叠转发信息时的最大限制条数 若要发转发信息 请设置lazy_message_id为true
   custom_bot_name : "Gensokyo全域机器人"   #自定义api返回的机器人名字,会在api调用中返回,默认Gensokyo全域机器人
   transform_api_ids : true          #对get_group_menmber_list\get_group_member_info\get_group_list生效,是否在其中返回转换后的值(默认转换,不转换请自行处理插件逻辑,比如调用gsk的http api转换)
@@ -178,6 +179,7 @@ settings:
   disable_error_chan : false        #禁用ws断开时候将信息放入补发频道,当信息非常多时可能导致冲垮应用端,可以设置本选项为true.
   string_ob11 : false               #api不再返回转换后的int类型,而是直接转换,需应用端适配.
   string_action : false             #开启后将兼容action调用中使用string形式的user_id和group_id.
+  cq_parse_mode : legacy            #CQ码解析器模式: legacy(默认,旧正则管道,行为零变化)/shadow(新旧解析器并行,差异仅日志上报,行为仍走legacy)/new(统一解析器cqparse:修C1贪婪JSON/C3批量user_ids/M1私聊动作拦截等,支持[CQ:group_info]).建议先shadow观察日志无diff再切new,可随时改回legacy回滚.
 
   #URL相关
   visible_ip : false                #转换url时,如果server_dir是ip true将以ip形式发出url 默认隐藏url 将server_dir配置为自己域名可以转换url
@@ -196,6 +198,7 @@ settings:
   keyboard_id : ""                  #自动转换图文信息到md所需要的按钮id *需要应用端支持双方向echo
   native_md : false                 #自动转换图文信息到md,使用原生markdown能力.
   enters_as_block : false           #自动转换图文信息到md,\r \r\n \n 替换为空格.
+  force_verify_image_resource : false  #发送markdown消息时官方校验图片转存结果,转存失败将返回错误(40034004)且消息不发送;仅需要确保图片必然可显示时开启
 
   #发送行为修改
   lazy_message_id : false           #false=message_id 条条准确对应 true=message_id 按时间范围随机对应(适合主动推送bot)前提,有足够多的活跃信息刷新id池

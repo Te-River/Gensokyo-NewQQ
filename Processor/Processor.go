@@ -45,6 +45,12 @@ type Processors struct {
 	WsServerClients []callapi.WebSocketServerClienter //ws server被连接的客户端
 }
 
+// cqAtCleanRe 清理正文中的 [CQ:at,qq=数字]（包级预编译，修 M7）
+var cqAtCleanRe = regexp.MustCompile(`\[CQ:at,qq=\d+\]`)
+
+// perfSelfAtRe 性能模式下剥离 @bot 的正则（包级预编译，修 M7）
+var perfSelfAtRe = regexp.MustCompile(`<@!?([0-9A-Fa-f]+)>\s*`)
+
 type Sender struct {
 	Nickname string `json:"nickname"`
 	TinyID   string `json:"tiny_id"`
@@ -131,6 +137,28 @@ type OnebotPrivateMessage struct {
 	IsBindedUserId  bool          `json:"is_binded_user_id,omitempty"` //当前用户号号是否是binded后的
 }
 
+// 私聊信息事件（string_ob11 形态，修 H2：C2C 与群消息对齐真实 string ID 上报）
+type OnebotPrivateMessageS struct {
+	RawMessage      string         `json:"raw_message"`
+	MessageID       string         `json:"message_id"` // 真实 string message_id
+	MessageType     string         `json:"message_type"`
+	PostType        string         `json:"post_type"`
+	SelfID          int64          `json:"self_id"`
+	Sender          PrivateSenderS `json:"sender"`
+	SubType         string         `json:"sub_type"`
+	Time            int64          `json:"time"`
+	Avatar          string         `json:"avatar,omitempty"`
+	Echo            string         `json:"echo,omitempty"`
+	Message         interface{}    `json:"message"`     // For array format
+	MessageSeq      int            `json:"message_seq"` // Optional field
+	Font            int            `json:"font"`        // Optional field
+	UserID          string         `json:"user_id"`     // 真实 string user_id
+	RealMessageType string         `json:"real_message_type,omitempty"`
+	RealUserID      string         `json:"real_user_id,omitempty"`
+	Platform        string         `json:"platform,omitempty"`
+	IsBindedUserId  bool           `json:"is_binded_user_id,omitempty"`
+}
+
 // onebotv11标准扩展
 type OnebotInteractionNotice struct {
 	GroupID     int64                  `json:"group_id,omitempty"`
@@ -172,6 +200,13 @@ type OnebotGroupReceiveNotice struct {
 type PrivateSender struct {
 	Nickname string `json:"nickname"`
 	UserID   int64  `json:"user_id"` // Can be either string or int depending on logic
+}
+
+// PrivateSenderS 为 string_ob11 形态的私聊 sender（M1-B：sender.user_id 为真实 OpenID 字符串而非 0）
+type PrivateSenderS struct {
+	Nickname string `json:"nickname"`
+	TinyID   string `json:"tiny_id"`
+	UserID   string `json:"user_id"`
 }
 
 // 打印结构体的函数
@@ -448,11 +483,8 @@ func sendPostRequest(jsonString, url string) {
 }
 
 func (p *Processors) HandleFrameworkCommand(messageText string, data interface{}, Type string) error {
-	// 正则表达式匹配转换后的 CQ 码
-	cqRegex := regexp.MustCompile(`\[CQ:at,qq=\d+\]`)
-
-	// 使用正则表达式替换所有的 CQ 码为 ""
-	cleanedMessage := cqRegex.ReplaceAllString(messageText, "")
+	// 正则表达式匹配转换后的 CQ 码（包级预编译，修 M7）
+	cleanedMessage := cqAtCleanRe.ReplaceAllString(messageText, "")
 
 	// 去除字符串前后的空格
 	cleanedMessage = strings.TrimSpace(cleanedMessage)

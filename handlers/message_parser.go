@@ -24,6 +24,7 @@ import (
 	"github.com/hoshinonyaruko/gensokyo/botstats"
 	"github.com/hoshinonyaruko/gensokyo/callapi"
 	"github.com/hoshinonyaruko/gensokyo/config"
+	"github.com/hoshinonyaruko/gensokyo/handlers/cqparse"
 	"github.com/hoshinonyaruko/gensokyo/echo"
 	"github.com/hoshinonyaruko/gensokyo/idmap"
 	"github.com/hoshinonyaruko/gensokyo/images"
@@ -41,6 +42,19 @@ var BotID string
 var AppID string
 var selfAtMu sync.RWMutex
 var selfAtIDs = make(map[string]struct{})
+
+// ---------- 包级正则（入站热路径预编译，修 M7/n1；新 cqparse 包内正则同样包级 var） ----------
+
+var (
+	// incomingAtRe 同时匹配 <@!数字>、<@!OpenID>、<@数字>、<@OpenID>
+	incomingAtRe = regexp.MustCompile(`<@!?([0-9A-Fa-f]+)>`)
+	// cqAnyRe 临时保护 CQ 码（AppID→BotID 替换时避免破坏码参数）
+	cqAnyRe = regexp.MustCompile(`\[CQ:[^\]]*\]`)
+	// replyNumRe 清理残留的 [CQ:reply,id=数字]
+	replyNumRe = regexp.MustCompile(`\[CQ:reply,id=\d+\]`)
+	// cqAtNumRe 匹配正文中的 [CQ:at,qq=数字]
+	cqAtNumRe = regexp.MustCompile(`\[CQ:at,qq=(\d+)\]`)
+)
 
 // ---------- 安全工具函数 ----------
 
@@ -105,17 +119,21 @@ func IsSelfAtID(id string) bool {
 	return ok
 }
 
+// selfAtTargetID 返回 @bot 自身应映射到的 OneBot qq 值（use_uin 决定 UIN 或 AppID），
+// 与消息 SelfID 字段保持一致，否则下游无法识别 @ 的是自己。
+func selfAtTargetID() string {
+	if config.GetUseUin() {
+		return config.GetUinStr()
+	}
+	if AppID != "" {
+		return AppID
+	}
+	return config.GetAppIDStr()
+}
+
 func resolveIncomingAtID(id string) (string, bool) {
 	if IsSelfAtID(id) {
-		// 与消息 SelfID 字段保持一致：use_uin=true 时用 UIN，否则用 AppID。
-		// 否则下游会因 [CQ:at] 的 qq 与 self_id 不匹配而无法识别 @ 的是自己。
-		if config.GetUseUin() {
-			return config.GetUinStr(), true
-		}
-		if AppID != "" {
-			return AppID, true
-		}
-		return config.GetAppIDStr(), true
+		return selfAtTargetID(), true
 	}
 	if !config.GetConvertOtherAt() {
 		return "", false
@@ -125,6 +143,40 @@ func resolveIncomingAtID(id string) (string, bool) {
 		return "", false
 	}
 	return virtualID, true
+}
+
+// eventSelfAtIDs 从事件自身的 mentions 数组提取被标记为 @bot 的 OpenID 集合。
+// 与全局 selfAtIDs 联合使用：mentions[].is_you/bot 是群场景 OpenID 格式下
+// 唯一可靠的 @bot 信号（Ready 的 me.ID 与群内 openid 格式不同）。
+func eventSelfAtIDs(msg *dto.Message) map[string]struct{} {
+	selfIDs := make(map[string]struct{})
+	for _, mention := range msg.Mentions {
+		if mention == nil {
+			continue
+		}
+		if mention.IsYou || mention.Bot {
+			selfIDs[mention.ID] = struct{}{}
+		}
+	}
+	return selfIDs
+}
+
+// isIncomingSelfAt 联合判定入站 <@userID> 是否为 @bot 自身：
+// 事件 mentions 标记与全局注册（selfAtIDs/BotID/AppID）联合决定，
+// 并兼容 UIN/AppID 形态的解析结果。消息作者（发送者）绝不视为 @bot——
+// is_you 在部分场景（多实例等）会误标到发送者上，误判会把发送者的 @
+// 当作 @bot 剥离，造成 @ 丢失或把 @bot 映射成发送者 ID。
+func isIncomingSelfAt(userID string, atID string, authorID string, selfIDs map[string]struct{}) bool {
+	if userID == "" || userID == authorID {
+		return false
+	}
+	if _, ok := selfIDs[userID]; ok {
+		return true
+	}
+	if IsSelfAtID(userID) {
+		return true
+	}
+	return atID == config.GetUinStr() || atID == config.GetAppIDStr()
 }
 
 // 定义响应结构体
@@ -314,7 +366,8 @@ func SendResponse(client callapi.Client, err error, message *callapi.ActionMessa
 		}
 	} else {
 		// Default ID handling
-		response.Data.MessageID = 123
+		// 无真实 message_id 不再伪造固定假值,诚实置 0;RetCode/Status 保持现状(官方审核异步假失败但消息可能已发)
+		response.Data.MessageID = 0
 	}
 
 	//mylog.Printf("convert GroupID64 to int: %v", GroupID64) 测试
@@ -470,7 +523,8 @@ func SendGuildResponse(client callapi.Client, err error, message *callapi.Action
 		botstats.RecordMessageSent()
 	} else {
 		// Default ID handling
-		response.Data.MessageID = 123
+		// 无真实 message_id 不再伪造固定假值,诚实置 0;RetCode/Status 保持现状(官方审核异步假失败但消息可能已发)
+		response.Data.MessageID = 0
 	}
 	//转换成int
 	ChannelID64, errr := idmap.StoreIDv2(message.Params.ChannelID.(string))
@@ -536,7 +590,8 @@ func SendC2CResponse(client callapi.Client, err error, message *callapi.ActionMe
 		botstats.RecordMessageSent()
 	} else {
 		// Default ID handling
-		response.Data.MessageID = 123
+		// 无真实 message_id 不再伪造固定假值,诚实置 0;RetCode/Status 保持现状(官方审核异步假失败但消息可能已发)
+		response.Data.MessageID = 0
 	}
 	//将真实id转为int userid64
 	userid64, errr := idmap.StoreIDv2(message.Params.UserID.(string))
@@ -599,7 +654,8 @@ func SendGuildPrivateResponse(client callapi.Client, err error, message *callapi
 		response.Data.MessageID = int(messageID64)
 	} else {
 		// Default ID handling
-		response.Data.MessageID = 123
+		// 无真实 message_id 不再伪造固定假值,诚实置 0;RetCode/Status 保持现状(官方审核异步假失败但消息可能已发)
+		response.Data.MessageID = 0
 	}
 	response.Echo = message.Echo
 	response.GuildID = guildID
@@ -634,8 +690,137 @@ func SendGuildPrivateResponse(client callapi.Client, err error, message *callapi
 	return string(jsonResponse), nil
 }
 
-// 信息处理函数
-func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.ActionMessage, client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI) (string, map[string][]string) {
+// parseMessageContent 是消息解析的统一入口（架构设计 §8.1）。
+// 按 cq_parse_mode 分发：
+//   - legacy（默认）：旧正则管道，行为与重构前逐字节一致；
+//   - shadow：legacy 产物生效，新解析器并行纯解析并 diff 上报（mylog）；
+//   - new：全走 cqparse 统一解析器，动作码以 PendingAction 返回。
+func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.ActionMessage, client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI) (string, map[string][]string, []cqparse.PendingAction) {
+	switch config.GetCQParseMode() {
+	case "new":
+		return parseMessageContentCQParse(paramsMessage, message, client, api, apiv2)
+	case "shadow":
+		messageText, foundItems := parseMessageContentLegacy(paramsMessage, message, client, api, apiv2)
+		runCQParseShadow(paramsMessage, message, client, api, apiv2, messageText, foundItems)
+		return messageText, foundItems, nil
+	default:
+		messageText, foundItems := parseMessageContentLegacy(paramsMessage, message, client, api, apiv2)
+		return messageText, foundItems, nil
+	}
+}
+
+// buildCQParseInput 将 ParamsContent 归一为 cqparse.Input（字符串/段数组/TRSS 三形态）。
+// enableChangeWord 的敏感词过滤在 cqparse 之外应用（cqparse 不依赖业务包）。
+func buildCQParseInput(paramsMessage callapi.ParamsContent) (cqparse.Input, bool) {
+	in := cqparse.Input{}
+	if gid, ok := paramsMessage.GroupID.(string); ok {
+		in.GroupID = gid
+	}
+	// M7：GroupID 缺省(nil)与 "" 统一视为无私聊群
+	in.HasGroup = paramsMessage.GroupID != nil && in.GroupID != ""
+	if uid, ok := paramsMessage.UserID.(string); ok {
+		in.UserID = uid
+	}
+	switch msg := paramsMessage.Message.(type) {
+	case string:
+		in.Kind = cqparse.InputString
+		in.String = msg
+		if config.GetEnableChangeWord() {
+			in.String = acnode.CheckWordOUT(in.String)
+		}
+	case []interface{}:
+		in.Kind = cqparse.InputSegments
+		in.Segments = normalizeSegmentsForCQParse(msg)
+	case map[string]interface{}:
+		in.Kind = cqparse.InputMap
+		in.Segments = normalizeSegmentsForCQParse([]interface{}{msg})
+	default:
+		return in, false
+	}
+	return in, true
+}
+
+// normalizeSegmentsForCQParse 过滤非法段并对 text 段应用敏感词过滤；
+// 采用拷贝改写，不变异调用方共享的段 map。
+func normalizeSegmentsForCQParse(segs []interface{}) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(segs))
+	checkWord := config.GetEnableChangeWord()
+	for _, s := range segs {
+		m, ok := s.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if checkWord {
+			if t, _ := m["type"].(string); t == "text" {
+				if dm, dmOK := m["data"].(map[string]interface{}); dmOK {
+					if txt, txtOK := dm["text"].(string); txtOK {
+						nd := make(map[string]interface{}, len(dm))
+						for k, v := range dm {
+							nd[k] = v
+						}
+						nd["text"] = acnode.CheckWordOUT(txt)
+						nm := make(map[string]interface{}, len(m))
+						for k, v := range m {
+							nm[k] = v
+						}
+						nm["data"] = nd
+						out = append(out, nm)
+						continue
+					}
+				}
+			}
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// parseMessageContentCQParse new 模式：全走 cqparse 统一解析器。
+// M7 修复：GroupID 缺省(nil)与 "" 统一走私聊分支（与 legacy 群分支行为分叉已被收敛）。
+func parseMessageContentCQParse(paramsMessage callapi.ParamsContent, message callapi.ActionMessage, client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI) (string, map[string][]string, []cqparse.PendingAction) {
+	in, ok := buildCQParseInput(paramsMessage)
+	if !ok {
+		mylog.Println("Unsupported message format: params.message field is not a string, map or slice")
+		return "", make(map[string][]string), nil
+	}
+	text, foundItems, pendings, err := cqparse.Parse(in, DefaultDeps(apiv2))
+	if err != nil {
+		mylog.Printf("cqparse 解析失败: %v", err)
+		return "", make(map[string][]string), nil
+	}
+	if in.HasGroup {
+		//处理at
+		text = transformMessageTextAt(text, in.GroupID, in.UserID)
+	} else {
+		//处理at
+		text = transformMessageTextAtNoGroupID(text)
+	}
+	//最后再处理Url
+	text = transformMessageTextUrl(text, message, client, api, apiv2)
+	return text, foundItems, pendings
+}
+
+// runCQParseShadow shadow 模式：新解析器并行纯解析并与 legacy 产物 diff 上报。
+// 产物仍用 legacy，动作副作用只由 legacy 执行。
+func runCQParseShadow(paramsMessage callapi.ParamsContent, message callapi.ActionMessage, client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, legacyText string, legacyItems map[string][]string) {
+	in, ok := buildCQParseInput(paramsMessage)
+	if !ok {
+		return
+	}
+	// 修 Minor：shadow 只读对比，置空 GroupInfo 依赖——cqparse 侧对 nil 容忍
+	// （group_info 码走 fallback 语义），避免 shadow 期间真实发起 GET 白耗 30 QPM
+	deps := DefaultDeps(apiv2)
+	deps.GroupInfo = nil
+	text, foundItems, pendings, err := cqparse.Parse(in, deps)
+	if err != nil {
+		mylog.Printf("[cqparse-shadow] 新解析器失败: %v", err)
+		return
+	}
+	cqparse.ShadowCompare(legacyText, legacyItems, text, foundItems, pendings)
+}
+
+// parseMessageContentLegacy legacy/shadow 模式的旧解析管道（重构前原逻辑）。
+func parseMessageContentLegacy(paramsMessage callapi.ParamsContent, message callapi.ActionMessage, client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI) (string, map[string][]string) {
 	messageText := ""
 
 	foundItems := make(map[string][]string)
@@ -1415,8 +1600,7 @@ func transformMessageTextAt(messageText string, groupid string, userid string) s
 		// 临时保护 CQ 码，避免 AppID→BotID 替换破坏 CQ 码参数
 		type cqHolder struct{ orig, placeholder string }
 		var holders []cqHolder
-		cqRE := regexp.MustCompile(`\[CQ:[^\]]*\]`)
-		messageText = cqRE.ReplaceAllStringFunc(messageText, func(m string) string {
+		messageText = cqAnyRe.ReplaceAllStringFunc(messageText, func(m string) string {
 			ph := fmt.Sprintf("\x00CQ_PH_%d\x00", len(holders))
 			holders = append(holders, cqHolder{orig: m, placeholder: ph})
 			return ph
@@ -1428,18 +1612,13 @@ func transformMessageTextAt(messageText string, groupid string, userid string) s
 	}
 
 	// 去除所有[CQ:reply,id=数字] todo 更好的处理办法
-	replyRE := regexp.MustCompile(`\[CQ:reply,id=\d+\]`)
-	messageText = replyRE.ReplaceAllString(messageText, "")
+	messageText = replyNumRe.ReplaceAllString(messageText, "")
 
-	// 使用正则表达式来查找所有[CQ:at,qq=UserID]的模式（仅匹配 用户 自身）
-	re := regexp.MustCompile(`\[CQ:at,qq=` + userid + `\]`)
-	messageText = re.ReplaceAllStringFunc(messageText, func(m string) string {
-		// 如果 remove_bot_at_group 开启，移除 触发被动消息@用户，避免重复
-		if config.GetRemoveBotAtGroup() {
-			return ""
-		}
-		return m
-	})
+	// 仅匹配 用户 自身的 [CQ:at,qq=UserID]：
+	// C2 修复：user_id 为外部输入，不再拼接正则（防 MustCompile panic），改精确字符串匹配
+	if config.GetRemoveBotAtGroup() {
+		messageText = strings.ReplaceAll(messageText, "[CQ:at,qq="+userid+"]", "")
+	}
 	// 如果内容为空且原始内容仅含 at（不含 reply），退回原始 at 文本
 	if strings.TrimSpace(messageText) == "" && strings.Contains(originalText, "[CQ:at") {
 		messageText = originalText
@@ -1456,8 +1635,7 @@ func transformMessageTextAtNoGroupID(messageText string) string {
 		// 临时保护 CQ 码，避免 AppID→BotID 替换破坏 CQ 码参数
 		type cqHolder struct{ orig, placeholder string }
 		var holders []cqHolder
-		cqRE := regexp.MustCompile(`\[CQ:[^\]]*\]`)
-		messageText = cqRE.ReplaceAllStringFunc(messageText, func(m string) string {
+		messageText = cqAnyRe.ReplaceAllStringFunc(messageText, func(m string) string {
 			ph := fmt.Sprintf("\x00CQ_PH_%d\x00", len(holders))
 			holders = append(holders, cqHolder{orig: m, placeholder: ph})
 			return ph
@@ -1469,13 +1647,11 @@ func transformMessageTextAtNoGroupID(messageText string) string {
 	}
 
 	// 去除所有[CQ:reply,id=数字] todo 更好的处理办法
-	replyRE := regexp.MustCompile(`\[CQ:reply,id=\d+\]`)
-	messageText = replyRE.ReplaceAllString(messageText, "")
+	messageText = replyNumRe.ReplaceAllString(messageText, "")
 
 	// 使用正则表达式来查找所有[CQ:at,qq=数字]的模式
-	re := regexp.MustCompile(`\[CQ:at,qq=(\d+)\]`)
-	messageText = re.ReplaceAllStringFunc(messageText, func(m string) string {
-		submatches := re.FindStringSubmatch(m)
+	messageText = cqAtNumRe.ReplaceAllStringFunc(messageText, func(m string) string {
+		submatches := cqAtNumRe.FindStringSubmatch(m)
 		if len(submatches) > 1 {
 			var err error
 			if config.GetIdmapPro() {
@@ -1569,7 +1745,6 @@ func RevertTransformedText(data interface{}, msgtype string, api openapi.OpenAPI
 	case *dto.WSGroupMessageData:
 		msg = (*dto.Message)(v)
 		isFullGroupMsg = true
-		msg = (*dto.Message)(v)
 	case *dto.WSC2CMessageData:
 		msg = (*dto.Message)(v)
 	default:
@@ -1602,28 +1777,42 @@ func RevertTransformedText(data interface{}, msgtype string, api openapi.OpenAPI
 	//mylog.Printf("1[%v]", messageText)
 
 	// 将messageText里的BotID替换成AppID
-	messageText = strings.ReplaceAll(messageText, BotID, AppID)
+	// BotID 为空时跳过（Ready 事件异常时未设置），防止空串替换把全文逐字符穿插污染
+	if BotID != "" {
+		messageText = strings.ReplaceAll(messageText, BotID, AppID)
+	}
 
-	// 同时匹配 <@!数字>、<@!OpenID>、<@数字>、<@OpenID>
-	re := regexp.MustCompile(`<@!?([0-9A-Fa-f]+)>`)
-	messageText = re.ReplaceAllStringFunc(messageText, func(m string) string {
-		submatches := re.FindStringSubmatch(m)
+	// 事件级 @bot 判定素材：mentions(is_you/bot) 标记 + 消息作者（发送者）
+	selfIDs := eventSelfAtIDs(msg)
+	authorID := ""
+	if msg.Author != nil {
+		authorID = msg.Author.ID
+	}
+
+	// 同时匹配 <@!数字>、<@!OpenID>、<@数字>、<@OpenID>（包级预编译，修 M7）
+	// 逐匹配原位替换：转换/剥离/保留都发生在原位，绝不前移、不重排、不丢失
+	messageText = incomingAtRe.ReplaceAllStringFunc(messageText, func(m string) string {
+		submatches := incomingAtRe.FindStringSubmatch(m)
 		if len(submatches) > 1 {
 			userID := submatches[1]
 			atID, ok := resolveIncomingAtID(userID)
-			if !ok {
-				return m
-			}
-			// 判断是否为 @Bot 自身：
-			// 1) IsSelfAtID 检查原始 ID（BotID/AppID/selfAtIDs）
-			// 2) 解析后的 atID 等于 bot 的 UIN 或 AppID（兼容 QQ 平台不同场景使用不同 ID 格式）
-			isSelf := IsSelfAtID(userID) || atID == config.GetUinStr() || atID == config.GetAppIDStr()
+			// 判断是否为 @Bot 自身（mentions 与全局注册联合判定，作者除外；
+			// 解析后的 atID 等于 bot 的 UIN 或 AppID 时兼容命中）。
+			// isSelf 判定必须先于 !ok 保留分支：mentions 判定的 @bot 可能
+			// 不在 idmap 中（resolve 失败），但仍是自身，不能裸保留。
+			isSelf := isIncomingSelfAt(userID, atID, authorID, selfIDs)
 			if isSelf {
 				// 全量群消息(GROUP_MESSAGE_CREATE)中的 @Bot 始终剥离，不依赖 remove_at 配置
 				if isFullGroupMsg || config.GetRemoveAt() {
 					return ""
 				}
+				if atID == "" {
+					atID = selfAtTargetID()
+				}
 				return "[CQ:at,qq=" + atID + "]"
+			}
+			if !ok {
+				return m
 			}
 			return "[CQ:at,qq=" + atID + "]"
 		}
@@ -1927,8 +2116,10 @@ func ConvertToSegmentedMessage(data interface{}) []map[string]interface{} {
 	case *dto.WSGroupATMessageData:
 		msg = (*dto.Message)(v)
 	case *dto.WSGroupMessageData:
+		// 修 H1：全量群消息（GROUP_MESSAGE_CREATE）在 array 模式同样剥离 @bot，
+		// 对齐字符串路径与 AGENTS.md 语义
 		msg = (*dto.Message)(v)
-		msg = (*dto.Message)(v)
+		isFullGroupMsg = true
 	case *dto.WSC2CMessageData:
 		msg = (*dto.Message)(v)
 	default:
@@ -1941,9 +2132,15 @@ func ConvertToSegmentedMessage(data interface{}) []map[string]interface{} {
 		menumsg = true
 	}
 	var messageSegments []map[string]interface{}
+	var imageSegments []map[string]interface{}
 
 	// 处理Attachments字段来构建图片消息
+	// 修 M2-B：array 模式按 ContentType 过滤，视频/语音附件不再误标 image 段
+	// （对齐 RevertTransformedText 字符串路径的 image/ 前缀过滤）
 	for _, attachment := range msg.Attachments {
+		if !strings.HasPrefix(attachment.ContentType, "image/") {
+			continue
+		}
 		imageFileMD5 := attachment.FileName
 		for _, ext := range []string{"{", "}", ".png", ".jpg", ".gif", "-"} {
 			imageFileMD5 = strings.ReplaceAll(imageFileMD5, ext, "")
@@ -1956,39 +2153,65 @@ func ConvertToSegmentedMessage(data interface{}) []map[string]interface{} {
 				"url":     attachment.URL,
 			},
 		}
-		messageSegments = append(messageSegments, imageSegment)
+		imageSegments = append(imageSegments, imageSegment)
 
 		// 在msg.Content中替换旧的图片链接
 		//newImagePattern := "[CQ:image,file=" + attachment.URL + "]"
 		//msg.Content = msg.Content + newImagePattern
 	}
 	// 将msg.Content里的BotID替换成AppID
-	msg.Content = strings.ReplaceAll(msg.Content, BotID, AppID)
+	// BotID 为空时跳过（Ready 事件异常时未设置），防止空串替换把全文逐字符穿插污染
+	if BotID != "" {
+		msg.Content = strings.ReplaceAll(msg.Content, BotID, AppID)
+	}
 
-	// 匹配所有可能的 at 格式（包括 OpenID）
-	r := regexp.MustCompile(`<@!?([0-9A-Fa-f]+)>`)
-	atMatches := r.FindAllStringSubmatch(msg.Content, -1)
-	for _, match := range atMatches {
-		userID := match[1]
+	// 事件级 @bot 判定素材：mentions(is_you/bot) 标记 + 消息作者（发送者）
+	selfIDs := eventSelfAtIDs(msg)
+	authorID := ""
+	if msg.Author != nil {
+		authorID = msg.Author.ID
+	}
+
+	// 匹配所有可能的 at 格式（包括 OpenID）（包级预编译，修 M7）
+	// 原位逐段扫描：转换/剥离都发生在 <@OpenID> 的原位置，绝不前移、不重排；
+	// 反查失败的 <@OpenID> 原样保留在原位文本中，不丢失。
+	// 已解析的 at 暂以占位符替换，待下方文本级处理（Trim/前缀移除）完成后按原序展开成段。
+	type atPlaceholder struct{ ph, atID string }
+	var placeholders []atPlaceholder
+	var contentB strings.Builder
+	last := 0
+	atMatches := incomingAtRe.FindAllStringSubmatchIndex(msg.Content, -1)
+	for _, loc := range atMatches {
+		userID := msg.Content[loc[2]:loc[3]]
 		atID, ok := resolveIncomingAtID(userID)
-		if !ok {
+		isSelf := isIncomingSelfAt(userID, atID, authorID, selfIDs)
+		if isSelf && (isFullGroupMsg || config.GetRemoveAt()) {
+			// 原位剥离 @bot：仅移除 <@OpenID> 本身，前后文本保持原序
+			contentB.WriteString(msg.Content[last:loc[0]])
+			last = loc[1]
 			continue
 		}
-		atSegment := map[string]interface{}{
-			"type": "at",
-			"data": map[string]interface{}{
-				"qq": atID,
-			},
+		contentB.WriteString(msg.Content[last:loc[0]])
+		if isSelf {
+			// mentions 判定的自身但 idmap 无映射（resolve 失败）时，按自身语义转换
+			if atID == "" {
+				atID = selfAtTargetID()
+			}
+			ph := fmt.Sprintf("\x00ATPH%d\x00", len(placeholders))
+			placeholders = append(placeholders, atPlaceholder{ph: ph, atID: atID})
+			contentB.WriteString(ph)
+		} else if ok {
+			ph := fmt.Sprintf("\x00ATPH%d\x00", len(placeholders))
+			placeholders = append(placeholders, atPlaceholder{ph: ph, atID: atID})
+			contentB.WriteString(ph)
+		} else {
+			// 反查失败/未开启转换：原样保留在原位
+			contentB.WriteString(msg.Content[loc[0]:loc[1]])
 		}
-		// 判断是否为 @Bot 自身（兼容 QQ 平台不同 ID 格式）
-		isSelf := IsSelfAtID(userID) || atID == config.GetUinStr() || atID == config.GetAppIDStr()
-		if isSelf && (isFullGroupMsg || config.GetRemoveAt()) {
-		    msg.Content = strings.Replace(msg.Content, match[0], "", 1)
-		    continue
-		   }
-		messageSegments = append(messageSegments, atSegment)
-		msg.Content = strings.Replace(msg.Content, match[0], "", 1)
+		last = loc[1]
 	}
+	contentB.WriteString(msg.Content[last:])
+	msg.Content = contentB.String()
 
 	// 移除 at 后，如果内容以空格开头，可选去除
 	  if isFullGroupMsg || config.GetRemoveAt() {
@@ -2004,18 +2227,35 @@ func ConvertToSegmentedMessage(data interface{}) []map[string]interface{} {
 			msg.Content = msg.Content[:idx] + msg.Content[idx+1:]
 		}
 	}
-	// 如果还有其他内容，那么这些内容被视为文本部分
-	if msg.Content != "" {
-		textSegment := map[string]interface{}{
-			"type": "text",
-			"data": map[string]interface{}{
-				"text": msg.Content,
-			},
+	// 按原序展开：占位符 → at 段，其余为 text 段（文本与 at 交错保位，不重排）
+	rest := msg.Content
+	for _, p := range placeholders {
+		idx := strings.Index(rest, p.ph)
+		if idx < 0 {
+			// 占位符被异常破坏（理论不可达）：跳过该 at，不中断
+			continue
 		}
-		messageSegments = append(messageSegments, textSegment)
+		if before := rest[:idx]; before != "" {
+			messageSegments = append(messageSegments, map[string]interface{}{
+				"type": "text",
+				"data": map[string]interface{}{"text": before},
+			})
+		}
+		messageSegments = append(messageSegments, map[string]interface{}{
+			"type": "at",
+			"data": map[string]interface{}{"qq": p.atID},
+		})
+		rest = rest[idx+len(p.ph):]
 	}
-	//排列
-	messageSegments = sortMessageSegments(messageSegments)
+	// 如果还有其他内容，那么这些内容被视为文本部分
+	if rest != "" {
+		messageSegments = append(messageSegments, map[string]interface{}{
+			"type": "text",
+			"data": map[string]interface{}{"text": rest},
+		})
+	}
+	// 图片段按既有语义排在内容段之后（原由 sortMessageSegments 保证，现显式追加以保位）
+	messageSegments = append(messageSegments, imageSegments...)
 	return messageSegments
 }
 
@@ -2032,25 +2272,6 @@ func ConvertToInt64(value interface{}) (int64, error) {
 		// 当无法处理该类型时返回错误
 		return 0, fmt.Errorf("无法将类型 %T 转换为 int64", value)
 	}
-}
-
-// 排列MessageSegments
-func sortMessageSegments(segments []map[string]interface{}) []map[string]interface{} {
-	var atSegments, textSegments, imageSegments []map[string]interface{}
-
-	for _, segment := range segments {
-		switch segment["type"] {
-		case "at":
-			atSegments = append(atSegments, segment)
-		case "text":
-			textSegments = append(textSegments, segment)
-		case "image":
-			imageSegments = append(imageSegments, segment)
-		}
-	}
-
-	// 按照指定的顺序合并这些切片
-	return append(append(atSegments, textSegments...), imageSegments...)
 }
 
 // SendMessage 发送消息根据不同的类型
@@ -2112,14 +2333,55 @@ func ConvertMapToJSONString(m map[string]interface{}) (string, error) {
 	return jsonString, nil
 }
 
+// unwrapNestedMarkdown 尝试从可能的嵌套/非标准 JSON 中提取 markdown 字段。
+// 处理两种场景：
+//  1. 双层包装 {"markdown":{"markdown":{"content":"..."}}} → 取内层 markdown
+//  2. 顶层 content 为字符串 {"content":"markdown text"} → 降级视为 markdown content
+//
+// 返回提取到的 mdFields 和 true，或零值和 false（无需解包 / 解包失败）。
+func unwrapNestedMarkdown(raw []byte) (struct {
+	CustomTemplateID *string               `json:"custom_template_id,omitempty"`
+	Params           []*dto.MarkdownParams `json:"params,omitempty"`
+	Content          string                `json:"content,omitempty"`
+}, bool) {
+	type mdFields struct {
+		CustomTemplateID *string               `json:"custom_template_id,omitempty"`
+		Params           []*dto.MarkdownParams `json:"params,omitempty"`
+		Content          string                `json:"content,omitempty"`
+	}
+	var zero mdFields
+
+	s := string(raw)
+	// 场景1: 检查顶层 "markdown" 键
+	if md := gjson.Get(s, "markdown"); md.Exists() && md.Type == gjson.JSON {
+		var inner mdFields
+		// 先尝试直接解析为 markdown 内容（{"content":"..."}/{"custom_template_id":"..."}）
+		if err := json.Unmarshal([]byte(md.Raw), &inner); err == nil && (inner.Content != "" || inner.CustomTemplateID != nil) {
+			return inner, true
+		}
+		// 若失败，检查是否双层包装 {"markdown":{"markdown":{...}}}
+		if nested := gjson.Get(md.Raw, "markdown"); nested.Exists() && nested.Type == gjson.JSON {
+			if err := json.Unmarshal([]byte(nested.Raw), &inner); err == nil && (inner.Content != "" || inner.CustomTemplateID != nil) {
+				return inner, true
+			}
+		}
+	}
+	// 场景2: 顶层无 "markdown" 但有 "content" 字符串 → 降级视为 markdown content
+	if c := gjson.Get(s, "content"); c.Exists() && c.Type == gjson.String {
+		return mdFields{Content: c.String()}, true
+	}
+	return zero, false
+}
+
 func parseMDData(mdData []byte) (*dto.Markdown, *keyboard.MessageKeyboard, error) {
 	// 定义一个用于解析 JSON 的临时结构体
+	type mdFields struct {
+		CustomTemplateID *string               `json:"custom_template_id,omitempty"`
+		Params           []*dto.MarkdownParams `json:"params,omitempty"`
+		Content          string                `json:"content,omitempty"`
+	}
 	var temp struct {
-		Markdown struct {
-			CustomTemplateID *string               `json:"custom_template_id,omitempty"`
-			Params           []*dto.MarkdownParams `json:"params,omitempty"`
-			Content          string                `json:"content,omitempty"`
-		} `json:"markdown,omitempty"`
+		Markdown mdFields `json:"markdown,omitempty"`
 		Keyboard struct {
 			ID      string                   `json:"id,omitempty"`
 			Content *keyboard.CustomKeyboard `json:"content,omitempty"`
@@ -2131,9 +2393,24 @@ func parseMDData(mdData []byte) (*dto.Markdown, *keyboard.MessageKeyboard, error
 		Rows    []*keyboard.Row          `json:"rows,omitempty"`
 	}
 
-	// 解析 JSON
-	if err := json.Unmarshal(mdData, &temp); err != nil {
-		return nil, nil, err
+	// 解析 JSON（允许失败——后续降级处理嵌套/解包场景）
+	unmarshalErr := json.Unmarshal(mdData, &temp)
+
+	// 当首次 Unmarshal 失败（如顶层 content 为 string 与 *keyboard.CustomKeyboard 类型冲突）
+	// 或 markdown 字段为空时，尝试从嵌套包装中解包 markdown。
+	// 典型场景：
+	//   1. 双层包装 {"markdown":{"markdown":{"content":"..."}}} → 递进一层
+	//   2. 顶层 content 为字符串的非标准格式 {"content":"markdown text"} → 降级提取
+	if unmarshalErr != nil || (temp.Markdown.Content == "" && temp.Markdown.CustomTemplateID == nil) {
+		if extracted, ok := unwrapNestedMarkdown(mdData); ok {
+			temp.Markdown = extracted
+			// 降级成功：清除首次 Unmarshal 的错误（keyboard 等字段可能部分丢失，但 markdown 是主路径）
+			unmarshalErr = nil
+		}
+	}
+
+	if unmarshalErr != nil {
+		return nil, nil, unmarshalErr
 	}
 
 	// 处理 Markdown
@@ -2150,6 +2427,11 @@ func parseMDData(mdData []byte) (*dto.Markdown, *keyboard.MessageKeyboard, error
 		md = &dto.Markdown{
 			Content: temp.Markdown.Content,
 		}
+	}
+
+	// D2: 官方强校验图片转存结果开关,群/单聊 markdown 共用此唯一注入点
+	if md != nil && config.GetForceVerifyImageResource() {
+		md.ForceVerifyImageResource = true
 	}
 
 	// 处理 Keyboard
@@ -2255,9 +2537,8 @@ func ResolvePlaceholderUserIDs(kb *keyboard.MessageKeyboard, realUserOpenID stri
 // ResolveMarkdownAtMentions 将 markdown 内容中的 [CQ:at,qq=数字] 替换为
 // QQ API 官方 @ 语法 <qqbot-at-user id="OpenID" />，使其在群聊/频道中可渲染为蓝色 @。
 func ResolveMarkdownAtMentions(content string) string {
-	re := regexp.MustCompile(`\[CQ:at,qq=(\d+)\]`)
-	return re.ReplaceAllStringFunc(content, func(m string) string {
-		submatches := re.FindStringSubmatch(m)
+	return cqAtNumRe.ReplaceAllStringFunc(content, func(m string) string {
+		submatches := cqAtNumRe.FindStringSubmatch(m)
 		if len(submatches) > 1 {
 			realUserID, err := idmap.RetrieveRowByIDv2(submatches[1])
 			if err != nil {
@@ -2273,9 +2554,8 @@ func ResolveMarkdownAtMentions(content string) string {
 // resolvePlainTextAtMentions 将普通文本中的 [CQ:at,qq=数字] 替换为 QQ API 可识别的 @ 格式。
 // 优先使用缓存的用户名（@用户名），缓存失效时回退为 <@OpenID> 格式。
 func resolvePlainTextAtMentions(messageText string) string {
-	re := regexp.MustCompile(`\[CQ:at,qq=(\d+)\]`)
-	return re.ReplaceAllStringFunc(messageText, func(m string) string {
-		submatches := re.FindStringSubmatch(m)
+	return cqAtNumRe.ReplaceAllStringFunc(messageText, func(m string) string {
+		submatches := cqAtNumRe.FindStringSubmatch(m)
 		if len(submatches) > 1 {
 			username := idmap.GetUserName(submatches[1])
 			if username != "" {
@@ -2483,6 +2763,10 @@ func parseQQMuiscMDData(musicid string) (*dto.Markdown, *keyboard.MessageKeyboar
 	md = &dto.Markdown{
 		CustomTemplateID: CustomTemplateID,
 		Params:           mdParams,
+	}
+	// D2: 与 parseMDData 保持一致,受 force_verify_image_resource 开关控制
+	if config.GetForceVerifyImageResource() {
+		md.ForceVerifyImageResource = true
 	}
 	// 使用gjson获取musicUrl
 	//musicUrl := gjson.Get(pinfo, "url_mid.data.midurlinfo.0.purl").String()

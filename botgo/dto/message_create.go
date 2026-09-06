@@ -110,6 +110,8 @@ type Markdown struct {
 	CustomTemplateID string            `json:"custom_template_id,omitempty"` // 模版 id 群
 	Params           []*MarkdownParams `json:"params,omitempty"`             // 模版参数
 	Content          string            `json:"content,omitempty"`            // 原生 markdown
+	// ForceVerifyImageResource 官方强校验图片转存结果,由 config 开关控制注入(默认 false 不序列化)
+	ForceVerifyImageResource bool `json:"force_verify_image_resource,omitempty"`
 }
 
 // MarkdownParams markdown 模版参数 键值对

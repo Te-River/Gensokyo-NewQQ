@@ -115,8 +115,10 @@ func (p *Processors) ProcessC2CMsgReject(data *dto.WSC2CMsgRejectData) error {
 			}
 
 			// 平台事件,不是真实信息,无需messageID
-			messageID64 := 123
-			messageID := int(messageID64)
+			// M5-B 诚实化：不再伪造 123（可能撞真实虚拟 msg_id 造成 reply/撤回串扰），
+			// 改用保留值 -1（虚拟映射池永不取负值），下游不得对它 reply/撤回
+			messageID64 := int64(-1)
+			messageID := safeMessageID(messageID64)
 
 			// 构造 Private Message
 			privateMsg := OnebotPrivateMessage{
@@ -252,8 +254,9 @@ func (p *Processors) ProcessC2CMsgReceive(data *dto.WSC2CMsgReceiveData) error {
 				IsBindedUserId = idmap.CheckValuev2(userid64)
 			}
 
-			messageID64 := 123
-			messageID := int(messageID64)
+			// M5-B 诚实化：保留值 -1（虚拟映射池永不取负值），下游不得对它 reply/撤回
+			messageID64 := int64(-1)
+			messageID := safeMessageID(messageID64)
 
 			privateMsg := OnebotPrivateMessage{
 				RawMessage:  newdata.Content,

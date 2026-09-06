@@ -106,7 +106,7 @@ func approveJoinRequest(apiv2 openapi.OpenAPI, groupOpenID, memberOpenID, flag s
 // 无任何参数时返回空串。
 func buildSetGroupCQCode(dataMap map[string]interface{}) string {
 	cq := "[CQ:set_group"
-	for _, k := range []string{"action", "group_id", "user_id", "duration", "enable", "approve", "flag", "reason", "add_to_member_blacklist", "strategy_id"} {
+	for _, k := range []string{"action", "group_id", "user_id", "user_ids", "duration", "enable", "approve", "flag", "reason", "add_to_member_blacklist", "add_blacklist", "strategy_id"} {
 		v, ok := dataMap[k]
 		if !ok {
 			continue
@@ -119,6 +119,17 @@ func buildSetGroupCQCode(dataMap map[string]interface{}) string {
 			sv = strconv.FormatFloat(tv, 'f', -1, 64)
 		case bool:
 			sv = strconv.FormatBool(tv)
+		case []interface{}: // 消息段数组路径的列表值(如 user_ids),逗号拼接还原为 CQ 批量参数
+			var parts []string
+			for _, item := range tv {
+				switch iv := item.(type) {
+				case string:
+					parts = append(parts, iv)
+				case float64:
+					parts = append(parts, strconv.FormatFloat(iv, 'f', -1, 64))
+				}
+			}
+			sv = strings.Join(parts, ",")
 		default:
 			continue // 其他类型忽略
 		}
