@@ -490,10 +490,10 @@ settings:
 
 ## 特别鸣谢
 
-- 感谢[`mnixry/nonebot-plugin-gocqhttp`](https://github.com/mnixry/nonebot-plugin-gocqhttp/): 本项目采用了mnixry编写的前端并实现了与它对应的基于qq官方api的后端api.
-- 感谢[`ElainaCore/ElainaBot_v2`](https://github.com/ElainaCore/ElainaBot_v2)为本项目的图床方面提供了相关思路
-- 感谢[`HX-Wrdzgzs/GensokyoNewQQWeb`](https://github.com/HX-Wrdzgzs/GensokyoNewQQWeb)为本项目搭建了 WebUI ~~(虽然没什么人看就是了)~~
-- 感谢[`Hoshinonyaruko/Gensokyo`](https://github.com/Hoshinonyaruko/Gensokyo/)
+- 感谢[`mnixry/nonebot-plugin-gocqhttp`](https://github.com/mnixry/nonebot-plugin-gocqhttp/) 本项目采用了mnixry编写的前端并实现了与它对应的基于qq官方api的后端api.
+- 感谢[`ElainaCore/ElainaBot_v2`](https://github.com/ElainaCore/ElainaBot_v2) 为本项目的图床方面提供了相关思路
+- 感谢[`HX-Wrdzgzs/GensokyoNewQQWeb`](https://github.com/HX-Wrdzgzs/GensokyoNewQQWeb) 为本项目搭建了 WebUI ~~(虽然没什么人看就是了)~~
+- 感谢[`Hoshinonyaruko/Gensokyo`](https://github.com/Hoshinonyaruko/Gensokyo/) 本项目的母版
 
 ## 引用
 
