@@ -55,4 +55,6 @@
   - **is_you 误标发送者导致 @ 丢失**：`is_you` 在多实例等场景可能误标到发送者上，发送者的 @ 会被当作 @bot 剥离。现判定时排除消息作者（发送者自身绝不视为 @bot），性能模式（`disable_error_chan=true`）的 @bot 剥离同步排除作者；@bot 自身的解析结果仍按 `use_uin` 映射 UIN/AppID，不会映射成发送者 ID。
   - 附带加固：`BotID` 为空（Ready 事件异常未设置）时跳过 `BotID→AppID` 全文替换，防止空串替换把消息逐字符穿插污染。
   - 新增回归网 `handlers/zzzz_inbound_at_order_test.go`：8 个场景（@bot+多他人 / @bot 在中间 / 仅 @bot / 反查失败他人 / convertOtherAt=false / removeAt=true·false / is_you 误标发送者 / 全量群消息），逐场景断言 string 输出与 array 段序列完全保位，并校验两路径一致。
+- 修复 legacy 模式下嵌套 `data.data.markdown` 双层包装识别失败导致 md-only 段消息发送空消息（40034030）的问题：`parseMDData` 新增 `unwrapNestedMarkdown`（gjson 安全导航），支持标准 `{"markdown":{"content":...}}`、双包装 `{"markdown":{"markdown":{...}}}`、顶层 `{"content":"..."}` 三种 JSON 形态；群聊 Markdown CQ 码字符串路径 keyboard 类型不匹配一并修复；D2 ForceVerifyImageResource 注入点不受影响。
+- 对齐官方 20260916 字段修正：`/v2/generate_url_link` 请求体字段名由 camelCase `callbackData` 改为官方文档的 `callback_data`（botgo/dto `GenerateURLLinkToCreate` json tag）；此前 callback 透传数据可能静默丢失（链接仍可生成，加好友事件 scene_param 回传断链）。响应侧 `data.url` 本就一致，未改动。注：服务端对旧 camelCase 的容忍度未实测（无法离线验证），以官方文档为权威对齐。
 

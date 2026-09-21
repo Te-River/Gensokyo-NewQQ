@@ -176,8 +176,8 @@ type MessageReactionUsers struct {
 
 // GenerateURLLinkToCreate 获取机器人资料页分享链接请求结构
 type GenerateURLLinkToCreate struct {
-	// 添加好友时会回传该参数给到开发者，最大 32 字符
-	CallbackData string `json:"callbackData,omitempty"`
+	// 官方字段名为 callback_data（20260916 changelog 修正）：添加好友时会回传该参数给到开发者，最大 32 字符
+	CallbackData string `json:"callback_data,omitempty"`
 }
 
 // GenerateURLLink 获取机器人资料页分享链接响应结构
