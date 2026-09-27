@@ -26,6 +26,9 @@
 | 卡片消息 | `[CQ:card,title=<标题>,desc=<描述>,pic=<图片URL>,url=<跳转链接>]` | `q群 (Group Chat)` | 群聊图文卡片消息（`msg_type=8`）。参数顺序无关，`title` 必填，其余可选。见 [CQ card](./cq码/扩展CQ码/扩展cq码-cq-card.md)。 |
 | 输入状态 | `[CQ:input_notify,type=<类型>,second=<秒数>]` | `私聊 (C2C)` | 在发送正文前先发送"正在输入"状态（`msg_type=6`）。`type` 默认 `1`，`second` 最大 `60`。见 [CQ input_notify](./cq码/扩展CQ码/扩展cq码-cq-input_notify.md)。 |
 | 流式消息 | `[CQ:stream,type:start,qq:<虚拟用户ID>]` | `私聊 (C2C)` | 流式消息，分 start→mid→finish 三阶段逐片发送，实现打字机效果。见 [CQ stream](./cq码/扩展CQ码/扩展cq码-cq-stream.md)。 |
+| 键盘 | `[CQ:keyboard,data=<base64 或 JSON>]` | `q群 (Group Chat)` / `私聊 (C2C)` | 文本消息附加官方内嵌键盘（按钮消息）；与 `[CQ:markdown]` 同存时 markdown 内嵌 keyboard 优先。见 [CQ keyboard](./cq码/扩展CQ码/扩展cq码-cq-keyboard.md)。 |
+| 群管理动作 | `[CQ:set_group,action=<ban/whole_ban/add_request/strategy_execute/strategy_delete/kick/blacklist_add/blacklist_del>,...]` | `q群 (Group Chat)` | 出站动作统一码：禁言 / 全员禁言 / 入群审批 / 策略执行与删除 / 踢出（≤20 可同步拉黑）/ 黑名单增删。见 [CQ set_group](./cq码/扩展CQ码/扩展cq码-cq-set_group.md)。 |
+| 群信息展开 | `[CQ:group_info,field=<name/memo/member_count/all>,group_id=<虚拟群ID>,fallback=<失败替换文本>]` | `q群 (Group Chat)` / `私聊 (C2C)` | 正文展开群名/群简报/成员数或三字段 JSON，同消息同群多码合并一次取数。需 `cq_parse_mode: new`。见 [CQ group_info](./cq码/扩展CQ码/扩展cq码-cq-group_info.md)。 |
 
 ## 消息段
 
@@ -38,14 +41,17 @@
 | `active` | `type`, `sub_type` | 解析后不写入文本。 |
 | `wakeup` | `userid` | 等同 `[CQ:wakeup,userid=xxx]`，解析后不写入文本。 |
 | `member` | `type`, `group_id`, `user_id` | 等同 `[CQ:member]`。 |
+| `keyboard` | `data` | 等同 `[CQ:keyboard]`，解码后存入 `foundItems["keyboard"]`。 |
+| `set_group` | `action`, `group_id`, `user_id` 等 | 还原为 CQ 码字符串拼入 messageText，与字符串路径统一分发。 |
+| `stream` | `type`, `qq` | 等同 `[CQ:stream]`，JSON 编码存入 `foundItems["stream"]`。 |
+| `group_info` | `field`, `group_id`, `fallback` | 等同 `[CQ:group_info]`（需 `cq_parse_mode: new`），替换值按段位置展开。 |
 
 ## Markdown 图片尺寸
 
 Gensokyo 支持 QQ 官方 Markdown 的图片尺寸语法：
 
 ```markdown
-![#100px](图片链接)        # 宽度 100px，高度自适应
-![#100px #100px](图片链接)  # 宽高均为 100px
+![text #100px #100px](图片链接)  # 宽高均为 100px（宽高必须成对指定）
 ```
 
 详见 [Markdown 消息文档](./文档-markdown消息.md)。

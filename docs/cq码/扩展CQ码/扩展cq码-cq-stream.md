@@ -16,6 +16,8 @@
 [CQ:stream,type:finish,qq:123456789]消息内容
 ```
 
+> `cq_parse_mode: new` 下同时接受等号写法 `[CQ:stream,type=start,qq=123456789]`；legacy 模式仅支持冒号写法。
+
 | 参数 | 必填 | 说明 |
 |------|------|------|
 | `type` | 是 | 流式阶段：`start`（首片）、`mid`（续片）、`finish`（终片） |

@@ -16,19 +16,21 @@
 | `delete_msg` | delete_msg.go | `私聊 (C2C)` / `q群 (Group Chat)` | 按消息所属场景调用对应撤回接口。 |
 | `get_login_info` | get_login_info.go | `-` | 获取当前机器人登录信息。 |
 | `get_friend_list` | get_friend_list.go | `私聊 (C2C)` | 获取好友列表（含全部 C2C 私聊用户的虚拟 ID）。 |
-| `get_group_list` | get_group_list.go | `q群 (Group Chat)` | 获取列表。 |
+| `get_group_list` | get_group_list.go | `q群 (Group Chat)` | 获取群列表：逐群拉取真实群名/简介/成员数（`get_g_list_delay` 毫秒节流），`group_create_time` 诚实置 0。 |
 | `get_group_info` | get_group_info.go | `q群 (Group Chat)` | 调用 QQ 官方 v2 群信息接口返回真实群名/简介/成员数。 |
-| `get_group_member_info` | get_group_member_info.go | `q群 (Group Chat)` | 获取成员信息。 |
-| `get_group_member_list` | get_group_member_list.go | `q群 (Group Chat)` | 获取成员列表。 |
-| `get_status` | get_status.go | `-` | 获取运行状态。 |
+| `get_group_member_info` | get_group_member_info.go | `q群 (Group Chat)` | 获取成员信息：真实调用 QQ v2 接口，失败时回退中性值。 |
+| `get_group_member_list` | get_group_member_list.go | `q群 (Group Chat)` | 获取成员列表：真实调用 QQ v2 接口，游标分页全量拉取（单页≤30、安全上限 100 页）；官方接口不可用回退 idmap-pro 缓存。 |
+| `get_status` | get_status.go | `-` | 获取运行状态：包收发/断线/丢包统计诚实置 0，消息收发计数为 botstats 真实数据。 |
 | `get_version_info` | get_version_info.go | `-` | 获取版本信息。 |
 | `get_online_clients` | get_online_clients.go | `-` | 获取在线客户端。 |
 | `send_group_forward_msg` | send_group_forward_msg.go | `q群 (Group Chat)` | 发送合并转发消息。 |
 | `set_group_ban` | set_group_ban.go | `q群 (Group Chat)` | 单人禁言，`duration` 秒数（0=解除禁言）。与 `[CQ:set_group,action=ban]` 共享实现底层。 |
 | `set_group_whole_ban` | set_group_whole_ban.go | `q群 (Group Chat)` | 全员禁言，`enable` 开关。与 `[CQ:set_group,action=whole_ban]` 共享实现底层。 |
+| `set_group_kick` | set_group_kick.go | `q群 (Group Chat)` | 批量移出群成员（单批≤20，`user_id`/`user_ids` 二选一、可合并去重），可同步拉黑。与 `[CQ:set_group,action=kick]` 共享实现底层。 |
+| `set_group_card` | set_group_card.go | `-` | QQ 官方 API 未提供设置群名片接口，明确失败回执（retcode 100）。 |
 | `.handle_quick_operation` | handle_quick_operation.go | `-` | OneBot 快速操作。 |
 | `.handle_quick_operation_async` | handle_quick_operation_async.go | `-` | OneBot 快速操作的 async action 名称。 |
-| `mark_msg_as_read` | mark_msg_as_read.go | `-` | 标记消息已读。 |
+| `mark_msg_as_read` | mark_msg_as_read.go | `-` | 标记消息已读：官方无已读上报接口，空实现仅回执 ok。 |
 
 > **delete_msg 差异说明：**
 >
@@ -60,6 +62,9 @@
 | [`join_approval_strategy_execute`](./扩展api/扩展api-join_approval_strategy.md) | join_approval_strategy.go | `-` | 执行策略全量扫描（异步约 10 分钟）。 |
 | [`join_approval_strategy_whitelist`](./扩展api/扩展api-join_approval_strategy.md) | join_approval_strategy.go | `-` | 修改策略白名单（`strategy_id` + `op` + `whitelist_users`）。 |
 | [`join_approval_strategy_delete`](./扩展api/扩展api-join_approval_strategy.md) | join_approval_strategy.go | `-` | 删除策略（`strategy_id`）。 |
+| `get_group_member_blacklist` / `set_group_member_blacklist` | get_group_member_blacklist.go / set_group_member_blacklist.go | `q群 (Group Chat)` | 群黑名单查询 / 增删（单批≤20）。 |
+| `get_custom_menu` / `set_custom_menu` | get_custom_menu.go / set_custom_menu.go | `私聊 (C2C)` | C2C 自定义菜单读取 / 设置（覆盖式，仅 C2C 全局生效）。 |
+| `get_panel_list` / `create_panel` / `get_panel` / `set_panel` / `delete_panel` / `set_panel_target` | get_panel_list.go / create_panel.go / get_panel.go / set_panel.go / delete_panel.go / set_panel_target.go | `-` | 指令面板管理：列表 / 创建 / 详情 / 更新元素与备注 / 删除 / 增删关联对象（支持 c2c/group/channel/dm）。 |
 
 ## 消息事件扩展字段
 

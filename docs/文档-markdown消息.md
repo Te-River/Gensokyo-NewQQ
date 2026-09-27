@@ -232,6 +232,10 @@ Markdown 内容中的 `![](path)` 图片，Gensokyo 会自动处理：
 ![](file:///C:/Users/xxx/Pictures/photo.png)
 ```
 
+### 图片转存强校验（force_verify_image_resource）
+
+配置 `force_verify_image_resource`（默认 `false`）：开启后发送 Markdown 消息时注入官方 `force_verify_image_resource` 字段，QQ 官方将校验图片转存结果；转存失败返回错误 `40034004` 且消息不发送。仅需要确保图片必然可显示时开启。群聊与单聊的 Markdown 路径（含 auto_md 直构路径）均生效。
+
 ### QQ Markdown 图片尺寸语法
 
 QQ 官方 Markdown 支持在图片中指定显示尺寸，语法为：

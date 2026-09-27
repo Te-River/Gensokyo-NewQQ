@@ -46,6 +46,20 @@ Gensokyo 为适配 QQ Bot API 特有能力而扩展的 CQ 码类型。
 
 ---
 
+## CQ 码解析模式（cq_parse_mode）
+
+消息解析统一为 cqparse 架构（字符串 / 消息段数组 / TRSS map 三输入归一 Token 流），由配置 `cq_parse_mode` 控制：
+
+| 模式 | 行为 |
+|------|------|
+| `legacy`（默认） | 走旧解析器，零行为变化。 |
+| `shadow` | 新旧两套解析并行运行，行为仍走 legacy；结果有差异时输出 `[cqparse-shadow]` 差异日志。 |
+| `new` | 全部走新解析器。修复旧解析的若干缺陷（贪婪 JSON 正则跨码吞噬、字符串路径批量 user_ids 只取第一个、动作码私聊泄漏、媒体码附加参数污染 URL、stream 等号语法等）；`[CQ:group_info]` 仅在此模式下可用。 |
+
+配置非法值（大小写敏感）时回退 `legacy` 并输出一次警告。建议先以 `shadow` 观察日志无差异再切换 `new`，可随时改回 `legacy` 回滚。
+
+---
+
 ## 范围说明
 
 | 标记 | 含义 |
