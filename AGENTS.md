@@ -83,6 +83,10 @@ Ukaka、星野、Nature）统一为 oss_type 的枚举值（4~10），
 Co-Authored-By: Agent <noreply@example.com>
 ```
 
+### Windows 中文提交信息
+
+- Windows/PowerShell 下用 `-m` 直接传中文 commit message 可能因控制台编码产生乱码；建议将信息写入 UTF-8 临时文件后 `git commit -F <file>`。
+
 ## 🔏 签名提交
 
 - 强烈建议开启 GPG/SSH 签名提交（`git commit -S`）。
@@ -108,6 +112,22 @@ Co-Authored-By: Agent <noreply@example.com>
 - 改动可能影响现有功能的兼容性
 
 **小改动**（单文件、1-2 行修复、纯文档更新）仍可直接在 `main` 提交。
+
+## 📦 发版与 CHANGELOG 惯例
+
+### release_log/ 变更日志
+
+- 每个版本一个文件 `release_log/CHANGELOG_vNNN.md`，记录"自上一 Release 以来的所有变更"；发布说明直接取用对应文件全文。
+- **格式自 v014 起固定**（模板见 `CHANGELOG_v014.md`）：
+  - 四段：`## ✨ 新功能 / 变更`、`## 🐛 修复`、`## 📝 工程与文档变更`、`## ✅ 提交记录`，段落间用 `---` 分隔
+  - 每个条目一个 `###` 子节：先一两句概述，再用 **修改**/**影响**/**测试** 等粗体引导 bullet 展开；技术细节（配置名/错误码/数值上限/文件路径）零删减
+  - `✅ 提交记录` 为 fenced code block：`<hash>  <subject>`（hash 后两个空格），新到旧；只收录有实质信息的提交（排除 merge、网页端 readme 微调、仓库卫生提交）
+- **封版流程**：changelog 定稿 → 顶部加 `> 🚀 **已封版**：ReleaseNNN 已封版，后续变更请记录到 [CHANGELOG_vNNN+1.md](./CHANGELOG_vNNN+1.md)。` → 新建下一版 stub（标题 + `> 自 ReleaseNNN 以来的所有变更。` + `---`）→ 打轻量 tag `ReleaseNNN` 并推送 → `.\build.ps1`（版本串经 ldflags 注入，无 tag-before-build 顺序依赖）。
+
+### docs/ 与代码对齐
+
+- 修改代码行为时必须同步更新对应文档；`docs/本版新增功能.md`（fork 能力汇总：事件/API/CQ 行为表）每版发布前核对更新。
+- 已知文档缺口（无自然归属文档，待补）：CDN/图床上传重试机制、域名统一与登录排障提示。
 
 ## ⛔ 禁止的破坏性操作
 
