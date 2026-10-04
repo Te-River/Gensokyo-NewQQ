@@ -480,6 +480,10 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			          md.Content = ResolveMarkdownImages(md.Content, apiv2)
 			                     }
 			                     if kb != nil {
+			                      // 替换 keyboard 中 __USER_ID__ 占位符为实际用户 OpenID，
+			                      // 并将 C2C 不支持的 permission.type=0 转为 type=2（所有人）
+			                      userOpenID := idmap.ResolveOriginalID(UserID)
+			                      ResolvePlaceholderUserIDs(kb, userOpenID)
 			                      ResolveKeyboardImages(kb, apiv2)
 			                     }
 			         if md != nil {

@@ -219,3 +219,78 @@ func TestSendGroupMsgKeyboardOnlySegment(t *testing.T) {
 		t.Errorf("Keyboard.ID = %q, want tpl_1", mtc.Keyboard.ID)
 	}
 }
+
+// TestSendPrivateMsgEmbeddedKeyboardPermissionType 私聊 markdown 段内嵌 keyboard：
+// 修复前该路径漏调 ResolvePlaceholderUserIDs，C2C 不支持的 permission.type=0 原样发出，
+// 用户点击按钮提示"无权限操作"；修复后应转为 type=2（所有人）且 specify_user_ids 保留。
+func TestSendPrivateMsgEmbeddedKeyboardPermissionType(t *testing.T) {
+	mock := &mockMDSendOpenAPI{}
+	client := &mdGateTestClient{}
+
+	// markdown 段的 data.data 同时含 markdown 与 keyboard（模拟 qbind 插件的真实形态）
+	seg := map[string]interface{}{
+		"type": "markdown",
+		"data": map[string]interface{}{
+			"data": map[string]interface{}{
+				"markdown": map[string]interface{}{"content": "### 确认绑定"},
+				"keyboard": map[string]interface{}{
+					"content": map[string]interface{}{
+						"rows": []interface{}{
+							map[string]interface{}{
+								"buttons": []interface{}{
+									map[string]interface{}{
+										"render_data": map[string]interface{}{"label": "确认", "visited_label": "确认", "style": 1},
+										"action": map[string]interface{}{
+											"type": 2,
+											"permission": map[string]interface{}{
+												"type":             0,
+												"specify_user_ids": []interface{}{"123456"},
+											},
+											"data": "confirm_bind",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	msg := callapi.ActionMessage{
+		Action: "send_private_msg",
+		Params: callapi.ParamsContent{
+			UserID:  openID32('u'),
+			Message: []interface{}{seg},
+		},
+		Echo: "md-kb-perm",
+	}
+
+	if _, err := HandleSendPrivateMsg(client, nil, mock, msg); err != nil {
+		t.Fatalf("HandleSendPrivateMsg 返回错误: %v", err)
+	}
+	if mock.c2cCalls != 1 {
+		t.Fatalf("内嵌 keyboard 私聊消息应调用一次 PostC2CMessage, got %d", mock.c2cCalls)
+	}
+	mtc, ok := mock.lastC2C.(*dto.MessageToCreate)
+	if !ok {
+		t.Fatalf("应发送 MessageToCreate, got %T", mock.lastC2C)
+	}
+	if mtc.MsgType != 2 {
+		t.Errorf("MsgType = %d, want 2", mtc.MsgType)
+	}
+	if mtc.Keyboard == nil || mtc.Keyboard.Content == nil || len(mtc.Keyboard.Content.Rows) == 0 || len(mtc.Keyboard.Content.Rows[0].Buttons) == 0 {
+		t.Fatalf("内嵌 Keyboard 应解析出 rows/buttons, got %+v", mtc.Keyboard)
+	}
+	btn := mtc.Keyboard.Content.Rows[0].Buttons[0]
+	if btn.Action == nil || btn.Action.Permission == nil {
+		t.Fatalf("按钮应含 action.permission, got %+v", btn)
+	}
+	if btn.Action.Permission.Type != 2 {
+		t.Errorf("Permission.Type = %d, want 2（修复前为 0，C2C 点击提示无权限操作）", btn.Action.Permission.Type)
+	}
+	if len(btn.Action.Permission.SpecifyUserIDs) == 0 {
+		t.Error("SpecifyUserIDs 应保留非空")
+	}
+}
