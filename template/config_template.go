@@ -180,6 +180,7 @@ settings:
   string_ob11 : false               #api不再返回转换后的int类型,而是直接转换,需应用端适配.
   string_action : false             #开启后将兼容action调用中使用string形式的user_id和group_id.
   cq_parse_mode : legacy            #CQ码解析器模式: legacy(默认,旧正则管道,行为零变化)/shadow(新旧解析器并行,差异仅日志上报,行为仍走legacy)/new(统一解析器cqparse:修C1贪婪JSON/C3批量user_ids/M1私聊动作拦截等,支持[CQ:group_info]).建议先shadow观察日志无diff再切new,可随时改回legacy回滚.
+  arch_mode : new                   #分层架构接入模式: legacy(全走旧链,行为零变化)/shadow(新旧链并行,差异仅日志上报,行为仍走legacy)/new(默认,走 internal+adapter 新链).空值/非法值回退 new;热重载即时生效,可随时改回 legacy 回滚.
 
   #URL相关
   visible_ip : false                #转换url时,如果server_dir是ip true将以ip形式发出url 默认隐藏url 将server_dir配置为自己域名可以转换url

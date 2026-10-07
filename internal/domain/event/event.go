@@ -23,6 +23,8 @@ const (
 
 // DomainEvent 归一化后的入站领域事件。
 // Raw 携带原始 QQ DTO（仅 QQ Adapter 消费，业务层不依赖）。
+// Payload 携带 legacy 构造的 OneBot 上报 map（逐字节复用 legacy payload 构造，
+// 避免 Publisher 重复实现导致字段漂移）；nil 时 Publisher 回退最小构造。
 type DomainEvent struct {
 	ID      string
 	Time    time.Time
@@ -31,5 +33,6 @@ type DomainEvent struct {
 	Target  identity.ResolvedTarget
 	Message message.ParsedMessage
 
-	Raw interface{}
+	Raw     interface{}
+	Payload map[string]interface{}
 }

@@ -66,6 +66,11 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 		mylog.Printf("[cqparse] wakeup 私聊路径拦截 %d 个动作码,不执行不发送", len(msgPendings))
 	}
 
+	// A 包出站接缝：arch_mode=new 走统一出站服务（wakeup 语义）；shadow 执行并 diff；legacy 原逻辑。
+	if handled, ret := TryOutbound(client, api, apiv2, message, messageText, foundItems, identity.TargetPrivate, true); handled {
+		return ret, nil
+	}
+
 	mylog.Printf("发送互动召回消息 UserID:[%s]", userID)
 
 	// 定义 KeyMap (对齐 HandleSendPrivateMsg)

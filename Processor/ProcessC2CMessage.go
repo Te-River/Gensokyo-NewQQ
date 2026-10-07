@@ -225,7 +225,7 @@ func (p *Processors) ProcessC2CMessage(data *dto.WSC2CMessageData) error {
 			privateMsgMap = structToMap(privateMsgS)
 		}
 		//上报信息到onebotv11应用端(正反ws)
-		go p.BroadcastMessageToAll(privateMsgMap, p.Apiv2, data)
+		p.dispatchInbound(data, privateMsgMap, func() { go p.BroadcastMessageToAll(privateMsgMap, p.Apiv2, data) })
 		//组合FriendData
 		struserid := strconv.FormatInt(userid64, 10)
 		if config.GetStringOb11() {

@@ -1,10 +1,14 @@
 package callapi
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 
+	"github.com/hoshinonyaruko/gensokyo/config"
+	"github.com/hoshinonyaruko/gensokyo/internal/application/action"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/tencent-connect/botgo/openapi"
 )
@@ -16,6 +20,10 @@ type ActionMessage struct {
 	Echo        interface{}   `json:"echo,omitempty"`
 	PostType    string        `json:"post_type,omitempty"`
 	MessageType string        `json:"message_type,omitempty"`
+	// ShadowDryRun 标记本次调用处于 shadow 的 new 对比执行（per-request，经 ctx 透传）：
+	// 出站桥据此只 diff、不产生发送副作用，避免 legacy + new 双发。
+	// json:"-" 保证 OneBot 线格式逐字节不变。
+	ShadowDryRun bool `json:"-"`
 }
 
 func (a *ActionMessage) UnmarshalJSON(data []byte) error {
@@ -257,7 +265,27 @@ func RegisterHandler(action string, handler HandlerFunc) {
 }
 
 // CallAPIFromDict 处理信息 by calling the 对应的 handler.
+// 按 config.GetArchMode() 切换：new 走 action.Dispatcher；shadow 以 legacy 产物为准并 diff；
+// legacy（及默认）走原逻辑。OneBot 响应逐字节兼容。
 func CallAPIFromDict(client Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, message ActionMessage) string {
+	switch config.GetArchMode() {
+	case "new":
+		return callAPIFromDictNew(client, api, apiv2, message, false)
+	case "shadow":
+		legacy := callAPIFromDictLegacy(client, api, apiv2, message)
+		// new 对比执行：dry-run 经 ctx 透传（per-request），出站桥只 diff、不发送，避免与 legacy 双发。
+		newResult := callAPIFromDictNew(client, api, apiv2, message, true)
+		if newResult != legacy {
+			mylog.Printf("arch shadow action=%s legacy=%q new=%q", message.Action, legacy, newResult)
+		}
+		return legacy
+	default:
+		return callAPIFromDictLegacy(client, api, apiv2, message)
+	}
+}
+
+// callAPIFromDictLegacy 原逻辑：全局 handlers map 直调。
+func callAPIFromDictLegacy(client Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, message ActionMessage) string {
 	handler, ok := handlers[message.Action]
 	if !ok {
 		mylog.Println("Unsupported action:", message.Action)
@@ -272,4 +300,43 @@ func CallAPIFromDict(client Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, 
 	}
 
 	return jsonString
+}
+
+// callAPIFromDictNew 新路径：经 action.Dispatcher 分发（Registry 按 client 缓存）。
+// Echo/PostType/MessageType 经 ctx 透传给桥接 handler，保证响应逐字节兼容；
+// dryRun（shadow 的 new 对比执行）同样经 ctx 透传，避免进程级标志被并发请求串读。
+func callAPIFromDictNew(client Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, message ActionMessage, dryRun bool) string {
+	raw, err := json.Marshal(message)
+	if err != nil {
+		mylog.Println("Error marshalling action:", message.Action, "Error:", err)
+		return ""
+	}
+
+	ctx := context.Background()
+	if message.Echo != nil {
+		ctx = context.WithValue(ctx, ctxKeyEcho, message.Echo)
+	}
+	if message.PostType != "" {
+		ctx = context.WithValue(ctx, ctxKeyPostType, message.PostType)
+	}
+	if message.MessageType != "" {
+		ctx = context.WithValue(ctx, ctxKeyMessageType, message.MessageType)
+	}
+	if dryRun {
+		ctx = context.WithValue(ctx, ctxKeyShadowDryRun, true)
+	}
+
+	res, err := action.NewDispatcher(registryFor(client, api, apiv2)).Dispatch(ctx, raw)
+	if err != nil {
+		if errors.Is(err, action.ErrUnknownAction) {
+			mylog.Println("Unsupported action:", message.Action)
+		} else {
+			mylog.Println("Error handling action:", message.Action, "Error:", err)
+		}
+		return ""
+	}
+	if s, ok := res.(string); ok {
+		return s
+	}
+	return ""
 }

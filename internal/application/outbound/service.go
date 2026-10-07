@@ -46,13 +46,19 @@ func (s *OutboundService) Send(ctx context.Context, cmd OutboundCommand) (SendRe
 	msg := cmd.Message
 	// Reply 已包含在 cmd.Message.Reply（发送行为独立于消息内容）
 
+	// lastID 保留最后一次非空的 QQ message_id：重试中/最终失败时仍回传，
+	// 供上层 rememberLatestBotGroupMessageInGroup 记录（legacy send_group_msg.go:504/715）。
+	var lastID string
 	for attempt := 0; ; attempt++ {
 		res, err := s.sender.Send(ctx, cmd.Target, msg)
+		if res.MessageID != "" {
+			lastID = res.MessageID
+		}
 		if err == nil {
 			return SendResult{MessageID: res.MessageID}, nil
 		}
 		if !s.retry.ShouldRetry(err, attempt) {
-			return SendResult{}, err
+			return SendResult{MessageID: lastID}, err
 		}
 		backoff := s.retry.Backoff(attempt)
 		if backoff <= 0 {
@@ -61,7 +67,7 @@ func (s *OutboundService) Send(ctx context.Context, cmd OutboundCommand) (SendRe
 		select {
 		case <-time.After(backoff):
 		case <-ctx.Done():
-			return SendResult{}, ctx.Err()
+			return SendResult{MessageID: lastID}, ctx.Err()
 		}
 	}
 }

@@ -47,6 +47,11 @@ type PendingAction struct {
 type ExecOutcome struct {
 	RealGroupID string
 	EventID     string
+	// EventIDSet 标记「CQ 显式决定过 eventID」：member add 命中缓存写入、
+	// member remove 显式清空（转主动推送）均为 true；add 未命中（legacy 为只覆盖语义，
+	// 保留原值）与其他动作码为 false。用于区分「显式清空」与「CQ 未设置」，
+	// 避免 messageID=="2000" 分支把缓存 event_id 重新回填进退群回复。
+	EventIDSet  bool
 	Intercepted bool // 私聊/转发：只拦截不执行
 }
 

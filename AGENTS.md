@@ -150,6 +150,36 @@ OneBot 后端 → handlers/ (出站 API 调用) → parseMessageContent → foun
 - **入站**（QQ API → 后端）：`Processor/` 目录处理各类事件，将 `<@OpenID>` 转换为 `[CQ:at,qq=虚拟ID]`，建立 idmap 映射
 - **出站**（后端 → QQ API）：`handlers/` 目录处理 OneBot 请求，核心入口 `parseMessageContent()` 解析消息，产出 `foundItems` map 供后续发送
 
+### 分层架构（internal/ + adapter/，arch_mode 切换）
+
+生产主链已接入 `internal/` + `adapter/` 分层架构，与 legacy 两路同时装配，按 `arch_mode` 逐请求切换，**legacy 保留回退**：
+
+| 目录 | 分层 |
+|------|------|
+| `internal/application/` | 用例层：`outbound/`、`inbound/`、`action/`、`media/`、`state/`、`queue/` |
+| `internal/domain/` | 领域层：`message/`、`event/`、`identity/` |
+| `internal/infrastructure/` | 基础设施：`config/`（快照 + 热重载 + bootstrap） |
+| `adapter/` | 适配层：`qq/`、`onebot/`、`media/`、`state/`、`identity/` |
+
+`arch_mode` 取值 `legacy|shadow|new`，默认 `new`；逐请求读取、热重载即时生效，空值/非法值回退 `new`：
+
+- `new`：走 `internal/` + `adapter/` 新链。
+- `shadow`：新旧链并行，差异仅日志上报，行为仍走 legacy。
+- `legacy`：全走旧链，行为零变化，**一键回退**。
+
+六个接缝（新链未注入/失败时自动落回 legacy）：
+
+| 接缝 | 桥文件 |
+|------|--------|
+| 出站 | `handlers/outbound_bridge.go` |
+| 入站 | `Processor/inbound_bridge.go` |
+| action | `callapi/dispatch_bridge.go` |
+| state | `handlers/state_bridge.go` |
+| config | `internal/infrastructure/config/bootstrap.go` |
+| media | `handlers/media_bridge.go` |
+
+装配点在 `main.go`：`configbootstrap.Bootstrap("config.yml")` 加载配置快照并注入新旧两路；bootstrap 失败时降级 legacy 语义（不 panic）。
+
 ### 连接模式与 Processor 初始化
 
 支持四种 OneBot 连接方式（可组合使用）：

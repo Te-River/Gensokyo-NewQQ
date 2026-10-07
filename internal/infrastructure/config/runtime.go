@@ -34,6 +34,14 @@ type OneBotConfig struct {
 	NativeMD        bool
 	LazyMessageId   bool
 	DisableErrorChan bool
+	// ArchMode 分层架构接入模式（legacy|shadow|new），供 bootstrap/集成读取。
+	ArchMode string
+	// CQParseMode CQ 码解析器模式（legacy|shadow|new）。
+	CQParseMode string
+	// RemoveAt 入站是否剥离 @bot（仅 GROUP_AT_MESSAGE_CREATE 生效）。
+	RemoveAt bool
+	// AddAtGroup 出站群消息前是否自动添加 [CQ:at,qq=AppID]。
+	AddAtGroup bool
 }
 
 // TransportConfig 传输层（正向 HTTP API / 反向 WS / 正向 WS / Webhook / TLS）。
@@ -103,6 +111,10 @@ func buildRuntime(dto ConfigDTO) RuntimeConfig {
 			NativeMD:         s.NativeMD,
 			LazyMessageId:    s.LazyMessageId,
 			DisableErrorChan: s.DisableErrorChan,
+			ArchMode:         s.ArchMode,
+			CQParseMode:      s.CQParseMode,
+			RemoveAt:         s.RemoveAt,
+			AddAtGroup:       s.AddAtGroup,
 		},
 		Transport: TransportConfig{
 			HTTPAddress:    s.HttpAddress,

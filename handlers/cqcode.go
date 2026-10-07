@@ -191,8 +191,17 @@ func ProcessCQWakeup(text string, foundItems map[string][]string) string {
 // 未知类型（at/image 等标准 CQ 码）原样保留。
 // 返回 (清理后的文本, member 跨群路由的 realGroupID)。
 func ProcessOutboundCQCodes(text, defaultGroupID string, eventID *string, apiv2 openapi.OpenAPI) (string, string) {
+	out, realGroupID, _ := ProcessOutboundCQCodesWithEventFlag(text, defaultGroupID, eventID, apiv2)
+	return out, realGroupID
+}
+
+// ProcessOutboundCQCodesWithEventFlag 与 ProcessOutboundCQCodes 同语义，额外返回
+// 「CQ 是否显式决定过 eventID」（member add 命中写入 / member remove 显式清空为 true）。
+// 出站 new 链据此跳过 messageID=="2000" 的缓存 event_id 回填，与 legacy 时序一致。
+func ProcessOutboundCQCodesWithEventFlag(text, defaultGroupID string, eventID *string, apiv2 openapi.OpenAPI) (string, string, bool) {
 	re := regexp.MustCompile(`\[CQ:([a-z_]+),([^\]]*)\]`)
 	var realGroupID string
+	var eventIDSet bool
 	result := re.ReplaceAllStringFunc(text, func(match string) string {
 		inner := match[len("[CQ:") : len(match)-1]
 		idx := strings.Index(inner, ",")
@@ -203,7 +212,7 @@ func ProcessOutboundCQCodes(text, defaultGroupID string, eventID *string, apiv2 
 		paramsStr := inner[idx+1:]
 		switch cqType {
 		case "member":
-			return cqMemberAction(paramsStr, match, eventID, defaultGroupID, apiv2, &realGroupID)
+			return cqMemberActionWithEventFlag(paramsStr, match, eventID, defaultGroupID, apiv2, &realGroupID, &eventIDSet)
 		case "remove":
 			return cqRemoveAction(paramsStr, match, defaultGroupID, apiv2)
 		case "set_group":
@@ -212,7 +221,7 @@ func ProcessOutboundCQCodes(text, defaultGroupID string, eventID *string, apiv2 
 			return match // 非动作 CQ 码原样保留
 		}
 	})
-	return result, realGroupID
+	return result, realGroupID, eventIDSet
 }
 
 // cqResolveGroupID 将默认群 ID 反查为真实 OpenID（32 位原生 OpenID 直接使用）
@@ -228,6 +237,19 @@ func cqResolveGroupID(groupID string) string {
 // cqMemberAction 处理 [CQ:member,type=add/remove,group_id=虚拟群ID,user_id=虚拟用户ID]
 // type=add: 使用存储的 event_id 进行被动回复；type=remove: 转为主动消息发送
 func cqMemberAction(paramsStr, match string, eventID *string, defaultGroupID string, apiv2 openapi.OpenAPI, realGroupID *string) string {
+	cqMemberActionWithEventFlag(paramsStr, match, eventID, defaultGroupID, apiv2, realGroupID, nil)
+	return ""
+}
+
+// cqMemberActionWithEventFlag 是 cqMemberAction 的带标志变体：
+// eventIDSet（可传 nil 表示不关心）标记「显式决定过 eventID」——
+// type=add 命中缓存写入、type=remove 显式清空均为 true；add 未命中为 false（只覆盖语义）。
+func cqMemberActionWithEventFlag(paramsStr, match string, eventID *string, defaultGroupID string, apiv2 openapi.OpenAPI, realGroupID *string, eventIDSet *bool) string {
+	setEventIDSet := func(v bool) {
+		if eventIDSet != nil {
+			*eventIDSet = v
+		}
+	}
 	var cqGroupID, cqUserID, memberType string
 	for _, part := range strings.Split(paramsStr, ",") {
 		kv := strings.SplitN(part, "=", 2)
@@ -274,12 +296,14 @@ func cqMemberAction(paramsStr, match string, eventID *string, defaultGroupID str
 		storedEventID := echo.GetEventIDByKey(key)
 		if storedEventID != "" {
 			*eventID = storedEventID
+			setEventIDSet(true)
 			mylog.Printf("[CQ:member] 入群回复: 使用 event_id=%s (group->%s, user->%s)", storedEventID, realGroupOpenID, openID)
 		} else {
 			mylog.Printf("[CQ:member] 入群回复: 未找到 event_id (group=%s)", cqGroupID)
 		}
 	case "remove":
 		*eventID = ""
+		setEventIDSet(true)
 		mylog.Printf("[CQ:member] 退群消息: 转为主动推送 (group_id=%s, user->%s)", cqGroupID, openID)
 	}
 

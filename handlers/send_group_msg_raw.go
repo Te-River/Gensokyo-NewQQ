@@ -124,6 +124,10 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 		if len(msgPendings) > 0 {
 			mylog.Printf("[cqparse] raw 路径拦截 %d 个动作码,不执行不发送", len(msgPendings))
 		}
+		// A 包出站接缝：arch_mode=new 走统一出站服务；shadow 执行并 diff；legacy 原逻辑。
+		if handled, ret := TryOutbound(client, api, apiv2, message, messageText, foundItems, identity.TargetGroup, false); handled {
+			return ret, nil
+		}
 		var SSM bool
 
 		var originalGroupID, originalUserID string

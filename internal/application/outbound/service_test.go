@@ -106,3 +106,28 @@ func TestSendMessageReplyPassed(t *testing.T) {
 		t.Fatalf("reply not passed: %+v", sender.lastReply)
 	}
 }
+
+// idThenFailSender 首次返回带 message_id 的可重试错误，之后持续失败：
+// 钉死 service.go 的 lastID 保留语义（legacy send_group_msg.go:504/715 的
+// rememberLatestBotGroupMessageInGroup 依赖最后一次成功的 QQ message_id）。
+type idThenFailSender struct{ calls int32 }
+
+func (s *idThenFailSender) Send(context.Context, identity.ResolvedTarget, QQMessage) (QQSendResult, error) {
+	if atomic.AddInt32(&s.calls, 1) == 1 {
+		return QQSendResult{MessageID: "mid-partial"}, errors.New("mock: deadline exceeded")
+	}
+	return QQSendResult{}, errors.New("mock: deadline exceeded")
+}
+
+func TestSendRetainsLastMessageIDOnFinalFailure(t *testing.T) {
+	policy := DefaultRetryPolicy(retryClassifier{})
+	policy.Backoff = func(int) time.Duration { return 0 }
+	s := NewService(&idThenFailSender{}, policy)
+	res, err := s.Send(context.Background(), testCommand())
+	if err == nil {
+		t.Fatal("Send should fail after exhausting retries")
+	}
+	if res.MessageID != "mid-partial" {
+		t.Fatalf("MessageID = %q, want %q (last successful id retained)", res.MessageID, "mid-partial")
+	}
+}

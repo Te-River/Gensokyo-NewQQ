@@ -181,11 +181,33 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 	case "group":
 		// 解析消息内容
 		messageText, foundItems, msgPendings := parseMessageContent(message.Params, message, client, api, apiv2)
+		// EventID
+		var eventID string
+		// eventIDSet：CQ 是否显式决定过 eventID（member remove 清空也算决定），
+		// 透传给新链以免 messageID=="2000" 分支把缓存 event_id 回填进退群回复。
+		var eventIDSet bool
+		// C1：出站动作型 CQ 码（member/remove/set_group）在 TryOutbound 前执行——
+		// TryOutbound 命中后 legacy 段不再运行；legacy 段复用结果，避免重复执行。
+		var realGroupID string
+		cqPreExecuted := false
+		if ArchMode() == "new" && outboundSvc != nil {
+			if len(msgPendings) > 0 {
+				outs := cqparse.ExecutePending(msgPendings, DefaultDeps(apiv2), &eventID)
+				realGroupID = pickLastRealGroupID(outs)
+				eventID, eventIDSet = pickCQEventID(outs, eventID)
+			} else {
+				messageText, realGroupID, eventIDSet = ProcessOutboundCQCodesWithEventFlag(messageText, message.Params.GroupID.(string), &eventID, apiv2)
+			}
+			cqPreExecuted = true
+		}
+		// A 包出站接缝：arch_mode=new 走统一出站服务；shadow 执行并 diff；legacy 原逻辑。
+		// C1：预执行的 realGroupID/eventID/eventIDSet 透传（跨群路由 + member add 被动回复）。
+		if handled, ret := TryOutboundWithCQ(client, api, apiv2, message, messageText, foundItems, identity.TargetGroup, false, realGroupID, eventID, eventIDSet); handled {
+			return ret, nil
+		}
 		var SSM bool
 		// 使用 echo 获取消息ID
 		var messageID string
-		// EventID
-		var eventID string
 		if config.GetLazyMessageId() {
 			//由于实现了Params的自定义unmarshell 所以可以类型安全的断言为string
 			messageID = echo.GetLazyMessagesId(message.Params.GroupID.(string))
@@ -514,13 +536,14 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			// 统一处理出站动作型 CQ 码（member/remove/禁言/入群审批/策略）
 			// legacy/shadow：旧正则管道单次扫描执行；new：ExecutePending 在原时序点执行
 			// （时序与重构前逐字节相同），返回 member 的 realGroupID 供跨群路由
-			var realGroupID string
-			if len(msgPendings) > 0 {
-				// 修 M-fix：取最后一个非空 RealGroupID（last-wins），对齐 legacy
-				// ProcessOutboundCQCodes 逐码覆写语义（此前 first-wins 会静默改变跨群路由目标）
-				realGroupID = pickLastRealGroupID(cqparse.ExecutePending(msgPendings, DefaultDeps(apiv2), &eventID))
-			} else {
-				messageText, realGroupID = ProcessOutboundCQCodes(messageText, message.Params.GroupID.(string), &eventID, apiv2)
+			if !cqPreExecuted {
+				if len(msgPendings) > 0 {
+					// 修 M-fix：取最后一个非空 RealGroupID（last-wins），对齐 legacy
+					// ProcessOutboundCQCodes 逐码覆写语义（此前 first-wins 会静默改变跨群路由目标）
+					realGroupID = pickLastRealGroupID(cqparse.ExecutePending(msgPendings, DefaultDeps(apiv2), &eventID))
+				} else {
+					messageText, realGroupID = ProcessOutboundCQCodes(messageText, message.Params.GroupID.(string), &eventID, apiv2)
+				}
 			}
 			if realGroupID != "" {
 				mylog.Printf("[CQ:member] CQ 码 group_id 已转为 OpenID=%s", realGroupID)

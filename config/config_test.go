@@ -86,3 +86,90 @@ func TestGetCQParseModeInvalidWarnsOnce(t *testing.T) {
 		t.Errorf("空值应静默回退 legacy: mode=%q log=%q", got, log4)
 	}
 }
+
+// TestGetArchModeInvalidWarnsOnce 钉死 arch_mode 访问器契约：
+// 空值/非法值回退 new（默认转战新架构），非法值首次命中输出一次警告（sync.Once 防刷屏），
+// 合法值原样返回；instance==nil 回退 new。
+func TestGetArchModeInvalidWarnsOnce(t *testing.T) {
+	// 保存并恢复单例，避免污染同包其他测试
+	oldInstance := instance
+	defer func() {
+		mu.Lock()
+		instance = oldInstance
+		mu.Unlock()
+	}()
+
+	capture := func(fn func()) string {
+		old := os.Stdout
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("os.Pipe 失败: %v", err)
+		}
+		os.Stdout = w
+		done := make(chan string, 1)
+		go func() {
+			var buf bytes.Buffer
+			_, _ = io.Copy(&buf, r)
+			done <- buf.String()
+		}()
+		fn()
+		_ = w.Close()
+		os.Stdout = old
+		return <-done
+	}
+
+	withMode := func(mode string) {
+		mu.Lock()
+		instance = &Config{Settings: structs.Settings{ArchMode: mode}}
+		mu.Unlock()
+	}
+
+	// instance==nil：回退 new
+	mu.Lock()
+	instance = nil
+	mu.Unlock()
+	if got := GetArchMode(); got != "new" {
+		t.Errorf("instance==nil 应回退 new: got %q", got)
+	}
+
+	got := ""
+	// 非法值（大小写错写）：回退 new + 恰好一次警告
+	withMode("New")
+	log1 := capture(func() {
+		got = GetArchMode()
+	})
+	if got != "new" {
+		t.Errorf("非法值应回退 new: got %q", got)
+	}
+	if !strings.Contains(log1, "arch_mode") || !strings.Contains(log1, "回退 new") {
+		t.Errorf("首次非法值应输出警告: got %q", log1)
+	}
+
+	// 第二次非法调用：不再警告（sync.Once 防刷屏）
+	log2 := capture(func() {
+		got = GetArchMode()
+	})
+	if got != "new" || strings.Contains(log2, "arch_mode") {
+		t.Errorf("第二次非法值不应重复警告: mode=%q log=%q", got, log2)
+	}
+
+	// 合法值：返回原值无警告
+	for _, mode := range []string{"legacy", "shadow", "new"} {
+		withMode(mode)
+		log3 := capture(func() {
+			got = GetArchMode()
+		})
+		if got != mode || strings.Contains(log3, "arch_mode") {
+			t.Errorf("合法值 %q 不应警告: got=%q log=%q", mode, got, log3)
+		}
+	}
+
+	// 空值：静默回退 new 无警告
+	withMode("")
+	log4 := capture(func() {
+		got = GetArchMode()
+	})
+	if got != "new" || strings.Contains(log4, "arch_mode") {
+		t.Errorf("空值应静默回退 new: mode=%q log=%q", got, log4)
+	}
+}
