@@ -391,10 +391,10 @@ func (p *Processors) ProcessGroupMessage(data *dto.WSGroupATMessageData) error {
 	// 如果不是性能模式
 	if !GetDisableErrorChan {
 		//上报信息到onebotv11应用端(正反ws) 并等待返回
-		go p.BroadcastMessageToAll(groupMsgMap, p.Apiv2, data)
+		p.dispatchInbound(data, groupMsgMap, func() { go p.BroadcastMessageToAll(groupMsgMap, p.Apiv2, data) })
 	} else {
 		// FAF式
-		go p.BroadcastMessageToAllFAF(groupMsgMap, p.Apiv2, data)
+		p.dispatchInbound(data, groupMsgMap, func() { go p.BroadcastMessageToAllFAF(groupMsgMap, p.Apiv2, data) })
 	}
 
 	return nil

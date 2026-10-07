@@ -142,7 +142,7 @@ func (p *Processors) ProcessInlineSearch(data *dto.WSInteractionData) error {
 		noticeMap := structToMap(notice)
 
 		//上报信息到onebotv11应用端(正反ws)
-		go p.BroadcastMessageToAll(noticeMap, p.Apiv2, data)
+		p.dispatchInbound(data, noticeMap, func() { go p.BroadcastMessageToAll(noticeMap, p.Apiv2, data) })
 
 		// 转换appid
 		AppIDString := strconv.FormatUint(p.Settings.AppID, 10)
@@ -270,7 +270,7 @@ func (p *Processors) ProcessInlineSearch(data *dto.WSInteractionData) error {
 				// Convert OnebotGroupMessage to map and send
 				groupMsgMap := structToMap(groupMsg)
 				//上报信息到onebotv11应用端(正反ws)
-				go p.BroadcastMessageToAll(groupMsgMap, p.Apiv2, data)
+				p.dispatchInbound(data, groupMsgMap, func() { go p.BroadcastMessageToAll(groupMsgMap, p.Apiv2, data) })
 
 				// 转换appid
 				AppIDString := strconv.FormatUint(p.Settings.AppID, 10)
@@ -302,7 +302,7 @@ func (p *Processors) ProcessInlineSearch(data *dto.WSInteractionData) error {
 				noticeMap := structToMap(notice)
 
 				//上报信息到onebotv11应用端(正反ws)
-				go p.BroadcastMessageToAll(noticeMap, p.Apiv2, data)
+				p.dispatchInbound(data, noticeMap, func() { go p.BroadcastMessageToAll(noticeMap, p.Apiv2, data) })
 			} else {
 				//群回调
 				newdata := ConvertInteractionToMessage(data)
@@ -394,7 +394,7 @@ func (p *Processors) ProcessInlineSearch(data *dto.WSInteractionData) error {
 				// Convert OnebotGroupMessage to map and send
 				groupMsgMap := structToMap(groupMsg)
 				//上报信息到onebotv11应用端(正反ws)
-				go p.BroadcastMessageToAll(groupMsgMap, p.Apiv2, data)
+				p.dispatchInbound(data, groupMsgMap, func() { go p.BroadcastMessageToAll(groupMsgMap, p.Apiv2, data) })
 
 				// 转换appid
 				AppIDString := strconv.FormatUint(p.Settings.AppID, 10)
@@ -426,7 +426,7 @@ func (p *Processors) ProcessInlineSearch(data *dto.WSInteractionData) error {
 				noticeMap := structToMap(notice)
 
 				//上报信息到onebotv11应用端(正反ws)
-				go p.BroadcastMessageToAll(noticeMap, p.Apiv2, data)
+				p.dispatchInbound(data, noticeMap, func() { go p.BroadcastMessageToAll(noticeMap, p.Apiv2, data) })
 			}
 		} else if data.UserOpenID != "" {
 
@@ -504,7 +504,7 @@ func (p *Processors) ProcessInlineSearch(data *dto.WSInteractionData) error {
 
 				if privateMsg.RawMessage != "" {
 					//上报信息到onebotv11应用端(正反ws)
-					go p.BroadcastMessageToAll(privateMsgMap, p.Apiv2, data)
+					p.dispatchInbound(data, privateMsgMap, func() { go p.BroadcastMessageToAll(privateMsgMap, p.Apiv2, data) })
 				}
 
 				// 转换appid
@@ -536,7 +536,7 @@ func (p *Processors) ProcessInlineSearch(data *dto.WSInteractionData) error {
 				noticeMap := structToMap(notice)
 
 				//上报信息到onebotv11应用端(正反ws)
-				go p.BroadcastMessageToAll(noticeMap, p.Apiv2, data)
+				p.dispatchInbound(data, noticeMap, func() { go p.BroadcastMessageToAll(noticeMap, p.Apiv2, data) })
 			} else {
 				// 这里应该还区分 是否虚拟私信为群聊 这里默认是虚拟成群聊
 				//私聊回调
@@ -598,7 +598,7 @@ func (p *Processors) ProcessInlineSearch(data *dto.WSInteractionData) error {
 
 				if privateMsg.RawMessage != "" {
 					//上报信息到onebotv11应用端(正反ws)
-					go p.BroadcastMessageToAll(privateMsgMap, p.Apiv2, data)
+					p.dispatchInbound(data, privateMsgMap, func() { go p.BroadcastMessageToAll(privateMsgMap, p.Apiv2, data) })
 				}
 
 				// 转换appid
@@ -630,7 +630,7 @@ func (p *Processors) ProcessInlineSearch(data *dto.WSInteractionData) error {
 				noticeMap := structToMap(notice)
 
 				//上报信息到onebotv11应用端(正反ws)
-				go p.BroadcastMessageToAll(noticeMap, p.Apiv2, data)
+				p.dispatchInbound(data, noticeMap, func() { go p.BroadcastMessageToAll(noticeMap, p.Apiv2, data) })
 			}
 		}
 	}

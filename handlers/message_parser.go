@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	neturl "net/url"
-	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -2626,7 +2625,7 @@ func ResolveMarkdownImages(content string, apiv2 openapi.OpenAPI) string {
 			return "", false
 		}
 		localPath = safePath
-		imageData, err := os.ReadFile(localPath)
+		imageData, err := readLocalMedia(localPath)
 		if err != nil {
 			mylog.Printf("Error reading local image for markdown: %v", err)
 			return "", false
@@ -2670,7 +2669,7 @@ func ResolveKeyboardImages(kb *keyboard.MessageKeyboard, apiv2 openapi.OpenAPI) 
 						return "", false
 					}
 					localPath = safePath
-					imageData, err := os.ReadFile(localPath)
+					imageData, err := readLocalMedia(localPath)
 					if err != nil {
 						mylog.Printf("Error reading local image for keyboard: %v", err)
 						return "", false
@@ -2699,7 +2698,7 @@ func ResolveKeyboardImages(kb *keyboard.MessageKeyboard, apiv2 openapi.OpenAPI) 
 						return "", false
 					}
 					localPath = safePath
-					imageData, err := os.ReadFile(localPath)
+					imageData, err := readLocalMedia(localPath)
 					if err != nil {
 						mylog.Printf("Error reading local image for keyboard: %v", err)
 						return "", false

@@ -97,7 +97,7 @@ func (p *Processors) ProcessGroupMember(data *dto.GroupMemberEvent, eventType st
 		outputMap := structToMap(notice)
 		outputMap["event_id"] = data.EventID // 保留 event_id 供 Gsk 内部被动回复
 		mylog.Printf("群成员加入(notice): group=%s, user=%s", data.GroupOpenID, data.MemberOpenID)
-		p.BroadcastMessageToAll(outputMap, p.Apiv2, data)
+		p.dispatchGroupMember(data, eventType, outputMap, func() { p.BroadcastMessageToAll(outputMap, p.Apiv2, data) })
 
 	case "GROUP_MEMBER_REMOVE":
 		notice := GroupNoticeEvent{
@@ -115,7 +115,7 @@ func (p *Processors) ProcessGroupMember(data *dto.GroupMemberEvent, eventType st
 		}
 		outputMap := structToMap(notice)
 		mylog.Printf("群成员离开(notice): group=%s, user=%s", data.GroupOpenID, data.MemberOpenID)
-		p.BroadcastMessageToAll(outputMap, p.Apiv2, data)
+		p.dispatchGroupMember(data, eventType, outputMap, func() { p.BroadcastMessageToAll(outputMap, p.Apiv2, data) })
 
 	default:
 		mylog.Printf("ProcessGroupMember: 未知事件类型 %s", eventType)
