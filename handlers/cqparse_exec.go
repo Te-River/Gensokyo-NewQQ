@@ -104,6 +104,21 @@ func pickLastRealGroupID(outs []cqparse.ExecOutcome) string {
 	return realGroupID
 }
 
+// pickCQEventID 汇总动作产物对 eventID 的「显式决定」标志：任一产物 EventIDSet 为真
+// 即返回 true（member remove 的显式清空也算决定，防止 messageID=="2000" 分支回填）。
+// 值恒为透传入参 current：ExecutePending 把同一个 eventID *string 指针依次交给每个动作码，
+// 逐码 last-write-wins 写穿（member add 命中写入 / remove 显式清空），
+// current 返回时已是 legacy 的最终值，此处再按「最后一个非空产物」覆盖会作废 remove 的清空。
+func pickCQEventID(outs []cqparse.ExecOutcome, current string) (string, bool) {
+	eventIDSet := false
+	for _, o := range outs {
+		if o.EventIDSet {
+			eventIDSet = true
+		}
+	}
+	return current, eventIDSet
+}
+
 // runPendingAction 按动作分发执行（与 ProcessOutboundCQCodes 分发一致）。
 func runPendingAction(p cqparse.PendingAction, apiv2 openapi.OpenAPI, eventID *string) cqparse.ExecOutcome {
 	switch p.Action {
@@ -148,6 +163,7 @@ func cqMemberExec(p cqparse.PendingAction, eventID *string) cqparse.ExecOutcome 
 		mylog.Printf("[CQ:member] groupID=%s → OpenID=%s", cqGroupID, realGroupOpenID)
 	}
 
+	eventIDSet := false
 	switch memberType {
 	case "add":
 		appID := config.GetAppIDStr()
@@ -157,6 +173,8 @@ func cqMemberExec(p cqparse.PendingAction, eventID *string) cqparse.ExecOutcome 
 			if eventID != nil {
 				*eventID = storedEventID
 			}
+			// 只有实际写入才标记「显式决定」；未命中时 legacy 为只覆盖语义，保留原值。
+			eventIDSet = true
 			mylog.Printf("[CQ:member] 入群回复: 使用 event_id=%s (group->%s, user->%s)", storedEventID, realGroupOpenID, openID)
 		} else {
 			mylog.Printf("[CQ:member] 入群回复: 未找到 event_id (group=%s)", cqGroupID)
@@ -165,10 +183,12 @@ func cqMemberExec(p cqparse.PendingAction, eventID *string) cqparse.ExecOutcome 
 		if eventID != nil {
 			*eventID = ""
 		}
+		// 显式清空也是一次决定：2000 分支不得再回填缓存 event_id。
+		eventIDSet = true
 		mylog.Printf("[CQ:member] 退群消息: 转为主动推送 (group_id=%s, user->%s)", cqGroupID, openID)
 	}
 
-	out := cqparse.ExecOutcome{RealGroupID: realGroupOpenID}
+	out := cqparse.ExecOutcome{RealGroupID: realGroupOpenID, EventIDSet: eventIDSet}
 	if eventID != nil {
 		out.EventID = *eventID
 	}

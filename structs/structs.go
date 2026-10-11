@@ -147,6 +147,8 @@ type Settings struct {
 	StringAction     bool `yaml:"string_action"`
 	//CQ码解析器模式: legacy(旧正则管道,默认)/shadow(新旧并行解析差异仅日志)/new(统一解析器cqparse)
 	CQParseMode string `yaml:"cq_parse_mode"`
+	//分层架构接入模式: legacy(全走旧链)/shadow(新旧并行,差异仅日志)/new(默认,走 internal+adapter 新链)
+	ArchMode string `yaml:"arch_mode"`
 	//url相关
 	VisibleIp    bool `yaml:"visible_ip"`
 	UrlToQrimage bool `yaml:"url_to_qrimage"`

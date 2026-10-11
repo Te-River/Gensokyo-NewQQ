@@ -48,6 +48,135 @@ var sendPrivateMsgKeyMap = map[string]bool{
 // streamCache 存储流式消息的 stream_msg_id 和 index，key = qq
 var streamCache sync.Map
 
+// streamInfo 流式消息的 stream_msg_id 与 index（streamCache 的值类型）。
+type streamInfo struct {
+	StreamMsgID string
+	Index       int
+}
+
+// sendInputNotify 发送 [CQ:input_notify] 输入状态通知（legacy 语义，供 legacy 与 new 出站桥复用）。
+// 返回 (retmsg, handled)：handled 表示解析成功并已处理（含回执）。
+func sendInputNotify(client callapi.Client, message *callapi.ActionMessage, messageID, userID string, foundItems map[string][]string, apiv2 openapi.OpenAPI) (string, bool) {
+	notifyItems, ok := foundItems["input_notify"]
+	if !ok || len(notifyItems) == 0 {
+		return "", false
+	}
+	var notifyData map[string]string
+	if err := json.Unmarshal([]byte(notifyItems[0]), &notifyData); err != nil {
+		return "", false
+	}
+	inputType := 1
+	inputSecond := 60
+	if t, err := strconv.Atoi(notifyData["type"]); err == nil {
+		inputType = t
+	}
+	if s, err := strconv.Atoi(notifyData["second"]); err == nil {
+		inputSecond = s
+	}
+	notifyMsg := &dto.MessageToCreate{
+		MsgType: 6,
+		InputNotify: &dto.InputNotify{
+			InputType:   inputType,
+			InputSecond: inputSecond,
+		},
+		MsgID:  messageID,
+		MsgSeq: echo.GetMappingSeq(messageID),
+	}
+	resp, err := apiv2.PostC2CMessage(context.TODO(), userID, notifyMsg)
+	if err != nil {
+		mylog.Printf("发送输入状态通知失败: %v", err)
+		mylog.Printf("%s", FormatQQError(err))
+	} else {
+		mylog.Printf("[CQ:input_notify] 已发送输入状态通知")
+	}
+	retmsg, _ := SendC2CResponse(client, err, message, resp)
+	delete(foundItems, "input_notify")
+	return retmsg, true
+}
+
+// sendStream 发送 [CQ:stream] 流式消息（legacy 语义，供 legacy 与 new 出站桥复用）。
+// 返回 (retmsg, present)：present 表示存在 stream 项（legacy 发送后不再走正文）。
+func sendStream(client callapi.Client, message *callapi.ActionMessage, messageID, userID, messageText string, foundItems map[string][]string, apiv2 openapi.OpenAPI) (string, bool) {
+	streamItems, ok := foundItems["stream"]
+	if !ok || len(streamItems) == 0 {
+		return "", false
+	}
+	var retmsg string
+	var streamData map[string]string
+	if err := json.Unmarshal([]byte(streamItems[0]), &streamData); err == nil {
+		streamType := streamData["type"]
+		qq := streamData["qq"]
+		delete(foundItems, "stream")
+
+		// 从缓存读取 stream_msg_id 和 index
+		info := &streamInfo{}
+		if cached, ok := streamCache.Load(qq); ok {
+			info = cached.(*streamInfo)
+		}
+
+		chunk := &dto.StreamChunk{
+			ContentType: "text",
+			ContentRaw:  messageText,
+			MsgID:       messageID,
+			MsgSeq:      echo.GetMappingSeq(messageID),
+		}
+
+		switch streamType {
+		case "start":
+			chunk.InputMode = "replace"
+			chunk.InputState = 1
+			chunk.Index = 0
+			resp, err := apiv2.PostC2CStreamMessage(context.TODO(), userID, chunk)
+			if err != nil {
+				mylog.Printf("流式消息首片发送失败: %v", err)
+			} else if resp != nil && resp.Message != nil {
+				info.StreamMsgID = resp.Message.ID
+				info.Index = 0
+				streamCache.Store(qq, info)
+				mylog.Printf("[CQ:stream] 首片发送成功, stream_msg_id=%s", info.StreamMsgID)
+			}
+			retmsg, _ = SendC2CResponse(client, err, message, resp)
+
+		case "mid":
+			if info.StreamMsgID == "" {
+				mylog.Printf("[CQ:stream] 续片缺少 stream_msg_id，跳过")
+			} else {
+				info.Index++
+				chunk.StreamMsgID = info.StreamMsgID
+				chunk.InputState = 1
+				chunk.Index = info.Index
+				streamCache.Store(qq, info)
+				resp, err := apiv2.PostC2CStreamMessage(context.TODO(), userID, chunk)
+				if err != nil {
+					mylog.Printf("流式消息续片发送失败: %v", err)
+				} else {
+					mylog.Printf("[CQ:stream] 续片发送成功, index=%d", info.Index)
+				}
+				retmsg, _ = SendC2CResponse(client, err, message, resp)
+			}
+
+		case "finish":
+			if info.StreamMsgID == "" {
+				mylog.Printf("[CQ:stream] 终片缺少 stream_msg_id，跳过")
+			} else {
+				info.Index++
+				chunk.StreamMsgID = info.StreamMsgID
+				chunk.InputState = 10
+				chunk.Index = info.Index
+				resp, err := apiv2.PostC2CStreamMessage(context.TODO(), userID, chunk)
+				if err != nil {
+					mylog.Printf("流式消息终片发送失败: %v", err)
+				} else {
+					mylog.Printf("[CQ:stream] 终片发送成功")
+				}
+				retmsg, _ = SendC2CResponse(client, err, message, resp)
+			}
+			streamCache.Delete(qq)
+		}
+	}
+	return retmsg, true
+}
+
 func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, message callapi.ActionMessage) (string, error) {
 	// 使用 message.Echo 作为key来获取消息类型
 	var msgType string
@@ -180,6 +309,11 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			// 覆盖 user_id 为目标用户，交由召回 handler 统一处理（含虚拟ID→OpenID转换）
 			message.Params.UserID = targetUserID
 			return HandleSendPrivateMsgWakeup(client, api, apiv2, message)
+		}
+
+		// A 包出站接缝：arch_mode=new 走统一出站服务；shadow 执行并 diff；legacy 原逻辑。
+		if handled, ret := TryOutbound(client, api, apiv2, message, messageText, foundItems, identity.TargetPrivate, false); handled {
+			return ret, nil
 		}
 
 		// 使用 echo 获取消息ID
@@ -343,118 +477,14 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 
 		// 优先发送文本信息
 		// 如果存在 [CQ:input_notify]，先发送输入状态通知
-		if notifyItems, ok := foundItems["input_notify"]; ok && len(notifyItems) > 0 {
-		 var notifyData map[string]string
-		 if err := json.Unmarshal([]byte(notifyItems[0]), &notifyData); err == nil {
-		  inputType := 1
-		  inputSecond := 60
-		  if t, err := strconv.Atoi(notifyData["type"]); err == nil {
-		   inputType = t
-		  }
-		  if s, err := strconv.Atoi(notifyData["second"]); err == nil {
-		   inputSecond = s
-		  }
-		  notifyMsg := &dto.MessageToCreate{
-		   MsgType: 6,
-		   InputNotify: &dto.InputNotify{
-		    InputType:   inputType,
-		    InputSecond: inputSecond,
-		   },
-		   MsgID:  messageID,
-		   MsgSeq: echo.GetMappingSeq(messageID),
-		  }
-		  resp, err := apiv2.PostC2CMessage(context.TODO(), UserID, notifyMsg)
-		  if err != nil {
-		   mylog.Printf("发送输入状态通知失败: %v", err)
-		   mylog.Printf("%s", FormatQQError(err))
-		  } else {
-		   mylog.Printf("[CQ:input_notify] 已发送输入状态通知")
-		  }
-		  retmsg, _ = SendC2CResponse(client, err, &message, resp)
-		  delete(foundItems, "input_notify")
-		 }
+		if ret, handled := sendInputNotify(client, &message, messageID, UserID, foundItems, apiv2); handled {
+			retmsg = ret
 		}
 
 		// 流式消息处理 [CQ:stream]
-		if streamItems, ok := foundItems["stream"]; ok && len(streamItems) > 0 {
-			var streamData map[string]string
-			if err := json.Unmarshal([]byte(streamItems[0]), &streamData); err == nil {
-				streamType := streamData["type"]
-				qq := streamData["qq"]
-				delete(foundItems, "stream")
-
-				// 从缓存读取 stream_msg_id 和 index
-				type streamInfo struct {
-					StreamMsgID string
-					Index       int
-				}
-				info := &streamInfo{}
-				if cached, ok := streamCache.Load(qq); ok {
-					info = cached.(*streamInfo)
-				}
-
-				chunk := &dto.StreamChunk{
-					ContentType: "text",
-					ContentRaw:  messageText,
-					MsgID:       messageID,
-					MsgSeq:      echo.GetMappingSeq(messageID),
-				}
-
-				switch streamType {
-				case "start":
-					chunk.InputMode = "replace"
-					chunk.InputState = 1
-					chunk.Index = 0
-					resp, err := apiv2.PostC2CStreamMessage(context.TODO(), UserID, chunk)
-					if err != nil {
-						mylog.Printf("流式消息首片发送失败: %v", err)
-					} else if resp != nil && resp.Message != nil {
-						info.StreamMsgID = resp.Message.ID
-						info.Index = 0
-						streamCache.Store(qq, info)
-						mylog.Printf("[CQ:stream] 首片发送成功, stream_msg_id=%s", info.StreamMsgID)
-					}
-					retmsg, _ = SendC2CResponse(client, err, &message, resp)
-
-				case "mid":
-					if info.StreamMsgID == "" {
-						mylog.Printf("[CQ:stream] 续片缺少 stream_msg_id，跳过")
-					} else {
-						info.Index++
-						chunk.StreamMsgID = info.StreamMsgID
-						chunk.InputState = 1
-						chunk.Index = info.Index
-						streamCache.Store(qq, info)
-						resp, err := apiv2.PostC2CStreamMessage(context.TODO(), UserID, chunk)
-						if err != nil {
-							mylog.Printf("流式消息续片发送失败: %v", err)
-						} else {
-							mylog.Printf("[CQ:stream] 续片发送成功, index=%d", info.Index)
-						}
-						retmsg, _ = SendC2CResponse(client, err, &message, resp)
-					}
-
-				case "finish":
-					if info.StreamMsgID == "" {
-						mylog.Printf("[CQ:stream] 终片缺少 stream_msg_id，跳过")
-					} else {
-						info.Index++
-						chunk.StreamMsgID = info.StreamMsgID
-						chunk.InputState = 10
-						chunk.Index = info.Index
-						resp, err := apiv2.PostC2CStreamMessage(context.TODO(), UserID, chunk)
-						if err != nil {
-							mylog.Printf("流式消息终片发送失败: %v", err)
-						} else {
-							mylog.Printf("[CQ:stream] 终片发送成功")
-						}
-						retmsg, _ = SendC2CResponse(client, err, &message, resp)
-					}
-					streamCache.Delete(qq)
-				}
-			}
+		if ret, present := sendStream(client, &message, messageID, UserID, messageText, foundItems, apiv2); present {
 			// 流式消息处理完毕后返回，不再走普通文本发送路径
-			return retmsg, nil
+			return ret, nil
 		}
 
 		if strings.TrimSpace(messageText) != "" || len(msgPendings) > 0 || len(foundItems["markdown"]) > 0 || len(foundItems["keyboard"]) > 0 {

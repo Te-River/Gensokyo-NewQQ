@@ -342,9 +342,9 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 	}
 
 	if !GetDisableErrorChan {
-		go p.BroadcastMessageToAll(groupMsgMap, p.Apiv2, data)
+		p.dispatchInbound(data, groupMsgMap, func() { go p.BroadcastMessageToAll(groupMsgMap, p.Apiv2, data) })
 	} else {
-		go p.BroadcastMessageToAllFAF(groupMsgMap, p.Apiv2, data)
+		p.dispatchInbound(data, groupMsgMap, func() { go p.BroadcastMessageToAllFAF(groupMsgMap, p.Apiv2, data) })
 	}
 	return nil
 }

@@ -2860,7 +2860,33 @@ func GetCQParseMode() string {
 	}
 }
 
-// 获取StringAction的值
+// archModeWarnOnce 非法 arch_mode 警告只输出一次，防热重载/高频调用刷屏。
+// 注意：config 不能 import mylog（mylog 反向依赖 config 会成环），按本文件
+// 既有惯例以 fmt.Println 输出。
+var archModeWarnOnce sync.Once
+
+// 获取ArchMode的值（分层架构接入模式）
+// 取值 legacy|shadow|new；空值/非法值一律回退 new（默认转战新架构，legacy 可一键回退）
+func GetArchMode() string {
+	mu.RLock()
+	defer mu.RUnlock()
+
+	if instance == nil {
+		return "new"
+	}
+	switch instance.Settings.ArchMode {
+	case "legacy", "shadow", "new":
+		return instance.Settings.ArchMode
+	default:
+		if instance.Settings.ArchMode != "" {
+			// 首次命中非法值（含大小写错写）输出警告，值仍回退 new
+			archModeWarnOnce.Do(func() {
+				fmt.Println("Warning: 配置项 arch_mode=\"" + instance.Settings.ArchMode + "\" 非法（大小写敏感，可选 legacy|shadow|new），已回退 new")
+			})
+		}
+		return "new"
+	}
+}
 func GetStringAction() bool {
 	mu.RLock()
 	defer mu.RUnlock()

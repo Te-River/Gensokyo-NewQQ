@@ -24,13 +24,19 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/hoshinonyaruko/gensokyo/Processor"
 	"github.com/hoshinonyaruko/gensokyo/acnode"
+	"github.com/hoshinonyaruko/gensokyo/adapter/qq"
+	staterepo "github.com/hoshinonyaruko/gensokyo/adapter/state"
 	"github.com/hoshinonyaruko/gensokyo/botstats"
 	"github.com/hoshinonyaruko/gensokyo/buildinfo"
+	"github.com/hoshinonyaruko/gensokyo/callapi"
 	"github.com/hoshinonyaruko/gensokyo/config"
 	"github.com/hoshinonyaruko/gensokyo/echo"
 	"github.com/hoshinonyaruko/gensokyo/handlers"
 	"github.com/hoshinonyaruko/gensokyo/httpapi"
 	"github.com/hoshinonyaruko/gensokyo/idmap"
+	"github.com/hoshinonyaruko/gensokyo/internal/application/media"
+	"github.com/hoshinonyaruko/gensokyo/internal/application/outbound"
+	configbootstrap "github.com/hoshinonyaruko/gensokyo/internal/infrastructure/config"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/hoshinonyaruko/gensokyo/server"
 	"github.com/hoshinonyaruko/gensokyo/sys"
@@ -213,6 +219,24 @@ func main() {
 			log.Println("创建 沙箱 apiv2 成功")
 		}
 
+		// state 接缝：注入 echo 仓储实现（与 config bootstrap 无关，始终可用）。
+		handlers.SetStateRepositories(staterepo.NewEchoSequenceRepository(), staterepo.NewEchoContextRepository())
+
+		// 分层架构装配：加载 config 快照并注入新旧两路（arch_mode 逐请求切换）。
+		// 失败时降级：打印日志，继续用 legacy 语义（不 panic）。
+		if mgr, err := configbootstrap.Bootstrap("config.yml"); err != nil {
+			log.Printf("Warning: 分层架构 config bootstrap 失败，降级 legacy 语义: %v", err)
+		} else {
+			snap := mgr.Snapshot()
+			handlers.SetOutboundService(outbound.NewServiceWithConfig(
+				qq.NewQQSender(api, apiV2),
+				outbound.DefaultRetryPolicy(qq.NewClassifier()),
+				configbootstrap.OutboundConfigFrom(snap),
+			))
+			handlers.SetMediaService(media.NewService(nil), configbootstrap.MediaPolicyFrom(snap))
+		}
+		log.Printf("arch_mode=%s", config.GetArchMode())
+
 		configURL := config.GetDevelop_Acdir()
 		fix11300 := config.GetFix11300()
 		var me *dto.User
@@ -330,6 +354,7 @@ func main() {
 
 			// 确保p包含conf
 			p = Processor.NewProcessorV2(api, apiV2, &conf.Settings)
+			Processor.SetInbound(p)
 
 			// 同步旧库计数器到新库（阻塞），保证后续 storeIdentity 不会分配冲突的虚拟 ID
 			// 计数器就绪后才连接 QQ 后端
@@ -402,19 +427,27 @@ func main() {
 					}
 				}
 
+				// 预热 action Registry（可选；未预热时惰性构建，行为一致）。
+				for _, wc := range wsClients {
+					callapi.PrewarmRegistry(wc, api, apiV2)
+				}
+
 				// 确保所有尝试建立的连接都有对应的wsClient
 				if len(wsClients) == 0 {
 					log.Println("Error: Not all wsClients are initialized!(反向ws未设置或全部连接失败)")
 					// 处理连接失败的情况 只启动正向
 					p = Processor.NewProcessorV2(api, apiV2, &conf.Settings)
+					Processor.SetInbound(p)
 				} else {
 					log.Println("All wsClients are successfully initialized.")
 					// 所有客户端都成功初始化
 					p = Processor.NewProcessor(api, apiV2, &conf.Settings, wsClients)
+					Processor.SetInbound(p)
 				}
 			} else {
 				// p一定需要初始化
 				p = Processor.NewProcessorV2(api, apiV2, &conf.Settings)
+				Processor.SetInbound(p)
 				// 如果只启动了http api
 				if !conf.Settings.EnableWsServer {
 					if conf.Settings.HttpAddress != "" {
@@ -472,14 +505,14 @@ func main() {
 
 	uploadAuth := server.UploadAuthMiddleware()
 
-	  r.GET("/updateport", uploadAuth, server.HandleIpupdate)
-	  r.POST("/delpic", uploadAuth, server.DeleteImageHandler(rateLimiter))
-	  r.GET("/healthz", uploadAuth, HealthzHandler)
-	      r.GET("/readyz", uploadAuth, HealthzHandler)
-	      r.GET("/metrics", uploadAuth, MetricsHandler)
-	  r.POST("/uploadpic", uploadAuth, server.UploadBase64ImageHandler(rateLimiter))
-	  r.POST("/uploadpicv2", uploadAuth, server.UploadBase64ImageHandlerV2(rateLimiter, apiV2))
-	  r.POST("/uploadrecord", uploadAuth, server.UploadBase64RecordHandler(rateLimiter))
+	r.GET("/updateport", uploadAuth, server.HandleIpupdate)
+	r.POST("/delpic", uploadAuth, server.DeleteImageHandler(rateLimiter))
+	r.GET("/healthz", uploadAuth, HealthzHandler)
+	r.GET("/readyz", uploadAuth, HealthzHandler)
+	r.GET("/metrics", uploadAuth, MetricsHandler)
+	r.POST("/uploadpic", uploadAuth, server.UploadBase64ImageHandler(rateLimiter))
+	r.POST("/uploadpicv2", uploadAuth, server.UploadBase64ImageHandlerV2(rateLimiter, apiV2))
+	r.POST("/uploadrecord", uploadAuth, server.UploadBase64RecordHandler(rateLimiter))
 	// 使用 CreateHandleValidation，传入 WebhookHandler 实例
 	server.InitPrivateKey(conf.Settings.ClientSecret)
 	//r.POST("/"+conf.Settings.WebhookPath, server.CreateHandleValidationSafe(webhookHandler))
@@ -980,11 +1013,11 @@ func setupConfigWatcher(configFilePath string) {
 
 // 过滤敏感头列表，转发时排除这些 Header
 var sensitiveHeaders = map[string]bool{
-	"authorization": true,
-	"cookie":        true,
-	"set-cookie":    true,
-	"x-token":       true,
-	"x-signature":   true,
+	"authorization":   true,
+	"cookie":          true,
+	"set-cookie":      true,
+	"x-token":         true,
+	"x-signature":     true,
 	"x-signature-256": true,
 }
 
@@ -1122,10 +1155,10 @@ func HealthzHandler(c *gin.Context) {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	c.JSON(http.StatusOK, gin.H{
-		"status":    "ok",
-		"uptime":    time.Since(mylog.StartTime).Seconds(),
+		"status":     "ok",
+		"uptime":     time.Since(mylog.StartTime).Seconds(),
 		"goroutines": runtime.NumGoroutine(),
-		"memory_mb": float64(m.Alloc) / 1024 / 1024,
+		"memory_mb":  float64(m.Alloc) / 1024 / 1024,
 	})
 }
 

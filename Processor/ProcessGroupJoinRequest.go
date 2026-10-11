@@ -76,7 +76,7 @@ func (p *Processors) ProcessGroupJoinRequest(data *dto.GroupJoinRequestEvent) {
 
 	outputMap := structToMap(request)
 	//上报信息到onebotv11应用端(正反ws)
-	p.BroadcastMessageToAll(outputMap, p.Apiv2, data)
+	p.dispatchInbound(data, outputMap, func() { p.BroadcastMessageToAll(outputMap, p.Apiv2, data) })
 
 	mylog.Printf("用户申请加群(request): group=%s user=%s flag=%s", data.GroupOpenID, data.MemberOpenID, data.JoinRequestID)
 }
