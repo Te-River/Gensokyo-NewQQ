@@ -107,5 +107,10 @@
 ## ✅ 提交记录
 
 ```
+8f3cfdb  docs: 修复 3 处失效相对链接（语法参考 cq-set_group / API介绍 本版新增功能 / 入群申请列表 readme）
 c1c6470  feat: 对齐官方 v2 现文档（群管理契约 / 入站事件字段 / 5MB 直传 / 错误码）
+bd73b1f  feat: 生产主链切换到 internal/+adapter 分层架构，新增 arch_mode 三态开关
+1e2691e  fix: 私聊 markdown 内嵌 keyboard 补齐 permission.type=0→2 兜底
+b4519d3  docs: readme 顶部小图标的引用仓库改为本仓库
+d719aef  docs: AGENTS.md 补充发版与 CHANGELOG 惯例及 Windows 提交编码提示
 ```
