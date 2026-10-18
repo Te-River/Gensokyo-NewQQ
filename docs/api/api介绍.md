@@ -176,5 +176,5 @@ Gensokyo 在群消息和私聊消息中，当 `card_nick` 配置为空时，会�
 - `admin` → 管理员
 - `member` → 普通群员
 
-API 未返回时回退到 `master_id` 配置判断，保持兼容。详见[本版新增功能](./本版新增功能.md#群消息-senderrole-支持-member_role)。
+API 未返回时回退到 `master_id` 配置判断，保持兼容。详见[本版新增功能](./../本版新增功能.md#群消息-senderrole-支持-member_role)。
 ```

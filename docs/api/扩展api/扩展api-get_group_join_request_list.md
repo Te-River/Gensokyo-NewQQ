@@ -6,7 +6,7 @@
 
 拉取群内入群申请列表（QQ 官方 v2 接口 `GET /v2/groups/{group_openid}/join_request_list`，2026-09 文档）。机器人需拥有群管理员身份。
 
-返回的 `group_id` / `user_id` / `flag` 与入站 `request` 事件完全一致，可直接回传 [`set_group_add_request`](../../readme.md) 进行审批，无需额外转换。
+返回的 `group_id` / `user_id` / `flag` 与入站 `request` 事件完全一致，可直接回传 [`set_group_add_request`](../../../readme.md) 进行审批，无需额外转换。
 
 ## 参数
 
