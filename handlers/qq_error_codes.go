@@ -10,6 +10,10 @@ import (
 // 数据来源（官方文档）：
 //   - https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/api-call-guide.html#openapi-错误码
 //   - https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_messages.post.html#错误码
+//   - GET /v2/groups/{group_openid}/bot_state、GET /v2/groups/{group_openid}/info
+//   - POST /v2/groups/{group_openid}/files、POST /v2/users/{user_openid}/files、POST /v2/groups/{group_openid}/upload_part_finish
+//   - DELETE /v2/groups/{group_openid}/messages/{message_id}
+//   - POST https://api.bot.qq.com/app/getAppAccessToken
 //
 // 用途：当 QQ API 调用返回错误时，在控制台向开发者输出该错误码对应的
 // 中文描述和排查建议，方便定位问题。
@@ -77,9 +81,12 @@ var qqErrorCodes = map[int]QQErrorCode{
 	// ===== 公共错误码（所有接口通用）=====
 	10001: {10001, "UnknownAccount 账号异常", "请检查账号状态"},
 	10003: {10003, "UnknownChannel 子频道异常", "请检查子频道ID"},
+	// 注意：10004 在不同接口语义不同 —— 此处为频道/Guild 语义；
+	// POST https://api.bot.qq.com/app/getAppAccessToken 场景下官方定义为"机器人不存在"
+	// （AppID 对应的机器人不存在，请确认 AppID 是否正确），由于环境不同不应覆盖既有语义。
 	10004: {10004, "UnknownGuild 频道异常", "请检查频道ID"},
 	11251: {11251, "ErrorWrongAppid 参数中的appid错误", "请检查token和appid"},
-	11253: {11253, "ErrorCheckAppPrivilegeNotPass 检查应用权限不通过", "该机器人应用未获得调用该接口的权限，需要向平台申请"},
+	11253: {11253, "ErrorCheckAppPrivilegeNotPass 应用无接口访问权限", "该接口仅白名单机器人可用，请联系平台运营申请权限"},
 	11254: {11254, "ErrorInterfaceForbidden 应用接口被封禁", "该机器人虽然获得了该接口权限，但是被封禁了"},
 	11262: {11262, "ErrorCheckRobot 当前接口不支持使用机器人Bot Token调用", "请使用正确的鉴权方式"},
 	11265: {11265, "ErrorRobotHasBaned 机器人已经被封禁", "请检查机器人状态"},
@@ -95,12 +102,36 @@ var qqErrorCodes = map[int]QQErrorCode{
 	50055: {50055, "无效的markdown content", "请检查markdown内容"},
 	50056: {50056, "不允许发送markdown content", "请检查markdown权限"},
 
-	// ===== 撤回消息错误码 =====
+	// ===== 撤回消息错误码（频道/旧接口）=====
 	306001: {306001, "撤回消息参数错误", "请检查撤回消息参数"},
 	306002: {306002, "msgid error 消息id错误", "请检查消息ID"},
 	306003: {306003, "fail to get message 获取消息错误", "可重试"},
 	306004: {306004, "no permission to delete message 没有撤回此消息的权限", "请检查机器人权限"},
 	306005: {306005, "retract message error 消息撤回失败", "可重试"},
+
+	// ===== 群聊 v2 撤回消息错误码（DELETE /v2/groups/{group_openid}/messages/{message_id}）=====
+	40061001: {40061001, "请求参数无效", "请检查请求参数格式"},
+	40062003: {40062003, "无操作权限", "请检查机器人是否有操作权限，机器人是否为群管理员或者发消息的用户是否为普通用户"},
+	40064004: {40064004, "已超出消息撤回时限", "消息发送超过2分钟后不可撤回"},
+	50065001: {50065001, "消息撤回失败，请稍后重试", "请稍后重试"},
+
+	// ===== 富媒体上传错误码（/v2/groups/{group_openid}/files、/v2/users/{user_openid}/files、upload_part_finish）=====
+	10000:    {10000, "不支持的操作", "请检查请求参数"},
+	850018:   {850018, "群被禁言或者机器人被禁言", "请检查机器人是否被禁言"},
+	850019:   {850019, "不支持的文件格式", "请检查 file_type 是否正确"},
+	850026:   {850026, "下载原始文件失败", "请检查 URL 是否可访问或重试"},
+	850027:   {850027, "发送数据超时", "请稍后重试"},
+	850031:   {850031, "上传文件超过大小限制", "请减小文件大小"},
+	40093001: {40093001, "文件上传失败，请重试", "分片转存 BDH 通道异常，请重试"},
+	40093002: {40093002, "超过今天发送文件容量上限", "请明天再试或减少文件大小"},
+
+	// ===== 获取访问凭证错误码（app/getAppAccessToken）=====
+	// 业务错误码经响应体 code 字段返回，此场景 HTTP 状态码仍为 200。
+	// 注：10004 在本接口中表示"机器人不存在"，与"公共错误码"中的频道语义冲突，
+	// 为避免 map 重复 key，沿用公共错误码区的 10004 条目（见上方注释）。
+	100001: {100001, "Too many requests", "请求过于频繁，请降低调用频率后重试"},
+	100007: {100007, "appid invalid", "AppID 无效，或机器人状态不正常（被封禁或已删除），请检查 AppID 是否正确以及机器人状态"},
+	100016: {100016, "invalid appid or secret", "AppID 或 ClientSecret 不正确，请检查传入的 appId 和 clientSecret 是否与开放平台管理端一致"},
 
 	// ===== 发消息错误（1000000~2999999）=====
 	1100100: {1100100, "安全打击：消息被限频", "请降低发送频率"},

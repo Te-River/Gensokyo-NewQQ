@@ -18,7 +18,7 @@ func (o *openAPI) BotInGroupState(ctx context.Context, groupOpenID string) (*dto
 }
 
 // JoinRequestList v1 不支持群聊接口
-func (o *openAPI) JoinRequestList(ctx context.Context, groupOpenID string, nextIndex int) (*dto.JoinRequestList, error) {
+func (o *openAPI) JoinRequestList(ctx context.Context, groupOpenID, cursor string, limit int) (*dto.JoinRequestList, error) {
 	return nil, fmt.Errorf("v1 openapi does not support JoinRequestList")
 }
 

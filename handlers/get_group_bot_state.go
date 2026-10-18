@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"time"
 
 	"github.com/hoshinonyaruko/gensokyo/callapi"
 	"github.com/hoshinonyaruko/gensokyo/idmap"
@@ -14,12 +15,32 @@ func init() {
 }
 
 // GroupBotState OneBot 机器人群内状态
+// 兼容双写：旧字段 join_time/can_push/push_msg_setting/role 取自官方新字段，
+// 新字段 joined_at/allow_proactive_msg/recv_msg_setting/member_role 与官方一致。
 type GroupBotState struct {
-	GroupID        int64  `json:"group_id"`
-	JoinTime       int64  `json:"join_time"`
-	CanPush        bool   `json:"can_push"`
-	PushMsgSetting string `json:"push_msg_setting"`
-	Role           string `json:"role"`
+	GroupID           int64  `json:"group_id"`
+	JoinTime          int64  `json:"join_time"`
+	CanPush           bool   `json:"can_push"`
+	PushMsgSetting    string `json:"push_msg_setting"`
+	Role              string `json:"role"`
+	JoinedAt          string `json:"joined_at"`
+	AllowProactiveMsg bool   `json:"allow_proactive_msg"`
+	RecvMsgSetting    string `json:"recv_msg_setting"`
+	MemberRole        string `json:"member_role"`
+	MemberOpenID      string `json:"member_openid"` // 机器人的 OpenID（官方 member_openid 原样透传）
+}
+
+// parseBotJoinedAt 解析官方 joined_at（RFC3339）为 Unix 秒，空串/非法格式置 0
+func parseBotJoinedAt(value string) int64 {
+	if value == "" {
+		return 0
+	}
+	t, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		mylog.Printf("get_group_bot_state: joined_at 解析失败(%s),置 0: %v", value, err)
+		return 0
+	}
+	return t.Unix()
 }
 
 // GetGroupBotState 获取机器人在群内的状态
@@ -46,12 +67,17 @@ func GetGroupBotState(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.
 
 	groupID64, _ := idmap.StoreIDv2(groupOpenID)
 	data := GroupBotState{
-		GroupID:        groupID64,
-		JoinTime:       state.JoinTime,
-		CanPush:        state.CanPush,
-		PushMsgSetting: state.PushMsgSetting,
-		Role:           state.Role,
+		GroupID:           groupID64,
+		JoinTime:          parseBotJoinedAt(state.JoinedAt),
+		CanPush:           state.AllowProactiveMsg,
+		PushMsgSetting:    state.RecvMsgSetting,
+		Role:              state.MemberRole,
+		JoinedAt:          state.JoinedAt,
+		AllowProactiveMsg: state.AllowProactiveMsg,
+		RecvMsgSetting:    state.RecvMsgSetting,
+		MemberRole:        state.MemberRole,
+		MemberOpenID:      state.MemberOpenID,
 	}
-	mylog.Printf("get_group_bot_state: group=%s role=%s can_push=%v", groupOpenID, state.Role, state.CanPush)
+	mylog.Printf("get_group_bot_state: group=%s member_role=%s allow_proactive_msg=%v", groupOpenID, state.MemberRole, state.AllowProactiveMsg)
 	return sendActionResultWithData(client, message, data)
 }

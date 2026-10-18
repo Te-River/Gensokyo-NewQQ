@@ -33,6 +33,12 @@ type Message struct {
 	MessageReference *MessageReference `json:"message_reference,omitempty"`
 	// 消息场景上下文（含 ext 里的 msg_idx/ref_msg_idx/auth_token）
 	MessageScene *MessageScene `json:"message_scene,omitempty"`
+	// 消息内容类型：0=普通文本 3=结构化卡片 101=并行消息 102=聊天记录 103=引用消息
+	MessageType int `json:"message_type,omitempty"`
+	// 结构化卡片消息数据（message_type=3 时有值）
+	ArkData *ARKData `json:"ark_data,omitempty"`
+	// 嵌套消息元素列表（引用消息等，递归结构）
+	MsgElements []*MsgElement `json:"msg_elements,omitempty"`
 	//返回的ret 超过主动限制会返回22009
 	Ret int `json:"ret,omitempty"`
 }
@@ -119,6 +125,10 @@ type MediaResponse struct {
 	//file_info
 	FileInfo string `json:"file_info"`
 	TTL      int    `json:"ttl"`
+	// 发送消息的唯一 ID，仅 srv_send_msg=true 时返回
+	ID string `json:"id,omitempty"`
+	// 文件下载链接（COS 预签名 GET URL），仅分片上传合并且 file_type 为图片/视频/语音时返回
+	RawURL string `json:"raw_url,omitempty"`
 	//返回的ret 超过主动限制会返回22009
 	Ret int `json:"ret,omitempty"`
 }
@@ -163,6 +173,40 @@ type MessageAttachment struct {
 	Size        int    `json:"size,omitempty"`
 	Width       int    `json:"width,omitempty"`
 	ContentType string `json:"content_type,omitempty"` // voice:语音, image/xxx: 图片 video/xxx: 视频
+	// 语音消息 SILK 等转换后的 WAV 文件 URL
+	VoiceWavURL string `json:"voice_wav_url,omitempty"`
+	// 语音消息 ASR 参考结果
+	ASRReferText string `json:"asr_refer_text,omitempty"`
+}
+
+// ARKData 结构化卡片消息数据（message_type=3 时有值）
+type ARKData struct {
+	// 卡片消息中的用户操作提示文本
+	Prompt string `json:"prompt,omitempty"`
+	// 卡片消息类型标识：tuwen/feed/miniapp/map/contact_card/video_share/music_together/picture
+	ARKType string `json:"ark_type,omitempty"`
+	// 卡片消息类型的中文名称，如"图文 H5"、"小程序"、"图文卡片"
+	ARKName string `json:"ark_name,omitempty"`
+	// 卡片消息字段，常见键名: tag/tags/title/desc/jump_url/preview/source/source_logo/tag_icon/nickname/avatar/address
+	Fields map[string]interface{} `json:"fields,omitempty"`
+}
+
+// MsgElement 嵌套消息元素（msg_elements，递归结构）
+type MsgElement struct {
+	// 消息元素在列表中的引用消息索引
+	MsgIdx string `json:"msg_idx,omitempty"`
+	// 该元素对应的消息发送者
+	Author *User `json:"author,omitempty"`
+	// 消息内容类型：0=普通文本 3=结构化卡片 101=并行消息 102=聊天记录 103=引用消息
+	MessageType int `json:"message_type,omitempty"`
+	// 消息正文内容
+	Content string `json:"content,omitempty"`
+	// 该元素携带的附件
+	Attachments []*MessageAttachment `json:"attachments,omitempty"`
+	// 结构化卡片消息数据（message_type=3 时有值）
+	ARKData *ARKData `json:"ark_data,omitempty"`
+	// 嵌套消息元素列表（递归结构）
+	MsgElements []*MsgElement `json:"msg_elements,omitempty"`
 }
 
 // MessageReactionUsers 消息表情表态用户列表

@@ -178,7 +178,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 > - **send_private_msg_sse**（SSE 私聊）
 > - **put_interaction**（处理按钮回调）
 > - **get_group_ban**（查询 q群 禁言）
-> - **get_group_whole_ban**（查询 q群 全员禁言）
+> - **get_group_whole_ban**（查询 q群 全员禁言；官方 POST 无写入字段，固定失败 retcode 100）
 > - **send_to_group**（send_group_msg 别名）
 > - **send_group_msg_raw**（发送原始消息）
 > - **get_group_member_blacklist**（获取群黑名单列表）
@@ -204,7 +204,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 | /delete_group_msg        | [撤回QQ群用户或Bot消息] |
 | /set_group_kick          | [群批量踢人(≤20,真实API,可同步拉黑)] |
 | /set_group_ban | [群单人禁言(禁言/解禁)] |
-| /set_group_whole_ban | [群全员禁言(开/关)] |
+| /set_group_whole_ban | [群全员禁言(开/关)；⚠️ 官方 POST 无写入字段，固定失败 retcode 100] |
 | /set_group_admin         | [群设置管理员] |
 | /set_group_card          | [设置群名片] |
 | /set_group_name          | [设置群名称] |

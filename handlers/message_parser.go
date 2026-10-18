@@ -23,8 +23,8 @@ import (
 	"github.com/hoshinonyaruko/gensokyo/botstats"
 	"github.com/hoshinonyaruko/gensokyo/callapi"
 	"github.com/hoshinonyaruko/gensokyo/config"
-	"github.com/hoshinonyaruko/gensokyo/handlers/cqparse"
 	"github.com/hoshinonyaruko/gensokyo/echo"
+	"github.com/hoshinonyaruko/gensokyo/handlers/cqparse"
 	"github.com/hoshinonyaruko/gensokyo/idmap"
 	"github.com/hoshinonyaruko/gensokyo/images"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
@@ -827,8 +827,8 @@ func parseMessageContentLegacy(paramsMessage callapi.ParamsContent, message call
 	switch message := paramsMessage.Message.(type) {
 	case string:
 		mylog.Printf("params.message is a string\n")
-		   messageText = message
-		   // 直接应用替换规则
+		messageText = message
+		// 直接应用替换规则
 		if config.GetEnableChangeWord() {
 			messageText = acnode.CheckWordOUT(messageText)
 		}
@@ -1204,21 +1204,21 @@ func parseMessageContentLegacy(paramsMessage callapi.ParamsContent, message call
 					foundItems["local_video"] = append(foundItems["local_video"], safePath)
 				}
 
-			    case "music":
-			     musicType, _ := segmentMap["data"].(map[string]interface{})["type"].(string)
-			     musicID, _ := segmentMap["data"].(map[string]interface{})["id"].(string)
-			     if musicType == "qq" && musicID != "" {
-			      foundItems["qqmusic"] = append(foundItems["qqmusic"], musicID)
-			     }
+			case "music":
+				musicType, _ := segmentMap["data"].(map[string]interface{})["type"].(string)
+				musicID, _ := segmentMap["data"].(map[string]interface{})["id"].(string)
+				if musicType == "qq" && musicID != "" {
+					foundItems["qqmusic"] = append(foundItems["qqmusic"], musicID)
+				}
 
-			    default:
-			     mylog.Printf("Unhandled segment type: %s", segmentType)
-			    }
+			default:
+				mylog.Printf("Unhandled segment type: %s", segmentType)
+			}
 
-			    messageText += segmentContent
+			messageText += segmentContent
 
-			   }
-			  case map[string]interface{}:
+		}
+	case map[string]interface{}:
 		mylog.Printf("params.message is a map (segment_type_trss)\n")
 		messageType, _ := message["type"].(string)
 
@@ -1309,109 +1309,109 @@ func parseMessageContentLegacy(paramsMessage callapi.ParamsContent, message call
 			}
 
 		case "at":
-		    qqNumber, _ := message["data"].(map[string]interface{})["qq"].(string)
-		    messageText += "[CQ:at,qq=" + qqNumber + "]"
+			qqNumber, _ := message["data"].(map[string]interface{})["qq"].(string)
+			messageText += "[CQ:at,qq=" + qqNumber + "]"
 
-		   case "reply":
-		    replyID, _ := message["data"].(map[string]interface{})["id"].(string)
-		    if replyID != "" {
-		     foundItems["reply_msg_id"] = append(foundItems["reply_msg_id"], replyID)
-		    }
+		case "reply":
+			replyID, _ := message["data"].(map[string]interface{})["id"].(string)
+			if replyID != "" {
+				foundItems["reply_msg_id"] = append(foundItems["reply_msg_id"], replyID)
+			}
 
-		   case "wakeup":
-		    dataMap, _ := message["data"].(map[string]interface{})
-		    if dataMap != nil {
-		     if wakeupUserID, ok := dataMap["userid"].(string); ok && wakeupUserID != "" {
-		      foundItems["wakeup"] = append(foundItems["wakeup"], wakeupUserID)
-		     }
-		    }
-		    // [CQ:wakeup] 不在 messageText 中留痕
+		case "wakeup":
+			dataMap, _ := message["data"].(map[string]interface{})
+			if dataMap != nil {
+				if wakeupUserID, ok := dataMap["userid"].(string); ok && wakeupUserID != "" {
+					foundItems["wakeup"] = append(foundItems["wakeup"], wakeupUserID)
+				}
+			}
+			// [CQ:wakeup] 不在 messageText 中留痕
 
-		   case "avatar":
-		    qqNumber, _ := message["data"].(map[string]interface{})["qq"].(string)
-		    var avatarCQCode string
-		    if paramsMessage.GroupID == nil {
-		     avatarCQCode, _ = GetAvatarCQCodeNoGroupID(qqNumber)
-		    } else {
-		     avatarCQCode, _ = GetAvatarCQCode(paramsMessage.GroupID.(string), qqNumber)
-		    }
-		    // 从 [CQ:image,file=URL] 中提取 URL 存入 foundItems
-		    if avatarCQCode != "" {
-		     re := regexp.MustCompile(`\[CQ:image,file=(.+?)\]`)
-		     if m := re.FindStringSubmatch(avatarCQCode); len(m) > 1 {
-		      url := m[1]
-		      if strings.HasPrefix(url, "https://") {
-		       foundItems["url_images"] = append(foundItems["url_images"], strings.TrimPrefix(url, "https://"))
-		      } else if strings.HasPrefix(url, "http://") {
-		       foundItems["url_image"] = append(foundItems["url_image"], strings.TrimPrefix(url, "http://"))
-		      } else {
-		       foundItems["unknown_image"] = append(foundItems["unknown_image"], url)
-		      }
-		     }
-		    }
+		case "avatar":
+			qqNumber, _ := message["data"].(map[string]interface{})["qq"].(string)
+			var avatarCQCode string
+			if paramsMessage.GroupID == nil {
+				avatarCQCode, _ = GetAvatarCQCodeNoGroupID(qqNumber)
+			} else {
+				avatarCQCode, _ = GetAvatarCQCode(paramsMessage.GroupID.(string), qqNumber)
+			}
+			// 从 [CQ:image,file=URL] 中提取 URL 存入 foundItems
+			if avatarCQCode != "" {
+				re := regexp.MustCompile(`\[CQ:image,file=(.+?)\]`)
+				if m := re.FindStringSubmatch(avatarCQCode); len(m) > 1 {
+					url := m[1]
+					if strings.HasPrefix(url, "https://") {
+						foundItems["url_images"] = append(foundItems["url_images"], strings.TrimPrefix(url, "https://"))
+					} else if strings.HasPrefix(url, "http://") {
+						foundItems["url_image"] = append(foundItems["url_image"], strings.TrimPrefix(url, "http://"))
+					} else {
+						foundItems["unknown_image"] = append(foundItems["unknown_image"], url)
+					}
+				}
+			}
 
-		   case "card":
-		    dataMap, _ := message["data"].(map[string]interface{})
-		    if dataMap != nil {
-		     cardData := make(map[string]string)
-		     if title, ok := dataMap["title"].(string); ok {
-		      cardData["title"] = title
-		     }
-		     if desc, ok := dataMap["desc"].(string); ok {
-		      cardData["desc"] = desc
-		     }
-		     if pic, ok := dataMap["pic"].(string); ok {
-		      cardData["pic"] = pic
-		     }
-		     if url, ok := dataMap["url"].(string); ok {
-		      cardData["url"] = url
-		     }
-		     if len(cardData) > 0 {
-		      encoded, err := json.Marshal(cardData)
-		      if err == nil {
-		       foundItems["card"] = append(foundItems["card"], string(encoded))
-		      }
-		     }
-		    }
+		case "card":
+			dataMap, _ := message["data"].(map[string]interface{})
+			if dataMap != nil {
+				cardData := make(map[string]string)
+				if title, ok := dataMap["title"].(string); ok {
+					cardData["title"] = title
+				}
+				if desc, ok := dataMap["desc"].(string); ok {
+					cardData["desc"] = desc
+				}
+				if pic, ok := dataMap["pic"].(string); ok {
+					cardData["pic"] = pic
+				}
+				if url, ok := dataMap["url"].(string); ok {
+					cardData["url"] = url
+				}
+				if len(cardData) > 0 {
+					encoded, err := json.Marshal(cardData)
+					if err == nil {
+						foundItems["card"] = append(foundItems["card"], string(encoded))
+					}
+				}
+			}
 
-		   case "input_notify":
-		    dataMap, _ := message["data"].(map[string]interface{})
-		    if dataMap != nil {
-		     notifyData := make(map[string]string)
-		     if t, ok := dataMap["type"].(string); ok {
-		      notifyData["type"] = t
-		     }
-		     if s, ok := dataMap["second"].(string); ok {
-		      notifyData["second"] = s
-		     }
-		     if len(notifyData) > 0 {
-		      encoded, err := json.Marshal(notifyData)
-		      if err == nil {
-		       foundItems["input_notify"] = append(foundItems["input_notify"], string(encoded))
-		      }
-		     }
-		    }
+		case "input_notify":
+			dataMap, _ := message["data"].(map[string]interface{})
+			if dataMap != nil {
+				notifyData := make(map[string]string)
+				if t, ok := dataMap["type"].(string); ok {
+					notifyData["type"] = t
+				}
+				if s, ok := dataMap["second"].(string); ok {
+					notifyData["second"] = s
+				}
+				if len(notifyData) > 0 {
+					encoded, err := json.Marshal(notifyData)
+					if err == nil {
+						foundItems["input_notify"] = append(foundItems["input_notify"], string(encoded))
+					}
+				}
+			}
 
-		    case "stream":
-		     dataMap, _ := message["data"].(map[string]interface{})
-		     if dataMap != nil {
-		      streamData := make(map[string]string)
-		      if t, ok := dataMap["type"].(string); ok {
-		       streamData["type"] = t
-		      }
-		      if q, ok := dataMap["qq"].(string); ok {
-		       streamData["qq"] = q
-		      }
-		      if len(streamData) > 0 {
-		       encoded, err := json.Marshal(streamData)
-		       if err == nil {
-		        foundItems["stream"] = append(foundItems["stream"], string(encoded))
-		       }
-		      }
-		     }
+		case "stream":
+			dataMap, _ := message["data"].(map[string]interface{})
+			if dataMap != nil {
+				streamData := make(map[string]string)
+				if t, ok := dataMap["type"].(string); ok {
+					streamData["type"] = t
+				}
+				if q, ok := dataMap["qq"].(string); ok {
+					streamData["qq"] = q
+				}
+				if len(streamData) > 0 {
+					encoded, err := json.Marshal(streamData)
+					if err == nil {
+						foundItems["stream"] = append(foundItems["stream"], string(encoded))
+					}
+				}
+			}
 
-		 case "markdown":
-		  mdContent, ok := message["data"].(map[string]interface{})["data"]
+		case "markdown":
+			mdContent, ok := message["data"].(map[string]interface{})["data"]
 			if ok {
 				var mdContentEncoded string
 				if mdContentMap, isMap := mdContent.(map[string]interface{}); isMap {
@@ -1446,38 +1446,38 @@ func parseMessageContentLegacy(paramsMessage callapi.ParamsContent, message call
 				mylog.Printf("Error: markdown segment data is nil.")
 			}
 
-		 case "keyboard":
-		  kbContent, ok := message["data"].(map[string]interface{})["data"]
-		  if ok {
-		   var kbContentJSON string
-		   if kbContentMap, isMap := kbContent.(map[string]interface{}); isMap {
-		    kbContentBytes, err := json.Marshal(kbContentMap)
-		    if err != nil {
-		     mylog.Printf("Error marshaling kbContentMap to JSON:%v", err)
-		     break
-		    }
-		    kbContentJSON = string(kbContentBytes)
-		   } else if kbContentStr, isString := kbContent.(string); isString {
-		    if strings.HasPrefix(kbContentStr, "base64://") {
-		     decoded, decErr := base64.StdEncoding.DecodeString(strings.TrimPrefix(kbContentStr, "base64://"))
-		     if decErr != nil {
-		      mylog.Printf("[CQ:keyboard] base64 解码失败: %v", decErr)
-		      break
-		     }
-		     kbContentJSON = string(decoded)
-		    } else {
-		     // 原始 JSON 形式（与 string 路径 keyboardJSONPattern 一致）
-		     kbContentJSON = kbContentStr
-		    }
-		   } else {
-		    mylog.Printf("Error marshaling keyboard segment wrong type.")
-		    break
-		   }
-		   foundItems["keyboard"] = append(foundItems["keyboard"], kbContentJSON)
-		   // [CQ:keyboard] 不在 messageText 中留痕，避免重复发送
-		  } else {
-		   mylog.Printf("Error: keyboard segment data is nil.")
-		  }
+		case "keyboard":
+			kbContent, ok := message["data"].(map[string]interface{})["data"]
+			if ok {
+				var kbContentJSON string
+				if kbContentMap, isMap := kbContent.(map[string]interface{}); isMap {
+					kbContentBytes, err := json.Marshal(kbContentMap)
+					if err != nil {
+						mylog.Printf("Error marshaling kbContentMap to JSON:%v", err)
+						break
+					}
+					kbContentJSON = string(kbContentBytes)
+				} else if kbContentStr, isString := kbContent.(string); isString {
+					if strings.HasPrefix(kbContentStr, "base64://") {
+						decoded, decErr := base64.StdEncoding.DecodeString(strings.TrimPrefix(kbContentStr, "base64://"))
+						if decErr != nil {
+							mylog.Printf("[CQ:keyboard] base64 解码失败: %v", decErr)
+							break
+						}
+						kbContentJSON = string(decoded)
+					} else {
+						// 原始 JSON 形式（与 string 路径 keyboardJSONPattern 一致）
+						kbContentJSON = kbContentStr
+					}
+				} else {
+					mylog.Printf("Error marshaling keyboard segment wrong type.")
+					break
+				}
+				foundItems["keyboard"] = append(foundItems["keyboard"], kbContentJSON)
+				// [CQ:keyboard] 不在 messageText 中留痕，避免重复发送
+			} else {
+				mylog.Printf("Error: keyboard segment data is nil.")
+			}
 
 		case "file":
 			dataMap, _ := message["data"].(map[string]interface{})
@@ -1531,38 +1531,38 @@ func parseMessageContentLegacy(paramsMessage callapi.ParamsContent, message call
 				foundItems["local_video"] = append(foundItems["local_video"], safePath)
 			}
 
-		   case "music":
-		    musicType, _ := message["data"].(map[string]interface{})["type"].(string)
-		    musicID, _ := message["data"].(map[string]interface{})["id"].(string)
-		    if musicType == "qq" && musicID != "" {
-		     foundItems["qqmusic"] = append(foundItems["qqmusic"], musicID)
-		    }
+		case "music":
+			musicType, _ := message["data"].(map[string]interface{})["type"].(string)
+			musicID, _ := message["data"].(map[string]interface{})["id"].(string)
+			if musicType == "qq" && musicID != "" {
+				foundItems["qqmusic"] = append(foundItems["qqmusic"], musicID)
+			}
 
-		   case "member":
-		    dataMap, _ := message["data"].(map[string]interface{})
-		    if dataMap != nil {
-		     memberType, _ := dataMap["type"].(string)
-		     groupID, _ := dataMap["group_id"].(string)
-		     userID, _ := dataMap["user_id"].(string)
-		     messageText += fmt.Sprintf("[CQ:member,type=%s,group_id=%s,user_id=%s]", memberType, groupID, userID)
-		    }
+		case "member":
+			dataMap, _ := message["data"].(map[string]interface{})
+			if dataMap != nil {
+				memberType, _ := dataMap["type"].(string)
+				groupID, _ := dataMap["group_id"].(string)
+				userID, _ := dataMap["user_id"].(string)
+				messageText += fmt.Sprintf("[CQ:member,type=%s,group_id=%s,user_id=%s]", memberType, groupID, userID)
+			}
 
-		   case "set_group":
-		    // 消息段形式 [CQ:set_group,action=...]：还原为 CQ 码字符串,
-		    // 与字符串模式汇合后由 ProcessOutboundCQCodes 统一执行
-		    dataMap, _ := message["data"].(map[string]interface{})
-		    if dataMap != nil {
-		     if cq := buildSetGroupCQCode(dataMap); cq != "" {
-		      messageText += cq
-		     }
-		    }
+		case "set_group":
+			// 消息段形式 [CQ:set_group,action=...]：还原为 CQ 码字符串,
+			// 与字符串模式汇合后由 ProcessOutboundCQCodes 统一执行
+			dataMap, _ := message["data"].(map[string]interface{})
+			if dataMap != nil {
+				if cq := buildSetGroupCQCode(dataMap); cq != "" {
+					messageText += cq
+				}
+			}
 
-		   default:
-		    mylog.Printf("Unhandled message type: %s", messageType)
-		   }
+		default:
+			mylog.Printf("Unhandled message type: %s", messageType)
+		}
 
-		  default:
-		   mylog.Println("Unsupported message format: params.message field is not a string, map or slice")
+	default:
+		mylog.Println("Unsupported message format: params.message field is not a string, map or slice")
 	}
 
 	// 统一 CQ 码解析管道：无论消息来自 string 还是消息段数组，
@@ -2080,6 +2080,9 @@ func RevertTransformedText(data interface{}, msgtype string, api openapi.OpenAPI
 			messageText += imageCQ
 		}
 	}
+
+	// 2026-09-16 新增消息事件字段（语音附件/结构化卡片/引用消息）的 CQ 码追加在图片码之后
+	messageText += messageEventCQText(msg)
 	//mylog.Printf("6[%v]", messageText)
 	return messageText
 }
@@ -2213,11 +2216,11 @@ func ConvertToSegmentedMessage(data interface{}) []map[string]interface{} {
 	msg.Content = contentB.String()
 
 	// 移除 at 后，如果内容以空格开头，可选去除
-	  if isFullGroupMsg || config.GetRemoveAt() {
-	   if !menumsg {
-	    msg.Content = strings.TrimSpace(msg.Content)
-	   }
-	  }
+	if isFullGroupMsg || config.GetRemoveAt() {
+		if !menumsg {
+			msg.Content = strings.TrimSpace(msg.Content)
+		}
+	}
 
 	// 检查是否需要移除前缀
 	if config.GetRemovePrefixValue() {
@@ -2255,7 +2258,182 @@ func ConvertToSegmentedMessage(data interface{}) []map[string]interface{} {
 	}
 	// 图片段按既有语义排在内容段之后（原由 sortMessageSegments 保证，现显式追加以保位）
 	messageSegments = append(messageSegments, imageSegments...)
+	// 2026-09-16 新增消息事件字段（语音附件/结构化卡片/引用消息）的段追加在图片段之后
+	messageSegments = append(messageSegments, messageEventSegments(msg)...)
 	return messageSegments
+}
+
+// inboundExtra 2026-09-16 消息事件新增字段的降级单元
+type inboundExtra struct {
+	kind   string // record/ark/reply/text
+	file   string // record：voice_wav_url，缺失时回退附件 url
+	url    string // record：附件原始 url
+	asr    string // record：asr_refer_text
+	ark    *dto.ARKData
+	msgIdx string // reply：被引用消息索引
+	text   string // text：正文
+}
+
+// voiceAttachmentExtra 语音附件（content_type=voice）降级为 record 单元
+func voiceAttachmentExtra(attachment *dto.MessageAttachment) (inboundExtra, bool) {
+	if attachment == nil {
+		return inboundExtra{}, false
+	}
+	if attachment.ContentType != "voice" {
+		return inboundExtra{}, false
+	}
+	file := attachment.VoiceWavURL
+	if file == "" {
+		file = attachment.URL
+	}
+	if file == "" {
+		return inboundExtra{}, false
+	}
+	return inboundExtra{kind: "record", file: file, url: attachment.URL, asr: attachment.ASRReferText}, true
+}
+
+// replyExtra 由 msg_elements 生成 reply 单元：msg_idx 取第一个非空索引，content 为各元素正文拼接
+func replyExtra(elements []*dto.MsgElement) inboundExtra {
+	extra := inboundExtra{kind: "reply"}
+	var content strings.Builder
+	for _, element := range elements {
+		if element == nil {
+			continue
+		}
+		if extra.msgIdx == "" {
+			extra.msgIdx = element.MsgIdx
+		}
+		content.WriteString(element.Content)
+	}
+	extra.text = content.String()
+	return extra
+}
+
+// collectElementExtras 递归降级 msg_elements：语音附件→record，卡片→ark，
+// 嵌套引用→reply，正文→text（101 并行消息 / 102 聊天记录按正文保留，不静默丢弃）
+func collectElementExtras(elements []*dto.MsgElement) []inboundExtra {
+	var extras []inboundExtra
+	for _, element := range elements {
+		if element == nil {
+			continue
+		}
+		for _, attachment := range element.Attachments {
+			if extra, ok := voiceAttachmentExtra(attachment); ok {
+				extras = append(extras, extra)
+			}
+		}
+		if element.ARKData != nil || element.MessageType == 3 {
+			extras = append(extras, inboundExtra{kind: "ark", ark: element.ARKData})
+		}
+		if element.Content != "" {
+			extras = append(extras, inboundExtra{kind: "text", text: element.Content})
+		}
+		// msg_elements 为空时不产出空 reply 段（msg_idx 为空，与 CQ 路径的跳过语义对齐）
+		if len(element.MsgElements) > 0 {
+			extras = append(extras, replyExtra(element.MsgElements))
+			extras = append(extras, collectElementExtras(element.MsgElements)...)
+		}
+	}
+	return extras
+}
+
+// collectMessageEventExtras 汇总 ark_data、语音附件与引用消息/msg_elements，供字符串路径与段路径共用
+func collectMessageEventExtras(msg *dto.Message) []inboundExtra {
+	var extras []inboundExtra
+	for _, attachment := range msg.Attachments {
+		if extra, ok := voiceAttachmentExtra(attachment); ok {
+			extras = append(extras, extra)
+		}
+	}
+	if msg.ArkData != nil || msg.MessageType == 3 {
+		extras = append(extras, inboundExtra{kind: "ark", ark: msg.ArkData})
+	}
+	// msg_elements 为空时不产出空 reply 段（msg_idx 为空，与 CQ 路径的跳过语义对齐）
+	if len(msg.MsgElements) > 0 {
+		extras = append(extras, replyExtra(msg.MsgElements))
+		extras = append(extras, collectElementExtras(msg.MsgElements)...)
+	}
+	return extras
+}
+
+// arkSegmentData 结构化卡片段数据（ark_type/ark_name/prompt/fields 四个键恒定存在）
+func arkSegmentData(ark *dto.ARKData) map[string]interface{} {
+	data := map[string]interface{}{
+		"ark_type": "",
+		"ark_name": "",
+		"prompt":   "",
+		"fields":   map[string]interface{}{},
+	}
+	if ark == nil {
+		return data
+	}
+	data["ark_type"] = ark.ARKType
+	data["ark_name"] = ark.ARKName
+	data["prompt"] = ark.Prompt
+	if ark.Fields != nil {
+		data["fields"] = ark.Fields
+	}
+	return data
+}
+
+// messageEventSegments 把新增字段降级为消息段
+func messageEventSegments(msg *dto.Message) []map[string]interface{} {
+	var segments []map[string]interface{}
+	for _, extra := range collectMessageEventExtras(msg) {
+		switch extra.kind {
+		case "record":
+			data := map[string]interface{}{"file": extra.file}
+			if extra.url != "" {
+				data["url"] = extra.url
+			}
+			if extra.asr != "" {
+				data["asr_refer_text"] = extra.asr
+			}
+			segments = append(segments, map[string]interface{}{"type": "record", "data": data})
+		case "ark":
+			segments = append(segments, map[string]interface{}{"type": "ark", "data": arkSegmentData(extra.ark)})
+		case "reply":
+			segments = append(segments, map[string]interface{}{
+				"type": "reply",
+				"data": map[string]interface{}{"msg_idx": extra.msgIdx, "content": extra.text},
+			})
+		case "text":
+			segments = append(segments, map[string]interface{}{"type": "text", "data": map[string]interface{}{"text": extra.text}})
+		}
+	}
+	return segments
+}
+
+// messageEventCQText 把新增字段降级为 CQ 码/正文，追加在图片码之后
+func messageEventCQText(msg *dto.Message) string {
+	var text string
+	for _, extra := range collectMessageEventExtras(msg) {
+		switch extra.kind {
+		case "record":
+			text += "[CQ:record,file=" + extra.file
+			if extra.asr != "" {
+				text += ",asr=" + cqparse.EncodeValue(extra.asr)
+			}
+			text += "]"
+		case "ark":
+			if extra.ark == nil {
+				// message_type=3 但无 ark_data：保留卡片存在的事实，不静默丢弃
+				text += "[CQ:ark]"
+				break
+			}
+			text += "[CQ:ark,ark_type=" + cqparse.EncodeValue(extra.ark.ARKType) +
+				",ark_name=" + cqparse.EncodeValue(extra.ark.ARKName) +
+				",prompt=" + cqparse.EncodeValue(extra.ark.Prompt) + "]"
+		case "reply":
+			if extra.msgIdx == "" {
+				break
+			}
+			text += "[CQ:reply,msg_idx=" + cqparse.EncodeValue(extra.msgIdx) + "]"
+		case "text":
+			text += extra.text
+		}
+	}
+	return text
 }
 
 // ConvertToInt64 尝试将 interface{} 类型的值转换为 int64 类型

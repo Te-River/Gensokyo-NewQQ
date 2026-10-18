@@ -98,6 +98,8 @@ await bot.send_group_msg(
 
 收到的回复消息会在文本开头追加 `[CQ:reply,id=虚拟ID]`。
 
+入站引用消息会上报 `[CQ:reply,msg_idx=<REFIDX 索引>]`（与出站 `[CQ:reply,id=<虚拟消息ID>]` 区分；出站会剥离 `msg_idx` 形态）。
+
 ### 数组模式
 
 ```json

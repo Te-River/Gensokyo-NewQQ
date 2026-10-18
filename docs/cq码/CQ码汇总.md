@@ -41,8 +41,22 @@ Gensokyo 为适配 QQ Bot API 特有能力而扩展的 CQ 码类型。
 | `[CQ:input_notify]` | `私聊 (C2C)` | 输入状态通知，正文发送前先展示"正在输入"。 | [查看](./扩展CQ码/扩展cq码-cq-input_notify.md) |
 | `[CQ:stream]` | `私聊 (C2C)` | 流式消息，逐片展示实现打字机效果（start→mid→finish）。 | [查看](./扩展CQ码/扩展cq码-cq-stream.md) |
 | `[CQ:keyboard]` | `q群 (Group Chat)` / `C2C (私聊)` | 文本消息附加内嵌键盘（按钮消息）。⚠️ 按钮仅在 Markdown 消息下渲染，建议与 `[CQ:markdown]` 配合。 | [查看](./扩展CQ码/扩展cq码-cq-keyboard.md) |
-| `[CQ:set_group]` | `q群 (Group Chat)` | 出站动作统一码：成员禁言/解禁（`action=ban`）、全员禁言开关（`action=whole_ban`）、入群申请审批（`action=add_request`）、审批策略执行/删除（`action=strategy_execute`/`strategy_delete`）、成员踢出（`action=kick`，批量≤20可同步拉黑）、黑名单增删（`action=blacklist_add`/`blacklist_del`）。 | [查看](./扩展CQ码/扩展cq码-cq-set_group.md) |
+| `[CQ:set_group]` | `q群 (Group Chat)` | 出站动作统一码：成员禁言/解禁（`action=ban`）、⚠️ 全员禁言（`action=whole_ban` **固定失败**：官方 POST 无全员禁言写入字段）、入群申请审批（`action=add_request`）、审批策略执行/删除（`action=strategy_execute`/`strategy_delete`）、成员踢出（`action=kick`，批量≤20可同步拉黑）、黑名单增删（`action=blacklist_add`/`blacklist_del`）。 | [查看](./扩展CQ码/扩展cq码-cq-set_group.md) |
 | `[CQ:group_info]` | `q群 (Group Chat)` / `C2C (私聊)` | 群信息内容展开码：正文展开群名/群简报/成员数或三字段 JSON，支持指定群与失败 fallback，同群多码合并一次取数。⚠️ 需 `cq_parse_mode: new`；legacy/shadow 下该码不被识别会原文发出。 | [查看](./扩展CQ码/扩展cq码-cq-group_info.md) |
+
+---
+
+## 入站新增形态（2026-09）
+
+入站消息事件新增三种上报形态（随消息事件字段降级产生，无独立文档）：
+
+| CQ 码 | 说明 |
+|-------|------|
+| `[CQ:ark,ark_type=...,ark_name=...,prompt=...]` | 结构化卡片（`message_type=3` / `ark_data`），`ark_type` 为官方枚举；无 `ark_data` 时上报裸 `[CQ:ark]` |
+| `[CQ:record,file=...,asr=...]` | 语音附件（`content_type=voice`），`file` 取 `voice_wav_url`，缺失时回退附件 url；`asr` 为空时省略 |
+| `[CQ:reply,msg_idx=...]` | 引用消息（`msg_elements`），`msg_idx` 为 REFIDX 索引，与出站 `[CQ:reply,id=...]` 区分 |
+
+> 三种形态均为**入站专用**：出站解析会剥离 `[CQ:ark]`（含参数）与 `[CQ:reply,msg_idx=...]`，`[CQ:record]` 的尾随 `,asr=` 参数亦被排除。
 
 ---
 

@@ -190,6 +190,10 @@ func kindForAction(action string) Kind {
 		return KindMedia
 	case "markdown", "keyboard", "card", "input_notify", "stream", "music", "avatar", "group_info":
 		return KindContent
+	case "ark":
+		// 入站专用卡片码：出站无消费点，由 inboundOnlyHandler 纯剥离
+		// （对齐 legacy ProcessCQInboundOnlyCodes）
+		return KindContent
 	case "reply", "active", "wakeup":
 		return KindControl
 	case "member", "remove", "set_group":

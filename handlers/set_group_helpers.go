@@ -2,13 +2,13 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/hoshinonyaruko/gensokyo/idmap"
-	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/tencent-connect/botgo/dto"
 	"github.com/tencent-connect/botgo/openapi"
 )
@@ -42,42 +42,30 @@ func resolveMemberOpenID(userID string) (string, error) {
 	return realID, nil
 }
 
-// applyRestrictChatSetting 查询当前群禁言设置并应用变更后提交。
-// memberOpenID 非空时按 duration 增/删该成员禁言条目（duration<=0 表示解除）；
-// allMute 非 nil 时切换全员禁言开关；两者可同时生效，均保留对方已有设置。
-// 解除禁言依赖当前设置列表，查询失败时中止提交，避免空列表清空全员禁言。
+// errWholeBanUnsupported 官方 POST /restrict_chat_setting 请求体只有 members，
+// 无全员禁言写入字段（global_rule.mode 仅出现在查询响应中）
+var errWholeBanUnsupported = errors.New("官方未提供全员禁言写入字段，仅支持按成员禁言")
+
+// applyRestrictChatSetting 按官方增量语义提交群成员禁言变更。
+// memberOpenID 非空时按 duration 增/删该成员禁言条目：
+// duration>0 → op=add + mute_expire_at=now+duration（RFC3339）；
+// duration<=0 → op=del + 空 mute_expire_at（立即解除）。
+// 官方 POST 按成员 op 增量生效，无需先查询当前设置（旧实现"查询失败即中止"的保护不再必要）。
+// allMute 非 nil 表示调用方要求切换全员禁言：官方无对应写入字段，固定返回 errWholeBanUnsupported。
 func applyRestrictChatSetting(apiv2 openapi.OpenAPI, groupOpenID string, memberOpenID string, duration int, allMute *bool) error {
-	setting := &dto.RestrictChatSetting{GroupOpenID: groupOpenID}
-	// 查询当前设置作为基础，避免覆盖已有禁言条目
-	if cur, err := apiv2.RestrictChatSetting(context.TODO(), groupOpenID); err == nil {
-		setting.MemberRestrict = cur.MemberRestrict
-	} else if memberOpenID != "" && duration <= 0 {
-		// 解禁路径依赖当前列表（先移除该成员条目），查询失败时无法安全提交，
-		// 空列表会清空群里所有已设置的禁言，直接中止并返回错误
-		return fmt.Errorf("查询禁言状态失败，无法安全解除禁言: %w", err)
-	} else {
-		mylog.Printf("set_group: 查询禁言状态失败: %v", err)
-	}
 	if allMute != nil {
-		setting.AllMute = *allMute
+		return errWholeBanUnsupported
 	}
-	if memberOpenID != "" {
-		// 先移除该成员旧条目，避免重复
-		var kept []dto.MemberRestrict
-		for _, m := range setting.MemberRestrict {
-			if m.MemberOpenID != memberOpenID {
-				kept = append(kept, m)
-			}
-		}
-		setting.MemberRestrict = kept
-		if duration > 0 {
-			setting.MemberRestrict = append(setting.MemberRestrict, dto.MemberRestrict{
-				MemberOpenID:  memberOpenID,
-				RestrictUntil: time.Now().Unix() + int64(duration),
-			})
-		}
+	item := dto.MemberMuteState{MemberOpenID: memberOpenID}
+	if duration > 0 {
+		item.Op = "add"
+		item.MuteExpireAt = time.Now().Add(time.Duration(duration) * time.Second).Format(time.RFC3339)
+	} else {
+		item.Op = "del"
 	}
-	return apiv2.SetRestrictChatSetting(context.TODO(), groupOpenID, setting)
+	return apiv2.SetRestrictChatSetting(context.TODO(), groupOpenID, &dto.RestrictChatSetting{
+		Members: []dto.MemberMuteState{item},
+	})
 }
 
 // approveJoinRequest 审批入群申请（approve=true 通过 / false 拒绝）。

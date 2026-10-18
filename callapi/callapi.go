@@ -93,9 +93,9 @@ type ParamsContent struct {
 	Reason               string `json:"reason,omitempty"`                  // 拒绝理由(扩展参数)
 	AddToMemberBlacklist bool   `json:"add_to_member_blacklist,omitempty"` // 是否同时拉黑(扩展参数)
 	// 群聊管理扩展 action 参数
-	NextIndex      int      `json:"next_index,omitempty"`      // 入群申请列表分页游标
-	Cursor         string   `json:"cursor,omitempty"`          // 策略列表分页游标
-	Limit          int      `json:"limit,omitempty"`           // 策略列表单页数量
+	NextIndex      int      `json:"next_index,omitempty"`      // 入群申请列表分页游标(旧字段, 官方已改 cursor)
+	Cursor         string   `json:"cursor,omitempty"`          // 分页游标(策略列表/入群申请列表)
+	Limit          int      `json:"limit,omitempty"`           // 单页数量(策略列表/入群申请列表)
 	StrategyID     string   `json:"strategy_id,omitempty"`     // 策略 ID
 	GroupOpenIDs   StringList `json:"group_openids,omitempty"`   // 关联群 openid 列表
 	GroupIDs       []uint64 `json:"group_ids,omitempty"`       // 关联 QQ 群号列表

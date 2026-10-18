@@ -43,7 +43,20 @@
 | `https://` | `url_files` | HTTPS URL，同上 |
 | `base64://` | `base64_file` | 去除前缀后直接走 QQ CDN 上传 |
 
-文件上传走 `POST /v2/groups/{group_id}/files` 或 `POST /v2/users/{user_id}/files` 接口，`file_type=4`。
+文件上传走 `POST /v2/groups/{group_id}/files` 或 `POST /v2/users/{user_id}/files` 接口，`file_type=4`（上传方式与大小限制见下节）。
+
+## 上传方式与大小限制
+
+QQ Bot API v2 的 `/files` 接口支持三种上传方式，Gensokyo 按数据大小自动选择：
+
+| 方式 | 触发条件 | 说明 |
+|------|----------|------|
+| URL 上传 | `file` 为 `http(s)://` | 传入 `url`，平台下载转存；服务端可能下载失败 |
+| 直接上传二进制 | base64/二进制数据 ≤ 5MB | 传入 `file_data`，官方限制"需要在 5M 以内" |
+| 分片上传合并 | base64/二进制数据 > 5MB | 先 `upload_prepare` + `upload_part_finish` 完成分片，再携带 `upload_id` 调用本接口合并（官方推荐） |
+
+- **5MB 直传上限**：`file_data` 超过 5MB 时 QQ 侧会拒绝（`850031 上传文件超过大小限制`），因此 Gensokyo 在 base64/二进制直传超过 5MB 时自动改走分片上传，无需用户配置；5MB 以内仍走 `file_data` 直传，行为不变。
+- **平台软限制**：分片上传合并后，平台按类型有软限制（图片 20MB / 视频 30MB / 语音 20MB / 文件 200MB）；超过软限制平台会降级为文件类型下发，超过硬限制（200MB）则报错。软限制是平台侧行为，不影响客户端选择上传方式。
 
 ## 文件名优先级
 
