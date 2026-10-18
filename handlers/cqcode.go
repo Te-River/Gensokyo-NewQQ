@@ -19,13 +19,17 @@ import (
 
 // ---------- 包级正则表达式（避免重复编译） ----------
 
+// record 码的 URL 捕获排除尾随参数：入站 messageEventCQText 会为语音附件追加
+// ",asr=<转义值>"（值内 , 与 ] 已转义为 &#44; / &#93;），插件把入站原文回灌
+// 出站时，URL 必须到 ,asr= 为止。只以已知参数名 asr 作切分点（而非任意逗号），
+// 因此 URL 自身含逗号（如 https://x/a,b.wav）仍完整落入捕获组。
 var (
 	httpUrlImagePattern  = regexp.MustCompile(`\[CQ:image,file=http://(.+?)\]`)
 	httpsUrlImagePattern = regexp.MustCompile(`\[CQ:image,file=https://(.+?)\]`)
 	base64ImagePattern   = regexp.MustCompile(`\[CQ:image,file=base64://(.+?)\]`)
-	base64RecordPattern  = regexp.MustCompile(`\[CQ:record,file=base64://(.+?)\]`)
-	httpUrlRecordPattern = regexp.MustCompile(`\[CQ:record,file=http://(.+?)\]`)
-	httpsUrlRecordPattern = regexp.MustCompile(`\[CQ:record,file=https://(.+?)\]`)
+	base64RecordPattern  = regexp.MustCompile(`\[CQ:record,file=base64://(.+?)(?:,asr=[^\]]*)?\]`)
+	httpUrlRecordPattern = regexp.MustCompile(`\[CQ:record,file=http://(.+?)(?:,asr=[^\]]*)?\]`)
+	httpsUrlRecordPattern = regexp.MustCompile(`\[CQ:record,file=https://(.+?)(?:,asr=[^\]]*)?\]`)
 	httpUrlVideoPattern  = regexp.MustCompile(`\[CQ:video,file=http://(.+?)\]`)
 	httpsUrlVideoPattern = regexp.MustCompile(`\[CQ:video,file=https://(.+?)\]`)
 	base64VideoPattern   = regexp.MustCompile(`\[CQ:video,file=base64://(.+?)\]`)
@@ -49,11 +53,11 @@ var (
 func initPlatformPatterns() {
 	if runtime.GOOS == "windows" {
 		localImagePattern = regexp.MustCompile(`\[CQ:image,file=file:///([^\]]+?)\]`)
-		localRecordPattern = regexp.MustCompile(`\[CQ:record,file=file:///([^\]]+?)\]`)
+		localRecordPattern = regexp.MustCompile(`\[CQ:record,file=file:///([^\]]+?)(?:,asr=[^\]]*)?\]`)
 		localVideoPattern = regexp.MustCompile(`\[CQ:video,file=file:///([^\]]+?)\]`)
 	} else {
 		localImagePattern = regexp.MustCompile(`\[CQ:image,file=file://([^\]]+?)\]`)
-		localRecordPattern = regexp.MustCompile(`\[CQ:record,file=file://([^\]]+?)\]`)
+		localRecordPattern = regexp.MustCompile(`\[CQ:record,file=file://([^\]]+?)(?:,asr=[^\]]*)?\]`)
 		localVideoPattern = regexp.MustCompile(`\[CQ:video,file=file://([^\]]+?)\]`)
 	}
 }
@@ -182,6 +186,23 @@ func ProcessCQWakeup(text string, foundItems map[string][]string) string {
 		}
 		return ""
 	})
+}
+
+// ---------- 入站专用 CQ 码的出站剥离 ----------
+
+// 入站上报会产出 [CQ:ark,...]（卡片）与 [CQ:reply,msg_idx=...]（引用索引）两类
+// 出站链路无消费点的码，插件把入站原文回传出站时它们会以字面量文本发给用户。
+// ark 参数值内可能含 &#44; 等转义，故整段匹配到右括号，不按逗号切分；
+// reply 仅剥离 msg_idx= 形态，[CQ:reply,id=数字] 是既有出站引用语义（由 replyRe 消费）。
+var (
+	arkCQPattern      = regexp.MustCompile(`\[CQ:ark[^\]]*\]`)
+	replyMsgIdxPattern = regexp.MustCompile(`\[CQ:reply,msg_idx=[^\]]*\]`)
+)
+
+// ProcessCQInboundOnlyCodes 剥离出站无消费点的入站专用 CQ 码（ark / reply,msg_idx=）
+func ProcessCQInboundOnlyCodes(text string) string {
+	text = arkCQPattern.ReplaceAllString(text, "")
+	return replyMsgIdxPattern.ReplaceAllString(text, "")
 }
 
 // ---------- 出站动作型 CQ 码（单次扫描 + 类型分发） ----------
@@ -459,7 +480,7 @@ func cqSetGroupBanAction(params map[string]string, match, defaultGroupID string,
 }
 
 // cqSetGroupWholeBanAction 处理 [CQ:set_group,action=whole_ban,group_id=虚拟群ID,enable=true/false]
-// 切换全员禁言
+// 切换全员禁言：官方 POST /restrict_chat_setting 无全员禁言写入字段，共享底层固定返回失败（仅日志）
 func cqSetGroupWholeBanAction(params map[string]string, match, defaultGroupID string, apiv2 openapi.OpenAPI) string {
 	groupID := params["group_id"]
 	if groupID == "" {
@@ -482,8 +503,6 @@ func cqSetGroupWholeBanAction(params map[string]string, match, defaultGroupID st
 	allMute := enable
 	if err := applyRestrictChatSetting(apiv2, groupOpenID, "", 0, &allMute); err != nil {
 		mylog.Printf("[CQ:set_group] whole_ban: 设置全员禁言失败: %v", err)
-	} else {
-		mylog.Printf("[CQ:set_group] whole_ban: 已设置全员禁言 group=%s enable=%v", groupOpenID, enable)
 	}
 	return ""
 }

@@ -25,7 +25,7 @@
 | `get_online_clients` | get_online_clients.go | `-` | 获取在线客户端。 |
 | `send_group_forward_msg` | send_group_forward_msg.go | `q群 (Group Chat)` | 发送合并转发消息。 |
 | `set_group_ban` | set_group_ban.go | `q群 (Group Chat)` | 单人禁言，`duration` 秒数（0=解除禁言）。与 `[CQ:set_group,action=ban]` 共享实现底层。 |
-| `set_group_whole_ban` | set_group_whole_ban.go | `q群 (Group Chat)` | 全员禁言，`enable` 开关。与 `[CQ:set_group,action=whole_ban]` 共享实现底层。 |
+| `set_group_whole_ban` | set_group_whole_ban.go | `q群 (Group Chat)` | ⚠️ **固定失败**：官方 POST /restrict_chat_setting 无全员禁言写入字段，返回 retcode 100。与 `[CQ:set_group,action=whole_ban]` 共享实现底层。 |
 | `set_group_kick` | set_group_kick.go | `q群 (Group Chat)` | 批量移出群成员（单批≤20，`user_id`/`user_ids` 二选一、可合并去重），可同步拉黑。与 `[CQ:set_group,action=kick]` 共享实现底层。 |
 | `set_group_card` | set_group_card.go | `-` | QQ 官方 API 未提供设置群名片接口，明确失败回执（retcode 100）。 |
 | `.handle_quick_operation` | handle_quick_operation.go | `-` | OneBot 快速操作。 |
@@ -50,11 +50,11 @@
 | [`send_private_msg_wakeup`](./扩展api/扩展api-send_private_msg_wakeup.md) | send_private_msg_wakeup.go | `私聊 (C2C)` | 发送 `is_wakeup=true` 的 C2C 召回消息。 |
 | `send_private_msg_sse` | send_private_msg_sse.go | `私聊 (C2C)` | SSE 私聊消息。 |
 | `get_group_ban` | set_group_ban.go | `q群 (Group Chat)` | 兼容入口，处理逻辑等同 `set_group_ban`。 |
-| `get_group_whole_ban` | set_group_whole_ban.go | `q群 (Group Chat)` | 兼容入口，处理逻辑等同 `set_group_whole_ban`。 |
+| `get_group_whole_ban` | set_group_whole_ban.go | `q群 (Group Chat)` | 兼容入口，处理逻辑等同 `set_group_whole_ban`（同样固定失败 retcode 100）。 |
 | `set_group_add_request` | set_group_add_request.go | `q群 (Group Chat)` | 入群申请审批。与 `[CQ:set_group,action=add_request]` 共享实现底层。 |
 | `send_to_group` | send_group_msg.go | `q群 (Group Chat)` | `send_group_msg` 别名。 |
 | [`delete_group_msg`](./扩展api/扩展api-delete_group_msg.md) | delete_group_msg.go | `q群 (Group Chat)` | 撤回群内指定用户或 Bot 自身的消息；支持自动查找最后一条消息。 |
-| [`get_group_join_request_list`](./扩展api/扩展api-get_group_join_request_list.md) | get_group_join_request_list.go | `q群 (Group Chat)` | 拉取入群申请列表，`next_index` 分页；返回的 `group_id`/`user_id`/`flag` 可直接回传 `set_group_add_request` 审批。 |
+| [`get_group_join_request_list`](./扩展api/扩展api-get_group_join_request_list.md) | get_group_join_request_list.go | `q群 (Group Chat)` | 拉取入群申请列表，`cursor`/`limit` 分页（旧 `next_index` 兼容回退）；返回的 `group_id`/`user_id`/`flag` 可直接回传 `set_group_add_request` 审批。 |
 | [`get_group_bot_state`](./扩展api/扩展api-get_group_bot_state.md) | get_group_bot_state.go | `q群 (Group Chat)` | 获取机器人在群内状态（入群时间/可推送/角色）。 |
 | [`join_approval_strategy_create`](./扩展api/扩展api-join_approval_strategy.md) | join_approval_strategy.go | `-` | 创建入群自动审批策略（`group_openids`/`group_ids` 二选一）。 |
 | [`join_approval_strategy_list`](./扩展api/扩展api-join_approval_strategy.md) | join_approval_strategy.go | `-` | 查询策略列表（`cursor`/`limit` 分页）。 |

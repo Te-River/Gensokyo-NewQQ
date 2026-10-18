@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -11,29 +12,38 @@ import (
 	"os"
 	"time"
 
+	"github.com/hoshinonyaruko/gensokyo/images"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/tencent-connect/botgo/dto"
 	"github.com/tencent-connect/botgo/openapi"
 )
 
-// ---------- 软限制（超过此限制的文件自动走分片上传） ----------
+// maxDirectFileDataBytes 官方 file_data 直传上限：超过 5MB 必须改用 URL 上传或分片上传。
+// 来源：POST /v2/groups/{group_openid}/files 与 POST /v2/users/{user_openid}/files 现文档。
+const maxDirectFileDataBytes = 5 * 1024 * 1024
 
+// fileTypeSoftLimits 各类型的平台软限制：分片上传合并后，超过软限制平台会把内容降级为文件类型下发，
+// 超过硬限制（getHardLimit）则报错。仅用于日志提示，不再作为是否走 file_data 直传的判据。
 var fileTypeSoftLimits = map[int]int64{
-	1: 20 * 1024 * 1024,   // 图片：20 MB
-	2: 30 * 1024 * 1024,   // 视频：30 MB
-	3: 20 * 1024 * 1024,   // 语音：20 MB
-	4: 200 * 1024 * 1024,  // 文件：200 MB（软限制 == 硬限制）
+	1: 20 * 1024 * 1024,  // 图片：20 MB
+	2: 30 * 1024 * 1024,  // 视频：30 MB
+	3: 20 * 1024 * 1024,  // 语音：20 MB
+	4: 200 * 1024 * 1024, // 文件：200 MB（软限制 == 硬限制）
 }
 
 const defaultBlockSize = 5 * 1024 * 1024 // 5MB（备用，优先用服务端下发的 block_size）
 
-// needsChunkedUpload 判断文件是否需要走分片上传
+// needsChunkedUpload 判断 base64/二进制直传是否必须改走分片上传。
+// 判据只有一条：超过官方 file_data 直传上限（5MB）。
+// fileType 仅用于日志提示：超过该类型软限制时，平台会把内容降级为文件类型下发。
 func needsChunkedUpload(fileSize int64, fileType int) bool {
-	limit, ok := fileTypeSoftLimits[fileType]
-	if !ok {
-		limit = 200 * 1024 * 1024
+	if fileSize <= maxDirectFileDataBytes {
+		return false
 	}
-	return fileSize >= limit
+	if limit, ok := fileTypeSoftLimits[fileType]; ok && fileSize > limit {
+		mylog.Printf("文件大小 %d 超过类型 %d 的软限制 %d，平台侧将降级为文件类型下发", fileSize, fileType, limit)
+	}
+	return true
 }
 
 // chunkedUpload 完整的分片上传流程
@@ -143,13 +153,52 @@ func chunkedUpload(ctx context.Context, apiv2 openapi.OpenAPI, id string, isGrou
 }
 
 // tryChunkedUpload 尝试分片上传；如果文件太小或不满足条件则回退到 URL 直传
-// 返回 (fileInfo, shouldFallback, error)
-// shouldFallback=true 时调用方应使用原有的 URL 直传逻辑
+// 返回 (fileInfo, error)：error 非 nil 时调用方应使用原有的 URL 直传逻辑
 func tryChunkedUpload(ctx context.Context, apiv2 openapi.OpenAPI, id string, isGroup bool, data []byte, fileType int, fileName string) (string, error) {
 	if !needsChunkedUpload(int64(len(data)), fileType) {
-		return "", fmt.Errorf("文件大小未超过软限制，使用 URL 直传")
+		return "", fmt.Errorf("文件大小未超过 file_data 直传上限(5MB)，使用 URL 直传")
 	}
 	return chunkedUpload(ctx, apiv2, id, isGroup, data, fileType, fileName)
+}
+
+// mediaMessageToCreate 构造 msg_type=7 的富媒体消息，字段与 images 包保持一致
+func mediaMessageToCreate(fileInfo, content, eventID, messageID string, msgseq int) *dto.MessageToCreate {
+	return &dto.MessageToCreate{
+		Content: content,
+		Media:   &dto.Media{FileInfo: fileInfo},
+		MsgID:   messageID,
+		EventID: eventID,
+		MsgSeq:  msgseq,
+		MsgType: 7,
+	}
+}
+
+// createAndUploadMediaMessage 群聊富媒体上传：base64 直传超过 5MB 时改走分片上传。
+// images 包不能反向调用 handlers 的 chunkedUpload（handlers → images 单向依赖），
+// 因此直传上限的判定放在调用侧；≤5MB 仍交给 images 包走 file_data 直传。
+func createAndUploadMediaMessage(ctx context.Context, base64EncodedData, eventID string, fileType uint64, srvSendMsg bool, content string, groupID string, messageID string, msgseq int, apiv2 openapi.OpenAPI) (*dto.MessageToCreate, error) {
+	if decoded, err := base64.StdEncoding.DecodeString(base64EncodedData); err == nil && needsChunkedUpload(int64(len(decoded)), int(fileType)) {
+		mylog.Printf("base64 数据超过 file_data 直传上限(5MB)，自动切换到分片上传 (type=%d, size=%d)", fileType, len(decoded))
+		fileInfo, err := chunkedUpload(ctx, apiv2, groupID, true, decoded, int(fileType), content)
+		if err != nil {
+			return nil, err
+		}
+		return mediaMessageToCreate(fileInfo, content, eventID, messageID, msgseq), nil
+	}
+	return images.CreateAndUploadMediaMessage(ctx, base64EncodedData, eventID, fileType, srvSendMsg, content, groupID, messageID, msgseq, apiv2)
+}
+
+// createAndUploadMediaMessagePrivate 单聊版本，语义同 createAndUploadMediaMessage
+func createAndUploadMediaMessagePrivate(ctx context.Context, base64EncodedData, eventID string, fileType uint64, srvSendMsg bool, content string, userID string, messageID string, msgseq int, apiv2 openapi.OpenAPI) (*dto.MessageToCreate, error) {
+	if decoded, err := base64.StdEncoding.DecodeString(base64EncodedData); err == nil && needsChunkedUpload(int64(len(decoded)), int(fileType)) {
+		mylog.Printf("base64 数据超过 file_data 直传上限(5MB)，自动切换到分片上传 (type=%d, size=%d)", fileType, len(decoded))
+		fileInfo, err := chunkedUpload(ctx, apiv2, userID, false, decoded, int(fileType), content)
+		if err != nil {
+			return nil, err
+		}
+		return mediaMessageToCreate(fileInfo, content, eventID, messageID, msgseq), nil
+	}
+	return images.CreateAndUploadMediaMessagePrivate(ctx, base64EncodedData, eventID, fileType, srvSendMsg, content, userID, messageID, msgseq, apiv2)
 }
 
 // ---------- 辅助函数 ----------

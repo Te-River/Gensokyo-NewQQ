@@ -883,13 +883,13 @@ func getGuildIDFromMessagev2(message callapi.ActionMessage) (string, string, err
 }
 
 // uploadMedia 上传媒体并返回FileInfo
-// 智能选择：小文件走 URL 直传，大文件自动切到分片上传
+// 智能选择：≤5MB 走 file_data 直传，>5MB 自动切到分片上传
 func uploadMediaPrivate(ctx context.Context, UserID string, richMediaMessage *dto.RichMediaMessage, apiv2 openapi.OpenAPI) (string, error) {
-	// 如果有 base64 文件数据且超过软限制，走分片上传
+	// 官方 file_data 直传上限 5MB，超过则改走分片上传
 	if richMediaMessage.FileData != "" {
 		decoded, err := base64.StdEncoding.DecodeString(richMediaMessage.FileData)
 		if err == nil && needsChunkedUpload(int64(len(decoded)), int(richMediaMessage.FileType)) {
-			mylog.Printf("文件超过软限制，自动切换到分片上传 (type=%d, size=%d)",
+			mylog.Printf("文件超过 file_data 直传上限(5MB)，自动切换到分片上传 (type=%d, size=%d)",
 				richMediaMessage.FileType, len(decoded))
 			return chunkedUpload(ctx, apiv2, UserID, false, decoded, int(richMediaMessage.FileType), richMediaMessage.FileName)
 		}

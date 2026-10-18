@@ -31,13 +31,16 @@ func (o *openAPIv2) BotInGroupState(ctx context.Context, groupOpenID string) (*d
 	return resp.Result().(*dto.BotInGroupState), nil
 }
 
-// JoinRequestList 入群申请列表
-func (o *openAPIv2) JoinRequestList(ctx context.Context, groupOpenID string, nextIndex int) (*dto.JoinRequestList, error) {
+// JoinRequestList 入群申请列表 (cursor 分页游标, 空串表示首页; limit 单页数量 默认20 最大50)
+func (o *openAPIv2) JoinRequestList(ctx context.Context, groupOpenID, cursor string, limit int) (*dto.JoinRequestList, error) {
 	request := o.request(ctx).
 		SetResult(dto.JoinRequestList{}).
 		SetPathParam("group_id", groupOpenID)
-	if nextIndex > 0 {
-		request = request.SetQueryParam("next_index", strconv.Itoa(nextIndex))
+	if cursor != "" {
+		request = request.SetQueryParam("cursor", cursor)
+	}
+	if limit > 0 {
+		request = request.SetQueryParam("limit", strconv.Itoa(limit))
 	}
 	resp, err := request.Get(o.getURL(groupJoinRequestListURI))
 	if err != nil {
@@ -69,6 +72,7 @@ func (o *openAPIv2) RestrictChatSetting(ctx context.Context, groupOpenID string)
 }
 
 // SetRestrictChatSetting 设置群成员禁言
+// 官方 POST 请求体只接受 members（按成员 op 增量生效），GlobalRule 为 nil 时不参与序列化
 func (o *openAPIv2) SetRestrictChatSetting(ctx context.Context, groupOpenID string, setting *dto.RestrictChatSetting) error {
 	_, err := o.request(ctx).
 		SetPathParam("group_id", groupOpenID).

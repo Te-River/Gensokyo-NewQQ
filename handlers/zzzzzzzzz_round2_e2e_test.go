@@ -63,13 +63,19 @@ const (
 	round2UserA  = "cccccccccccccccccccccccccccccccc"
 )
 
+// round2SetGroupMessage 构造带动作型 CQ 码的正文。
+// 动作用 action=ban（成员禁言）：官方 POST /restrict_chat_setting 无全员禁言写入字段，
+// whole_ban 已改为显式失败且不再调用 SetRestrictChatSetting，无法观测「预执行一次」；
+// ban 仍走 applyRestrictChatSetting → SetRestrictChatSetting，setCalls 重新成为有效观测点。
+// user_id 用 32 位原生 OpenID（resolveMemberOpenID 直接透传）。
 func round2SetGroupMessage(groupID string) string {
-	return "hello [CQ:set_group,action=whole_ban,group_id=" + groupID + ",enable=true]"
+	return "hello [CQ:set_group,action=ban,group_id=" + groupID + ",user_id=" + round2UserA + ",duration=60]"
 }
 
 // TestC1NewModeSetGroupPreExecutedAndTextCleaned 钉死 C1：
 // arch_mode=new + cq_parse_mode=legacy 下 [CQ:set_group] 在 TryOutbound 前执行一次，
 // 正文清理后发送（cqPreExecuted 守卫不重复执行）。
+// 观测点：action=ban 经 applyRestrictChatSetting 调用 SetRestrictChatSetting（mock.setCalls）。
 func TestC1NewModeSetGroupPreExecutedAndTextCleaned(t *testing.T) {
 	adapterLoadConfig(t, "new")
 	mock := &round2E2EOpenAPI{}
@@ -86,7 +92,7 @@ func TestC1NewModeSetGroupPreExecutedAndTextCleaned(t *testing.T) {
 		t.Fatalf("HandleSendGroupMsg 返回错误: %v", err)
 	}
 	if mock.setCalls != 1 {
-		t.Fatalf("set_group 应在 TryOutbound 前执行且只执行一次: got %d", mock.setCalls)
+		t.Fatalf("set_group(ban) 应在 TryOutbound 前执行且只执行一次: got %d", mock.setCalls)
 	}
 	if mock.groupCalls != 1 {
 		t.Fatalf("应发送 1 条群消息: got %d", mock.groupCalls)
@@ -105,6 +111,7 @@ func TestC1NewModeSetGroupPreExecutedAndTextCleaned(t *testing.T) {
 
 // TestC1LegacyModeSetGroupUnchanged 钉死 C1 回归面：arch_mode=legacy 行为不变
 // （legacy 段执行动作码一次并清理正文）。
+// 观测点：action=ban 经 applyRestrictChatSetting 调用 SetRestrictChatSetting（mock.setCalls）。
 func TestC1LegacyModeSetGroupUnchanged(t *testing.T) {
 	adapterLoadConfig(t, "legacy")
 	mock := &round2E2EOpenAPI{}
@@ -119,7 +126,7 @@ func TestC1LegacyModeSetGroupUnchanged(t *testing.T) {
 		t.Fatalf("HandleSendGroupMsg 返回错误: %v", err)
 	}
 	if mock.setCalls != 1 {
-		t.Fatalf("legacy 应执行 set_group 一次: got %d", mock.setCalls)
+		t.Fatalf("legacy 应执行 set_group(ban) 一次: got %d", mock.setCalls)
 	}
 	if mock.groupCalls != 1 {
 		t.Fatalf("legacy 应发送 1 条群消息: got %d", mock.groupCalls)

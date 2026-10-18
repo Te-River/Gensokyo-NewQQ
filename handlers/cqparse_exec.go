@@ -310,6 +310,7 @@ func cqSetGroupBanExec(params map[string]string, defaultGroupID string, apiv2 op
 }
 
 // cqSetGroupWholeBanExec 全员禁言开关。修 M4：enable 非法 → 日志 + 跳过，不再泄漏。
+// 官方 POST /restrict_chat_setting 无全员禁言写入字段，共享底层固定返回失败（仅日志）。
 func cqSetGroupWholeBanExec(params map[string]string, defaultGroupID string, apiv2 openapi.OpenAPI) cqparse.ExecOutcome {
 	groupID := params["group_id"]
 	if groupID == "" {
@@ -332,8 +333,6 @@ func cqSetGroupWholeBanExec(params map[string]string, defaultGroupID string, api
 	allMute := enable
 	if err := applyRestrictChatSetting(apiv2, groupOpenID, "", 0, &allMute); err != nil {
 		mylog.Printf("[CQ:set_group] whole_ban: 设置全员禁言失败: %v", err)
-	} else {
-		mylog.Printf("[CQ:set_group] whole_ban: 已设置全员禁言 group=%s enable=%v", groupOpenID, enable)
 	}
 	return cqparse.ExecOutcome{}
 }

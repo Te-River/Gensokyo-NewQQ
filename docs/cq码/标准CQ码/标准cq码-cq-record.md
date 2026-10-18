@@ -93,6 +93,8 @@ await bot.send_group_msg(
 
 收到的语音会以 `[CQ:record,file=xxx]` 形式追加在消息文本中。
 
+入站语音消息会上报 `[CQ:record,file=<voice_wav_url 或附件 url>,asr=<ASR 文本>]`（`asr` 为空时省略）；出站解析已排除尾随 `,asr=` 参数。
+
 ### 数组模式
 
 ```json

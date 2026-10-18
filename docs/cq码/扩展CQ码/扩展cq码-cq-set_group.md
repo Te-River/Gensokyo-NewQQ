@@ -40,8 +40,8 @@
 | `group_id` | ban / whole_ban / add_request / kick / blacklist_add / blacklist_del | ❌ | string | 目标群：虚拟数字 ID 或 32 位原生 OpenID；省略时回退到消息发送的目标群（支持跨群路由） |
 | `user_id` | ban / add_request / kick / blacklist_add / blacklist_del | 二选一* | string | 目标成员：虚拟数字 ID 或 32 位原生 OpenID |
 | `user_ids` | kick / blacklist_add / blacklist_del | 二选一* | string | 批量目标成员，逗号分隔；与 `user_id` 同时存在时合并去重，超 20 截断并警告 |
-| `duration` | ban | ❌ | int | 禁言时长（秒）；`>0` 禁言至当前时间 + duration，省略或 `0` 表示解除禁言 |
-| `enable` | whole_ban | ❌ | bool | 全员禁言开关：`true` 开启 / `false` 关闭；省略按 `false` 处理 |
+| `duration` | ban | ❌ | int | 禁言时长（秒）；`>0` 禁言至当前时间 + duration（官方 `op=add` + `mute_expire_at`），省略或 `0` 表示解除禁言（官方 `op=del`） |
+| `enable` | whole_ban | ❌ | bool | 全员禁言开关：`true` 开启 / `false` 关闭；省略按 `false` 处理。**官方 POST 无全员禁言写入字段，该动作固定失败**（详见下） |
 | `flag` | add_request | ✅ | string | 入群申请 ID（`join_request_id`），来自入站 request 事件或 `get_group_join_request_list` 返回 |
 | `approve` | add_request | ❌ | bool | `true` = 通过（op=approve）/ `false` = 拒绝（op=decline）；省略按 `true` 处理 |
 | `reason` | add_request | ❌ | string | 拒绝理由，仅 `approve=false` 时生效 |
@@ -59,8 +59,8 @@
 
 | 值 | 操作 | 调用 QQ API |
 |----|------|-------------|
-| `ban` | 群成员禁言 / 解禁 | `SetRestrictChatSetting` |
-| `whole_ban` | 群全员禁言开关 | `SetRestrictChatSetting`（AllMute） |
+| `ban` | 群成员禁言 / 解禁 | `SetRestrictChatSetting`（`members[{op,member_openid,mute_expire_at}]`） |
+| `whole_ban` | 群全员禁言开关（**固定失败**：官方 POST 无全员禁言写入字段） | 共享底层 `SetRestrictChatSetting`（不提交请求） |
 | `add_request` | 审批入群申请 | `ApprovalJoinRequest` |
 | `strategy_execute` | 执行自动审批策略（全量扫描，异步约 10 分钟） | `ExecuteJoinApprovalStrategy` |
 | `strategy_delete` | 删除自动审批策略 | `DeleteJoinApprovalStrategy` |
@@ -84,13 +84,16 @@
 
 ### `duration`（仅 ban）
 
-- `> 0`：禁言该成员至「当前时间 + duration 秒」（`RestrictUntil`）。
-- `= 0` 或省略：解除禁言——先查询群当前禁言设置，仅移除该成员的条目，**不影响其他成员的禁言状态**。
+- `> 0`：禁言该成员至「当前时间 + duration 秒」——官方 `op=add` + `mute_expire_at`（RFC3339）。
+- `= 0` 或省略：解除禁言——官方 `op=del` + 空 `mute_expire_at`（立即解除），**不影响其他成员的禁言状态**（官方按成员 op 增量生效，无需先查询当前设置）。
 
 ### `enable`（仅 whole_ban）
 
-- `true`：全员禁言开启；`false`：关闭。
-- 提交时保留群当前的成员禁言列表（`MemberRestrict`），不会清掉已设置的单项禁言。
+- `true`：请求开启全员禁言；`false`：请求关闭。
+- **官方 `POST /v2/groups/{group_openid}/restrict_chat_setting` 请求体只有 `members`，没有全员禁言写入字段**（`global_rule.mode` 只出现在查询响应中），因此该动作在官方契约下无可用写入字段：
+  - API 路径（`set_group_whole_ban` / `get_group_whole_ban`）返回**失败回执**：`retcode=100`，`message` 为「官方未提供全员禁言写入字段，仅支持按成员禁言」；
+  - CQ 码路径无结构化回执，仅记录失败日志，CQ 码仍从文本移除；
+  - 两条路径都不再提交任何请求（此前提交的 `all_mute` 字段官方并不接受）。
 
 ### `flag`（仅 add_request）
 
@@ -130,7 +133,7 @@
 - **反查失败**：ID 反查 OpenID 失败 → 动作不执行，CQ 码从文本移除（不发送原文）；kick / blacklist 动作逐个反查，失败的单个成员跳过不中断整批。
 - **批量上限**：kick / blacklist 单批最多 20 人（官方接口上限），超出截断并记录警告日志；单个成员也走批量接口。
 - **黑名单 add 限制**：群内成员加入黑名单会被官方拒绝（群内成员应使用 `kick` 的 `add_blacklist`），错误透传日志，不影响消息发送。
-- **执行失败**：QQ API 调用失败仅记录日志，不阻断消息中其余文本的发送。
+- **执行失败**：QQ API 调用失败仅记录日志，不阻断消息中其余文本的发送；`whole_ban` 因官方 POST 无全员禁言写入字段**固定失败**（见 `enable` 一节）。
 - **移除语义**：CQ 码执行后一律从文本移除，无论成败都不会把 CQ 码原文发到群里。
 - **动作型 CQ 码仅群聊生效**：`[CQ:set_group]` 在群聊路径（`send_group_msg`）执行；私聊（C2C）/转发节点路径一律**拦截**——码从文本移除、记录日志、不执行不发送（2026-09 修复，此前私聊/转发会原样泄漏为聊天文本）。
 - **与 OneBot API 的关系**：`/set_group_ban`、`/set_group_whole_ban`、`/set_group_add_request`、`/set_group_kick` 等 API handler 与 `[CQ:set_group]` 共享同一底层实现，行为一致；API 路径有结构化回执（retcode），CQ 码路径无结构化回执。
@@ -188,6 +191,8 @@
 ```text
 [CQ:set_group,action=whole_ban,group_id=821404315,enable=true] 全员禁言已开启
 ```
+
+发送后：文本"全员禁言已开启"正常发送；**全员禁言本身不会生效**——官方 POST 无全员禁言写入字段，动作固定失败（仅日志），需改用按成员禁言（`action=ban`）。
 
 ### 审批入群（通过）
 
@@ -250,6 +255,8 @@ async def _(bot: Bot, event: GroupMessageEvent):
     await bot.send_group_msg(group_id=event.group_id,
         message="[CQ:set_group,action=whole_ban,enable=true] 全员禁言已开启")
 ```
+
+注：`whole_ban` 固定失败（官方无全员禁言写入字段），示例仅用于展示码格式与正文清理行为；实际禁言请逐成员使用 `action=ban`。
 
 ### 入群审批（配合 get_group_join_request_list）
 
@@ -322,3 +329,6 @@ A: 官方限制：仅已移出/已退群成员可加入黑名单，群内成员 
 
 **Q: 执行失败会怎样？**
 A: 仅记录日志，不影响消息中其余文本的发送；CQ 码同样会被移除，不会把原始 CQ 码文本发到群里。
+
+**Q: `whole_ban` 为什么总是失败？**
+A: QQ 官方 `POST /v2/groups/{group_openid}/restrict_chat_setting` 请求体只有 `members`（按成员 `op` 增量生效），没有全员禁言写入字段——`global_rule.mode` 只出现在查询响应里。因此 `whole_ban` 无可用写入字段：API 路径返回 `retcode=100`（message 说明原因），CQ 码路径仅记录日志，两者都不提交请求。需要禁言请按成员使用 `action=ban`。

@@ -1125,7 +1125,7 @@ func generateGroupMessage(id string, eventid string, foundItems map[string][]str
 		base64Encoded := base64.StdEncoding.EncodeToString(compressedData)
 
 		// 直接 base64 上传图片到 QQ CDN
-		messageToCreate, err := images.CreateAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 1, false, "", groupid, id, msgseq, apiv2)
+		messageToCreate, err := createAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 1, false, "", groupid, id, msgseq, apiv2)
 		if err != nil {
 			mylog.Printf("Error messageToCreate: %v", err)
 			return &dto.MessageToCreate{
@@ -1182,7 +1182,7 @@ func generateGroupMessage(id string, eventid string, foundItems map[string][]str
 
 		base64Encoded := base64.StdEncoding.EncodeToString(RecordData)
 		// 语音直接 base64 上传到 QQ CDN，不需要本地图床中转
-		messageToCreate, err := images.CreateAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 3, false, "", groupid, id, msgseq, apiv2)
+		messageToCreate, err := createAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 3, false, "", groupid, id, msgseq, apiv2)
 		if err != nil {
 			mylog.Printf("Error messageToCreate: %v", err)
 			return &dto.MessageToCreate{
@@ -1232,7 +1232,7 @@ func generateGroupMessage(id string, eventid string, foundItems map[string][]str
 			base64Encoded := base64.StdEncoding.EncodeToString(imageData)
 
 			// 直接 base64 上传到 QQ CDN
-			messageToCreate, err := images.CreateAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 1, false, "", groupid, id, msgseq, apiv2)
+			messageToCreate, err := createAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 1, false, "", groupid, id, msgseq, apiv2)
 			if err != nil {
 				mylog.Printf("Error messageToCreate: %v", err)
 				return &dto.MessageToCreate{
@@ -1294,7 +1294,7 @@ func generateGroupMessage(id string, eventid string, foundItems map[string][]str
 			base64Encoded := base64.StdEncoding.EncodeToString(imageData)
 
 			// 直接 base64 上传到 QQ CDN
-			messageToCreate, err := images.CreateAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 1, false, "", groupid, id, msgseq, apiv2)
+			messageToCreate, err := createAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 1, false, "", groupid, id, msgseq, apiv2)
 			if err != nil {
 				mylog.Printf("Error messageToCreate: %v", err)
 				return &dto.MessageToCreate{
@@ -1348,7 +1348,7 @@ func generateGroupMessage(id string, eventid string, foundItems map[string][]str
 		}
 		base64Encoded := base64.StdEncoding.EncodeToString(fileRecordData)
 		// 语音直接 base64 上传到 QQ CDN，不需要本地图床中转
-		messageToCreate, err := images.CreateAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 3, false, "", groupid, id, msgseq, apiv2)
+		messageToCreate, err := createAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 3, false, "", groupid, id, msgseq, apiv2)
 		if err != nil {
 			mylog.Printf("Error messageToCreate: %v", err)
 			return &dto.MessageToCreate{
@@ -1402,7 +1402,7 @@ func generateGroupMessage(id string, eventid string, foundItems map[string][]str
 		}
 		base64Encoded := base64.StdEncoding.EncodeToString(recordData)
 		// 语音直接 base64 上传到 QQ CDN，不需要本地图床中转
-		messageToCreate, err := images.CreateAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 3, false, "", groupid, id, msgseq, apiv2)
+		messageToCreate, err := createAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 3, false, "", groupid, id, msgseq, apiv2)
 		if err != nil {
 			mylog.Printf("Error messageToCreate: %v", err)
 			return &dto.MessageToCreate{
@@ -1457,7 +1457,7 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 		}
 		base64Encoded := base64.StdEncoding.EncodeToString(recordData)
 		// 语音直接 base64 上传到 QQ CDN，不需要本地图床中转
-		messageToCreate, err := images.CreateAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 3, false, "", groupid, id, msgseq, apiv2)
+		messageToCreate, err := createAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 3, false, "", groupid, id, msgseq, apiv2)
 		if err != nil {
 			mylog.Printf("Error messageToCreate: %v", err)
 			return &dto.MessageToCreate{
@@ -1495,7 +1495,7 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 
 		base64Encoded := base64.StdEncoding.EncodeToString(compressedData)
 		// 直接 base64 上传到 QQ CDN
-		messageToCreate, err := images.CreateAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 1, false, "", groupid, id, msgseq, apiv2)
+		messageToCreate, err := createAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 1, false, "", groupid, id, msgseq, apiv2)
 		if err != nil {
 			mylog.Printf("Error messageToCreate: %v", err)
 			return &dto.MessageToCreate{
@@ -1604,7 +1604,7 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 		}
 	} else if base64Videos, ok := foundItems["base64_video"]; ok && len(base64Videos) > 0 {
 		// base64 视频数据上传到 QQ CDN（FileType=2 视频）
-		messageToCreate, err := images.CreateAndUploadMediaMessage(context.TODO(), base64Videos[0], eventid, 2, false, "", groupid, id, msgseq, apiv2)
+		messageToCreate, err := createAndUploadMediaMessage(context.TODO(), base64Videos[0], eventid, 2, false, "", groupid, id, msgseq, apiv2)
 		if err != nil {
 			mylog.Printf("Error uploading base64 video: %v", err)
 			return &dto.MessageToCreate{
@@ -1635,7 +1635,7 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 			}
 		}
 		base64Encoded := base64.StdEncoding.EncodeToString(videoData)
-		messageToCreate, err := images.CreateAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 2, false, "", groupid, id, msgseq, apiv2)
+		messageToCreate, err := createAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 2, false, "", groupid, id, msgseq, apiv2)
 		if err != nil {
 			mylog.Printf("Error uploading local video: %v", err)
 			return &dto.MessageToCreate{
@@ -1676,7 +1676,7 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 		// base64编码
 		base64Encoded := base64.StdEncoding.EncodeToString(fileData)
 		// 直接 base64 上传文件到 QQ CDN，文件名作为 content 传递
-		messageToCreate, err := images.CreateAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 4, false, fileName, groupid, id, msgseq, apiv2)
+		messageToCreate, err := createAndUploadMediaMessage(context.TODO(), base64Encoded, eventid, 4, false, fileName, groupid, id, msgseq, apiv2)
 		if err != nil {
 			mylog.Printf("Error uploading file: %v", err)
 			return &dto.MessageToCreate{
@@ -1730,7 +1730,7 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 		}
 	} else if base64Files, ok := foundItems["base64_file"]; ok && len(base64Files) > 0 {
 	   // base64文件数据上传到 QQ CDN
-	   messageToCreate, err := images.CreateAndUploadMediaMessage(context.TODO(), base64Files[0], eventid, 4, false, "", groupid, id, msgseq, apiv2)
+	   messageToCreate, err := createAndUploadMediaMessage(context.TODO(), base64Files[0], eventid, 4, false, "", groupid, id, msgseq, apiv2)
 	   if err != nil {
 	    mylog.Printf("Error uploading base64 file: %v", err)
 	    return &dto.MessageToCreate{
@@ -1844,7 +1844,7 @@ func generatePrivateMessage(id string, eventid string, foundItems map[string][]s
 		base64Encoded := base64.StdEncoding.EncodeToString(compressedData)
 
 		// 直接 base64 上传到 QQ CDN
-		messageToCreate, err := images.CreateAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 1, false, "", userid, id, msgseq, apiv2)
+		messageToCreate, err := createAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 1, false, "", userid, id, msgseq, apiv2)
 		if err != nil {
 			mylog.Printf("Error messageToCreate: %v", err)
 			return &dto.MessageToCreate{
@@ -1901,7 +1901,7 @@ func generatePrivateMessage(id string, eventid string, foundItems map[string][]s
 
 		base64Encoded := base64.StdEncoding.EncodeToString(RecordData)
 		// 语音直接 base64 上传到 QQ CDN，不需要本地图床中转
-		messageToCreate, err := images.CreateAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 3, false, "", userid, id, msgseq, apiv2)
+		messageToCreate, err := createAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 3, false, "", userid, id, msgseq, apiv2)
 		if err != nil {
 			mylog.Printf("Error messageToCreate: %v", err)
 			return &dto.MessageToCreate{
@@ -1951,7 +1951,7 @@ func generatePrivateMessage(id string, eventid string, foundItems map[string][]s
 			base64Encoded := base64.StdEncoding.EncodeToString(imageData)
 
 			// 直接 base64 上传到 QQ CDN
-			messageToCreate, err := images.CreateAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 1, false, "", userid, id, msgseq, apiv2)
+			messageToCreate, err := createAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 1, false, "", userid, id, msgseq, apiv2)
 			if err != nil {
 				mylog.Printf("Error messageToCreate: %v", err)
 				return &dto.MessageToCreate{
@@ -2013,7 +2013,7 @@ func generatePrivateMessage(id string, eventid string, foundItems map[string][]s
 			base64Encoded := base64.StdEncoding.EncodeToString(imageData)
 
 			// 直接 base64 上传到 QQ CDN
-			messageToCreate, err := images.CreateAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 1, false, "", userid, id, msgseq, apiv2)
+			messageToCreate, err := createAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 1, false, "", userid, id, msgseq, apiv2)
 			if err != nil {
 				mylog.Printf("Error messageToCreate: %v", err)
 				return &dto.MessageToCreate{
@@ -2067,7 +2067,7 @@ func generatePrivateMessage(id string, eventid string, foundItems map[string][]s
 			}
 			base64Encoded := base64.StdEncoding.EncodeToString(fileRecordData)
 			// 语音直接 base64 上传到 QQ CDN，不需要本地图床中转
-			messageToCreate, err := images.CreateAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 3, false, "", userid, id, msgseq, apiv2)
+			messageToCreate, err := createAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 3, false, "", userid, id, msgseq, apiv2)
 			if err != nil {
 				mylog.Printf("Error messageToCreate: %v", err)
 				return &dto.MessageToCreate{
@@ -2121,7 +2121,7 @@ func generatePrivateMessage(id string, eventid string, foundItems map[string][]s
 		}
 		base64Encoded := base64.StdEncoding.EncodeToString(recordData)
 		// 语音直接 base64 上传到 QQ CDN，不需要本地图床中转
-		messageToCreate, err := images.CreateAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 3, false, "", userid, id, msgseq, apiv2)
+		messageToCreate, err := createAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 3, false, "", userid, id, msgseq, apiv2)
 		if err != nil {
 			mylog.Printf("Error messageToCreate: %v", err)
 			return &dto.MessageToCreate{
@@ -2176,7 +2176,7 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 		}
 		base64Encoded := base64.StdEncoding.EncodeToString(recordData)
 		// 语音直接 base64 上传到 QQ CDN，不需要本地图床中转
-		messageToCreate, err := images.CreateAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 3, false, "", userid, id, msgseq, apiv2)
+		messageToCreate, err := createAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 3, false, "", userid, id, msgseq, apiv2)
 		if err != nil {
 			mylog.Printf("Error messageToCreate: %v", err)
 			return &dto.MessageToCreate{
@@ -2214,7 +2214,7 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 
 		base64Encoded := base64.StdEncoding.EncodeToString(compressedData)
 		// 直接 base64 上传到 QQ CDN
-		messageToCreate, err := images.CreateAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 1, false, "", userid, id, msgseq, apiv2)
+		messageToCreate, err := createAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 1, false, "", userid, id, msgseq, apiv2)
 		if err != nil {
 			mylog.Printf("Error messageToCreate: %v", err)
 			return &dto.MessageToCreate{
@@ -2325,7 +2325,7 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 		}
 	} else if base64Videos, ok := foundItems["base64_video"]; ok && len(base64Videos) > 0 {
 		// base64 视频数据上传到 QQ CDN（FileType=2 视频）
-		messageToCreate, err := images.CreateAndUploadMediaMessagePrivate(context.TODO(), base64Videos[0], eventid, 2, false, "", userid, id, msgseq, apiv2)
+		messageToCreate, err := createAndUploadMediaMessagePrivate(context.TODO(), base64Videos[0], eventid, 2, false, "", userid, id, msgseq, apiv2)
 		if err != nil {
 			mylog.Printf("Error uploading base64 video: %v", err)
 			return &dto.MessageToCreate{
@@ -2356,7 +2356,7 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 			}
 		}
 		base64Encoded := base64.StdEncoding.EncodeToString(videoData)
-		messageToCreate, err := images.CreateAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 2, false, "", userid, id, msgseq, apiv2)
+		messageToCreate, err := createAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 2, false, "", userid, id, msgseq, apiv2)
 		if err != nil {
 			mylog.Printf("Error uploading local video: %v", err)
 			return &dto.MessageToCreate{
@@ -2397,7 +2397,7 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 		// base64编码
 		base64Encoded := base64.StdEncoding.EncodeToString(fileData)
 		// 直接 base64 上传文件到 QQ CDN，文件名作为 content 传递
-		messageToCreate, err := images.CreateAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 4, false, fileName, userid, id, msgseq, apiv2)
+		messageToCreate, err := createAndUploadMediaMessagePrivate(context.TODO(), base64Encoded, eventid, 4, false, fileName, userid, id, msgseq, apiv2)
 		if err != nil {
 			mylog.Printf("Error uploading file: %v", err)
 			return &dto.MessageToCreate{
@@ -2451,7 +2451,7 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 		}
 	} else if base64Files, ok := foundItems["base64_file"]; ok && len(base64Files) > 0 {
 	   // base64文件数据上传到 QQ CDN
-	   messageToCreate, err := images.CreateAndUploadMediaMessagePrivate(context.TODO(), base64Files[0], eventid, 4, false, "", userid, id, msgseq, apiv2)
+	   messageToCreate, err := createAndUploadMediaMessagePrivate(context.TODO(), base64Files[0], eventid, 4, false, "", userid, id, msgseq, apiv2)
 	   if err != nil {
 	    mylog.Printf("Error uploading base64 file: %v", err)
 	    return &dto.MessageToCreate{
@@ -2615,13 +2615,13 @@ func GetMessageTypeByGroupidV2(GroupID interface{}) string {
 }
 
 // uploadMedia 上传媒体并返回FileInfo
-// 智能选择：小文件走 URL 直传，大文件自动切到分片上传
+// 智能选择：≤5MB 走 file_data 直传，>5MB 自动切到分片上传
 func uploadMedia(ctx context.Context, groupID string, richMediaMessage *dto.RichMediaMessage, apiv2 openapi.OpenAPI) (string, error) {
-	// 如果有 base64 文件数据且超过软限制，走分片上传
+	// 官方 file_data 直传上限 5MB，超过则改走分片上传
 	if richMediaMessage.FileData != "" {
 		decoded, err := base64.StdEncoding.DecodeString(richMediaMessage.FileData)
 		if err == nil && needsChunkedUpload(int64(len(decoded)), int(richMediaMessage.FileType)) {
-			mylog.Printf("文件超过软限制，自动切换到分片上传 (type=%d, size=%d)",
+			mylog.Printf("文件超过 file_data 直传上限(5MB)，自动切换到分片上传 (type=%d, size=%d)",
 				richMediaMessage.FileType, len(decoded))
 			return chunkedUpload(ctx, apiv2, groupID, true, decoded, int(richMediaMessage.FileType), richMediaMessage.FileName)
 		}

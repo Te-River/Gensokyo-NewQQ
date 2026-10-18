@@ -108,6 +108,7 @@ func isTimeoutError(err error) bool {
 
 // uploadMedia 上传媒体并返回FileInfo
 // 使用 300s 超时 context 避免大文件上传超时；超时类错误自动重试（最多 3 次总尝试，线性退避）
+// 注意：file_data 直传上限 5MB，超过时由 handlers 侧调用点改走分片上传（见 handlers/upload_helper.go）
 func uploadMedia(ctx context.Context, groupID string, richMediaMessage *dto.RichMediaMessage, apiv2 openapi.OpenAPI) (string, error) {
 	var lastErr error
 	for attempt := 1; attempt <= maxMediaUploadAttempts; attempt++ {
@@ -136,6 +137,7 @@ func uploadMedia(ctx context.Context, groupID string, richMediaMessage *dto.Rich
 
 // uploadMediaPrivate 上传媒体并返回FileInfo
 // 使用 300s 超时 context 避免大文件上传超时；超时类错误自动重试（最多 3 次总尝试，线性退避）
+// 注意：file_data 直传上限 5MB，超过时由 handlers 侧调用点改走分片上传（见 handlers/upload_helper.go）
 func uploadMediaPrivate(ctx context.Context, UserID string, richMediaMessage *dto.RichMediaMessage, apiv2 openapi.OpenAPI) (string, error) {
 	var lastErr error
 	for attempt := 1; attempt <= maxMediaUploadAttempts; attempt++ {

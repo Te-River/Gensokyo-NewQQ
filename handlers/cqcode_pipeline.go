@@ -12,6 +12,7 @@ import (
 // 无论消息来自 string 还是消息段数组（[]interface{}）路径，均经过本管道：
 //   - 媒体类（image/record/video/file）：存入 foundItems 对应 key（url/base64/本地）
 //   - 控制类（markdown/card/input_notify/stream/active/keyboard/qqmusic/reply/avatar）：存入对应 key
+//   - 入站专用（ark / reply,msg_idx=）：出站无消费点，整段剥离
 //   - 未知类型（at 等）原样保留，由下游 transformMessageTextAt 等继续处理
 //
 // 返回剔除已解析 CQ 码后的文本。
@@ -52,6 +53,10 @@ func ProcessCQCodePipeline(text string, foundItems map[string][]string, groupID 
 	} else {
 		text = ProcessCQAvatar(groupID.(string), text)
 	}
+
+	// 10. 入站专用码 [CQ:ark...] / [CQ:reply,msg_idx=...]：出站无消费点，整段剥离。
+	// 置于最后，保证前面各步的输入文本与新增剥离逻辑前完全一致
+	text = ProcessCQInboundOnlyCodes(text)
 
 	return text
 }

@@ -33,11 +33,15 @@ func (p *Processors) ProcessGroupJoinRequest(data *dto.GroupJoinRequestEvent) {
 	}
 	mylog.Printf("[message] join_request id mapped: raw_group=%s vGroup=%d raw_user=%s vUser=%d", data.GroupOpenID, groupID, data.MemberOpenID, userID)
 
-	// 时间戳
+	// 时间戳：官方 apply_at 为 RFC3339 字符串（兼容历史秒级时间戳/数字）
 	var timestamp int64
 	switch v := data.ApplyAt.(type) {
 	case string:
-		timestamp, _ = strconv.ParseInt(v, 10, 64)
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			timestamp = t.Unix()
+		} else {
+			timestamp, _ = strconv.ParseInt(v, 10, 64)
+		}
 	case int64:
 		timestamp = v
 	case float64:
@@ -75,6 +79,9 @@ func (p *Processors) ProcessGroupJoinRequest(data *dto.GroupJoinRequestEvent) {
 	}
 
 	outputMap := structToMap(request)
+	// auto_approved 官方为对象（AutoAppproved，仅下行事件携带）：对象透传 + 布尔伴随字段
+	outputMap["auto_approved"] = data.AutoApproved
+	outputMap["auto_approved_bool"] = data.AutoApproved != nil && data.AutoApproved.Approved
 	//上报信息到onebotv11应用端(正反ws)
 	p.dispatchInbound(data, outputMap, func() { p.BroadcastMessageToAll(outputMap, p.Apiv2, data) })
 

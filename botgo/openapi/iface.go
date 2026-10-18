@@ -97,8 +97,8 @@ type GroupAPI interface {
 	GroupInfo(ctx context.Context, groupOpenID string) (*dto.GroupInfo, error)
 	// BotInGroupState 获取机器人群内状态
 	BotInGroupState(ctx context.Context, groupOpenID string) (*dto.BotInGroupState, error)
-	// JoinRequestList 入群申请列表
-	JoinRequestList(ctx context.Context, groupOpenID string, nextIndex int) (*dto.JoinRequestList, error)
+	// JoinRequestList 入群申请列表 (cursor 分页游标, 空串表示首页; limit 单页数量 默认20 最大50)
+	JoinRequestList(ctx context.Context, groupOpenID, cursor string, limit int) (*dto.JoinRequestList, error)
 	// ApprovalJoinRequest 入群申请审批 (op: "approve" / "decline")
 	ApprovalJoinRequest(ctx context.Context, groupOpenID, memberOpenID string, req *dto.ApprovalJoinRequest) error
 	// RestrictChatSetting 查询群禁言状态
