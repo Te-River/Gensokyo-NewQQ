@@ -117,6 +117,7 @@
 ## ✅ 提交记录
 
 ```
+eca1843  fix: 官方口径再对齐（token 域名 / 5M 直传阈值 / dto.User 字段）
 8f3cfdb  docs: 修复 3 处失效相对链接（语法参考 cq-set_group / API介绍 本版新增功能 / 入群申请列表 readme）
 c1c6470  feat: 对齐官方 v2 现文档（群管理契约 / 入站事件字段 / 5MB 直传 / 错误码）
 bd73b1f  feat: 生产主链切换到 internal/+adapter 分层架构，新增 arch_mode 三态开关
