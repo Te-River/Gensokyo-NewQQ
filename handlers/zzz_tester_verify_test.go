@@ -451,7 +451,7 @@ func TestTesterVerify_LocalRecordAsrBranchDivergence(t *testing.T) {
 // TestTesterVerify_UploadThresholdWiring 5MB 边界在 tryChunkedUpload 上的接线
 func TestTesterVerify_UploadThresholdWiring(t *testing.T) {
 	mock := &tvMockAPI{}
-	exact := make([]byte, 5*1024*1024)
+	exact := make([]byte, maxDirectFileDataBytes)
 	if _, err := tryChunkedUpload(context.Background(), mock, "g", true, exact, 1, "a.png"); err == nil {
 		t.Fatalf("恰好 5MB 应回退 URL 直传（返回错误提示）")
 	} else if !strings.Contains(err.Error(), "5MB") {
@@ -460,7 +460,7 @@ func TestTesterVerify_UploadThresholdWiring(t *testing.T) {
 	if mock.prepareCalls != 0 {
 		t.Errorf("恰好 5MB 不应发起预上传: prepareCalls=%d", mock.prepareCalls)
 	}
-	if needsChunkedUpload(5*1024*1024, 1) || !needsChunkedUpload(5*1024*1024+1, 1) {
+	if needsChunkedUpload(maxDirectFileDataBytes, 1) || !needsChunkedUpload(maxDirectFileDataBytes+1, 1) {
 		t.Errorf("5MB 边界判据错误")
 	}
 }

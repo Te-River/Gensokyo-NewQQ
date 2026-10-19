@@ -7,8 +7,8 @@ import "testing"
 func TestNeedsChunkedUploadBoundaries(t *testing.T) {
 	const (
 		oneByte = int64(1)
-		fiveMB  = int64(5 * 1024 * 1024)
-		over5MB = int64(5*1024*1024 + 1)
+		fiveMB  = int64(5 * 1000 * 1000)
+		over5MB = int64(5*1000*1000 + 1)
 		twoHMB  = int64(200 * 1024 * 1024)
 	)
 
@@ -36,7 +36,7 @@ func TestNeedsChunkedUploadBoundaries(t *testing.T) {
 	}
 
 	// 上限常量必须与官方文档的 5M 一致
-	if maxDirectFileDataBytes != 5*1024*1024 {
-		t.Fatalf("maxDirectFileDataBytes = %d, want %d", maxDirectFileDataBytes, 5*1024*1024)
+	if maxDirectFileDataBytes != 5*1000*1000 {
+		t.Fatalf("maxDirectFileDataBytes = %d, want %d", maxDirectFileDataBytes, 5*1000*1000)
 	}
 }

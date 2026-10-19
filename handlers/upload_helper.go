@@ -20,7 +20,9 @@ import (
 
 // maxDirectFileDataBytes 官方 file_data 直传上限：超过 5MB 必须改用 URL 上传或分片上传。
 // 来源：POST /v2/groups/{group_openid}/files 与 POST /v2/users/{user_openid}/files 现文档。
-const maxDirectFileDataBytes = 5 * 1024 * 1024
+// 官方 files 页（2026-10-09）只写"5M / 数据大小不能超过 5M"，未定义十进制或二进制；
+// 取保守十进制 5,000,000 字节，超过即走分片上传，结果仍正确。
+const maxDirectFileDataBytes = 5 * 1000 * 1000
 
 // fileTypeSoftLimits 各类型的平台软限制：分片上传合并后，超过软限制平台会把内容降级为文件类型下发，
 // 超过硬限制（getHardLimit）则报错。仅用于日志提示，不再作为是否走 file_data 直传的判据。
