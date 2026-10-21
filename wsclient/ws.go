@@ -3,10 +3,13 @@ package wsclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"net/url"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -17,6 +20,9 @@ import (
 	"github.com/tencent-connect/botgo/openapi"
 )
 
+// errWebSocketClosed 表示客户端已关闭，写请求不会再有消费者
+var errWebSocketClosed = errors.New("websocket client closed")
+
 type WebSocketClient struct {
 	conn           *websocket.Conn
 	api            openapi.OpenAPI
@@ -24,10 +30,12 @@ type WebSocketClient struct {
 	botID          uint64
 	urlStr         string
 	cancel         context.CancelFunc
-	isReconnecting bool
+	isReconnecting atomic.Bool              // 重连门闩（跨 goroutine 读写）
 	sendFailures   []map[string]interface{} // 存储失败的消息
 	writeCh        chan writeRequest        // 写请求通道
 	closeCh        chan struct{}            // 用于关闭的通道
+	closed         atomic.Bool              // Close 之后为 true
+	closeOnce      sync.Once                // 保证 Close 幂等
 }
 
 type writeRequest struct {
@@ -37,6 +45,12 @@ type writeRequest struct {
 
 // SendMessage 发送消息，将写请求发送到写 Goroutine
 func (client *WebSocketClient) SendMessage(message map[string]interface{}) error {
+	// 关闭后写 Goroutine 已退出，writeCh 仍有缓冲空间，必须先短路
+	// 否则消息会被静默丢弃（select 两个 case 均就绪时随机选择）
+	if client.closed.Load() {
+		return errWebSocketClosed
+	}
+
 	// 序列化消息
 	msgBytes, err := json.Marshal(message)
 	if err != nil {
@@ -44,21 +58,30 @@ func (client *WebSocketClient) SendMessage(message map[string]interface{}) error
 		return err
 	}
 
-	// 创建专用通道，用于接收写操作的结果
-	client.writeCh <- writeRequest{
-		messageType: websocket.TextMessage,
-		data:        msgBytes,
+	// 入队即交给写 Goroutine；关闭瞬间可能已入队但无人消费，入队后复查避免"假成功"
+	select {
+	case client.writeCh <- writeRequest{messageType: websocket.TextMessage, data: msgBytes}:
+		if client.closed.Load() {
+			return errWebSocketClosed
+		}
+		return nil
+	case <-client.closeCh:
+		return errWebSocketClosed
 	}
-
-	// 等待写操作完成，并返回结果
-	return nil
 }
 
-// Close 关闭 WebSocketClient，停止写 Goroutine
+// Close 关闭 WebSocketClient，停止写 Goroutine（可重复调用）
 func (client *WebSocketClient) Close() error {
-	close(client.closeCh)
-	close(client.writeCh)
-	client.conn.Close()
+	client.closeOnce.Do(func() {
+		client.closed.Store(true)
+		// writeCh 不关闭：写 Goroutine 只靠 closeCh 退出，避免并发 SendMessage panic
+		close(client.closeCh)
+		if client.conn != nil {
+			if err := client.conn.Close(); err != nil {
+				log.Println("Error closing WebSocket connection:", err)
+			}
+		}
+	})
 	return nil
 }
 
@@ -88,7 +111,7 @@ func (client *WebSocketClient) handleIncomingMessages(cancel context.CancelFunc)
 		if err != nil {
 			mylog.Println("WebSocket connection closed:", err)
 			cancel() // 取消心跳 goroutine
-			if !client.isReconnecting {
+			if !client.isReconnecting.Load() {
 				go client.Reconnect()
 			}
 			return // 退出循环，不再尝试读取消息
@@ -100,7 +123,12 @@ func (client *WebSocketClient) handleIncomingMessages(cancel context.CancelFunc)
 
 // 断线重连
 func (client *WebSocketClient) Reconnect() {
-	client.isReconnecting = true
+	// 已关闭则不再重连（Close 后 handleIncomingMessages 仍可能触发一次重连）
+	if client.closed.Load() {
+		return
+	}
+
+	client.isReconnecting.Store(true)
 
 	addresses := config.GetWsAddress()
 	tokens := config.GetWsToken()
@@ -155,6 +183,14 @@ func (client *WebSocketClient) Reconnect() {
 			break                                                          // successfully connected, break the loop
 		}
 	}
+	// dial 期间可能已被 Close：关闭新连接并直接退出，避免关闭后继续发送元事件
+	if client.closed.Load() {
+		if err := conn.Close(); err != nil {
+			mylog.Printf("Error closing reconnected WebSocket: %v\n", err)
+		}
+		return
+	}
+
 	// 复用现有的client完成重连
 	client.conn = conn
 
@@ -187,7 +223,7 @@ func (client *WebSocketClient) Reconnect() {
 	go client.handleIncomingMessages(cancel)
 
 	defer func() {
-		client.isReconnecting = false
+		client.isReconnecting.Store(false)
 	}()
 
 	mylog.Printf("Successfully reconnected to WebSocket.")

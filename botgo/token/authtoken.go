@@ -16,8 +16,8 @@ import (
 )
 
 // getAccessTokenURL 取得AccessToken的地址
-// https://bots.qq.com/app/getAppAccessToken
-var getAccessTokenURL = "https://bots.qq.com/app/getAppAccessToken"
+// https://api.bot.qq.com/app/getAppAccessToken
+var getAccessTokenURL = "https://api.bot.qq.com/app/getAppAccessToken"
 
 // AuthTokenInfo 动态鉴权Token信息
 type AuthTokenInfo struct {

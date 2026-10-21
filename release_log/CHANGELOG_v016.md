@@ -37,13 +37,23 @@
 
 官方 `file_data` 二进制直传上限为 **5MB**，超过必须改走 URL 上传或分片上传：
 
-- **判据收敛**（`handlers/upload_helper.go` 的 `maxDirectFileDataBytes = 5 * 1024 * 1024`）：`needsChunkedUpload` 判据只有一条——超过 5MB 即改走分片上传（`upload_prepare` → 预签名 PUT → `upload_part_finish` → 合并），群聊（`handlers/send_group_msg.go`）/ 单聊（`handlers/send_private_msg.go`）一致
+- **判据收敛**（`handlers/upload_helper.go` 的 `maxDirectFileDataBytes`，取值见下文「官方口径再对齐」）：`needsChunkedUpload` 判据只有一条——超过 5MB 即改走分片上传（`upload_prepare` → 预签名 PUT → `upload_part_finish` → 合并），群聊（`handlers/send_group_msg.go`）/ 单聊（`handlers/send_private_msg.go`）一致
 - **软限制降级为提示**：按类型软限制（图片 20MB / 视频 30MB / 语音 20MB / 文件 200MB）不再作为直传判据，仅打印"平台侧将降级为文件类型下发"日志；硬限制 200MB（`getHardLimit`）不变
 - **入口重构**：`images.CreateAndUploadMediaMessage` / `CreateAndUploadMediaMessagePrivate` 调用点统一换为 `handlers` 包内的 `createAndUploadMediaMessage` / `...Private` 包装（超限先分流，≤5MB 仍交 `images` 包走 `file_data` 直传）；`images/upload_api.go` 同步补充字段
 
 ---
 
 ## 🐛 修复
+
+### 官方口径再对齐（2026-10-19）
+
+按 QQ 官方现文档核对三处口径，均不影响对外契约：
+
+- **修改**：`botgo/token/authtoken.go` 的 `getAppAccessToken` 地址由 `https://bots.qq.com/app/getAppAccessToken` 改为官方 access-token 页（2026-09-16 更新）的 `https://api.bot.qq.com/app/getAppAccessToken`；`develop_acdir` 覆盖逻辑不变
+- **修改**：`handlers/upload_helper.go` 的 `maxDirectFileDataBytes` 由 `5 * 1024 * 1024` 改为 `5 * 1000 * 1000`。官方 files 页（2026-10-09）只写"5M / 数据大小不能超过 5M"，未定义十进制/二进制；取保守十进制 5,000,000 字节，超过即自动走分片上传（`upload_prepare` → 预签名 PUT → `upload_part_finish` → 合并），结果仍正确；`defaultBlockSize = 5 * 1024 * 1024` 为分片块大小兜底，未改动
+- **修改**：`botgo/dto/user.go` 的 `User` 补 `user_openid` / `member_openid`（`omitempty`），**零行为差异**——业务仍用 `Author.ID`，未改动任何使用方
+- **影响**：token 获取改走官方现域名；5,000,001~5,242,880 字节区间从直传改为分片，平台侧接收结果一致；DTO 新字段仅提供下游可选读取
+- **测试**：`go build ./...`、`go vet ./...`、`go test ./handlers/ -run 'Upload|Threshold' -count=1`、`cd botgo; go build ./...` 全通过
 
 ### 私聊 markdown 段内嵌 keyboard 按钮权限 `permission.type=0` 原样发出（点击提示"无权限操作"）
 
@@ -107,6 +117,7 @@
 ## ✅ 提交记录
 
 ```
+eca1843  fix: 官方口径再对齐（token 域名 / 5M 直传阈值 / dto.User 字段）
 8f3cfdb  docs: 修复 3 处失效相对链接（语法参考 cq-set_group / API介绍 本版新增功能 / 入群申请列表 readme）
 c1c6470  feat: 对齐官方 v2 现文档（群管理契约 / 入站事件字段 / 5MB 直传 / 错误码）
 bd73b1f  feat: 生产主链切换到 internal/+adapter 分层架构，新增 arch_mode 三态开关
