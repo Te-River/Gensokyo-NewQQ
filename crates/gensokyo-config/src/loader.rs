@@ -56,6 +56,8 @@ pub fn load(path: impl AsRef<Path>) -> Result<Settings, LoadError> {
 }
 
 fn parse_with_path(text: &str, path: PathBuf) -> Result<Settings, LoadError> {
+    // 部分编辑器（记事本等）会写 UTF-8 BOM；先剥掉，否则纯 BOM 文件会被当成"有内容"送去解析。
+    let text = text.trim_start_matches('\u{feff}');
     // 空文档 / 纯注释文档：Go yaml.v3 不报错并留下零值，`serde_norway` 却会报 EOF，这里补齐。
     if is_effectively_empty(text) {
         return Ok(Settings::default());
@@ -66,10 +68,16 @@ fn parse_with_path(text: &str, path: PathBuf) -> Result<Settings, LoadError> {
     })
 }
 
-/// 是否没有任何 YAML 内容（只含空白与注释行）。
+/// 是否没有任何 YAML 内容：只有空白、注释、文档标记（`---` / `...`）与 null 标量
+/// （`null` / `Null` / `NULL` / `~`）。
+///
+/// Go yaml.v3 对这类文档不报错并留下零值，`serde_norway` 却会报 EOF 或类型错误，这里补齐。
 fn is_effectively_empty(text: &str) -> bool {
     text.lines().all(|line| {
-        let line = line.trim();
-        line.is_empty() || line.starts_with('#')
+        // 先剥行内注释：`--- # 文档标记` 与 `null # 空值` 同样视为无内容。
+        // 只用 `#` 切分不会把有内容的行误判为空（有内容时切分后仍非空），
+        // 因为 YAML 里 `#` 在引号外才起注释作用，而本函数只关心"是否全空"。
+        let line = line.split('#').next().unwrap_or("").trim();
+        line.is_empty() || matches!(line, "---" | "..." | "null" | "Null" | "NULL" | "~")
     })
 }

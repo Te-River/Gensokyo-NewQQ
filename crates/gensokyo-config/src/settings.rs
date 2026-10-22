@@ -9,13 +9,13 @@
 //! 解码宽容度：未知字段忽略、缺失字段取零值（与 Go yaml.v3 一致，因此**不使用**
 //! `deny_unknown_fields`）。
 //!
-//! **有意放宽的 Rust 侧超集**——下列输入 Go yaml.v3 会直接报错，这里接受（仅为容错，
-//! 不改变 Go 会接受的输入的解码结果）：带引号的数字字符串（`"5"`）、整值浮点（`5.0`）、
-//! 以及 Go 侧是 `string` 的字段（如 `port`，`config.GetPortValue()` 直接返回该字符串）
-//! 位置上的数字与布尔。Go 的 `int` / `int64` / `uint64` / `string` 字段分别走
-//! [`de_i64_lenient`] / [`de_u64_lenient`] / [`de_string_lenient`]；切片字段
-//! （`[]int`、`[]string`、`[]int64`、`[]bool`）按元素严格解析，与 M0 的 `ws_address`
-//! 口径一致。
+//! **有意放宽的 Rust 侧超集**——Go 的 `int` / `int64` / `uint64` 字段额外接受带引号的
+//! 数字字符串（`"5"`）与整值浮点（`5.0`），这些输入 Go yaml.v3 会直接报错。Go 侧是
+//! `string` 的字段（如 `port`，`config.GetPortValue()` 直接返回该字符串）额外接受裸标量，
+//! 并按标量文本归一（`port: 5.0` → `"5.0"`、`port: true` → `"true"`），与 yaml.v3 对
+//! string 字段保留原文的行为一致。实现分别是 [`de_i64_lenient`] / [`de_u64_lenient`] /
+//! [`de_string_lenient`]；切片字段（`[]int`、`[]string`、`[]int64`、`[]bool`）按元素严格
+//! 解析，与 M0 的 `ws_address` 口径一致。
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -646,7 +646,7 @@ pub struct ImageHostingQQChannel {
 #[serde(default)]
 pub struct ImageHostingSimple {}
 
-/// 接受 YAML 整数、无符号整数、整值浮点或数字字符串。
+/// 接受 YAML 整数、无符号整数、整值浮点或数字字符串（字符串可带下划线，如 `1_000`）。
 ///
 /// Rust 侧超集：Go yaml.v3 对 `int` 字段拒绝 `"5"` 与 `5.0`；这里放宽，但整值浮点必须
 /// 小数部分为 0 且落在 `i64` 范围内，绝不静默截断。
@@ -671,8 +671,7 @@ fn de_i64_lenient<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i64, D::
             i64::try_from(value).map_err(|_| D::Error::custom("整数超出 int64 范围"))
         }
         Raw::Float(value) => float_to_i64(value).map_err(D::Error::custom),
-        Raw::Text(text) => text
-            .trim()
+        Raw::Text(text) => strip_numeric_underscores(&text)
             .parse::<i64>()
             .map_err(|err| D::Error::custom(format!("非法整数 {text:?}: {err}"))),
     }
@@ -700,39 +699,46 @@ fn de_u64_lenient<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::
             u64::try_from(value).map_err(|_| D::Error::custom("期望非负整数（Go uint64）"))
         }
         Raw::Float(value) => float_to_u64(value).map_err(D::Error::custom),
-        Raw::Text(text) => text
-            .trim()
+        Raw::Text(text) => strip_numeric_underscores(&text)
             .parse::<u64>()
             .map_err(|err| D::Error::custom(format!("非法无符号整数 {text:?}: {err}"))),
     }
 }
 
-/// 接受 YAML 字符串、数字或布尔（Go 侧是 `string` 但用户常写成裸标量），统一归一为字符串。
+/// 数字文本预处理：去掉 Go / yaml.v3 允许的下划线分隔符（`1_000` → `1000`）。
 ///
-/// 归一规则：整值浮点 → 整数串（`5.0` → `"5"`），其余浮点保留原样（`5.5` → `"5.5"`），
-/// 布尔 → `"true"` / `"false"`（Go 的文本形式）。
+/// 仅支持下划线：base-0 写法（`0x10` / `0o10` / `0b10`）只有作为 YAML 裸标量时才生效
+/// （由解析器直接解成整数）；写成带引号的字符串时本实现不接受，Go 的
+/// `strconv.ParseInt(..., 0, 64)` 会接受，属已知差异。
+fn strip_numeric_underscores(text: &str) -> String {
+    text.trim().replace('_', "")
+}
+
+/// 接受 YAML 字符串或裸标量（Go 侧是 `string`，但用户常把数字/布尔写成裸标量）并归一为字符串。
+///
+/// 归一规则：取 YAML 解析后的**规范化标量文本**——整数按十进制、浮点走 ryu（`5.0` 保留
+/// 一位小数）、布尔 `true`/`false`；`null` → `""`（Go 零值）；映射/序列写进 string 字段
+/// 一律报错（Go 同样报错）。引号字符串与 `1_000` 这类普通标量原样保留。
+///
+/// 与 Go yaml.v3 的差异（v3 对 string 字段保留标量原文）：`5.00` → `"5.0"`、
+/// `1e3` → `"1000.0"`、`0x10` → `"16"`；普通十进制/布尔标量与 v3 一致。
 fn de_string_lenient<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Raw {
-        Text(String),
-        Int(i64),
-        Uint(u64),
-        Float(f64),
-        Bool(bool),
-    }
+    // 先落到 `Value` 再取文本：只有这样才能保住浮点的标量原文（`5.0` 不能变成 `"5"`）。
+    let value = Option::<serde_norway::Value>::deserialize(deserializer)?
+        .unwrap_or(serde_norway::Value::Null);
+    scalar_to_string(&value).map_err(D::Error::custom)
+}
 
-    // 显式 null（如 `port:` 空值）→ 空字符串，与 Go 零值一致（`GetPortValue()` 返回 ""）。
-    let Some(raw) = Option::<Raw>::deserialize(deserializer)? else {
-        return Ok(String::new());
-    };
-
-    match raw {
-        Raw::Text(text) => Ok(text),
-        Raw::Int(value) => Ok(value.to_string()),
-        Raw::Uint(value) => Ok(value.to_string()),
-        Raw::Float(value) => Ok(float_to_string(value)),
-        Raw::Bool(value) => Ok(value.to_string()),
+/// YAML 标量 → 规范化后的标量文本（`null` 为零值空串）。
+fn scalar_to_string(value: &serde_norway::Value) -> Result<String, String> {
+    match value {
+        serde_norway::Value::Null => Ok(String::new()),
+        serde_norway::Value::Bool(value) => Ok(value.to_string()),
+        serde_norway::Value::Number(value) => Ok(value.to_string()),
+        serde_norway::Value::String(value) => Ok(value.clone()),
+        // `!!str 5` 这类显式标签：取内层标量的文本，与 yaml.v3 一致
+        serde_norway::Value::Tagged(tagged) => scalar_to_string(&tagged.value),
+        other => Err(format!("期望字符串标量，收到 {other:?}")),
     }
 }
 
@@ -750,7 +756,9 @@ fn float_to_i64(value: f64) -> Result<i64, String> {
     if !value.is_finite() || value.fract() != 0.0 {
         return Err(format!("期望整数，收到非整值浮点 {value}"));
     }
-    if value < i64::MIN as f64 || value > i64::MAX as f64 {
+    // `i64::MAX as f64` 精确等于 2^63，故上界必须用 `>=`：边界值 2^63 若放行，`as i64`
+    // 会静默饱和成 `i64::MAX`。下界 `i64::MIN as f64` 恰为 -2^63（可表示），保留 `<`。
+    if value < i64::MIN as f64 || value >= i64::MAX as f64 {
         return Err(format!("浮点整数 {value} 超出 int64 范围"));
     }
     Ok(value as i64)
@@ -761,19 +769,11 @@ fn float_to_u64(value: f64) -> Result<u64, String> {
     if !value.is_finite() || value.fract() != 0.0 {
         return Err(format!("期望整数，收到非整值浮点 {value}"));
     }
-    if value < 0.0 || value > u64::MAX as f64 {
+    // `u64::MAX as f64` 精确等于 2^64，上界同样必须用 `>=`，否则 2^64 会被饱和成 `u64::MAX`。
+    if value < 0.0 || value >= u64::MAX as f64 {
         return Err(format!("浮点整数 {value} 超出 uint64 范围"));
     }
     Ok(value as u64)
-}
-
-/// 浮点 → 字符串：整值且量级安全时输出整数形式（`5.0` → `"5"`），否则保留浮点原样。
-fn float_to_string(value: f64) -> String {
-    if value.is_finite() && value.fract() == 0.0 && value.abs() < 9.0e15 {
-        format!("{}", value as i64)
-    } else {
-        value.to_string()
-    }
 }
 
 #[cfg(test)]
@@ -1062,8 +1062,91 @@ webhook_path: true
         assert_eq!(settings.log_level, 5);
         assert_eq!(settings.msgid_ttl_seconds, 600);
         assert_eq!(settings.oss_type, 4);
-        assert_eq!(settings.port_value(), "5", "整值浮点归一为整数串");
+        assert_eq!(
+            settings.port_value(),
+            "5.0",
+            "string 字段保留标量原文，与 yaml.v3 一致"
+        );
         assert_eq!(settings.webhook_path, "true", "布尔归一为 Go 文本形式");
+    }
+
+    #[test]
+    fn string_fields_preserve_scalar_text_like_go_yaml_v3() {
+        let yaml = r#"
+port: 5.0
+title: 5
+backup_port: 5.5
+frp_port: true
+http_port_after_ssl: "5702"
+union_webhook:
+"#;
+        let settings = parse_str(yaml).expect("解析失败");
+
+        // yaml.v3 把标量原文直接写进 string 字段：`5.0` 不得被归一成 `"5"`
+        assert_eq!(settings.port_value(), "5.0");
+        assert_eq!(settings.title, "5");
+        assert_eq!(settings.backup_port, "5.5");
+        assert_eq!(settings.frp_port, "true");
+        assert_eq!(settings.http_port_after_ssl, "5702");
+        assert_eq!(settings.union_webhook, "", "null → Go 零值空串");
+
+        // 映射/序列写进 string 字段必须报错（Go 同样报错，不做静默转换）
+        assert!(parse_str("port: [1, 2]").is_err());
+        assert!(parse_str("port:\n  nested: 1").is_err());
+    }
+
+    #[test]
+    fn rejects_values_on_the_saturation_boundary() {
+        // 2^63 / 2^64 恰是 f64 可表示值：越界一档必须报错，不能靠 `as` 静默饱和
+        assert!(parse_str("log_level: 9223372036854775808").is_err(), "2^63");
+        assert!(parse_str("app_id: 18446744073709551616").is_err(), "2^64");
+        assert!(
+            parse_str("log_level: 9.223372036854776e18").is_err(),
+            "2^63 浮点"
+        );
+        assert!(
+            parse_str("app_id: 1.8446744073709552e19").is_err(),
+            "2^64 浮点"
+        );
+
+        // 边界之内的极值必须原样保留：同时证明 uin 是有符号、app_id 是无符号
+        let settings =
+            parse_str("uin: -9223372036854775808\napp_id: 18446744073709551615").expect("解析失败");
+        assert_eq!(settings.uin, i64::MIN);
+        assert_eq!(settings.app_id, u64::MAX);
+    }
+
+    #[test]
+    fn numeric_fields_accept_underscore_separators() {
+        // Go / yaml.v3 允许下划线分组：裸标量与带引号写法都要接受
+        let settings = parse_str(
+            r#"
+log_level: 1_000
+app_id: "102_001_234"
+msgid_ttl_seconds: -1_000
+"#,
+        )
+        .expect("下划线数字必须解析成功");
+
+        assert_eq!(settings.log_level, 1_000);
+        assert_eq!(settings.app_id, 102_001_234);
+        assert_eq!(settings.msgid_ttl_seconds, -1_000);
+
+        // 只去掉下划线，不改变其余校验口径：仍然只认十进制
+        assert!(parse_str("log_level: 1_0x0").is_err());
+        assert!(parse_str("app_id: \"0x10\"").is_err());
+    }
+
+    #[test]
+    fn utf8_bom_is_ignored() {
+        // 纯 BOM / BOM + 注释都必须视为空文档；BOM + 内容要正常解析
+        for text in ["\u{feff}", "\u{feff}# 注释\n", "\u{feff}\n\n"] {
+            let settings = parse_str(text).expect("纯 BOM 必须解析成功");
+            assert_eq!(settings, Settings::default(), "必须是零值: {text:?}");
+        }
+
+        let settings = parse_str("\u{feff}log_level: 3").expect("BOM + 内容必须解析成功");
+        assert_eq!(settings.log_level, 3);
     }
 
     #[test]
@@ -1343,6 +1426,28 @@ webhook_path: true
         assert_eq!(settings.cos, ImageHostingCOS::default());
         assert_eq!(settings.chatglm, ImageHostingSimple {});
         assert!(settings.visual_prefixs.is_empty());
+    }
+
+    #[test]
+    fn document_markers_and_null_are_all_zero_values() {
+        // yaml.v3：只含文档标记（`---` / `...`）、null 标量（`null` / `~`）或注释的文档
+        // 解码成零值而不报错；`serde_norway` 对纯 `---` / `null` 文档会报 EOF / 类型错误。
+        for text in [
+            "---\n",
+            "---\n...\n",
+            "null\n",
+            "~\n",
+            "---\nnull\n...\n",
+            "# 注释\n---\n# 注释\n...\n",
+            "--- # 文档标记\nnull # 空值\n",
+        ] {
+            let settings = parse_str(text).expect("空文档必须解析成功");
+            assert_eq!(
+                settings,
+                Settings::default(),
+                "空文档必须得到零值: {text:?}"
+            );
+        }
     }
 
     #[test]
