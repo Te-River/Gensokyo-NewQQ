@@ -164,20 +164,46 @@ fn touch_target(event: &Event, target: &Path) -> bool {
     event.paths.iter().any(|path| same_path(path, target))
 }
 
-/// 路径比较：统一转绝对路径，避免相对/绝对写法不匹配（不解析符号链接，够用且不失败）。
+/// 路径比较：父目录规范化后比较文件名。
+///
+/// 父目录先 `canonicalize` 解析符号链接：macOS 上 tempdir 给出 `/var/folders/...`，
+/// 而 FSEvents 上报 `/private/var/folders/...`（`/var` 是符号链接），不解析就永远匹配不上。
+/// 目标文件在 rename 期间可能暂不存在，因此**只**规范化父目录；两边路径仍可能相对/绝对混用。
+/// `canonicalize` 失败时回退 `absolute`（不解析符号链接但不失败）。
 ///
 /// Windows 文件名大小写不敏感（编辑器可能把 `Config.yml` 的 rename 事件报成 `config.yml`），
 /// 因此只对文件名做 ASCII 大小写不敏感比较，目录部分保持精确。
 fn same_path(a: &Path, b: &Path) -> bool {
-    let (a, b) = match (std::path::absolute(a), std::path::absolute(b)) {
-        (Ok(a), Ok(b)) => (a, b),
-        _ => return a == b,
+    let (a_parent, b_parent) = match (resolve_parent(a), resolve_parent(b)) {
+        (Some(a_parent), Some(b_parent)) => (a_parent, b_parent),
+        _ => return absolute_eq(a, b),
     };
-    if a.parent() != b.parent() {
+    if a_parent != b_parent {
         return false;
     }
     match (a.file_name(), b.file_name()) {
         (Some(a_name), Some(b_name)) if cfg!(windows) => a_name.eq_ignore_ascii_case(b_name),
+        (Some(a_name), Some(b_name)) => a_name == b_name,
+        // 路径没有文件名（根目录、`..` 等）：退回整路径比较
+        _ => absolute_eq(a, b),
+    }
+}
+
+/// 规范化路径的父目录：优先 `canonicalize`（解析符号链接），失败回退 `absolute`。
+fn resolve_parent(path: &Path) -> Option<PathBuf> {
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    std::fs::canonicalize(parent)
+        .or_else(|_| std::path::absolute(parent))
+        .ok()
+}
+
+/// 整路径比较（父目录或文件名缺失时的退路）：转绝对路径后精确比较。
+fn absolute_eq(a: &Path, b: &Path) -> bool {
+    match (std::path::absolute(a), std::path::absolute(b)) {
+        (Ok(a), Ok(b)) => a == b,
         _ => a == b,
     }
 }

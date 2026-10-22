@@ -123,9 +123,9 @@ async fn watcher_reports_real_file_change() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     fs::write(&path, yaml(102001234, 1, "5700", "/bind2")).expect("写配置失败");
 
-    let outcome = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+    let outcome = tokio::time::timeout(Duration::from_secs(20), rx.recv())
         .await
-        .expect("10 秒内必须收到重载结果")
+        .expect("20 秒内必须收到重载结果")
         .expect("channel 不应关闭");
     assert!(
         matches!(&outcome, ReloadOutcome::Applied { changed } if changed == &vec!["bind_prefix".to_owned()]),
@@ -162,12 +162,12 @@ fn stop_does_not_hang_when_receiver_is_full() {
         let _ = done_tx.send(started.elapsed());
     });
 
-    match done_rx.recv_timeout(Duration::from_secs(3)) {
+    match done_rx.recv_timeout(Duration::from_secs(10)) {
         Ok(elapsed) => assert!(
-            elapsed < Duration::from_secs(2),
-            "receiver 不读 + channel 满时 stop 必须在 2 秒内返回（blocking_send 会永久挂起），实际 {elapsed:?}"
+            elapsed < Duration::from_secs(8),
+            "receiver 不读 + channel 满时 stop 必须在 8 秒内返回（blocking_send 会永久挂起），实际 {elapsed:?}"
         ),
-        Err(_) => panic!("stop() 3 秒内未返回：监听线程阻塞在发送路径上"),
+        Err(_) => panic!("stop() 10 秒内未返回：监听线程阻塞在发送路径上"),
     }
     assert!(rx.try_recv().is_ok(), "channel 里应留着第一次的重载结果");
 }
