@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 gensokyo-core.workspace = true
 redb.workspace = true
+md-5.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

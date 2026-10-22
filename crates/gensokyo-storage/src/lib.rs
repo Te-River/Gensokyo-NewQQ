@@ -1,8 +1,8 @@
 //! gensokyo-storage：idmap、echo、cookie、bbolt 导入、IDMapService gRPC。
 //!
-//! M1d 落地 [`idmap`] 的**本地**存储（redb），对齐 Go `idmap/map_service.go` +
-//! `idmap/service.go` 的本地路径；gRPC/HTTP 远程回退与 bbolt 导入留给 M1e，
-//! echo 层（消息 ID 懒加载 / SSM / Seq）留给后续里程碑。
+//! M1d 落地 [`idmap`] 的**本地**存储（redb），M1e 落地 [`echo`] 的进程内映射，
+//! 分别对齐 Go `idmap/map_service.go` + `idmap/service.go` 与 `echo/echo.go` +
+//! `echo/messageidmap.go`；gRPC/HTTP 远程回退与 bbolt 导入留给后续里程碑。
 //!
 //! # 库文件
 //!
@@ -76,11 +76,12 @@
 mod error;
 pub mod idmap;
 
+pub use echo::{Clock, EchoStore, MessageGroupPair, MessageScene};
 pub use error::StorageError;
 pub use idmap::{IdMapOptions, IdMapStore, USER_NAME_SWEEP_THRESHOLD};
 
-/// 消息 ID / Seq / SSM 映射（`echo/`），后续里程碑落地。
-pub mod echo {}
+/// 消息 ID 懒加载 / msg_seq / SSM 补发队列 / REFIDX 等进程内映射（Go `echo/`）。
+pub mod echo;
 
 /// 联合缓存（`unioncache/`），后续里程碑落地。
 pub mod union_cache {}

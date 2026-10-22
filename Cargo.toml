@@ -53,6 +53,8 @@ saphyr = "0.2.2"
 
 # 存储
 redb = "4.4.0"
+# 行号派生：Go `idmap.GenerateRowID` 用 MD5，虚拟行号迁移/对拍必须逐位一致
+md-5 = "0.11.0"
 
 # 可观测性 / 错误
 tracing = "0.1.44"
