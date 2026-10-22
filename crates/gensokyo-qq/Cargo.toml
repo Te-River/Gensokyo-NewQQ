@@ -9,10 +9,26 @@ publish.workspace = true
 
 [dependencies]
 # TLS 归属方：三件套在这里真正进入依赖图（不是只写在 workspace.dependencies）。
-# M0 只声明与断言版本下限；provider 选型与连接代码在 M1 落地。
+# provider（ring / aws-lc-rs）由二进制侧选择并经 `ReqwestTransport::with_provider` 注入，
+# 避免把 C 工具链要求强加给整个 workspace（M0 设计 §9.1 的 provider 留白）。
 rustls.workspace = true
 webpki-root-certs.workspace = true
 rustls-webpki.workspace = true
+# 生产传输：只启用 rustls 骨架（`rustls-no-provider`），不拉 aws-lc-rs/native-tls
+reqwest = { workspace = true, default-features = false, features = [
+    "http2",
+    "rustls-no-provider",
+    "system-proxy",
+] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+# 刷新回退等可观测事件走 workspace 统一的 tracing（与 core/config/storage 一致）
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 
 [lints]
 workspace = true
