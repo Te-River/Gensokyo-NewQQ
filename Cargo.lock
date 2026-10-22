@@ -153,6 +153,7 @@ dependencies = [
 name = "gensokyo-config"
 version = "0.1.0"
 dependencies = [
+ "gensokyo-core",
  "serde",
  "serde_norway",
  "thiserror",

@@ -32,12 +32,17 @@ pub enum LoadError {
     },
 }
 
+// 上层统一走 `gensokyo_core::Error`，但 `LoadError` 的路径/底层原因必须保留，
+// 因此只做 Display 转写，不丢弃 `LoadError` 结构。
+impl From<LoadError> for gensokyo_core::Error {
+    fn from(err: LoadError) -> Self {
+        Self::Config(err.to_string())
+    }
+}
+
 /// 从 YAML 文本解析配置。
 pub fn parse_str(text: &str) -> Result<Settings, LoadError> {
-    serde_norway::from_str(text).map_err(|source| LoadError::Parse {
-        path: PathBuf::from("<inline>"),
-        source: Box::new(source),
-    })
+    parse_with_path(text, PathBuf::from("<inline>"))
 }
 
 /// 从文件加载配置。
@@ -47,8 +52,24 @@ pub fn load(path: impl AsRef<Path>) -> Result<Settings, LoadError> {
         path: path.to_path_buf(),
         source,
     })?;
-    serde_norway::from_str(&text).map_err(|source| LoadError::Parse {
-        path: path.to_path_buf(),
+    parse_with_path(&text, path.to_path_buf())
+}
+
+fn parse_with_path(text: &str, path: PathBuf) -> Result<Settings, LoadError> {
+    // 空文档 / 纯注释文档：Go yaml.v3 不报错并留下零值，`serde_norway` 却会报 EOF，这里补齐。
+    if is_effectively_empty(text) {
+        return Ok(Settings::default());
+    }
+    serde_norway::from_str(text).map_err(|source| LoadError::Parse {
+        path,
         source: Box::new(source),
+    })
+}
+
+/// 是否没有任何 YAML 内容（只含空白与注释行）。
+fn is_effectively_empty(text: &str) -> bool {
+    text.lines().all(|line| {
+        let line = line.trim();
+        line.is_empty() || line.starts_with('#')
     })
 }
