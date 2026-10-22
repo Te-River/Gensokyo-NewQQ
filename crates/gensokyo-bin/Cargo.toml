@@ -1,0 +1,18 @@
+[package]
+name = "gensokyo-bin"
+description = "gensokyo 可执行入口"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "gensokyo"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+
+[lints]
+workspace = true

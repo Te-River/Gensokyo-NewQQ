@@ -1,0 +1,19 @@
+[package]
+name = "gensokyo-protocol"
+description = "OneBot V11 模型、CQ 码、OutboundPlan、handler 注册表"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gensokyo-core.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+# 响应序列化契约单测（data 恒出现，None → null）
+serde_norway.workspace = true
+
+[lints]
+workspace = true

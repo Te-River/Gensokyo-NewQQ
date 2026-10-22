@@ -12,7 +12,8 @@ gsk.exe
 *.upx
 gensokyo
 
-gensokyo-*
+# 仅根目录的 Go 产物（不要匹配 crates/gensokyo-*）
+/gensokyo-*
 
 # Ignore channel_temp
 channel_temp/
@@ -41,6 +42,10 @@ handlers/sensitive_words_out.txt
 
 # Build output
 release/
+
+# Rust（M0 起）
+/target
+**/*.rs.bk
 
 # webui placeholder (auto-created by build.ps1 Ensure-WebUIDist)
 webui/dist/placeholder.html

@@ -1,0 +1,11 @@
+[package]
+name = "gensokyo-runtime"
+description = "入站转换、四种连接、dispatch、队列与限速、优雅关闭"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

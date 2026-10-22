@@ -1,0 +1,11 @@
+[package]
+name = "gensokyo-media"
+description = "下载上传、压缩、图床、silk、QR"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

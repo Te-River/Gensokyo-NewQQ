@@ -1,0 +1,18 @@
+[package]
+name = "gensokyo-qq"
+description = "QQ 官方 API 适配：token、OpenAPI v1/v2、群管理、事件 DTO"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# TLS 归属方：三件套在这里真正进入依赖图（不是只写在 workspace.dependencies）。
+# M0 只声明与断言版本下限；provider 选型与连接代码在 M1 落地。
+rustls.workspace = true
+webpki-root-certs.workspace = true
+rustls-webpki.workspace = true
+
+[lints]
+workspace = true

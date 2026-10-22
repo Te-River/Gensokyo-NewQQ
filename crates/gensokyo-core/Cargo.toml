@@ -1,0 +1,21 @@
+[package]
+name = "gensokyo-core"
+description = "统一错误、OneBot 虚拟 ID、日志与指标门面"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+# Ob11Id 的 untagged 线上形态单测（serde_norway 已在依赖图中，仍是唯一 YAML 后端）
+serde_norway.workspace = true
+
+[lints]
+workspace = true

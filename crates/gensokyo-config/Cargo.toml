@@ -1,0 +1,16 @@
+[package]
+name = "gensokyo-config"
+description = "config.yml 映射、访问器与热重载"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_norway.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

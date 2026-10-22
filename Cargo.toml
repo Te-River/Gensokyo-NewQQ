@@ -1,0 +1,91 @@
+# Gensokyo-NewQQ Rust workspace
+# 设计依据：rust-rewrite/01-architect-design.md §1（布局）、§8（M0）、§9（安全与供应链）
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/gensokyo-core",
+    "crates/gensokyo-config",
+    "crates/gensokyo-protocol",
+    "crates/gensokyo-qq",
+    "crates/gensokyo-storage",
+    "crates/gensokyo-media",
+    "crates/gensokyo-actions",
+    "crates/gensokyo-runtime",
+    "crates/gensokyo-webui",
+    "crates/gensokyo-bin",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+# 内部 crate（依赖方向只能向下：bin → runtime → actions → 能力 crate → config → core）
+# 带 version 而非裸 path：cargo-deny 的 bans/wildcards 会把"仅 path 无版本"判为 wildcard 依赖
+gensokyo-core = { path = "crates/gensokyo-core", version = "0.1.0" }
+gensokyo-config = { path = "crates/gensokyo-config", version = "0.1.0" }
+gensokyo-protocol = { path = "crates/gensokyo-protocol", version = "0.1.0" }
+gensokyo-qq = { path = "crates/gensokyo-qq", version = "0.1.0" }
+gensokyo-storage = { path = "crates/gensokyo-storage", version = "0.1.0" }
+gensokyo-media = { path = "crates/gensokyo-media", version = "0.1.0" }
+gensokyo-actions = { path = "crates/gensokyo-actions", version = "0.1.0" }
+gensokyo-runtime = { path = "crates/gensokyo-runtime", version = "0.1.0" }
+gensokyo-webui = { path = "crates/gensokyo-webui", version = "0.1.0" }
+
+# 异步运行时 / 网络
+tokio = "1.54.1"
+axum = "0.8.9"
+tokio-tungstenite = "0.30.0"
+tungstenite = "0.30.0"
+reqwest = "0.13.5"
+
+# 序列化 / 配置
+serde = { version = "1.0.229", features = ["derive"] }
+# 主选 YAML 库：serde_norway（serde_yaml 的维护分支，RustSec 推荐）
+# 2026-10-22 裁决：serde_yml 0.0.13 因 RUSTSEC-2025-0068（unsound/unmaintained）弃用
+serde_norway = "0.9.42"
+saphyr = "0.2.2"
+
+# 存储
+redb = "4.4.0"
+
+# 可观测性 / 错误
+tracing = "0.1.44"
+thiserror = "2.0.21"
+anyhow = "1.0.104"
+
+# CLI / 工具
+clap = { version = "4.6.7", features = ["derive"] }
+
+# 媒体 / 通用工具
+base64 = "0.23.1"
+image = "0.25.10"
+bytes = "1.12.1"
+futures = "0.3.34"
+parking_lot = "0.13.0"
+dashmap = "6.2.1"
+uuid = { version = "1.28.0", features = ["v4"] }
+time = { version = "0.3.55", features = ["formatting", "macros"] }
+
+# TLS 安全下限（RustSec-2026-0382/0383 / CVE-2026-111943）
+# 低于下列版本的 rustls/webpki 禁止进入依赖图；`cargo xtask check-tls-floors` + CI 会再断言一次。
+# provider（ring / aws-lc-rs）显式不选：它决定是否需要 C 工具链与平台矩阵，留到 M1 定。
+rustls = { version = "0.23.46", default-features = false, features = ["logging", "std", "tls12"] }
+webpki-root-certs = "1.0.10"
+rustls-webpki = { version = "0.103.16", default-features = false, features = ["std"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+unimplemented = "deny"
+todo = "warn"

@@ -1,0 +1,3 @@
+[alias]
+# `cargo xtask build` == `cargo run -p xtask -- build`
+xtask = "run --package xtask --"
