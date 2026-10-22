@@ -46,6 +46,8 @@ release/
 # Rust（M0 起）
 /target
 **/*.rs.bk
+# redb 默认库文件落在 CWD（openid-map.redb / msgid-map.redb）
+*.redb
 
 # webui placeholder (auto-created by build.ps1 Ensure-WebUIDist)
 webui/dist/placeholder.html

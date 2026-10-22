@@ -20,4 +20,4 @@ M0 只新建 Rust 工作区与 CI，**不改动任何 Go 代码**。
 - `gensokyo` 在 M0 只支持 `--version` / `version`；无子命令时打印提示并以退出码 2 结束（不假装启动成功）。
 - TLS 下限**接线**：`gensokyo-qq` 依赖 `rustls 0.23.46` / `webpki-root-certs 1.0.10` / `rustls-webpki 0.103.16`（provider 显式留空，M1 再选）；`cargo xtask check-tls-floors` 与 CI `tls-floors` job 断言 `Cargo.lock` 不低于下限；`deny.toml` 同时禁 `openssl`、`openssl-sys`。
 - CQ 转义口径**跟随 Go 而非规范**：出站只转 `,` `]` `&`，不转 `[`（OneBot v11 规范要求转 `[`）；入站 `unescape` 仍接受 `&#91;`。M1 勿"修正"为转 `[`，否则黄金样本整串不匹配。
-- 待 M1 校准：MSRV job 与 build matrix 按实际依赖重新校准（现有依赖 MSRV 高于 1.85，M0 不放假的 MSRV job）；`dtolnay/rust-toolchain` 无 `1.99.1` tag，工作流用 `@master` + `toolchain: 1.99.1` 输入钉版本。
+- 待 M1 校准：MSRV job 与 build matrix 按实际依赖重新校准（M1d 已按实际依赖校准为 **1.90**：`redb 4.4.0` 需 1.90、`time 0.3.55` 需 1.88，M0 不放假的 MSRV job）；`dtolnay/rust-toolchain` 无 `1.99.1` tag，工作流用 `@master` + `toolchain: 1.99.1` 输入钉版本。

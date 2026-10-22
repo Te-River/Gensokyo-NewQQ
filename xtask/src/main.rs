@@ -67,13 +67,13 @@ fn lock_versions(lock: &str) -> BTreeMap<String, Vec<String>> {
             current = Some(name.trim_end_matches('"').to_owned());
             continue;
         }
-        if let Some(version) = line.strip_prefix("version = \"") {
-            if let Some(name) = current.take() {
-                versions
-                    .entry(name)
-                    .or_default()
-                    .push(version.trim_end_matches('"').to_owned());
-            }
+        if let Some(version) = line.strip_prefix("version = \"")
+            && let Some(name) = current.take()
+        {
+            versions
+                .entry(name)
+                .or_default()
+                .push(version.trim_end_matches('"').to_owned());
         }
     }
 

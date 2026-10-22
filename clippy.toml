@@ -1,5 +1,5 @@
-# MSRV 与 design §9.2 一致：edition 2024 下限
-msrv = "1.85"
+# MSRV 与 workspace `rust-version` 一致：按实际依赖校准为 1.90（redb 4.4.0 需 1.90、time 0.3.55 需 1.88）
+msrv = "1.90"
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-dbg-in-tests = true

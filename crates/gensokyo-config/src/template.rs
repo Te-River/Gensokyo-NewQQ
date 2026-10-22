@@ -50,13 +50,14 @@ pub fn ensure_config_file(path: impl AsRef<Path>) -> Result<bool, TemplateError>
         return Ok(false);
     }
 
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            fs::create_dir_all(parent).map_err(|source| TemplateError::CreateDir {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent).map_err(|source| TemplateError::CreateDir {
+            path: parent.to_path_buf(),
+            source,
+        })?;
     }
 
     let tmp = tmp_path(path);
