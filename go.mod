@@ -1,6 +1,6 @@
 module github.com/hoshinonyaruko/gensokyo
 
-go 1.25.0
+go 1.26.10
 
 require (
 	github.com/Baidu-AIP/golang-sdk v1.1.1
@@ -11,7 +11,7 @@ require (
 	github.com/fsnotify/fsnotify v1.7.0
 	github.com/gin-gonic/gin v1.9.1
 	github.com/google/uuid v1.6.0
-	github.com/gorilla/websocket v1.4.2
+	github.com/gorilla/websocket v1.5.3
 	github.com/hajimehoshi/go-mp3 v0.3.4
 	github.com/shirou/gopsutil v3.21.11+incompatible
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
@@ -19,7 +19,7 @@ require (
 	github.com/tencentyun/cos-go-sdk-v5 v0.7.45
 	go.etcd.io/bbolt v1.3.9
 	golang.org/x/time v0.15.0
-	google.golang.org/grpc v1.65.0
+	google.golang.org/grpc v1.84.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -35,7 +35,7 @@ require (
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect
 	github.com/yusufpapurcu/wmi v1.2.3 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20240528184218-531527333157 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260706201446-f0a921348800 // indirect
 	gopkg.in/ini.v1 v1.66.2 // indirect
 )
 
@@ -68,10 +68,10 @@ require (
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.2.11 // indirect
 	golang.org/x/arch v0.3.0 // indirect
-	golang.org/x/crypto v0.23.0 // indirect
-	golang.org/x/net v0.25.0
-	golang.org/x/sys v0.20.0
-	golang.org/x/text v0.15.0 // indirect
-	google.golang.org/protobuf v1.34.1
+	golang.org/x/crypto v0.57.0 // indirect
+	golang.org/x/net v0.60.0
+	golang.org/x/sys v0.48.0
+	golang.org/x/text v0.42.0 // indirect
+	google.golang.org/protobuf v1.36.11
 	mvdan.cc/xurls v1.1.0
 )
