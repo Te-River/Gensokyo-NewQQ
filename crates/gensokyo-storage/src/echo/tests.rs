@@ -275,6 +275,19 @@ fn seq_increment_equals_next() {
     assert_eq!(store.increment_mapping_seq("msg"), 2);
 }
 
+#[test]
+fn next_mapping_seq_saturates_at_i32_max() {
+    let store = EchoStore::new();
+    store.add_mapping_seq("msg", i32::MAX);
+    assert_eq!(
+        store.next_mapping_seq("msg"),
+        i32::MAX,
+        "seq 饱和于 i32::MAX，不回绕、不 panic（值为 i32，Go int 为 64 位）"
+    );
+    assert_eq!(store.current_and_increment_mapping_seq("msg"), i32::MAX);
+    assert_eq!(store.get_mapping_seq("msg"), i32::MAX);
+}
+
 // ---- SSM ----
 
 #[test]
@@ -575,7 +588,6 @@ fn cleanup_clears_all_mappings() {
     store.add_mapping_seq("msg", 4);
     store.push_global_stack(MessageGroupPair::new("g1"));
     store.store_ref_idx("msg", "REFIDX_1");
-    store.add_lazy_message_id("g1", "lazy", base());
     let row = store.store_cache_in_memory("msg").expect("分配行号");
 
     store.cleanup();
@@ -590,7 +602,6 @@ fn cleanup_clears_all_mappings() {
     assert_eq!(store.get_mapping_seq("msg"), 0);
     assert_eq!(store.global_stack_len(), 0);
     assert_eq!(store.get_ref_idx("msg"), "");
-    assert_eq!(store.get_lazy_messages_id("g1"), DEFAULT_MESSAGE_ID);
     assert_eq!(
         store.get_cache_id_from_memory_by_row_id(&row.to_string()),
         None
@@ -599,6 +610,25 @@ fn cleanup_clears_all_mappings() {
     assert_eq!(store.store_cache_in_memory("msg").expect("重新分配"), row);
     // SSM 计数器不随清理重置（Go 同）：入队已用掉 1。
     assert_eq!(store.next_ssm_correlation_id("g1"), "ssm-g1-2");
+}
+
+#[test]
+fn cleanup_keeps_lazy_messages_within_window() {
+    let (store, clock) = frozen_store();
+    store.add_lazy_message_id("g1", "lazy", base());
+
+    store.cleanup();
+
+    // Go `cleanupGlobalMaps` 从不清理 `messageStore.records`：被动回复 msg_id 必须活到窗口结束。
+    assert_eq!(
+        store.get_lazy_messages_id("g1"),
+        "lazy",
+        "cleanup 后懒消息仍在 4 分钟窗口内可命中"
+    );
+
+    // 窗口仍按时间裁剪：满 4 分钟后照常回落到主动推送默认值。
+    clock.advance(DEFAULT_LAZY_WINDOW);
+    assert_eq!(store.get_lazy_messages_id("g1"), DEFAULT_MESSAGE_ID);
 }
 
 #[test]

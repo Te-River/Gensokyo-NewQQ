@@ -46,6 +46,8 @@ reqwest = "0.13.5"
 
 # 序列化 / 配置
 serde = { version = "1.0.229", features = ["derive"] }
+# OneBot 协议层：事件/消息段/action 参数都是 JSON，`#[serde(flatten)] extra` 也需要 Value
+serde_json = "1.0.150"
 # 主选 YAML 库：serde_norway（serde_yaml 的维护分支，RustSec 推荐）
 # 2026-10-22 裁决：serde_yml 0.0.13 因 RUSTSEC-2025-0068（unsound/unmaintained）弃用
 serde_norway = "0.9.42"
@@ -54,7 +56,8 @@ saphyr = "0.2.2"
 # 存储
 redb = "4.4.0"
 # 行号派生：Go `idmap.GenerateRowID` 用 MD5，虚拟行号迁移/对拍必须逐位一致
-md-5 = "0.11.0"
+# 关闭默认特性：只需要摘要核心，不需要 oid（const-oid）与 alloc
+md-5 = { version = "0.11.0", default-features = false }
 
 # 可观测性 / 错误
 tracing = "0.1.44"

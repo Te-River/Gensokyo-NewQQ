@@ -2,7 +2,8 @@
 //!
 //! 覆盖四类进程内状态：消息 ID 懒加载、msg_seq、SSM 补发队列，以及 echo 键值映射
 //! （消息类型 / message_id / event_id / 递归计数 / REFIDX / 行号缓存）。全部是可丢的
-//! 内存数据：进程重启即清空，[`EchoStore::cleanup`] 也会整体清空。
+//! 内存数据：进程重启即清空；[`EchoStore::cleanup`] 清空除懒消息表之外的映射（与 Go
+//! `cleanupGlobalMaps` 一致）。
 //!
 //! # key 格式（与 Go 一致）
 //!
@@ -48,9 +49,14 @@
 //!   `index < 0` 分支在 `usize` 下不可达）。
 //! - **[`MessageGroupPair::payload`]**：Go 存 `*dto.MessageToCreate`；本层只存不解释的字符串，
 //!   消息体类型留给 actions/runtime 层（M1e 不引协议类型）。
+//! - **整数宽度**：Go `int` 是 64 位；`int_mapping` 与 seq 的值用 `i32` 收窄（对齐 Go 侧实际
+//!   取值范围），上层不应写入超过 `i32::MAX` 的计数。
 //! - **seq 溢出**：`saturating_add`，永不 panic（Go 回绕）。
-//! - **清理**：Go 另有 `StartCleanupRoutine`（5 分钟）只清两张 msgid 内存表；本实现不保留两套
-//!   周期，统一由 [`EchoStore::cleanup`] 覆盖全部映射。SSM 计数器与 Go 一样不随清理重置。
+//! - **群 ID 登记**：Go `generateDefaultMessageID` 先 `idmap.StoreIDv2(groupID)` 登记群虚拟 ID
+//!   （随后查消息类型但丢弃结果）再返回 `"2000"`；本层只返回 `"2000"`，群 ID 登记由上层负责。
+//! - **清理**：Go `cleanupGlobalMaps`（30 分钟 tick）清空除懒消息表**之外**的全部映射——
+//!   `messageStore.records`（`echo/messageidmap.go`）没有任何清理路径，窗口内的被动回复 msg_id
+//!   必须活到 4 分钟结束。本实现同样不清懒消息表，SSM 计数器也不随清理重置。
 //!
 //! # 并发
 //!
@@ -227,26 +233,32 @@ impl EchoStore {
         self.lazy_window
     }
 
-    /// 清空全部映射（Go `cleanupGlobalMaps`）。
+    /// 清空映射（Go `cleanupGlobalMaps`）。
     ///
-    /// SSM 计数器不重置、后台清理线程不停（Go 同）。
+    /// 懒消息表**不清**：Go 的 `messageStore.records` 没有任何清理路径，清掉会让窗口内写入的
+    /// 被动回复 msg_id 提前失效、回落到 [`DEFAULT_MESSAGE_ID`]（主动推送，可能触发 22009 +
+    /// SSM 补发）。SSM 计数器不重置、后台清理线程不停（Go 同）。
     pub fn cleanup(&self) {
-        write_map(&self.inner.msg_types).clear();
-        write_map(&self.inner.msg_ids).clear();
-        write_map(&self.inner.event_ids).clear();
-        write_map(&self.inner.int_mapping).clear();
-        write_map(&self.inner.ref_idx).clear();
-        write_map(&self.inner.lazy).clear();
-        write_map(&self.inner.cache_rows).clear();
-        write_map(&self.inner.cache_ids).clear();
-        self.inner.seq.clear();
-        self.inner
+        Self::cleanup_inner(&self.inner);
+    }
+
+    /// 清理的实际实现：后台线程持 `Weak` 句柄时也走这里。
+    fn cleanup_inner(inner: &EchoInner) {
+        write_map(&inner.msg_types).clear();
+        write_map(&inner.msg_ids).clear();
+        write_map(&inner.event_ids).clear();
+        write_map(&inner.int_mapping).clear();
+        write_map(&inner.ref_idx).clear();
+        write_map(&inner.cache_rows).clear();
+        write_map(&inner.cache_ids).clear();
+        inner.seq.clear();
+        inner
             .ssm
             .stack
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
-        debug!(target: "gensokyo_storage::echo", "echo 内存映射已清空");
+        debug!(target: "gensokyo_storage::echo", "echo 内存映射已清空（懒消息表除外）");
     }
 
     /// 启动后台清理线程，周期 [`DEFAULT_CLEANUP_PERIOD`]。
@@ -262,7 +274,8 @@ impl EchoStore {
 
     /// 启动后台清理线程，周期可配。
     ///
-    /// `period` 为 0 会抬到 1ms，避免忙等。
+    /// `period` 为 0 会抬到 1ms，避免忙等。线程只持 `Weak` 句柄：所有 `EchoStore`
+    /// 释放后，下一次 tick（或 channel 断开）即退出，无需显式 [`EchoStore::stop_cleanup_routine`]。
     ///
     /// # Errors
     ///
@@ -283,15 +296,21 @@ impl EchoStore {
             period
         };
         let (stop, ticks) = mpsc::channel::<()>();
-        // 共享句柄而非 &self：线程必须 'static，且清理的正是同一份映射。
-        let store = self.clone();
+        // 只持弱引用：`Sender` 在 `EchoInner` 内，强引用会形成环导致不显式 stop 时永不释放。
+        // 所有 `EchoStore` 释放后 upgrade 失败（或 channel 断开），线程自行退出。
+        let weak = Arc::downgrade(&self.inner);
         let join = thread::Builder::new()
             .name("gensokyo-echo-cleanup".to_owned())
             .spawn(move || {
                 loop {
                     match ticks.recv_timeout(period) {
                         Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
-                        Err(RecvTimeoutError::Timeout) => store.cleanup(),
+                        Err(RecvTimeoutError::Timeout) => {
+                            let Some(inner) = weak.upgrade() else {
+                                break;
+                            };
+                            EchoStore::cleanup_inner(&inner);
+                        }
                     }
                 }
             })?;
@@ -474,9 +493,11 @@ impl EchoStore {
         self.get_msg_type_by_key(&echo_key_v3(app_id, group_id))
     }
 
-    // ---- int64 → int 递归计数（Go echo.go:236-247） ----
+    // ---- int64 → i32 递归计数（Go echo.go:236-247；Go `int` 为 64 位，这里收窄） ----
 
     /// 记录递归调用计数（Go `AddMapping`）。
+    ///
+    /// Go 的值为 `int`（64 位）；本层收窄为 `i32`，调用方不应传入超出范围的计数。
     pub fn add_mapping(&self, key: i64, value: i32) {
         write_map(&self.inner.int_mapping).insert(key, value);
     }
@@ -496,6 +517,8 @@ impl EchoStore {
     ///
     /// Go 已把它标为 Deprecated：`get_mapping_seq` + `add_mapping_seq` 组合有读-改-写竞态，
     /// 新代码用 [`EchoStore::next_mapping_seq`] / [`EchoStore::current_and_increment_mapping_seq`]。
+    ///
+    /// 值收窄为 `i32`（Go `int` 是 64 位）；递增在 [`EchoStore::next_mapping_seq`] 处饱和。
     pub fn add_mapping_seq(&self, key: &str, value: i32) {
         self.inner.seq.set(key, value);
     }
@@ -518,6 +541,8 @@ impl EchoStore {
     }
 
     /// 原子递增 seq 并返回**递增后**的值（Go `NextMappingSeq`）。
+    ///
+    /// 值饱和于 `i32::MAX`，不回绕、不 panic（Go 会回绕）。
     pub fn next_mapping_seq(&self, key: &str) -> i32 {
         self.inner.seq.current_and_advance(key, self.ramdom_seq).1
     }
@@ -654,16 +679,17 @@ impl EchoStore {
     ///
     /// 记录 `<id, 行号>` 并在反表登记 `<行号, id>`（Go `StoreCacheInMemory`）。
     ///
-    /// 与 Go 一样从 9 位十进制开始尝试、冲突则加长到 18 位；行号由 ID 按
+    /// 与 Go 一样从 9 位十进制开始派生化行号、冲突则加长到 18 位；行号由 ID 按
     /// `idmap.GenerateRowID` 稳定派生（MD5，见 `generate_row_id`），同一 ID 永远得到同一行号。
+    /// 写锁覆盖"查 + 占位"，同 ID 并发不会触发重试，9→18 位循环仅作防御。
     ///
     /// # Errors
     ///
-    /// 18 位内仍无法登记（Go 对同一 key 的 `LoadOrStore` 冲突且已到上限）时返回
+    /// 18 位内仍无法登记（防御路径；正常路径不可达）时返回
     /// [`StorageError::Corrupt`]。
     pub fn store_cache_in_memory(&self, id: &str) -> Result<i64, StorageError> {
         // 持写锁完成"查 + 占位"，等价 Go 的 `Load` + `LoadOrStore`：同一 ID 的并发调用
-        // 不会把彼此逼到更长的位数。
+        // 不会把彼此逼到更长的位数，因此下面的 `Entry::Vacant` 必成立。
         let mut rows = write_map(&self.inner.cache_rows);
         if let Some(&row) = rows.get(id) {
             return Ok(row);
@@ -672,7 +698,7 @@ impl EchoStore {
         let mut row = 0;
         for digits in ROW_ID_MIN_DIGITS..=ROW_ID_MAX_DIGITS {
             row = generate_row_id(id, digits)?;
-            // Go 的冲突分支检查的是同一个 key，持锁后只有并发路径可达。
+            // 写锁保证同 ID 并发不会走到这里重试；长度循环只作防御（对齐 Go 的冲突分支）。
             if let Entry::Vacant(entry) = rows.entry(id.to_owned()) {
                 entry.insert(row);
                 break;
