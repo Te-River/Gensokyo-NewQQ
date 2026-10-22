@@ -1,0 +1,2 @@
+# 模板通过 include_str! 嵌入并逐字节写盘，行尾必须固定为 LF（Windows autocrlf 不得改写）
+config.yml text eol=lf

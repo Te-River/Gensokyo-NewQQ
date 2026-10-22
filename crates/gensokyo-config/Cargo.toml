@@ -12,6 +12,15 @@ gensokyo-core.workspace = true
 serde.workspace = true
 serde_norway.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tracing = { workspace = true, features = ["std"] }
+# M1c：无锁快照 + 文件监听（workspace 根不引入这两项，版本由本 crate 持有）
+arc-swap = "1.9.3"
+notify = "8.2.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 
 [lints]
 workspace = true

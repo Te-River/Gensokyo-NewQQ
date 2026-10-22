@@ -1,0 +1,2 @@
+# 根仓库为 Go 运行时配置忽略了 config.yml；本 crate 的模板必须入库
+!templates/config.yml

@@ -4,7 +4,9 @@
 
 pub mod error;
 pub mod ids;
+pub mod sys;
 pub mod telemetry;
 
 pub use error::{Error, Result};
 pub use ids::Ob11Id;
+pub use sys::local_ip;

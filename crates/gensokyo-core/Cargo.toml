@@ -12,6 +12,8 @@ serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 time.workspace = true
+# 本机网卡枚举（sys::local_ip，对齐 Go sys.GetLocalIP）
+if-addrs = "0.14.0"
 
 [dev-dependencies]
 # Ob11Id 的 untagged 线上形态单测（serde_norway 已在依赖图中，仍是唯一 YAML 后端）

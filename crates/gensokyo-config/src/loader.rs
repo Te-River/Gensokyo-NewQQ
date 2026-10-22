@@ -1,10 +1,16 @@
 //! `config.yml` 加载。
 //!
-//! M0 只做"读文件 + 解析"；热重载（`notify` + `ArcSwap` 快照）与首启模板生成在 M1 落地。
+//! 兼容两种文档形态：Go 真源的 `{version, settings}` 整份配置（`template/config_template.go`
+//! 生成的就是它），以及 M0 起测试/调用方直接给的 `settings` 正文。
+//!
+//! **已知缺口（M1d 处理）**：Go `config/config.go:60-64` 会在解析前修复历史 bug 产生的
+//! 重复 `settings:` / `version:` 行；这里尚未实现，出现重复顶层键时 `serde_norway` 会
+//! 直接报解析错误（不会静默取其中一个）。
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
 use thiserror::Error;
 
 use crate::settings::Settings;
@@ -62,10 +68,30 @@ fn parse_with_path(text: &str, path: PathBuf) -> Result<Settings, LoadError> {
     if is_effectively_empty(text) {
         return Ok(Settings::default());
     }
-    serde_norway::from_str(text).map_err(|source| LoadError::Parse {
+
+    // 先看顶层有没有 `settings` 键：Go 的 config.yml 是 `{version, settings}`，
+    // 而 M0 起的夹具/调用方给的是 settings 正文。探测一次 `Value` 只为决定形态，
+    // 真正反序列化仍走带行号的 `from_str`，报错位置不丢。
+    let parsed = match serde_norway::from_str::<serde_norway::Value>(text) {
+        Ok(serde_norway::Value::Mapping(map)) if map.contains_key("settings") => {
+            serde_norway::from_str::<ConfigDocument>(text)
+                .map(|doc| doc.settings.unwrap_or_default())
+        }
+        Ok(_) => serde_norway::from_str::<Settings>(text),
+        Err(err) => Err(err),
+    };
+    parsed.map_err(|source| LoadError::Parse {
         path,
         source: Box::new(source),
     })
+}
+
+/// Go `config.Config`：`version` 之外只有 `settings` 一份配置。
+///
+/// `settings: null` 与缺失同样回退零值（Go yaml.v3 对 null 结构体留零值）。
+#[derive(Deserialize)]
+struct ConfigDocument {
+    settings: Option<Settings>,
 }
 
 /// 是否没有任何 YAML 内容：只有空白、注释、文档标记（`---` / `...`）与 null 标量
@@ -80,4 +106,31 @@ fn is_effectively_empty(text: &str) -> bool {
         let line = line.split('#').next().unwrap_or("").trim();
         line.is_empty() || matches!(line, "---" | "..." | "null" | "Null" | "NULL" | "~")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unwraps_go_document_shape() {
+        let settings = parse_str("version: 1\nsettings:\n  port: \"5700\"\n  app_id: 42\n")
+            .expect("Go 文档形态必须能解析");
+        assert_eq!(settings.port, "5700");
+        assert_eq!(settings.app_id, 42);
+    }
+
+    #[test]
+    fn null_settings_falls_back_to_default() {
+        let settings =
+            parse_str("version: 1\nsettings: null\n").expect("settings: null 必须能解析");
+        assert_eq!(settings, Settings::default());
+    }
+
+    #[test]
+    fn plain_settings_body_still_parses() {
+        // M0 起的夹具形态（没有 version/settings 外壳）不能回归
+        let settings = parse_str("port: \"5700\"\n").expect("settings 正文必须能解析");
+        assert_eq!(settings.port, "5700");
+    }
 }
