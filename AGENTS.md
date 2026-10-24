@@ -14,7 +14,7 @@ This file provides guidance to Qoder (qoder.com) when working with code in this 
 
 ## 🎯 项目简介
 
-Gensokyo-NewQQ 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 标准的 QQ 机器人服务端，将 QQ 官方 API 和 WebSocket 事件转换为 OneBot V11 协议。使用 Go 语言开发（Go 1.25）。模块路径：`github.com/hoshinonyaruko/gensokyo`。
+Gensokyo-NewQQ 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 标准的 QQ 机器人服务端，将 QQ 官方 API 和 WebSocket 事件转换为 OneBot V11 协议。使用 Go 语言开发（Go 1.26.10）。模块路径：`github.com/hoshinonyaruko/gensokyo`。
 
 ## 🌐 语言
 
