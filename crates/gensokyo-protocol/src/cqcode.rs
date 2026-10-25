@@ -48,6 +48,63 @@ pub fn escape(value: &str) -> String {
     out
 }
 
+/// CQ 码起始标记。
+const CODE_PREFIX: &[u8] = b"[CQ:";
+
+/// CQ 实体（`&amp;` / `&#91;` / `&#93;` / `&#44;`）的统一长度。
+const ENTITY_LEN: usize = 5;
+
+/// 字宽单字节查找（`memchr` 语义）：返回 `haystack[from..]` 里第一个 `byte` 的绝对下标。
+///
+/// 整字比较 SWAR：一个 `usize` 一次排掉 8 个字节，只有命中字才逐字节定位，因此不依赖端序
+/// （掩码里的"最低命中字节"在小端下才对应最低地址）。CQ 文本里 `[` `]` `,` 稀疏，
+/// 逐字节比较会白白多跑几倍。
+fn memchr_byte(haystack: &[u8], from: usize, byte: u8) -> Option<usize> {
+    const LO: usize = usize::MAX / 0xFF;
+    const HI: usize = LO << 7;
+    const WIDTH: usize = std::mem::size_of::<usize>();
+
+    let wide = LO * usize::from(byte);
+    let mut at = from;
+    while at + WIDTH <= haystack.len() {
+        let mut word = [0_u8; WIDTH];
+        word.copy_from_slice(&haystack[at..at + WIDTH]);
+        let diff = usize::from_ne_bytes(word) ^ wide;
+        // 字节为 0 时该字节高位置 1：借位减 + `!diff` 掩掉跨字节借位
+        let hit = diff.wrapping_sub(LO) & !diff & HI;
+        if hit != 0 {
+            return haystack[at..at + WIDTH]
+                .iter()
+                .position(|&b| b == byte)
+                .map(|idx| at + idx);
+        }
+        at += WIDTH;
+    }
+    haystack[at..]
+        .iter()
+        .position(|&b| b == byte)
+        .map(|idx| at + idx)
+}
+
+/// 识别 `bytes[at..]` 处的 CQ 实体，返回替换文本；未知实体或长度不足返回 `None`。
+fn entity_at(bytes: &[u8], at: usize) -> Option<&'static str> {
+    if at + ENTITY_LEN > bytes.len() {
+        return None;
+    }
+    let tail = &bytes[at..at + ENTITY_LEN];
+    if tail.starts_with(b"&amp;") {
+        Some("&")
+    } else if tail.starts_with(b"&#91;") {
+        Some("[")
+    } else if tail.starts_with(b"&#93;") {
+        Some("]")
+    } else if tail.starts_with(b"&#44;") {
+        Some(",")
+    } else {
+        None
+    }
+}
+
 /// 反转义 CQ 码参数值。
 ///
 /// 与 Go `handlers/cqcode.go` 的 `ReplaceAll` 容错语义一致：只还原已知实体，**未知 `&`
@@ -55,11 +112,31 @@ pub fn escape(value: &str) -> String {
 /// 比 Go 多还原 `&#91;`，用于兼容对端按规范转义的 `[`（出站 [`escape`] 不产出它）。
 #[must_use]
 pub fn unescape(value: &str) -> String {
-    value
-        .replace("&#44;", ",")
-        .replace("&#93;", "]")
-        .replace("&#91;", "[")
-        .replace("&amp;", "&")
+    let mut out = String::with_capacity(value.len());
+    push_unescaped(&mut out, value);
+    out
+}
+
+/// 单趟反转义，结果追加到 `out`。
+///
+/// 四个实体等长、互不为前缀，且替换产物都是单字符（拼不出新实体），所以逐位置匹配与 Go
+/// 的四次 `ReplaceAll` 结果逐字节一致，却只需一次遍历、一次分配（旧实现每次 `replace`
+/// 都新分配一个 `String`，无实体的值也要付四次）。
+fn push_unescaped(out: &mut String, value: &str) {
+    let bytes = value.as_bytes();
+    let mut copied = 0;
+    let mut search = 0;
+    while let Some(at) = memchr_byte(bytes, search, b'&') {
+        let Some(replacement) = entity_at(bytes, at) else {
+            search = at + 1;
+            continue;
+        };
+        out.push_str(&value[copied..at]);
+        out.push_str(replacement);
+        copied = at + ENTITY_LEN;
+        search = copied;
+    }
+    out.push_str(&value[copied..]);
 }
 
 /// 严格反转义：未知 `&` 实体返回 [`Error::Protocol`]。
@@ -68,62 +145,86 @@ pub fn unescape(value: &str) -> String {
 /// 里的 `&` 被当成协议错误。
 #[doc(hidden)]
 pub fn unescape_strict(value: &str) -> Result<String> {
+    let bytes = value.as_bytes();
     let mut out = String::with_capacity(value.len());
-    let mut rest = value;
-    while let Some(idx) = rest.find('&') {
-        out.push_str(&rest[..idx]);
-        let tail = &rest[idx..];
-        let (replacement, consumed) = if tail.starts_with("&amp;") {
-            ("&", 5)
-        } else if tail.starts_with("&#91;") {
-            ("[", 5)
-        } else if tail.starts_with("&#93;") {
-            ("]", 5)
-        } else if tail.starts_with("&#44;") {
-            (",", 5)
-        } else {
-            let preview: String = tail.chars().take(5).collect();
+    let mut copied = 0;
+    let mut search = 0;
+    while let Some(at) = memchr_byte(bytes, search, b'&') {
+        let Some(replacement) = entity_at(bytes, at) else {
+            let preview: String = value[at..].chars().take(5).collect();
             return Err(Error::Protocol(format!("非法 CQ 实体: {preview}")));
         };
+        out.push_str(&value[copied..at]);
         out.push_str(replacement);
-        rest = &tail[consumed..];
+        copied = at + ENTITY_LEN;
+        search = copied;
     }
-    out.push_str(rest);
+    out.push_str(&value[copied..]);
     Ok(out)
 }
 
 /// 解析一段消息文本为消息段序列。
 ///
 /// 非 CQ 部分成为 `text` 段；相邻文本不会重复分段（与 `parse_string.go` 的 flush 语义一致）。
+///
+/// 实现要点：整趟只做字宽查找（`[CQ:` 起点与结束括号各扫一次），`copied` 游标标记"尚未
+/// 成为段"的文本起点。码段类型非法时不推进 `copied`，因此待落的文本永远是一段连续切片
+/// （`input[copied..start]`），可以直接原地落成 `Segment`，中间不留临时 `String`。
 #[must_use]
 pub fn parse(input: &str) -> Vec<Segment> {
-    let mut segments = Vec::new();
-    let mut text = String::new();
-    let mut rest = input;
+    let bytes = input.as_bytes();
+    // 段数上界：码段数 ≤ `[` 个数，文本段数 ≤ 码段数 + 1
+    let mut segments = Vec::with_capacity(count_byte(bytes, b'[') * 2 + 1);
+    let mut copied = 0;
+    let mut cursor = 0;
 
-    while let Some(start) = rest.find("[CQ:") {
-        text.push_str(&rest[..start]);
-        let tail = &rest[start..];
-        let Some(end) = tail.find(']') else {
+    while let Some(start) = find_code_start(bytes, cursor) {
+        let body_start = start + CODE_PREFIX.len();
+        let Some(end) = memchr_byte(bytes, body_start, b']') else {
             // 无结束括号：剩余全部按文本处理（Go `parse_string.go` 的 malformed 分支）
-            text.push_str(tail);
-            rest = "";
             break;
         };
-        let body = &tail[4..end];
-        match parse_body(body) {
-            Some(segment) => {
-                flush_text(&mut segments, &mut text);
-                segments.push(segment);
+        // 类型非法（含空类型）时整段当文本：不推进 `copied`，收尾的文本段会一并带上，
+        // 保证输出可逆
+        if let Some(segment) = parse_body(&input[body_start..end]) {
+            if start > copied {
+                segments.push(Segment::text(&input[copied..start]));
             }
-            // 类型非法（含空类型）时整段当文本，保证输出可逆
-            None => text.push_str(&tail[..=end]),
+            segments.push(segment);
+            copied = end + 1;
         }
-        rest = &tail[end + 1..];
+        cursor = end + 1;
     }
-    text.push_str(rest);
-    flush_text(&mut segments, &mut text);
+    if copied < input.len() {
+        segments.push(Segment::text(&input[copied..]));
+    }
     segments
+}
+
+/// 查找下一个 `[CQ:` 的起始下标。
+fn find_code_start(bytes: &[u8], from: usize) -> Option<usize> {
+    let mut at = from;
+    loop {
+        let found = memchr_byte(bytes, at, b'[')?;
+        if bytes[found..].starts_with(CODE_PREFIX) {
+            return Some(found);
+        }
+        at = found + 1;
+    }
+}
+
+/// 统计 `byte` 在 `bytes` 里出现的次数。
+///
+/// 用于估段数上界：逐字节 `filter().count()` 要付一次均匀扫描，这里同一个字宽查找循环
+/// 只在命中处停一下，稀疏时几乎只按字宽走完全程。
+fn count_byte(bytes: &[u8], byte: u8) -> usize {
+    let mut count = 0;
+    let mut at = 0;
+    while let Some(found) = memchr_byte(bytes, at, byte) {
+        count += 1;
+        at = found + 1;
+    }
+    count
 }
 
 /// 解析单个完整 CQ 码（`[CQ:type,...]`）。
@@ -155,14 +256,8 @@ pub fn to_cq_string(segments: &[Segment]) -> String {
     out
 }
 
-fn flush_text(segments: &mut Vec<Segment>, text: &mut String) {
-    if !text.is_empty() {
-        segments.push(Segment::text(std::mem::take(text)));
-    }
-}
-
 fn parse_body(body: &str) -> Option<Segment> {
-    let (kind, params_part) = match body.find(',') {
+    let (kind, params_part) = match memchr_byte(body.as_bytes(), 0, b',') {
         Some(idx) => (&body[..idx], &body[idx + 1..]),
         None => (body, ""),
     };
@@ -175,12 +270,7 @@ fn parse_body(body: &str) -> Option<Segment> {
         return None;
     }
     let mut params = Vec::new();
-    for chunk in split_params(params_part) {
-        let Some((key, value)) = split_kv(chunk) else {
-            continue;
-        };
-        params.push((key.to_owned(), unescape(value)));
-    }
+    scan_params(&mut params, params_part);
     Some(Segment {
         kind: kind.to_owned(),
         params,
@@ -192,10 +282,10 @@ fn parse_body(body: &str) -> Option<Segment> {
 /// 先按首个 `=` 切；没有 `=` 时按首个 `:` 切（`[CQ:stream,type:start,qq:123]`，
 /// `handlers/cqcode.go:41` 的 stream 正则就是这个写法）。两者都没有的裸片段丢弃。
 fn split_kv(chunk: &str) -> Option<(&str, &str)> {
-    if let Some(idx) = chunk.find('=') {
+    if let Some(idx) = memchr_byte(chunk.as_bytes(), 0, b'=') {
         return Some((&chunk[..idx], &chunk[idx + 1..]));
     }
-    let idx = chunk.find(':')?;
+    let idx = memchr_byte(chunk.as_bytes(), 0, b':')?;
     // 空 key 丢弃；无 `=` 的 URL 型裸值（`https://x`）会被切成 `https` + `//x`，
     // 这是"无分隔符"本身有歧义的代价——CQ 参数键不含 `:`，值必须显式带分隔符。
     if idx == 0 {
@@ -204,26 +294,27 @@ fn split_kv(chunk: &str) -> Option<(&str, &str)> {
     Some((&chunk[..idx], &chunk[idx + 1..]))
 }
 
-/// 按 `,` 切分参数，`&#44;` 整体跳过（Go `splitCQParams`）。
-fn split_params(input: &str) -> Vec<&str> {
-    let mut out = Vec::new();
+/// 按 `,` 切分参数，并直接落成 `(key, 反转义后的值)`。
+///
+/// 分隔符是裸 `,`；`&#44;` 里没有裸 `,`（实体本身已是转义形态），所以直接按字节切分与
+/// Go `splitCQParams` 逐字节一致，不需要为实体单独跳过。旧实现先收集 `Vec<&str>` 再逐个
+/// 处理，这里一趟切分直接落成参数。
+fn scan_params(params: &mut Vec<(String, String)>, input: &str) {
+    let bytes = input.as_bytes();
     let mut start = 0;
-    let mut iter = input.char_indices().peekable();
-    while let Some((idx, ch)) = iter.next() {
-        if ch == '&' && input[idx..].starts_with("&#44;") {
-            // 吞掉 `#44;` 四个字符，实体整体留给值的反转义处理
-            for _ in 0..4 {
-                iter.next();
-            }
-            continue;
-        }
-        if ch == ',' {
-            out.push(&input[start..idx]);
-            start = idx + 1;
-        }
+    while let Some(at) = memchr_byte(bytes, start, b',') {
+        push_param(params, &input[start..at]);
+        start = at + 1;
     }
-    out.push(&input[start..]);
-    out
+    push_param(params, &input[start..]);
+}
+
+/// 单个参数片段落成参数；无 `=` 也无 `:` 的裸片段丢弃（legacy 口径）。
+fn push_param(params: &mut Vec<(String, String)>, chunk: &str) {
+    let Some((key, value)) = split_kv(chunk) else {
+        return;
+    };
+    params.push((key.to_owned(), unescape(value)));
 }
 
 /// 一个 CQ 码：`[CQ:type,key=value,...]`。
@@ -764,5 +855,83 @@ mod tests {
         assert_eq!(code.to_string(), "[CQ:at,name=a&#44;b]");
         assert_eq!(code.into_segment(), segment);
         assert!(CqCode::from_segment(&Segment::text("x")).is_none());
+    }
+}
+
+/// 解析热路径计时（只打印、**不断言耗时**：慢机器或 debug 构建不该让测试变红）。
+///
+/// 数字要跟 `xtask bench` 对比时用同一个 profile 跑：
+/// `cargo test -p gensokyo-protocol --release -- --nocapture parse_`。
+#[cfg(test)]
+mod perf {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    use super::parse;
+
+    /// 计时迭代次数：debug 构建下 2000 次也只有几十毫秒。
+    const ITERS: u32 = 2_000;
+
+    /// 预热后计时，返回单次操作耗时（纳秒）。
+    fn ns_per_op<T>(iters: u32, mut op: impl FnMut() -> T) -> f64 {
+        for _ in 0..100 {
+            black_box(op());
+        }
+        let start = Instant::now();
+        for _ in 0..iters {
+            black_box(op());
+        }
+        start.elapsed().as_secs_f64() * 1e9 / f64::from(iters)
+    }
+
+    /// 20 段混合 CQ（与 `xtask bench` 的 `cq_sample` 同形，便于两处数字对照）。
+    fn mixed_sample() -> String {
+        const CODES: [&str; 5] = [
+            "[CQ:at,qq=10001]",
+            "[CQ:image,file=8f3c.png,url=https://multimedia.nt.qq.com.cn/download?appid=1407]",
+            "[CQ:face,id=14]",
+            "[CQ:reply,id=1234567890123]",
+            "[CQ:record,file=abc.silk]",
+        ];
+        let mut text = String::new();
+        for index in 0..20 {
+            text.push('第');
+            text.push_str(&index.to_string());
+            text.push_str("段 ");
+            text.push_str(CODES[index % CODES.len()]);
+        }
+        text
+    }
+
+    #[test]
+    fn parse_mixed_20_segments_timing() {
+        let text = mixed_sample();
+        let segments = parse(&text).len();
+        let ns = ns_per_op(ITERS, || black_box(parse(black_box(text.as_str())).len()));
+        println!("[perf] parse 20-segment mixed: {ns:.1} ns/op ({segments} segments)");
+    }
+
+    #[test]
+    fn parse_plain_text_timing() {
+        // 无 CQ 码：应当只有一次文本段分配，是整趟扫描的下限
+        let text = "纯文本消息，没有 CQ 码，只有中文和 ASCII mixed content。".repeat(8);
+        let segments = parse(&text).len();
+        let ns = ns_per_op(ITERS, || black_box(parse(black_box(text.as_str())).len()));
+        println!(
+            "[perf] parse plain text ({} bytes): {ns:.1} ns/op ({segments} segments)",
+            text.len()
+        );
+    }
+
+    #[test]
+    fn parse_escaped_values_timing() {
+        // 每个值都含实体：走反转义的改写分支（旧实现这里是 4 次 replace/值）
+        let text = "[CQ:file,file=a&#44;b.txt&amp;c,file_name=d&#93;e.txt]".repeat(10);
+        let segments = parse(&text).len();
+        let ns = ns_per_op(ITERS, || black_box(parse(black_box(text.as_str())).len()));
+        println!(
+            "[perf] parse escaped values ({} bytes): {ns:.1} ns/op ({segments} segments)",
+            text.len()
+        );
     }
 }
