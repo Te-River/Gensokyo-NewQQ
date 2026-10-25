@@ -219,11 +219,18 @@ settings:
             "地址展示应含实际监听端口"
         );
 
-        let response = http_get(http, "/").await;
+        // 探活固定走独立路径：WebUI 挂载后 `/` 是前端首页。
+        let response = http_get(http, "/health").await;
         assert!(response.contains("200 OK"), "响应: {response}");
         assert!(
             response.contains("gensokyo-runtime: ok"),
             "健康检查正文: {response}"
+        );
+        assert!(
+            response
+                .to_ascii_lowercase()
+                .contains("content-type: text/plain"),
+            "健康检查应回 text/plain: {response}"
         );
 
         started
@@ -258,6 +265,16 @@ settings:
         assert!(
             started.handle.http_addr().is_none(),
             "模板默认 http_address 为空，不应启动 HTTP API"
+        );
+
+        // 模板 disable_webui=false 且 ws_server_path=ws：WebUI 占着 WS 端口的 `/`，
+        // 探活同样只能走 `/health`。
+        let ws = started.handle.ws_addr().expect("WS 应已监听");
+        let response = http_get(ws, "/health").await;
+        assert!(response.contains("200 OK"), "响应: {response}");
+        assert!(
+            response.contains("gensokyo-runtime: ok"),
+            "健康检查正文: {response}"
         );
 
         started
