@@ -5,7 +5,8 @@
 //!   注入，缺省 `None`（不强制调用方构造）。
 //! - [`Dispatcher`]：`ActionRequest<Value>` → [`gensokyo_protocol::Registry`] →
 //!   `ActionResponse<Value>`。未知 action `retcode=1404`、参数/JSON 非法 `1400`、
-//!   handler panic 隔离为 `1500`；`echo` 始终原样回传。
+//!   handler panic 隔离为 `1500`；`echo` 始终原样回传。handler 是异步的，直接 await，
+//!   不再经 `spawn_blocking` 调度线程池。
 //! - [`builtin`]：`get_status` / `get_version_info` / `get_login_info`（字段对齐 Go
 //!   `handlers/`）。
 //! - [`ws_server`]：正向 WS 服务端（`enable_ws_server` / `ws_server_path` /

@@ -13,9 +13,9 @@
 use std::sync::Arc;
 
 use gensokyo_config::ConfigManager;
-use gensokyo_core::Result;
 use gensokyo_protocol::action::{ActionRequest, ActionResponse};
-use gensokyo_protocol::{Handler, Registry};
+use gensokyo_protocol::registry::ready;
+use gensokyo_protocol::{Handler, HandlerFuture, Registry};
 use serde_json::{Value, json};
 
 /// `get_status`（Go `handlers/get_status.go`）。
@@ -27,8 +27,8 @@ impl Handler for GetStatus {
         "get_status"
     }
 
-    fn handle(&self, _request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
-        Ok(ActionResponse::ok(json!({
+    fn handle<'a>(&'a self, _request: &'a ActionRequest<Value>) -> HandlerFuture<'a> {
+        ready(Ok(ActionResponse::ok(json!({
             "app_initialized": true,
             "app_enabled": true,
             "plugins_good": true,
@@ -45,7 +45,7 @@ impl Handler for GetStatus {
                 "lost_times": 0,
                 "last_message_time": 0,
             },
-        })))
+        }))))
     }
 }
 
@@ -58,9 +58,9 @@ impl Handler for GetVersionInfo {
         "get_version_info"
     }
 
-    fn handle(&self, _request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
+    fn handle<'a>(&'a self, _request: &'a ActionRequest<Value>) -> HandlerFuture<'a> {
         let version = env!("CARGO_PKG_VERSION");
-        Ok(ActionResponse::ok(json!({
+        ready(Ok(ActionResponse::ok(json!({
             "app_full_name": "gensokyo",
             "app_name": "gensokyo",
             "app_version": version,
@@ -75,7 +75,7 @@ impl Handler for GetVersionInfo {
             "runtime_os": std::env::consts::OS,
             "runtime_version": "",
             "version": version,
-        })))
+        }))))
     }
 }
 
@@ -99,7 +99,7 @@ impl Handler for GetLoginInfo {
         "get_login_info"
     }
 
-    fn handle(&self, _request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
+    fn handle<'a>(&'a self, _request: &'a ActionRequest<Value>) -> HandlerFuture<'a> {
         let settings = self.config.snapshot();
         #[allow(clippy::cast_possible_wrap)] // 与 Go `int64(globalBotID)` 的截断口径一致
         let user_id = if settings.get_use_uin() {
@@ -107,10 +107,10 @@ impl Handler for GetLoginInfo {
         } else {
             settings.get_app_id() as i64
         };
-        Ok(ActionResponse::ok(json!({
+        ready(Ok(ActionResponse::ok(json!({
             "user_id": user_id,
             "nickname": settings.get_custom_bot_name(),
-        })))
+        }))))
     }
 }
 
@@ -163,20 +163,22 @@ mod tests {
         }
     }
 
-    #[test]
-    fn get_status_reports_online_and_good() {
+    #[tokio::test]
+    async fn get_status_reports_online_and_good() {
         let response = GetStatus
             .handle(&request("get_status"))
+            .await
             .expect("get_status 应成功");
         assert_eq!(response.retcode, 0);
         assert_eq!(response.data.as_ref().expect("data")["online"], true);
         assert_eq!(response.data.as_ref().expect("data")["good"], true);
     }
 
-    #[test]
-    fn get_version_info_matches_go_shape() {
+    #[tokio::test]
+    async fn get_version_info_matches_go_shape() {
         let response = GetVersionInfo
             .handle(&request("get_version_info"))
+            .await
             .expect("get_version_info 应成功");
         let data = response.data.expect("data");
         assert_eq!(data["app_name"], "gensokyo");
@@ -185,28 +187,30 @@ mod tests {
         assert_eq!(data["protocol_name"], 4);
     }
 
-    #[test]
-    fn get_login_info_prefers_uin_when_use_uin() {
+    #[tokio::test]
+    async fn get_login_info_prefers_uin_when_use_uin() {
         let (_dir, config) =
             manager("use_uin: true\nuin: 10001\napp_id: 12345\ncustom_bot_name: Bot\n");
         let response = GetLoginInfo::new(config)
             .handle(&request("get_login_info"))
+            .await
             .expect("get_login_info 应成功");
         assert_eq!(response.data.as_ref().expect("data")["user_id"], 10001);
         assert_eq!(response.data.as_ref().expect("data")["nickname"], "Bot");
     }
 
-    #[test]
-    fn get_login_info_falls_back_to_app_id() {
+    #[tokio::test]
+    async fn get_login_info_falls_back_to_app_id() {
         let (_dir, config) = manager("use_uin: false\nuin: 10001\napp_id: 12345\n");
         let response = GetLoginInfo::new(config)
             .handle(&request("get_login_info"))
+            .await
             .expect("get_login_info 应成功");
         assert_eq!(response.data.as_ref().expect("data")["user_id"], 12345);
     }
 
-    #[test]
-    fn register_all_installs_three_actions() {
+    #[tokio::test]
+    async fn register_all_installs_three_actions() {
         let (_dir, config) = manager("app_id: 12345\n");
         let mut registry = Registry::new();
         register_all(&mut registry, config);
@@ -223,6 +227,7 @@ mod tests {
                 params: Some(json!({})),
                 echo: None,
             })
+            .await
             .expect("应成功");
         assert_eq!(response.status, gensokyo_protocol::action::Status::Ok);
     }

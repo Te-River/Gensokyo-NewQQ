@@ -8,9 +8,8 @@ use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
 use gensokyo_config::ConfigManager;
-use gensokyo_core::Result as CoreResult;
-use gensokyo_protocol::action::{ActionRequest, ActionResponse};
-use gensokyo_protocol::{Handler, Registry};
+use gensokyo_protocol::action::ActionRequest;
+use gensokyo_protocol::{Handler, HandlerFuture, Registry};
 use gensokyo_runtime::{
     AppState, DEFAULT_SHUTDOWN_TIMEOUT, Runtime, RuntimeHandle, RuntimeOptions,
 };
@@ -69,6 +68,8 @@ const HTTP_TOKEN: &str = r#"  port: "5700"
 "#;
 
 /// 注入的 panic handler：验证传输层把 panic 隔离成 1500，而不是带走连接或进程。
+///
+/// 刻意在 `handle` 本体 panic（future 构造阶段），覆盖分发器把调用与轮询一起捕获的路径。
 #[derive(Debug)]
 struct Panics;
 
@@ -77,7 +78,7 @@ impl Handler for Panics {
         "panics"
     }
 
-    fn handle(&self, _request: &ActionRequest<Value>) -> CoreResult<ActionResponse<Value>> {
+    fn handle<'a>(&'a self, _request: &'a ActionRequest<Value>) -> HandlerFuture<'a> {
         panic!("injected boom");
     }
 }

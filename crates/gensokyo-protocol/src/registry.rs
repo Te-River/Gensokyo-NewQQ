@@ -1,5 +1,8 @@
 //! handler 注册表：显式单清单，替代 Go 的 `init()` 文件自注册（design §3.2）。
 //!
+//! handler 是异步 trait（[`Handler::handle`] 返回 [`HandlerFuture`]）：runtime 直接 await，
+//! 每条 action 不再经一次 `spawn_blocking` 线程池调度；纯同步实现用 [`ready`] 包一层。
+//!
 //! 为什么不用 `inventory` / `linkme`：链接期 section 在部分平台/静态链接下有坑，且顺序
 //! 不可测。这里用 `HashMap<&'static str, Arc<dyn Handler>>` + 别名指向同一 `Arc`，
 //! [`Registry::actions`] 给出稳定排序的全集，供 M4 与 Go 的注册清单核对。
@@ -9,6 +12,8 @@
 
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -17,10 +22,25 @@ use gensokyo_core::{Error, Result};
 
 use crate::action::{ActionRequest, ActionResponse};
 
-/// action 处理入口。
+/// [`Handler::handle`] 的返回类型：一个装箱的 future。
+///
+/// 生命周期同时绑定 `&'a self` 与 `&'a ActionRequest`，handler 可以零拷贝借用请求参数；
+/// `Send` 让 runtime 能把分发放进任意 tokio 任务。
+///
+/// 为什么手写 `Pin<Box<dyn Future>>` 而不用 `async fn`：trait 里的 `async fn`（AFIT）不是
+/// dyn-compatible，而注册表必须持有 `Arc<dyn Handler>`。装箱的代价是一次分配——比原先每条
+/// 消息一次 `spawn_blocking` 线程池调度便宜一个数量级。
+pub type HandlerFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<ActionResponse<Value>>> + Send + 'a>>;
+
+/// action 处理入口（异步）。
 ///
 /// 参数/响应用 [`serde_json::Value`] 兜底：注册表不关心每个 action 的具体形状，各 handler
 /// 自己反序列化成 [`crate::action`] 里的类型化参数结构。
+///
+/// `handle` 返回 future 而不是直接返回值：action 需要 await QQ OpenAPI 时，同步签名会逼
+/// 调用方 `block_on`，或者让 runtime 把整条分发塞进 `spawn_blocking`。纯同步的 handler 用
+/// [`ready`] 或 `Box::pin(async move { … })` 包一层即可，不必自造执行器。
 pub trait Handler: Send + Sync + Debug {
     /// 唯一实现名，用于日志与 action 覆盖率统计。
     fn name(&self) -> &'static str;
@@ -29,7 +49,15 @@ pub trait Handler: Send + Sync + Debug {
     ///
     /// # Errors
     /// 参数缺失/非法、上游失败等可预期错误返回 [`Error`]；协议层只负责形状，不实现业务。
-    fn handle(&self, request: &ActionRequest<Value>) -> Result<ActionResponse<Value>>;
+    fn handle<'a>(&'a self, request: &'a ActionRequest<Value>) -> HandlerFuture<'a>;
+}
+
+/// 同步 handler 的快捷出口：把已算好的结果包成已就绪的 [`HandlerFuture`]。
+///
+/// 返回值是 `'static` future；trait object 的生命周期参数是协变的，因此可以直接当作任意
+/// `HandlerFuture<'a>` 返回，实现方的签名不必跟着变。
+pub fn ready(response: Result<ActionResponse<Value>>) -> HandlerFuture<'static> {
+    Box::pin(std::future::ready(response))
 }
 
 /// action 名 → handler。别名指向同一 `Arc`，因此别名不会带来第二份实现。
@@ -206,13 +234,31 @@ macro_rules! register_actions {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::Arc;
+    use std::task::{Context, Poll, Waker};
 
     use serde_json::Value;
 
-    use super::{ACTION_ALIASES, Handler, KNOWN_ACTIONS, Registry};
+    use super::{ACTION_ALIASES, Handler, HandlerFuture, KNOWN_ACTIONS, Registry, ready};
     use crate::action::{ActionRequest, ActionResponse};
-    use gensokyo_core::Result;
+
+    /// 单测里的最小 `block_on`。
+    ///
+    /// 刻意不引 tokio / futures：protocol 只依赖 serde，加 dev-dependency 会动 `Cargo.lock`。
+    /// `Handler` 的 future 不做 I/O，`Pending` 只可能来自下面 `YieldOnce` 这种自己唤醒自己的
+    /// 实现，所以自旋一轮即可推进。
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        let mut context = Context::from_waker(Waker::noop());
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(output) => return output,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
 
     #[derive(Debug)]
     struct Stub(&'static str);
@@ -222,8 +268,43 @@ mod tests {
             self.0
         }
 
-        fn handle(&self, _request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
-            Ok(ActionResponse::ok(Value::Null))
+        fn handle<'a>(&'a self, _request: &'a ActionRequest<Value>) -> HandlerFuture<'a> {
+            ready(Ok(ActionResponse::ok(Value::Null)))
+        }
+    }
+
+    /// 首次 poll 返回 `Pending`、被唤醒后第二次 poll 才 `Ready`。
+    #[derive(Debug)]
+    struct YieldOnce(bool);
+
+    impl Future for YieldOnce {
+        type Output = ();
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            if self.0 {
+                Poll::Ready(())
+            } else {
+                self.0 = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+    }
+
+    /// 真的 await 一次的 handler：证明 trait 允许 await 点，而不只是“包一层立即就绪”。
+    #[derive(Debug)]
+    struct Yielder;
+
+    impl Handler for Yielder {
+        fn name(&self) -> &'static str {
+            "yielder"
+        }
+
+        fn handle<'a>(&'a self, _request: &'a ActionRequest<Value>) -> HandlerFuture<'a> {
+            Box::pin(async move {
+                YieldOnce(false).await;
+                Ok(ActionResponse::ok(Value::Null))
+            })
         }
     }
 
@@ -328,7 +409,19 @@ mod tests {
         let request: ActionRequest<Value> =
             serde_json::from_str(r#"{"action":"send_group_msg","params":{"group_id":1}}"#)
                 .expect("反序列化失败");
-        let response = handler.handle(&request).expect("handler 应成功");
+        let response = block_on(handler.handle(&request)).expect("handler 应成功");
+        assert_eq!(response.status, crate::action::Status::Ok);
+    }
+
+    #[test]
+    fn handler_future_may_yield_before_completing() {
+        let mut registry = Registry::new();
+        registry.register("yielder", Arc::new(Yielder));
+        let handler = registry.get("yielder").expect("应有实现");
+        let request: ActionRequest<Value> =
+            serde_json::from_str(r#"{"action":"yielder"}"#).expect("反序列化失败");
+
+        let response = block_on(handler.handle(&request)).expect("yield 之后仍应成功");
         assert_eq!(response.status, crate::action::Status::Ok);
     }
 }

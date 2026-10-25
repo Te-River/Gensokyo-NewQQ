@@ -12,10 +12,13 @@
 //!
 //! 别名（`send_to_group`）不在这里注册：由 `gensokyo_protocol::Registry` 的别名表指向
 //! [`SendGroupHandler`]。
+//!
+//! 三个 handler 只做规划、不碰 I/O，但仍按异步 trait 返回 `Box::pin(async move { … })`：
+//! 后续 action 要 await QQ API 时无需再改注册表契约。
 
 use gensokyo_core::{Error, Result};
-use gensokyo_protocol::Handler;
 use gensokyo_protocol::action::{ActionRequest, ActionResponse};
+use gensokyo_protocol::{Handler, HandlerFuture};
 use serde_json::Value;
 
 use crate::send::{SendRequest, plan_send_group_msg, plan_send_msg, plan_send_private_msg};
@@ -43,8 +46,8 @@ impl Handler for SendGroupHandler {
         "send_group_msg"
     }
 
-    fn handle(&self, request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
-        respond(request, plan_send_group_msg)
+    fn handle<'a>(&'a self, request: &'a ActionRequest<Value>) -> HandlerFuture<'a> {
+        Box::pin(async move { respond(request, plan_send_group_msg) })
     }
 }
 
@@ -65,8 +68,8 @@ impl Handler for SendPrivateHandler {
         "send_private_msg"
     }
 
-    fn handle(&self, request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
-        respond(request, plan_send_private_msg)
+    fn handle<'a>(&'a self, request: &'a ActionRequest<Value>) -> HandlerFuture<'a> {
+        Box::pin(async move { respond(request, plan_send_private_msg) })
     }
 }
 
@@ -87,8 +90,8 @@ impl Handler for SendMsgHandler {
         "send_msg"
     }
 
-    fn handle(&self, request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
-        respond(request, plan_send_msg)
+    fn handle<'a>(&'a self, request: &'a ActionRequest<Value>) -> HandlerFuture<'a> {
+        Box::pin(async move { respond(request, plan_send_msg) })
     }
 }
 
@@ -121,6 +124,9 @@ fn deferred_data(planned: &SendRequest) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
     use serde_json::{Value, json};
 
     use super::{
@@ -131,6 +137,20 @@ mod tests {
     use gensokyo_protocol::action::{ActionRequest, ActionResponse};
 
     use crate::send::{SendRequest, SendTarget};
+
+    /// 单测里的最小 `block_on`：三个 handler 都不碰 I/O，一次 poll 即 `Ready`。
+    ///
+    /// 不给本 crate 加 `futures` / `tokio` 的 dev-dependency——那会改动 `Cargo.lock`。
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        let mut context = Context::from_waker(Waker::noop());
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(output) => return output,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
 
     fn request(action: &str, params: Value) -> ActionRequest<Value> {
         serde_json::from_value(json!({"action": action, "params": params, "echo": "e-1"}))
@@ -146,14 +166,10 @@ mod tests {
 
     #[test]
     fn send_group_handler_returns_deferred_plan() {
-        let response = SendGroupHandler::new()
-            .handle(&request(
-                "send_group_msg",
-                json!({"group_id": 1, "message": "hi"}),
-            ))
-            .expect("handler 不应返回 Err");
+        let req = request("send_group_msg", json!({"group_id": 1, "message": "hi"}));
+        let response = block_on(SendGroupHandler::new().handle(&req));
+        let data = ok_data(response.expect("handler 不应返回 Err"));
 
-        let data = ok_data(response);
         assert_eq!(data[DEFERRED_FIELD], json!(true));
         assert_eq!(data["target"], json!({"group": "1"}));
         assert_eq!(data["message"]["text"], json!("hi"));
@@ -163,14 +179,9 @@ mod tests {
 
     #[test]
     fn deferred_data_round_trips_without_message_id() {
-        let data = ok_data(
-            SendGroupHandler::new()
-                .handle(&request(
-                    "send_group_msg",
-                    json!({"group_id": 1, "message": "hi"}),
-                ))
-                .expect("handler 不应返回 Err"),
-        );
+        let req = request("send_group_msg", json!({"group_id": 1, "message": "hi"}));
+        let response = block_on(SendGroupHandler::new().handle(&req));
+        let data = ok_data(response.expect("handler 不应返回 Err"));
 
         assert_eq!(data[DEFERRED_FIELD], json!(true));
         assert!(
@@ -186,14 +197,13 @@ mod tests {
 
     #[test]
     fn send_private_handler_returns_deferred_plan() {
-        let response = SendPrivateHandler::new()
-            .handle(&request(
-                "send_private_msg",
-                json!({"user_id": "abc", "message": "[CQ:reply,id=9]hi"}),
-            ))
-            .expect("handler 不应返回 Err");
+        let req = request(
+            "send_private_msg",
+            json!({"user_id": "abc", "message": "[CQ:reply,id=9]hi"}),
+        );
+        let response = block_on(SendPrivateHandler::new().handle(&req));
+        let data = ok_data(response.expect("handler 不应返回 Err"));
 
-        let data = ok_data(response);
         assert_eq!(data[DEFERRED_FIELD], json!(true));
         assert_eq!(data["target"], json!({"private": "abc"}));
         assert_eq!(data["message"]["text"], json!("hi"));
@@ -208,37 +218,31 @@ mod tests {
     fn send_msg_handler_dispatches_both_targets() {
         let handler = SendMsgHandler::new();
 
-        let group = ok_data(
-            handler
-                .handle(&request(
-                    "send_msg",
-                    json!({"message_type": "group", "group_id": 2, "message": "g"}),
-                ))
-                .expect("群聊分派应成功"),
+        let group_req = request(
+            "send_msg",
+            json!({"message_type": "group", "group_id": 2, "message": "g"}),
         );
+        let group = ok_data(block_on(handler.handle(&group_req)).expect("群聊分派应成功"));
         assert_eq!(group["target"], json!({"group": "2"}));
 
-        let private = ok_data(
-            handler
-                .handle(&request(
-                    "send_msg",
-                    json!({"message_type": "private", "user_id": 3, "message": "p"}),
-                ))
-                .expect("私聊分派应成功"),
+        let private_req = request(
+            "send_msg",
+            json!({"message_type": "private", "user_id": 3, "message": "p"}),
         );
+        let private = ok_data(block_on(handler.handle(&private_req)).expect("私聊分派应成功"));
         assert_eq!(private["target"], json!({"private": "3"}));
         assert_eq!(SendMsgHandler.name(), "send_msg");
     }
 
     #[test]
     fn missing_params_fail_with_1400() {
-        let response = SendGroupHandler::new()
-            .handle(&ActionRequest {
-                action: "send_group_msg".to_owned(),
-                params: None,
-                echo: Some(json!({"id": 7})),
-            })
-            .expect("参数错误也应是 Ok(失败响应)");
+        let req = ActionRequest {
+            action: "send_group_msg".to_owned(),
+            params: None,
+            echo: Some(json!({"id": 7})),
+        };
+        let response = block_on(SendGroupHandler::new().handle(&req));
+        let response = response.expect("参数错误也应是 Ok(失败响应)");
 
         assert_eq!(response.status, Status::Failed);
         assert_eq!(response.retcode, RETCODE_BAD_REQUEST);
@@ -265,9 +269,9 @@ mod tests {
                 json!({"message_type": "guild", "group_id": 1, "message": "x"}),
             ),
         ] {
-            let response = handler
-                .handle(&request(handler.name(), params))
-                .expect("参数错误也应是 Ok(失败响应)");
+            let req = request(handler.name(), params);
+            let response = block_on(handler.handle(&req));
+            let response = response.expect("参数错误也应是 Ok(失败响应)");
 
             assert_eq!(response.status, Status::Failed);
             assert_eq!(response.retcode, RETCODE_BAD_REQUEST);

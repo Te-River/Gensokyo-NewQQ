@@ -14,6 +14,7 @@
 //! - [`outbound`]：`foundItems` 的类型化替代 [`outbound::OutboundPlan`]，含
 //!   `from_found_items` / `to_found_items` / `from_segments` / `to_segments`。
 //! - [`registry`]：`Handler` trait + 显式注册表、别名与 [`registry::KNOWN_ACTIONS`]。
+//!   handler 返回 [`registry::HandlerFuture`]，runtime 直接 await（无 `spawn_blocking`）。
 //!
 //! # 与 Go 的口径差异
 //! - **出站转义只转 `,` `]` `&`**（[`cqcode::escape`]），不转 `[`——跟随 `handlers/cqcode.go`。
@@ -51,7 +52,7 @@ pub mod segment;
 pub use action::{ActionRequest, ActionResponse, Echo, Status};
 pub use event::Event;
 pub use outbound::OutboundPlan;
-pub use registry::{Handler, Registry};
+pub use registry::{Handler, HandlerFuture, Registry};
 pub use segment::{MediaRef, MessageContent, Segment};
 
 /// JSON 附加字段：`#[serde(flatten)]` 的落点，未知字段不会丢失。
