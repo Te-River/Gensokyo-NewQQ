@@ -13,6 +13,7 @@ use gensokyo_storage::{EchoStore, IdMapStore};
 
 use crate::builtin;
 use crate::dispatcher::Dispatcher;
+use crate::event_hub::EventHub;
 
 /// 传输层与 handler 共享的状态。
 #[derive(Debug, Clone)]
@@ -22,10 +23,11 @@ pub struct AppState {
     idmap: Option<Arc<IdMapStore>>,
     echo: Option<Arc<EchoStore>>,
     api: Option<Arc<OpenApiClient<ReqwestTransport>>>,
+    hub: EventHub,
 }
 
 impl AppState {
-    /// 用配置与注册表构造；可选句柄全部为 `None`。
+    /// 用配置与注册表构造；可选句柄全部为 `None`，事件总线用默认容量。
     #[must_use]
     pub fn new(config: Arc<ConfigManager>, registry: Arc<Registry>) -> Self {
         Self {
@@ -34,6 +36,7 @@ impl AppState {
             idmap: None,
             echo: None,
             api: None,
+            hub: EventHub::default(),
         }
     }
 
@@ -66,10 +69,29 @@ impl AppState {
         self
     }
 
+    /// 换成外部构造的事件总线（多个 `AppState` 想共享一条总线时使用）。
+    #[must_use]
+    pub fn with_hub(mut self, hub: EventHub) -> Self {
+        self.hub = hub;
+        self
+    }
+
     /// 配置快照管理器（每次请求现读快照，热重载即时生效）。
     #[must_use]
     pub fn config(&self) -> &ConfigManager {
         self.config.as_ref()
+    }
+
+    /// 配置快照管理器的 `Arc`（[`crate::inbound::Inbound`] 要持有）。
+    #[must_use]
+    pub fn config_arc(&self) -> Arc<ConfigManager> {
+        Arc::clone(&self.config)
+    }
+
+    /// 事件总线：入站发布、反向 WS 订阅。
+    #[must_use]
+    pub fn hub(&self) -> &EventHub {
+        &self.hub
     }
 
     /// handler 注册表。
@@ -82,6 +104,12 @@ impl AppState {
     #[must_use]
     pub fn idmap(&self) -> Option<&IdMapStore> {
         self.idmap.as_deref()
+    }
+
+    /// idmap 句柄的 `Arc`（[`crate::inbound::Inbound`] 要持有）。
+    #[must_use]
+    pub fn idmap_arc(&self) -> Option<Arc<IdMapStore>> {
+        self.idmap.clone()
     }
 
     /// echo 句柄（未注入时为 `None`）。

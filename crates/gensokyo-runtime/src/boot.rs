@@ -1,18 +1,22 @@
-//! 任务树与启动器：把正向 WS / HTTP API 装配成可关闭的 [`RuntimeHandle`]。
+//! 任务树与启动器：把正向 WS / HTTP API / webhook / 反向 WS 装配成可关闭的 [`RuntimeHandle`]。
 //!
 //! 绑定地址来源（对齐 Go `main.go`）：
 //! - 正向 WS：`0.0.0.0:{port}`。Go 把 WS 挂在主服务器（`serverPort`）上；Rust 侧 M1h-a
 //!   还没有主服务器与 WebUI 路由，先独立监听，后续里程碑合并。
 //! - HTTP API：`http_address` 原样使用（空则不启动）。
+//! - webhook（`webhook_path`）：Go 与正向 WS 共用主服务器端口，这里 merge 进上面两个
+//!   listener 的路由表（见 [`crate::webhook`] 模块文档）。
+//! - 反向 WS（`ws_address[]`）：纯出站连接，不需要监听端口；地址全为空则不启动。
 //!
-//! [`RuntimeOptions`] 可覆盖两者：测试用 `127.0.0.1:0` 取随机端口，避免端口冲突。
+//! [`RuntimeOptions`] 可覆盖两个绑定地址：测试用 `127.0.0.1:0` 取随机端口，避免端口冲突。
 //!
 //! listener 只在启动时创建：`http_address` 不是配置层的重启项，热改该字段会更新快照但
 //! 不会迁移监听端口（与 Go 只在启动时 `ListenAndServe` 一致），需要新端口请重启进程。
 //! token 与其余热字段在每次请求 / 每次握手时现读快照。
 //!
-//! 关闭语义见 [`RuntimeHandle::shutdown`]：先给全部 listener 发信号再逐个 await，整体
-//! 受 [`DEFAULT_SHUTDOWN_TIMEOUT`] 约束；句柄未 `shutdown` 就被 drop 时由 `Drop` 兜底
+//! 关闭语义见 [`RuntimeHandle::shutdown`]：先停反向 WS 客户端（否则它们会在 listener
+//! 收摊期间继续重连），再给全部 listener 发信号并逐个 await，整体受
+//! [`DEFAULT_SHUTDOWN_TIMEOUT`] 约束；句柄未 `shutdown` 就被 drop 时由 `Drop` 兜底
 //! 中止任务，避免端口继续监听。
 
 use std::fmt;
@@ -25,7 +29,9 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::{AbortHandle, JoinHandle};
 
+use crate::event_hub::EventHub;
 use crate::state::AppState;
+use crate::ws_client::{WsClient, WsClientHandle};
 
 /// 优雅关闭的默认时限：超过它则强制中止残留任务（WS 长连接不会无限拖住退出）。
 pub const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -84,6 +90,16 @@ impl Runtime {
             )
         };
 
+        // webhook 路径同样在绑定前校验：非法值会让 `Router::route` panic。
+        let webhook = if settings.get_webhook_path().trim().is_empty() {
+            tracing::info!("webhook_path 为空，webhook 未启用");
+            None
+        } else {
+            let path =
+                crate::ws_server::route_path_named("webhook_path", settings.get_webhook_path())?;
+            Some(crate::webhook::router(state.clone(), &path))
+        };
+
         // 先把两个 listener 都绑好再 spawn：任一绑定失败时，已绑定的 socket 随局部变量
         // 释放关闭，不会出现「WS 已在跑、HTTP 启动失败」的半启动状态。
         let ws_listener = match &ws_target {
@@ -96,7 +112,7 @@ impl Runtime {
         };
 
         let ws = if let (Some((_, path)), Some((listener, addr))) = (ws_target, ws_listener) {
-            let app = crate::ws_server::router(state.clone(), &path);
+            let app = merge_webhook(crate::ws_server::router(state.clone(), &path), &webhook);
             Some(serve("正向 WS", listener, addr, app))
         } else {
             None
@@ -106,11 +122,37 @@ impl Runtime {
                 "HTTP API",
                 listener,
                 addr,
-                crate::http_api::router(state.clone()),
+                merge_webhook(crate::http_api::router(state.clone()), &webhook),
             )
         });
 
-        Ok(RuntimeHandle { ws, http })
+        if webhook.is_some() && ws.is_none() && http.is_none() {
+            tracing::warn!("webhook_path 已配置，但正向 WS 与 HTTP API 都没启动，回调没有监听端口");
+        }
+
+        // 反向 WS 是出站连接：与 listener 成败无关，地址非空就启动。
+        let has_ws_address = settings
+            .get_ws_address()
+            .iter()
+            .any(|address| !address.trim().is_empty());
+        let ws_client = has_ws_address.then(|| WsClient::start(state.clone()));
+
+        Ok(RuntimeHandle {
+            ws,
+            http,
+            ws_client,
+            hub: state.hub().clone(),
+        })
+    }
+}
+
+/// 把 webhook 路由并进 listener 的路由表；没配 `webhook_path` 时原样返回。
+///
+/// webhook 只注册 `POST`，与 WS 的 `GET` / 健康检查的 `GET` 不冲突，可以安全 merge。
+fn merge_webhook(app: Router, webhook: &Option<Router>) -> Router {
+    match webhook {
+        Some(webhook) => app.merge(webhook.clone()),
+        None => app,
     }
 }
 
@@ -132,11 +174,13 @@ impl fmt::Debug for ServerHandle {
     }
 }
 
-/// 运行时句柄：实际监听地址 + 关闭入口。
+/// 运行时句柄：实际监听地址 + 反向 WS 客户端 + 事件总线 + 关闭入口。
 #[derive(Debug)]
 pub struct RuntimeHandle {
     ws: Option<ServerHandle>,
     http: Option<ServerHandle>,
+    ws_client: Option<WsClientHandle>,
+    hub: EventHub,
 }
 
 impl RuntimeHandle {
@@ -152,7 +196,22 @@ impl RuntimeHandle {
         self.http.as_ref().map(|server| server.addr)
     }
 
-    /// 优雅关闭：停止接受新连接，等待存量请求处理完，最多等 [`DEFAULT_SHUTDOWN_TIMEOUT`]。
+    /// 本次启动的反向 WS 地址数量（0 表示没有 `ws_address`）。
+    #[must_use]
+    pub fn ws_client_addresses(&self) -> usize {
+        self.ws_client
+            .as_ref()
+            .map_or(0, WsClientHandle::address_count)
+    }
+
+    /// 事件总线：入站发布、反向 WS 订阅；外部也可订阅做旁路观测。
+    #[must_use]
+    pub fn hub(&self) -> &EventHub {
+        &self.hub
+    }
+
+    /// 优雅关闭：先停反向 WS，再停止接受新连接、等待存量请求处理完，最多等
+    /// [`DEFAULT_SHUTDOWN_TIMEOUT`]。
     ///
     /// 升级后的 WS 长连接是否计入 graceful shutdown 取决于 hyper 版本（实测当前版本不阻塞、
     /// 立即返回），超时 + 强制中止仍然保留：任何版本上都不会让调用方无限挂住。需要立刻收摊
@@ -163,6 +222,13 @@ impl RuntimeHandle {
 
     /// 同 [`RuntimeHandle::shutdown`]，自定义超时（测试用短超时避免拖慢套件）。
     pub async fn shutdown_with_timeout(mut self, limit: Duration) {
+        // 先停出站客户端：否则 listener 收摊期间它们还在按退避重连。
+        if let Some(client) = self.ws_client.take() {
+            let addresses = client.address_count();
+            client.shutdown(limit).await;
+            tracing::debug!(addresses, "反向 WS 客户端已关闭");
+        }
+
         let mut servers: Vec<ServerHandle> = [self.ws.take(), self.http.take()]
             .into_iter()
             .flatten()
@@ -209,8 +275,11 @@ impl RuntimeHandle {
         }
     }
 
-    /// 立即中止两个 listener 的任务（不等存量连接）。
+    /// 立即中止全部任务（不等存量连接）。
     pub fn abort(&self) {
+        if let Some(client) = &self.ws_client {
+            client.abort();
+        }
         for server in [self.ws.as_ref(), self.http.as_ref()].into_iter().flatten() {
             server.task.abort();
         }
@@ -219,8 +288,12 @@ impl RuntimeHandle {
 
 impl Drop for RuntimeHandle {
     /// 句柄没走 `shutdown` 就被丢弃时兜底：不 abort 的话 listener 任务会一直活着，
-    /// 端口继续监听而调用方无从关闭。
+    /// 端口继续监听而调用方无从关闭；反向 WS 任务也会继续重连。
     fn drop(&mut self) {
+        if let Some(client) = self.ws_client.take() {
+            tracing::warn!("RuntimeHandle 未 shutdown 即被 drop，已中止反向 WS 客户端");
+            drop(client);
+        }
         for server in [self.ws.take(), self.http.take()].into_iter().flatten() {
             if server.task.is_finished() {
                 tracing::debug!(addr = %server.addr, kind = server.kind, "服务任务已结束，无需中止");

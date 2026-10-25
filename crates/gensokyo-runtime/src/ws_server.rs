@@ -42,6 +42,11 @@ pub(crate) fn router(state: AppState, path: &str) -> Router {
 /// [`Error::Config`]：这些值会让 `Router::route` 在启动时 panic，提前在这里变成可诊断的
 /// 启动错误。
 pub(crate) fn route_path(raw: &str) -> Result<String> {
+    route_path_named("ws_server_path", raw)
+}
+
+/// 同 [`route_path`]，错误信息用调用方的配置字段名（webhook 也复用这套归一化）。
+pub(crate) fn route_path_named(field: &str, raw: &str) -> Result<String> {
     let raw = raw.trim();
     if raw.is_empty() || raw == "nil" {
         return Ok("/".to_owned());
@@ -52,7 +57,7 @@ pub(crate) fn route_path(raw: &str) -> Result<String> {
     }
     if !trimmed.split('/').all(is_literal_segment) {
         return Err(Error::Config(format!(
-            "ws_server_path 非法: {raw:?}（每段只允许字母数字与 - _ . ~ % ）"
+            "{field} 非法: {raw:?}（每段只允许字母数字与 - _ . ~ % ）"
         )));
     }
     Ok(format!("/{trimmed}"))
