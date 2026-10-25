@@ -12,11 +12,18 @@ name = "gensokyo"
 path = "src/main.rs"
 
 [dependencies]
+gensokyo-actions.workspace = true
 gensokyo-config.workspace = true
 gensokyo-core.workspace = true
+gensokyo-qq.workspace = true
 gensokyo-runtime.workspace = true
+# 为 M1h-b 的 idmap 装配预留（当前 `ActionContext` 不注入 idmap，见 README）。
+gensokyo-storage.workspace = true
 clap.workspace = true
 thiserror.workspace = true
+# TLS provider：`gensokyo-qq` / `gensokyo-media` 只带 rustls 骨架（`rustls-no-provider`），
+# provider 由二进制注入。ring 需要 C 工具链（CI ubuntu 的 gcc / 本机 mingw gcc）。
+rustls = { workspace = true, features = ["ring"] }
 # 进程级异步运行时 + Ctrl-C 信号；`enable_all` 需要 net/time 驱动
 tokio = { workspace = true, features = [
     "net",

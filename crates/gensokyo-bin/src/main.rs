@@ -6,10 +6,12 @@
 //!   `-local-logger`。未实现的维护开关打印「未实现」并以退出码 [`cli::EXIT_UNIMPLEMENTED`]
 //!   结束，不静默成功。
 //! - 启动链见 [`startup`]：`config.yml` → [`gensokyo_config::ConfigManager`] →
-//!   [`gensokyo_runtime::AppState`]（内置 action）→ [`gensokyo_runtime::Runtime::start`]，
-//!   即**正向 WS + 正向 HTTP API**；启动后打印实际监听地址，Ctrl-C 触发带超时的优雅关闭。
-//! - **不连接 QQ**（只读 `app_id` / `token` 进快照）、不启动反向 WS / webhook（M1h-b）、
-//!   不装配 idmap / echo / OpenAPI 句柄（M1i），也不启动 config watcher 与 WebUI。
+//!   [`gensokyo_runtime::AppState`] → [`gensokyo_runtime::Runtime::start`]，即**正向 WS +
+//!   正向 HTTP API**。有 QQ 凭据时装配 `ReqwestTransport` + `ActionContext`（47 个 action
+//!   名：内置 3 + `gensokyo-actions` 41 + 别名 3），无凭据或传输构建失败时降级为内置 3 个；
+//!   启动后打印 action 数量与实际监听地址，Ctrl-C 触发带超时的优雅关闭。
+//! - 启动期**不联网**（access_token 在首次调用上游时才惰性换取），不启动反向 WS / webhook
+//!   （M1h-b）、不装配 idmap / echo（M1i），也不启动 config watcher 与 WebUI。
 //!
 //! 退出码与 CLI 细节见 `crates/gensokyo-bin/README.md`。
 
