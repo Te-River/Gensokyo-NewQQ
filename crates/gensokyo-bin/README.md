@@ -13,7 +13,7 @@ M1j 的交付：把运行时装配成一个能按 `config.yml` 启动的二进�
    - **有 QQ 凭据**（`app_id != 0` 且 `client_secret` 非空白）：`ReqwestTransport::new()` →
      `TokenManager` → `OpenApiClient`（`sandbox_mode` 决定基址）→ `ActionContext`（**不注入
      idmap**）→ `AppState::with_actions`，并挂上 `with_api`。注册表 = 内置 3 个 +
-     `gensokyo-actions` 的 41 个注册名 + 3 个别名 = **47 个 action 名**。
+     `gensokyo-actions` 的 `IMPLEMENTED_ACTIONS` + 3 个别名 + 内置 3 个 = **78 个 action 名**（随实现增长）。
    - **无凭据，或 TLS 传输构建失败**：`warn` 后走 `AppState::with_builtin_handlers`
      （`get_status` / `get_version_info` / `get_login_info`，共 **3 个**）。
 5. `Runtime::start`：按配置启动 listener
@@ -34,7 +34,7 @@ Ctrl-C，并打一条 `warn`。
 |----------|----------|----------|
 | `app_id: 0`，或 `client_secret` 为空/全空白 | `warn 未配置 QQ 凭据…仅启动 WS/HTTP`，只注册内置 3 个 | WS/HTTP 照常；QQ action 未注册 → `1404`；`get_login_info` 只回显配置里的 `user_id` / `nickname` |
 | 凭据齐全，但 rustls provider 缺失或 `ReqwestTransport::new()` 失败 | `warn 构建 QQ HTTP 传输失败…`，同样降级为 3 个 | 同上；启动不失败 |
-| 凭据齐全且客户端构建成功 | 47 个 action 名 | 启动期**不联网**；access_token 在首次调用上游时才换取；凭据无效应表现为 action 错误 `1500` |
+| 凭据齐全且客户端构建成功 | 78 个 action 名 | 启动期**不联网**；access_token 在首次调用上游时才换取；凭据无效应表现为 action 错误 `1500` |
 | `token`（机器人令牌）非空但 `client_secret` 为空 | 视为未配置 | OpenAPI v2 用 `app_id` + `client_secret` 换 access_token，`token` 不参与鉴权 |
 | 未装配 idmap（M1j 现状） | `ActionContext` 无 idmap | 只接受 32 位 OpenID；虚拟号形式的 `group_id` / `user_id` 会被拒（`1400`） |
 

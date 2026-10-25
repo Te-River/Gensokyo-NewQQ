@@ -502,8 +502,8 @@ settings:
         let state = AppState::with_actions(manager, context);
         assert_eq!(
             state.registry().len(),
-            47,
-            "内置 3 + gensokyo-actions 41 + 别名 3"
+            gensokyo_actions::IMPLEMENTED_ACTIONS.len() + 3 + 3,
+            "内置 3 + IMPLEMENTED_ACTIONS + 别名 3"
         );
         assert!(state.actions().is_some(), "ActionContext 应随状态一起挂上");
     }
