@@ -10,9 +10,13 @@
 //!
 //! `send_*` 的 handler 只回计划（`data.deferred == true`）。分发器识别到该标记后执行
 //! [`crate::deferred::execute`]：反序列化 [`gensokyo_actions::SendRequest`] → 合成
-//! `MessageToCreate` → 按 target 调上游发送，成功时用 `data = {"message_id": …}` 替换计划，
-//! **计划本身（含 `deferred` 标记）不会回给客户端**。执行失败（含未装配
-//! [`gensokyo_actions::ActionContext`]）一律 `retcode 1500`。
+//! `MessageToCreate`（含媒体上传与 reply 还原）→ 按 target 调上游发送 → `echo` 回写，成功时用
+//! `data = {"message_id": …}` 替换计划，**计划本身（含 `deferred` 标记）不会回给客户端**。
+//!
+//! 执行失败按错误类型分档：请求侧问题（媒体来源 / 大小 / 类型、reply 无法还原）是
+//! `retcode 1400`，其余（未装配 [`gensokyo_actions::ActionContext`]、计划损坏、下载 / 上传 /
+//! 上游失败）一律 `retcode 1500`——与 handler 阶段的 [`retcode_for`] 不同，这里不把
+//! [`CoreError::Unsupported`] 当成 `1404`：计划已经交给了 runtime，未知能力是服务端问题。
 //!
 //! handler 是异步 trait（`gensokyo_protocol::Handler`），[`dispatch_json`] 直接 await：
 //! 每条消息不再额外经一次 `spawn_blocking` 线程池调度；handler 需要上游 I/O 时自己 await。
@@ -27,7 +31,11 @@ use gensokyo_actions::{ActionContext, SendRequest};
 use gensokyo_core::Error as CoreError;
 use gensokyo_protocol::Registry;
 use gensokyo_protocol::action::{ActionRequest, ActionResponse, Echo};
+use gensokyo_storage::EchoStore;
 use serde_json::{Value, json};
+
+use crate::deferred::DeferredDeps;
+use crate::media::MediaRuntime;
 
 /// 请求 JSON 或参数非法。
 pub const RETCODE_BAD_REQUEST: i32 = 1400;
@@ -41,6 +49,8 @@ pub const RETCODE_INTERNAL: i32 = 1500;
 pub struct Dispatcher {
     registry: Arc<Registry>,
     actions: Option<Arc<ActionContext>>,
+    media: Arc<MediaRuntime>,
+    echo: Option<Arc<EchoStore>>,
 }
 
 impl Dispatcher {
@@ -50,6 +60,8 @@ impl Dispatcher {
         Self {
             registry,
             actions: None,
+            media: Arc::new(MediaRuntime::default()),
+            echo: None,
         }
     }
 
@@ -57,6 +69,20 @@ impl Dispatcher {
     #[must_use]
     pub fn with_actions(mut self, actions: Option<Arc<ActionContext>>) -> Self {
         self.actions = actions;
+        self
+    }
+
+    /// 覆盖媒体下载器（单测注入假传输；生产用 [`Dispatcher::new`] 的默认 HTTP 实现）。
+    #[must_use]
+    pub fn with_media(mut self, media: Arc<MediaRuntime>) -> Self {
+        self.media = media;
+        self
+    }
+
+    /// 挂上 echo 存储：deferred 发送成功后回写 `message_id`，`[CQ:reply]` 也靠它反查虚拟号。
+    #[must_use]
+    pub fn with_echo(mut self, echo: Option<Arc<EchoStore>>) -> Self {
+        self.echo = echo;
         self
     }
 
@@ -108,7 +134,7 @@ impl Dispatcher {
                 Ok(message_id) => {
                     ActionResponse::ok(json!({ "message_id": message_id })).with_echo(echo)
                 }
-                Err(message) => failure(RETCODE_INTERNAL, message, echo),
+                Err((retcode, message)) => failure(retcode, message, echo),
             };
         }
 
@@ -119,17 +145,42 @@ impl Dispatcher {
         response
     }
 
-    /// 执行 deferred 计划；失败一律按 `1500` 上报（含未装配 [`ActionContext`]、计划损坏、
-    /// 收件人无法反查、上游发送失败）。
-    async fn run_deferred(&self, data: Value) -> Result<String, String> {
+    /// 执行 deferred 计划；失败带上该用的 `retcode`（见 [`deferred_retcode`]）。
+    ///
+    /// 未装配 [`ActionContext`]、计划反序列化失败都算服务端问题（`1500`）；消息侧问题由
+    /// [`crate::deferred::execute`] 的 [`CoreError`] 决定。
+    async fn run_deferred(&self, data: Value) -> Result<String, (i32, String)> {
         let Some(context) = self.actions.as_ref() else {
-            return Err("deferred 计划需要装配 ActionContext（QqApi）".to_owned());
+            return Err((
+                RETCODE_INTERNAL,
+                "deferred 计划需要装配 ActionContext（QqApi）".to_owned(),
+            ));
         };
-        let plan: SendRequest = serde_json::from_value(data)
-            .map_err(|err| format!("deferred 计划反序列化失败: {err}"))?;
-        crate::deferred::execute(context, &plan)
+        let plan: SendRequest = serde_json::from_value(data).map_err(|err| {
+            (
+                RETCODE_INTERNAL,
+                format!("deferred 计划反序列化失败: {err}"),
+            )
+        })?;
+        let deps = DeferredDeps {
+            media: self.media.as_ref(),
+            echo: self.echo.as_deref(),
+        };
+        crate::deferred::execute(context, &plan, &deps)
             .await
-            .map_err(|err| err.to_string())
+            .map_err(|err| (deferred_retcode(&err), err.to_string()))
+    }
+}
+
+/// deferred 失败的 retcode：请求侧问题（媒体来源 / 大小 / 类型、reply 无法还原）是 `1400`，
+/// 其余（上游 / 网络 / 存储 / 计划损坏）`1500`。
+///
+/// 与 [`retcode_for`] 的差别：这里不把 [`CoreError::Unsupported`] 映射成 `1404`——计划已经被
+/// runtime 收下，未知能力是服务端没能兑现，不是「未知 action」。
+fn deferred_retcode(err: &CoreError) -> i32 {
+    match err {
+        CoreError::Protocol(_) => RETCODE_BAD_REQUEST,
+        _ => RETCODE_INTERNAL,
     }
 }
 
@@ -355,5 +406,32 @@ mod tests {
         assert_eq!(value["status"], "ok");
         assert_eq!(value["retcode"], 0);
         assert_eq!(value["echo"], "wire");
+    }
+
+    /// deferred 失败分档：请求侧 `1400`，上游 / 网络 / 存储 / 未实现能力 `1500`。
+    ///
+    /// 与 [`super::retcode_for`] 的 `Unsupported → 1404` 不同：计划已进 runtime，
+    /// 未知能力是服务端没兑现，不能回「未知 action」。
+    #[test]
+    fn deferred_failures_split_request_and_server_side() {
+        assert_eq!(
+            super::deferred_retcode(&Error::Protocol("媒体超限".to_owned())),
+            RETCODE_BAD_REQUEST
+        );
+        assert_eq!(
+            super::deferred_retcode(&Error::Upstream {
+                code: 22009,
+                message: "频控".to_owned(),
+            }),
+            RETCODE_INTERNAL
+        );
+        assert_eq!(
+            super::deferred_retcode(&Error::Network("下载失败".to_owned())),
+            RETCODE_INTERNAL
+        );
+        assert_eq!(
+            super::deferred_retcode(&Error::Unsupported("upload_group_file".to_owned())),
+            RETCODE_INTERNAL
+        );
     }
 }

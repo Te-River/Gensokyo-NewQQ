@@ -16,6 +16,7 @@ use gensokyo_storage::{EchoStore, IdMapStore};
 use crate::builtin;
 use crate::dispatcher::Dispatcher;
 use crate::event_hub::EventHub;
+use crate::media::MediaRuntime;
 
 /// 传输层与 handler 共享的状态。
 #[derive(Debug, Clone)]
@@ -26,12 +27,15 @@ pub struct AppState {
     idmap: Option<Arc<IdMapStore>>,
     echo: Option<Arc<EchoStore>>,
     api: Option<Arc<OpenApiClient<ReqwestTransport>>>,
+    media: Arc<MediaRuntime>,
     hub: EventHub,
     webui: Option<bool>,
 }
 
 impl AppState {
     /// 用配置与注册表构造；可选句柄全部为 `None`，事件总线用默认容量。
+    ///
+    /// 媒体下载器总是存在（[`MediaRuntime::default`] 延迟建 HTTP 客户端，构造不会失败）。
     #[must_use]
     pub fn new(config: Arc<ConfigManager>, registry: Arc<Registry>) -> Self {
         Self {
@@ -41,6 +45,7 @@ impl AppState {
             idmap: None,
             echo: None,
             api: None,
+            media: Arc::new(MediaRuntime::default()),
             hub: EventHub::default(),
             webui: None,
         }
@@ -95,6 +100,13 @@ impl AppState {
     #[must_use]
     pub fn with_api(mut self, api: Arc<OpenApiClient<ReqwestTransport>>) -> Self {
         self.api = Some(api);
+        self
+    }
+
+    /// 覆盖 deferred 的媒体下载器（单测注入假传输；生产用默认 HTTP 实现）。
+    #[must_use]
+    pub fn with_media(mut self, media: Arc<MediaRuntime>) -> Self {
+        self.media = media;
         self
     }
 
@@ -176,6 +188,12 @@ impl AppState {
         self.echo.as_deref()
     }
 
+    /// deferred 的媒体下载器。
+    #[must_use]
+    pub fn media(&self) -> &MediaRuntime {
+        self.media.as_ref()
+    }
+
     /// OpenAPI 客户端（未注入时为 `None`）。
     #[must_use]
     pub fn api(&self) -> Option<&OpenApiClient<ReqwestTransport>> {
@@ -184,9 +202,13 @@ impl AppState {
 
     /// 基于当前注册表的分发器（克隆一个 `Arc`，开销可忽略）。
     ///
-    /// 装配了 [`ActionContext`] 时一并挂上，deferred 计划才会被真正执行。
+    /// 装配了 [`ActionContext`] 时一并挂上，deferred 计划才会被真正执行；echo 一并传递，
+    /// 发送成功的 `message_id` 才会回写到同一个存储。
     #[must_use]
     pub fn dispatcher(&self) -> Dispatcher {
-        Dispatcher::new(Arc::clone(&self.registry)).with_actions(self.actions_arc())
+        Dispatcher::new(Arc::clone(&self.registry))
+            .with_actions(self.actions_arc())
+            .with_media(Arc::clone(&self.media))
+            .with_echo(self.echo.clone())
     }
 }

@@ -62,7 +62,7 @@ where
 /// 正向 HTTP API 路由；`http_address` 的判定在 [`crate::boot::Runtime`]。
 pub(crate) fn router(state: AppState) -> Router {
     Router::new()
-        .route("/", get(health))
+        .route("/", get(health).post(action))
         .merge(health_router())
         .fallback(action)
         .with_state(state)

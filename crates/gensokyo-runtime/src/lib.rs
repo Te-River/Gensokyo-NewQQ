@@ -47,9 +47,15 @@
 //!   （41 个注册名 + 3 个 Go 兼容别名），并挂上 [`AppState::actions`]（`ActionContext`）。
 //! - [`dispatcher::Dispatcher`]：handler 回 `data.deferred == true` 时执行
 //!   [`deferred::execute`]——反序列化 `SendRequest`、收件人反查 OpenID、`MessageOut` 合成
-//!   `MessageToCreate`（文本 + `[CQ:at]` → `<@openid>` + 单个已上传 media），按 target 调
-//!   `QqApi::send_group_message` / `send_c2c_message`，最终 `data = {"message_id": …}`；
-//!   失败与未装配 `ActionContext` 一律 `retcode 1500`。
+//!   `MessageToCreate`（文本 + `[CQ:at]` → `<@openid>` + 单个 media + reply `msg_id`），按
+//!   target 调 `QqApi::send_group_message` / `send_c2c_message`，最终 `data = {"message_id": …}`。
+//! - [`media::MediaRuntime`]：图片 / 语音 / 视频 / 文件的 `url` / 本地 / `base64` 来源先经
+//!   `gensokyo_media::Fetcher` 取字节，再调 `QqApi::upload_group_file` / `upload_c2c_file`
+//!   换 `file_info`（单条上限 5MB，细节见 [`media`]）。
+//! - 发送成功的 `message_id` 回写 `EchoStore`（行号双向映射，Go `StoreCacheInMemory`）；
+//!   `[CQ:reply]` 的虚拟号经 idmap / echo 还原成真实消息 ID。
+//! - 失败分档：请求侧问题（媒体来源 / 大小 / 类型、reply 无法还原、不支持的段）`1400`，
+//!   其余（未装配 `ActionContext`、下载 / 上传 / 上游失败）`1500`。
 //!
 //! # 未做项（后续里程碑）
 //! - 消息段：图片 / 语音 / 视频 / ark 卡片 / markdown / card 一律停留在文本形态，
@@ -59,8 +65,9 @@
 //!   `union_webhook` 扇出亦未做。
 //! - 反向 WS 上收到的 OneBot action 不 dispatch；`sendFailures` 补发队列未实现。
 //! - 具体 `send_*` / 群管理 action（M1i）、有界队列与令牌桶（[`queue`]）。
-//!   `send_*` 已能真正发送（见上一节），仍未接线的是媒体上传（图片需先拿 `file_info`）与
-//!   echo / 懒消息回写；群管理其余端点、有界队列与令牌桶仍属后续里程碑。
+//!   群管理其余端点、有界队列与令牌桶仍属后续里程碑。
+//! - deferred 的媒体片段级能力：markdown / keyboard / card / music / stream / input_notify
+//!   段仍返回 `1400`；超 5MB 媒体缺分片上传；`active` / `wakeup` 标记被忽略。
 //! - 正向 WS 连接建立时仍**不发送** `meta_event/lifecycle/connect`（只有反向 WS 发），
 //!   与 Go 的行为差异保留到正向 WS 的 M1h-b 后续对齐。
 //! - WebUI 与 Go 主服务器路由：M1h-a 的 WS 独立监听 `0.0.0.0:{port}`（Go 是挂在主服务器
@@ -78,6 +85,8 @@ pub mod http_api;
 pub mod inbound;
 /// `text_intent` → botgo intent 位（`main.go`，M1h-c）。
 pub mod intent;
+/// deferred 媒体链路：`MediaRef` → 字节 → QQ `files` 端点 → `file_info`。
+pub mod media;
 /// 有界队列 + 令牌桶（`messagequeue/`，M1i）。
 pub mod queue {}
 pub mod state;
@@ -93,6 +102,7 @@ pub use dispatcher::{Dispatcher, RETCODE_BAD_REQUEST, RETCODE_INTERNAL, RETCODE_
 pub use event_hub::EventHub;
 pub use inbound::Inbound;
 pub use intent::IntentPlan;
+pub use media::{FetchedMedia, MAX_MEDIA_BYTES, MediaRuntime};
 pub use state::AppState;
 pub use webhook::{ACK_BODY as WEBHOOK_ACK_BODY, MAX_BODY_BYTES as WEBHOOK_MAX_BODY_BYTES};
 pub use ws_client::{WsClient, WsClientHandle, WsClientOptions};

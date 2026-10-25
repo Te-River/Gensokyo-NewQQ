@@ -528,6 +528,12 @@ async fn http_health_unknown_action_and_version_info() {
     assert_eq!(status, 200, "未挂 WebUI 时 GET / 仍是健康检查");
     assert_eq!(body, "gensokyo-runtime: ok");
 
+    // OneBot HTTP 客户端通常直接 POST `/`：不能因为 GET / 已注册就回 405。
+    let (status, body) = http_request(addr, "POST", "/", r#"{"action":"get_status"}"#, None).await;
+    assert_eq!(status, 200, "POST / 必须进入 action 分派: {body}");
+    let value: Value = serde_json::from_str(&body).expect("响应应为 JSON");
+    assert_eq!(value["retcode"], 0, "POST / 应执行 action: {body}");
+
     let (status, body) = http_request(
         addr,
         "POST",

@@ -726,6 +726,7 @@ dependencies = [
  "gensokyo-actions",
  "gensokyo-config",
  "gensokyo-core",
+ "gensokyo-media",
  "gensokyo-protocol",
  "gensokyo-qq",
  "gensokyo-storage",
