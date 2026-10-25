@@ -19,22 +19,60 @@ pub(crate) fn object(params: &Value) -> Result<&Map<String, Value>> {
 /// 返回值是规范化后的 JSON 值（数字 → 整数，字符串原样），供协议类型反序列化。
 pub(crate) fn id_field(object: &Map<String, Value>, key: &str) -> Result<Option<Value>> {
     match object.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(text)) if text.is_empty() => Ok(None),
-        Some(Value::String(text)) => {
+        None => Ok(None),
+        Some(value) => id_value(value, key),
+    }
+}
+
+/// 单个 ID 值的归一规则（字段形态与数组元素形态共用）。
+///
+/// `key` 只用于错误文案：数组元素会带上 `[i]`，定位到具体哪一项非法。
+fn id_value(value: &Value, key: &str) -> Result<Option<Value>> {
+    match value {
+        Value::Null => Ok(None),
+        Value::String(text) if text.is_empty() => Ok(None),
+        Value::String(text) => {
             if text == "0" {
                 return Err(Error::Protocol(format!("{key} 不能为 0")));
             }
             Ok(Some(Value::String(text.clone())))
         }
-        Some(Value::Number(number)) => {
+        Value::Number(number) => {
             let normalized = normalized_number(key, number)?;
             if normalized.as_i64() == Some(0) {
                 return Err(Error::Protocol(format!("{key} 不能为 0")));
             }
             Ok(Some(Value::Number(normalized)))
         }
-        Some(_) => Err(Error::Protocol(format!("{key} 必须是数字或字符串"))),
+        _ => Err(Error::Protocol(format!("{key} 必须是数字或字符串"))),
+    }
+}
+
+/// ID 数组（`user_ids`）：逐个按 [`id_value`] 归一，`null` / 空串条目直接跳过。
+///
+/// 缺失或 `null` 视为空数组（不是参数错误：`user_id` 与 `user_ids` 二选一）。
+pub(crate) fn id_list(object: &Map<String, Value>, key: &str) -> Result<Vec<String>> {
+    match object.get(key) {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(items)) => {
+            let mut ids = Vec::with_capacity(items.len());
+            for (index, item) in items.iter().enumerate() {
+                let Some(value) = id_value(item, &format!("{key}[{index}]"))? else {
+                    continue;
+                };
+                match value {
+                    Value::String(text) => ids.push(text),
+                    Value::Number(number) => ids.push(number.to_string()),
+                    other => {
+                        return Err(Error::Protocol(format!(
+                            "{key}[{index}] 必须是数字或字符串: {other}"
+                        )));
+                    }
+                }
+            }
+            Ok(ids)
+        }
+        Some(_) => Err(Error::Protocol(format!("{key} 必须是数组"))),
     }
 }
 
@@ -116,11 +154,34 @@ pub(crate) fn optional_u32(object: &Map<String, Value>, key: &str) -> Result<Opt
         .map_err(|_| Error::Protocol(format!("{key} 超出范围: {value}")))
 }
 
+/// 可选布尔：JSON 布尔，或 `"true"` / `"false"` / `1` / `0`。
+///
+/// OneBot 客户端对 `enable` / `reject_add_request` 这类开关既有布尔也有字符串写法；
+/// 其它取值一律按参数错误拒绝，不做「非空即真」的猜测。
+pub(crate) fn optional_bool(object: &Map<String, Value>, key: &str) -> Result<Option<bool>> {
+    match object.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        Some(Value::String(text)) => match text.as_str() {
+            "" => Ok(None),
+            "true" => Ok(Some(true)),
+            "false" => Ok(Some(false)),
+            other => Err(Error::Protocol(format!("{key} 必须是布尔: {other}"))),
+        },
+        Some(Value::Number(number)) => match normalized_number(key, number)?.as_i64() {
+            Some(0) => Ok(Some(false)),
+            Some(1) => Ok(Some(true)),
+            _ => Err(Error::Protocol(format!("{key} 必须是布尔: {number}"))),
+        },
+        Some(_) => Err(Error::Protocol(format!("{key} 必须是布尔"))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
-    use super::{id_text, object, optional_i64, optional_u32, required_id};
+    use super::{id_list, id_text, object, optional_bool, optional_i64, optional_u32, required_id};
 
     fn map(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
         value.as_object().expect("测试用 params 都是对象").clone()
@@ -189,5 +250,40 @@ mod tests {
             optional_i64(&map(json!({"duration": -5})), "duration").unwrap(),
             Some(-5)
         );
+    }
+
+    #[test]
+    fn id_list_normalizes_elements_and_skips_empties() {
+        let params = map(json!({"user_ids": [42, "43", "", null, 4.4e1]}));
+        assert_eq!(id_list(&params, "user_ids").unwrap(), ["42", "43", "44"]);
+        assert_eq!(
+            id_list(&map(json!({})), "user_ids").unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            id_list(&map(json!({"user_ids": null})), "user_ids").unwrap(),
+            Vec::<String>::new()
+        );
+        assert!(id_list(&map(json!({"user_ids": 42})), "user_ids").is_err());
+        assert!(id_list(&map(json!({"user_ids": [0]})), "user_ids").is_err());
+        assert!(id_list(&map(json!({"user_ids": [[1]]})), "user_ids").is_err());
+    }
+
+    #[test]
+    fn optional_bool_accepts_json_and_string_forms() {
+        for (value, expected) in [
+            (json!(true), Some(true)),
+            (json!("false"), Some(false)),
+            (json!(1), Some(true)),
+            (json!(0), Some(false)),
+            (json!(null), None),
+            (json!(""), None),
+        ] {
+            let params = map(json!({"enable": value}));
+            assert_eq!(optional_bool(&params, "enable").unwrap(), expected);
+        }
+        for value in [json!("yes"), json!(2), json!([true])] {
+            assert!(optional_bool(&map(json!({"enable": value})), "enable").is_err());
+        }
     }
 }

@@ -11,15 +11,19 @@
 //! | `get_group_bot_state` | `handlers/get_group_bot_state.go` | `GET /v2/groups/{gid}/bot_state` |
 //! | `get_group_join_request_list` | `handlers/get_group_join_request_list.go` | `GET /v2/groups/{gid}/join_request_list` |
 //!
+//! `set_group_whole_ban` / `get_group_whole_ban`、`set_group_card`、`set_group_kick`、
+//! `set_group_leave`、`get_group_list` 在 [`crate::group_admin`]。
+//!
 //! 成功响应是 `status=ok` / `retcode=0` + `data`；参数缺失或非法回 `retcode=1400`
 //! （[`RETCODE_BAD_REQUEST`]），上游失败回 `retcode=1500`（[`RETCODE_UPSTREAM`]）。`echo` 由
 //! handler 原样带在响应上（runtime 统一回填的语义不变：同一值，重复设置无副作用）。
 //!
 //! # ID 口径
 //!
-//! 参数接受数字或字符串两种形态（[`crate::params`] 归一）。32 位原生 OpenID 直接当上游 ID 用；
-//! 其余形态视为虚拟号，经 [`gensokyo_storage::IdMapStore`] 反查——与 Go 的
-//! `len(id) == 32` 分支完全一致。未装配 idmap 时，虚拟号请求一律 1400，不做静默降级。
+//! ID 归一口径集中在 `util`：参数接受数字或字符串两种形态（`params` 归一），
+//! 32 位原生 OpenID 直接当上游 ID 用，其余形态视为虚拟号并经
+//! [`gensokyo_storage::IdMapStore`] 反查——与 Go 的 `len(id) == 32` 分支完全一致。未装配
+//! idmap 时，虚拟号请求一律 1400，不做静默降级。
 //!
 //! 响应里的 `group_id` / `user_id` 是**虚拟号**（回填请求值），形态由配置 `string_ob11`
 //! 决定（[`gensokyo_protocol::parse_id`] 的数字/字符串双形态）。本 crate 无 idmap 时列表条目的
@@ -33,13 +37,13 @@
 //!   Go 的「最多 100 页全量拉取 + 页间节流」尚未移植，`next_cursor` 也暂不外露。
 //! - **idmap 缺失时的中性值**：Go 侧 `StoreIDv2` 失败直接跳过成员；这里保留条目并置 `user_id=0`，
 //!   由调用方按 `member_openid` 决策。
-//! - **`joined_at` 解析**：Go 用 `time.Parse(RFC3339)`；这里用 [`crate::rfc3339`]（无 `time` 依赖），
+//! - **`joined_at` 解析**：Go 用 `time.Parse(RFC3339)`；这里用 `rfc3339`（无 `time` 依赖），
 //!   解析失败同样置 0。
 
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use gensokyo_core::{Error, Ob11Id, Result};
 use gensokyo_protocol::action::{ActionRequest, ActionResponse, GroupInfo, GroupMemberInfo};
@@ -49,13 +53,14 @@ use gensokyo_qq::dto::{
     ReviewQa,
 };
 
-use crate::handler::RETCODE_BAD_REQUEST;
 use crate::params;
 use crate::qqapi::ActionContext;
 use crate::rfc3339;
-
-/// 上游失败（OneBot 语义的 `retcode`），与 `gensokyo_runtime` 的上游错误码同值。
-pub const RETCODE_UPSTREAM: i32 = 1500;
+pub use crate::util::RETCODE_UPSTREAM;
+use crate::util::{
+    bad_request, ob11_id, ok_data, page_limit, params_object, resolve_group, resolve_member,
+    upstream_error, virtual_id_text,
+};
 
 /// `get_group_member_list` 单页默认条数（对齐 Go 的 `GroupMemberList(..., 30)`）。
 pub const DEFAULT_MEMBER_PAGE: u32 = 30;
@@ -68,18 +73,6 @@ pub const DEFAULT_JOIN_REQUEST_LIMIT: u32 = 20;
 
 /// 入群申请列表单页上限（官方上限 50）。
 pub const MAX_JOIN_REQUEST_LIMIT: u32 = 50;
-
-/// 32 位 OpenID 的长度（Go `len(id) == 32`）。
-const OPENID_LEN: usize = 32;
-
-/// 反查结果：请求里的虚拟号文本 + 真实 OpenID。
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ResolvedId {
-    /// 请求给出的虚拟号 / 文本形态（响应里回填这个）。
-    requested: String,
-    /// 真实的 32 位 OpenID（上游入参）。
-    openid: String,
-}
 
 /// `get_group_bot_state` 的响应数据（Gensokyo 扩展 action，字段与 Go `GroupBotState` 对齐）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -499,109 +492,6 @@ impl Handler for GetGroupJoinRequestListHandler {
     }
 }
 
-/// 取 `params` 对象；缺失时给出与其他 handler 同口径的 1400 文案。
-fn params_object(request: &ActionRequest<Value>) -> Result<&Map<String, Value>> {
-    match request.params.as_ref() {
-        Some(params) => params::object(params),
-        None => Err(Error::Protocol("params 缺失或不是 JSON 对象".to_owned())),
-    }
-}
-
-/// 群 ID → 上游 `group_openid`：32 位 OpenID 直通，虚拟号经 idmap 反查。
-fn resolve_group(context: &ActionContext, object: &Map<String, Value>) -> Result<ResolvedId> {
-    let requested = params::required_id(object, "group_id")?;
-    if is_openid(&requested) {
-        return Ok(ResolvedId {
-            openid: requested.clone(),
-            requested,
-        });
-    }
-    let vuin = requested.parse::<i64>().map_err(|_| {
-        Error::Protocol(format!(
-            "group_id 必须是 32 位 OpenID 或虚拟号: {requested}"
-        ))
-    })?;
-    let store = context.idmap().ok_or_else(|| {
-        Error::Protocol("未装配 idmap，无法把 group_id 反查成 group_openid".to_owned())
-    })?;
-    let openid = store
-        .retrieve_row_by_id(vuin)
-        .map_err(|err| Error::Protocol(format!("反查 group_openid 失败: {err}")))?;
-    if openid.is_empty() {
-        return Err(Error::Protocol(format!(
-            "group_id {requested} 未绑定 group_openid"
-        )));
-    }
-    Ok(ResolvedId { requested, openid })
-}
-
-/// 成员 ID：`member_openid` 优先（32 位真实 OpenID），否则 `user_id` 按同一套规则反查。
-fn resolve_member(context: &ActionContext, object: &Map<String, Value>) -> Result<ResolvedId> {
-    if let Some(openid) = params::optional_text(object, "member_openid")? {
-        let requested = match params::optional_text(object, "user_id")? {
-            Some(user_id) => user_id,
-            None => virtual_id_text(context, &openid),
-        };
-        return Ok(ResolvedId { requested, openid });
-    }
-
-    let requested = params::required_id(object, "user_id")?;
-    if is_openid(&requested) {
-        return Ok(ResolvedId {
-            openid: requested.clone(),
-            requested,
-        });
-    }
-    let vuin = requested.parse::<i64>().map_err(|_| {
-        Error::Protocol(format!("user_id 必须是 32 位 OpenID 或虚拟号: {requested}"))
-    })?;
-    let store = context.idmap().ok_or_else(|| {
-        Error::Protocol("未装配 idmap，无法把 user_id 反查成 member_openid".to_owned())
-    })?;
-    let openid = store
-        .retrieve_row_by_id(vuin)
-        .map_err(|err| Error::Protocol(format!("反查 member_openid 失败: {err}")))?;
-    if openid.is_empty() {
-        return Err(Error::Protocol(format!(
-            "user_id {requested} 未绑定 member_openid"
-        )));
-    }
-    Ok(ResolvedId { requested, openid })
-}
-
-/// 真实 OpenID → 虚拟号文本；未装配 idmap 或映射失败时回退 `"0"`（真实 ID 仍在附加字段里）。
-fn virtual_id_text(context: &ActionContext, openid: &str) -> String {
-    let Some(store) = context.idmap() else {
-        return "0".to_owned();
-    };
-    match store.retrieve_virtual_value(openid) {
-        Ok((_, vuin)) => vuin.to_string(),
-        Err(_) => "0".to_owned(),
-    }
-}
-
-/// 32 位 OpenID 判定（Go `len(id) == 32`；OpenID 是 ASCII，字符数与字节数一致）。
-fn is_openid(raw: &str) -> bool {
-    raw.chars().count() == OPENID_LEN
-}
-
-/// 虚拟号的线上形态：`string_ob11` 为真时发字符串，否则按 `parse_id` 的数字/字符串双形态。
-fn ob11_id(text: &str, string_mode: bool) -> Ob11Id {
-    if string_mode {
-        Ob11Id::Str(text.to_owned())
-    } else {
-        gensokyo_protocol::parse_id(text)
-    }
-}
-
-/// 分页条数：未传 / `0` 用默认值，超过上限截断。
-fn page_limit(object: &Map<String, Value>, default: u32, max: u32) -> Result<u32> {
-    match params::optional_u32(object, "limit")? {
-        None | Some(0) => Ok(default),
-        Some(limit) => Ok(limit.min(max)),
-    }
-}
-
 /// 原来的成员 DTO → OneBot 成员信息。
 fn member_info(group_id: &Ob11Id, user_id: &Ob11Id, member: &QqGroupMember) -> GroupMemberInfo {
     let mut extra = Extra::new();
@@ -691,29 +581,6 @@ fn next_index(next_cursor: &str) -> i64 {
         .unwrap_or(0)
 }
 
-/// 成功响应：`data` 来自序列化后的业务结构。
-fn ok_data<T: Serialize>(
-    request: &ActionRequest<Value>,
-    data: &T,
-) -> Result<ActionResponse<Value>> {
-    let value = serde_json::to_value(data)
-        .map_err(|err| Error::Protocol(format!("响应序列化失败: {err}")))?;
-    Ok(ActionResponse::ok(value).with_echo(request.echo.clone()))
-}
-
-/// 参数错误响应（`retcode = 1400`）。
-fn bad_request(request: &ActionRequest<Value>, err: &Error) -> ActionResponse<Value> {
-    ActionResponse::failed(RETCODE_BAD_REQUEST, err.to_string()).with_echo(request.echo.clone())
-}
-
-/// 上游错误响应（`retcode = 1500`）。
-fn upstream_error(
-    request: &ActionRequest<Value>,
-    err: &gensokyo_qq::Error,
-) -> ActionResponse<Value> {
-    ActionResponse::failed(RETCODE_UPSTREAM, err.to_string()).with_echo(request.echo.clone())
-}
-
 #[cfg(test)]
 mod tests {
     use std::future::Future;
@@ -729,6 +596,7 @@ mod tests {
     use crate::handler::RETCODE_BAD_REQUEST;
     use crate::qqapi::{ActionContext, QqApi, QqFuture};
     use gensokyo_config::ConfigManager;
+    use gensokyo_core::{Error, Result};
     use gensokyo_protocol::Handler;
     use gensokyo_protocol::Status;
     use gensokyo_protocol::action::{ActionRequest, ActionResponse};
@@ -774,89 +642,91 @@ mod tests {
         }
     }
 
-    fn take<T>(slot: &Mutex<Option<Result<T, ApiError>>>) -> gensokyo_qq::Result<T> {
+    fn take<T>(slot: &Mutex<Option<Result<T, ApiError>>>) -> Result<T> {
         slot.lock()
             .expect("响应槽锁未中毒")
             .take()
             .expect("测试未配置该方法的响应")
-            .map_err(gensokyo_qq::Error::Api)
+            .map_err(|err| Error::Upstream {
+                code: err.code,
+                message: err.message,
+            })
     }
 
     impl QqApi for FakeQqApi {
-        fn get_group_info<'a>(&'a self, group_openid: &'a str) -> QqFuture<'a, QqGroupInfo> {
+        fn get_group_info(&self, group_openid: &str) -> QqFuture<'_, QqGroupInfo> {
+            // 先把借用转成所有权：async 块只捕获 `&self`，返回的 future 才只依赖 self 的生命周期
+            let group_openid = group_openid.to_owned();
             Box::pin(async move {
-                self.record(Call::GroupInfo(group_openid.to_owned()));
+                self.record(Call::GroupInfo(group_openid));
                 take(&self.group_info)
             })
         }
 
-        fn get_group_member_info<'a>(
-            &'a self,
-            group_openid: &'a str,
-            member_openid: &'a str,
-        ) -> QqFuture<'a, QqGroupMember> {
+        fn get_group_member_info(
+            &self,
+            group_openid: &str,
+            member_openid: &str,
+        ) -> QqFuture<'_, QqGroupMember> {
+            let group_openid = group_openid.to_owned();
+            let member_openid = member_openid.to_owned();
             Box::pin(async move {
-                self.record(Call::MemberInfo(
-                    group_openid.to_owned(),
-                    member_openid.to_owned(),
-                ));
+                self.record(Call::MemberInfo(group_openid, member_openid));
                 take(&self.member_info)
             })
         }
 
-        fn get_group_member_list<'a>(
-            &'a self,
-            group_openid: &'a str,
+        fn get_group_member_list(
+            &self,
+            group_openid: &str,
             limit: u32,
-        ) -> QqFuture<'a, QqGroupMemberList> {
+        ) -> QqFuture<'_, QqGroupMemberList> {
+            let group_openid = group_openid.to_owned();
             Box::pin(async move {
-                self.record(Call::MemberList(group_openid.to_owned(), limit));
+                self.record(Call::MemberList(group_openid, limit));
                 take(&self.member_list)
             })
         }
 
-        fn set_group_ban<'a>(
-            &'a self,
-            group_openid: &'a str,
-            member_openid: &'a str,
+        fn set_group_ban(
+            &self,
+            group_openid: &str,
+            member_openid: &str,
             duration_secs: i64,
-        ) -> QqFuture<'a, ()> {
+        ) -> QqFuture<'_, ()> {
+            let group_openid = group_openid.to_owned();
+            let member_openid = member_openid.to_owned();
             Box::pin(async move {
-                self.record(Call::SetBan(
-                    group_openid.to_owned(),
-                    member_openid.to_owned(),
-                    duration_secs,
-                ));
+                self.record(Call::SetBan(group_openid, member_openid, duration_secs));
                 let error = self.ban.lock().expect("禁言槽锁未中毒").take();
                 match error {
-                    Some(error) => Err(gensokyo_qq::Error::Api(error)),
+                    Some(error) => Err(Error::Upstream {
+                        code: error.code,
+                        message: error.message,
+                    }),
                     None => Ok(()),
                 }
             })
         }
 
-        fn get_group_bot_state<'a>(
-            &'a self,
-            group_openid: &'a str,
-        ) -> QqFuture<'a, BotInGroupState> {
+        fn get_group_bot_state(&self, group_openid: &str) -> QqFuture<'_, BotInGroupState> {
+            let group_openid = group_openid.to_owned();
             Box::pin(async move {
-                self.record(Call::BotState(group_openid.to_owned()));
+                self.record(Call::BotState(group_openid));
                 take(&self.bot_state)
             })
         }
 
-        fn get_group_join_request_list<'a>(
-            &'a self,
-            group_openid: &'a str,
-            cursor: Option<&'a str>,
+        fn get_group_join_request_list(
+            &self,
+            group_openid: &str,
+            cursor: Option<&str>,
             limit: Option<u32>,
-        ) -> QqFuture<'a, QqJoinRequestList> {
+        ) -> QqFuture<'_, QqJoinRequestList> {
+            let group_openid = group_openid.to_owned();
+            let cursor = cursor.map(str::to_owned);
             Box::pin(async move {
-                self.record(Call::JoinRequestList(
-                    group_openid.to_owned(),
-                    cursor.map(str::to_owned),
-                    limit,
-                ));
+                self.record(Call::JoinRequestList(group_openid, cursor, limit));
                 take(&self.join_requests)
             })
         }
