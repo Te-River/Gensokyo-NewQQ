@@ -19,6 +19,22 @@
 //! # 无法归类的段
 //! `face` / `node` / `poke` / `set_group` 等没有对应 `foundItems` key 的段落进
 //! [`OutboundPlan::extra`]，按到达顺序原样保留，`to_segments` 时排在最后。
+//!
+//! # 与 Go 的字段差异
+//!
+//! `foundItems` 是 `map[string][]string`，这里把同一契约类型化；差异只在表达方式，线上值不变：
+//!
+//! | 载荷 | Go | 本 crate |
+//! |------|----|----------|
+//! | markdown | 只搬 base64(JSON) 字节串（`handlers/message_parser.go:1048-1097`） | 原样承载，另提供 [`MarkdownPayload::decode`] / `content` / `custom_template_id` / `keyboard` 类型化视图（对齐 `dto.Markdown`） |
+//! | keyboard | 对象 → JSON 串；`base64://` → 解码；其余原样（同文件 `1103-1134`） | 同左（[`KeyboardPayload`]） |
+//! | card | 段路径只认 `title`/`desc`/`pic`/`url`（`handlers/message_parser.go:988-1010`），CQ 文本路径收全部 `k=v`（`handlers/cqcode_pipeline.go:114-132`） | 收全部 `k=v`（CQ 路径口径），另提供 [`CardPayload::fields`] 取四个官方字段 |
+//! | stream | `foundItems` 只写 `type`/`qq`；`stream_msg_id`/`index`/`msg_seq` 由 `handlers/send_private_msg.go:51-55` 的进程内 `streamCache` 维护，不落 `foundItems` | 升为 [`StreamPayload`] 的可选字段 `id`/`index`/`seq`，只在有值时附加进 JSON（解析时也认 Go 的 `stream_msg_id`/`msg_seq` 键名） |
+//! | input_notify | `type` 恒写、`second` 可缺，值均为字符串 | [`InputNotifyPayload::kind`] 为 `i64`（非数字段的整段进 `extra`），`second` 为 `Option<i64>` |
+//! | wakeup | 独立 key `wakeup` | 归到 [`ActiveKind::wakeup`]（分组不同，值相同） |
+//!
+//! `markdown` / `keyboard` / `card` 在此是 `Vec`：Go 对同名 key 是 `append`，一条消息可带多份，
+//! 收敛成 `Option` 会丢信息。`stream` / `input_notify` 在 Go 里实际只消费首项，故为 `Option`。
 
 use std::collections::BTreeMap;
 
@@ -68,11 +84,65 @@ pub struct FileRef {
 ///
 /// Go 的 `foundItems["markdown"]` 是 base64(JSON)（`handlers/message_parser.go` 的
 /// `mdContentEncoded`）或原始 JSON 串；协议层不重新编码，原样承载，避免把 M2 的编码决策
-/// 固化在模型里。
+/// 固化在模型里。读字段用 [`Self::decode`] 系列（对齐 `dto.Markdown`：`content` /
+/// `custom_template_id`，内嵌键盘在 `keyboard`）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarkdownPayload {
     /// 原始 `data=` 值。
     pub raw: String,
+}
+
+impl MarkdownPayload {
+    /// 直接承载已编码好的 base64(JSON)。
+    #[must_use]
+    pub fn new(raw: impl Into<String>) -> Self {
+        Self { raw: raw.into() }
+    }
+
+    /// JSON 文本 → base64(JSON)（Go 的"对象先 marshal 再编码"分支）。
+    ///
+    /// # Errors
+    /// 入参不是合法 JSON 时返回 [`Error::Protocol`]。
+    pub fn from_json(raw: &str) -> Result<Self> {
+        let value: Value = serde_json::from_str(raw)
+            .map_err(|error| Error::Protocol(format!("markdown 载荷不是合法 JSON: {error}")))?;
+        Ok(Self {
+            raw: base64::encode(value.to_string().as_bytes()),
+        })
+    }
+
+    /// 解码回 JSON 值。
+    ///
+    /// # Errors
+    /// 非 base64，或解出的字节不是合法 JSON 时返回 [`Error::Protocol`]。
+    pub fn decode(&self) -> Result<Value> {
+        let bytes = base64::decode(&self.raw)
+            .ok_or_else(|| Error::Protocol("markdown 载荷不是合法 base64".to_owned()))?;
+        serde_json::from_slice(&bytes).map_err(|error| {
+            Error::Protocol(format!("markdown 载荷 base64 解码后不是合法 JSON: {error}"))
+        })
+    }
+
+    /// `content` 字段（原生 markdown 文本）。
+    #[must_use]
+    pub fn content(&self) -> Option<String> {
+        self.decode().ok()?.get("content").and_then(json_scalar)
+    }
+
+    /// `custom_template_id` 字段（群模板 id）。
+    #[must_use]
+    pub fn custom_template_id(&self) -> Option<String> {
+        self.decode()
+            .ok()?
+            .get("custom_template_id")
+            .and_then(json_scalar)
+    }
+
+    /// `keyboard` 字段（markdown 内嵌键盘）。
+    #[must_use]
+    pub fn keyboard(&self) -> Option<Value> {
+        self.decode().ok()?.get("keyboard").cloned()
+    }
 }
 
 /// 键盘载荷（`foundItems["keyboard"]`，JSON 字符串）。
@@ -87,6 +157,66 @@ pub struct KeyboardPayload {
 pub struct CardPayload {
     /// 原始 JSON。
     pub raw: String,
+}
+
+/// 卡片的四个官方字段（`handlers/message_parser.go:991-1003` 只把这些写进卡片）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CardFields {
+    /// 卡片标题。
+    pub title: Option<String>,
+    /// 卡片描述。
+    pub desc: Option<String>,
+    /// 封面图 URL。
+    pub pic: Option<String>,
+    /// 跳转链接。
+    pub url: Option<String>,
+}
+
+impl CardFields {
+    /// 四个字段都为空时没有可发送内容。
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.title.is_none() && self.desc.is_none() && self.pic.is_none() && self.url.is_none()
+    }
+}
+
+impl CardPayload {
+    /// 由字段表构造：只写有值的键（键序与 Go 的 map marshal 一致，字典序）。
+    #[must_use]
+    pub fn from_fields(fields: &CardFields) -> Self {
+        let mut object = serde_json::Map::new();
+        for (key, value) in [
+            ("title", &fields.title),
+            ("desc", &fields.desc),
+            ("pic", &fields.pic),
+            ("url", &fields.url),
+        ] {
+            if let Some(value) = value {
+                object.insert(key.to_owned(), Value::String(value.clone()));
+            }
+        }
+        Self {
+            raw: Value::Object(object).to_string(),
+        }
+    }
+
+    /// 取出四个官方字段。
+    ///
+    /// # Errors
+    /// 载荷不是 JSON 对象时返回 [`Error::Protocol`]。
+    pub fn fields(&self) -> Result<CardFields> {
+        let value: Value = serde_json::from_str(&self.raw)
+            .map_err(|error| Error::Protocol(format!("card 载荷不是合法 JSON: {error}")))?;
+        if !value.is_object() {
+            return Err(Error::Protocol("card 载荷不是 JSON 对象".to_owned()));
+        }
+        Ok(CardFields {
+            title: value.get("title").and_then(json_scalar),
+            desc: value.get("desc").and_then(json_scalar),
+            pic: value.get("pic").and_then(json_scalar),
+            url: value.get("url").and_then(json_scalar),
+        })
+    }
 }
 
 /// 流式消息阶段（`[CQ:stream,type=…]`）。
@@ -127,12 +257,22 @@ impl From<&str> for StreamKind {
 }
 
 /// 流式消息载荷。
+///
+/// Go 的 `foundItems["stream"]` 只带 `type`/`qq`，`stream_msg_id`、`index`、`msg_seq` 由
+/// `handlers/send_private_msg.go:51-55` 的进程内 `streamCache` 维护。这里把它们升为可选字段，
+/// 由调用方显式给出：`start` 可全省，`mid`/`finish` 缺 `id` 等价于 Go 的"缺少 stream_msg_id，跳过"。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamPayload {
     /// 阶段。
     pub kind: StreamKind,
     /// 目标用户 ID（虚拟）。
     pub qq: Ob11Id,
+    /// 首片返回的 `stream_msg_id`（Go `streamInfo.StreamMsgID`）。
+    pub id: Option<String>,
+    /// 分片序号（Go `streamInfo.Index`）。
+    pub index: Option<i64>,
+    /// 回复序号（`msg_seq`）。
+    pub seq: Option<i64>,
 }
 
 /// 输入状态载荷（`[CQ:input_notify,type=…,second=…]`）。
@@ -360,16 +500,22 @@ impl OutboundPlan {
         }
 
         if let Some(stream) = &self.stream {
-            items.insert(
-                "stream".to_owned(),
-                vec![
-                    serde_json::json!({
-                        "type": stream.kind.as_str(),
-                        "qq": stream.qq.to_string(),
-                    })
-                    .to_string(),
-                ],
+            let mut object = serde_json::Map::new();
+            object.insert(
+                "type".to_owned(),
+                Value::String(stream.kind.as_str().to_owned()),
             );
+            object.insert("qq".to_owned(), Value::String(stream.qq.to_string()));
+            if let Some(id) = &stream.id {
+                object.insert("id".to_owned(), Value::String(id.clone()));
+            }
+            if let Some(index) = stream.index {
+                object.insert("index".to_owned(), Value::String(index.to_string()));
+            }
+            if let Some(seq) = stream.seq {
+                object.insert("seq".to_owned(), Value::String(seq.to_string()));
+            }
+            items.insert("stream".to_owned(), vec![Value::Object(object).to_string()]);
         }
         if let Some(notify) = &self.input_notify {
             let mut object = serde_json::Map::new();
@@ -418,15 +564,32 @@ impl OutboundPlan {
                         .or_else(|| segment.get("name"))
                         .map(ToOwned::to_owned),
                 }),
-                "markdown" => plan.markdown.push(MarkdownPayload {
-                    raw: markdown_payload(segment),
-                }),
-                "keyboard" => plan.keyboard.push(KeyboardPayload {
-                    raw: keyboard_payload(segment),
-                }),
-                "card" => plan.card.push(CardPayload {
-                    raw: card_payload(segment),
-                }),
+                "markdown" => {
+                    let raw = markdown_payload(segment);
+                    if raw.is_empty() {
+                        // Go 缺 data.data 时记日志后跳过（message_parser.go:1099-1101）；
+                        // 这里保留段本身，模型层不静默丢载荷
+                        plan.extra.push(segment.clone());
+                    } else {
+                        plan.markdown.push(MarkdownPayload { raw });
+                    }
+                }
+                "keyboard" => {
+                    let raw = keyboard_payload(segment);
+                    if raw.is_empty() {
+                        plan.extra.push(segment.clone());
+                    } else {
+                        plan.keyboard.push(KeyboardPayload { raw });
+                    }
+                }
+                "card" => {
+                    let raw = card_payload(segment);
+                    if raw.is_empty() {
+                        plan.extra.push(segment.clone());
+                    } else {
+                        plan.card.push(CardPayload { raw });
+                    }
+                }
                 "music" => {
                     if let Some(id) = segment.get("id") {
                         plan.qqmusic.push(id.to_owned());
@@ -517,7 +680,17 @@ impl OutboundPlan {
             out.push(Segment::input_notify(notify.kind, notify.second));
         }
         if let Some(stream) = &self.stream {
-            out.push(Segment::stream(stream.kind.as_str(), stream.qq.clone()));
+            let mut segment = Segment::stream(stream.kind.as_str(), stream.qq.clone());
+            if let Some(id) = &stream.id {
+                segment = segment.param("id", id.clone());
+            }
+            if let Some(index) = stream.index {
+                segment = segment.param("index", index.to_string());
+            }
+            if let Some(seq) = stream.seq {
+                segment = segment.param("seq", seq.to_string());
+            }
+            out.push(segment);
         }
 
         out.extend(self.extra.iter().cloned());
@@ -619,6 +792,9 @@ fn card_payload(segment: &Segment) -> String {
     if let Some(data) = segment.get("data") {
         return data.to_owned();
     }
+    if segment.params.is_empty() {
+        return String::new();
+    }
     let mut object = serde_json::Map::new();
     for (key, value) in &segment.params {
         object.insert(key.clone(), Value::String(value.clone()));
@@ -666,6 +842,15 @@ fn stream_from_segment(segment: &Segment) -> Option<StreamPayload> {
     Some(StreamPayload {
         kind: StreamKind::from(segment.get("type")?),
         qq: segment.id_param("qq")?,
+        id: segment
+            .get("id")
+            .or_else(|| segment.get("stream_msg_id"))
+            .map(ToOwned::to_owned),
+        index: segment.get("index").and_then(|raw| raw.parse::<i64>().ok()),
+        seq: segment
+            .get("seq")
+            .or_else(|| segment.get("msg_seq"))
+            .and_then(|raw| raw.parse::<i64>().ok()),
     })
 }
 
@@ -699,7 +884,22 @@ fn parse_stream(raw: &str) -> Result<StreamPayload> {
     Ok(StreamPayload {
         kind: StreamKind::from(kind.as_str()),
         qq: parse_id(&qq),
+        // Go 侧的键名是 stream_msg_id / msg_seq，CQ 参数用 id / seq，两种都认
+        id: optional_text(&value, &["id", "stream_msg_id"]),
+        index: optional_i64(&value, &["index"]),
+        seq: optional_i64(&value, &["seq", "msg_seq"]),
     })
+}
+
+/// 可选字符串字段（字符串/数字两种写法，Go 的 `map[string]string` 两种都出现过）。
+fn optional_text(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(json_scalar))
+}
+
+/// 可选整数字段：缺省或不可解析都按"未提供"处理（Go 只读 type/qq，其余是扩展键）。
+fn optional_i64(value: &Value, keys: &[&str]) -> Option<i64> {
+    optional_text(value, keys).and_then(|text| text.parse().ok())
 }
 
 fn parse_input_notify(raw: &str) -> Result<InputNotifyPayload> {
@@ -722,8 +922,8 @@ mod tests {
     use gensokyo_core::Ob11Id;
 
     use super::{
-        CardPayload, FileRef, FoundItems, InputNotifyPayload, MediaRef, OutboundPlan, StreamKind,
-        StreamPayload,
+        CardFields, CardPayload, FileRef, FoundItems, InputNotifyPayload, MarkdownPayload,
+        MediaRef, OutboundPlan, StreamKind, StreamPayload,
     };
     use crate::segment::Segment;
 
@@ -821,7 +1021,10 @@ mod tests {
             plan.stream,
             Some(StreamPayload {
                 kind: StreamKind::Start,
-                qq: Ob11Id::Num(99999)
+                qq: Ob11Id::Num(99999),
+                id: None,
+                index: None,
+                seq: None,
             })
         );
         assert_eq!(
@@ -839,9 +1042,27 @@ mod tests {
     #[test]
     fn invalid_stream_payload_is_reported() {
         let items = found(&[("stream", &[r#"{"type":"start"}"#])]);
-        assert!(OutboundPlan::from_found_items(&items).is_err());
+        let error = OutboundPlan::from_found_items(&items).expect_err("缺 qq 应报错");
+        assert!(error.to_string().contains("qq"), "错误应点名字段: {error}");
+
+        let items = found(&[("stream", &[r#"{"qq":"1"}"#])]);
+        let error = OutboundPlan::from_found_items(&items).expect_err("缺 type 应报错");
+        assert!(
+            error.to_string().contains("type"),
+            "错误应点名字段: {error}"
+        );
+
+        let items = found(&[("stream", &["not-json"])]);
+        let error = OutboundPlan::from_found_items(&items).expect_err("非 JSON 应报错");
+        assert!(
+            error.to_string().contains("JSON"),
+            "错误应点名字段: {error}"
+        );
 
         let items = found(&[("input_notify", &[r#"{"second":"5"}"#])]);
+        assert!(OutboundPlan::from_found_items(&items).is_err());
+
+        let items = found(&[("input_notify", &[r#"{"type":"abc"}"#])]);
         assert!(OutboundPlan::from_found_items(&items).is_err());
     }
 
@@ -890,6 +1111,9 @@ mod tests {
             stream: Some(StreamPayload {
                 kind: StreamKind::Start,
                 qq: Ob11Id::Num(9),
+                id: None,
+                index: None,
+                seq: None,
             }),
             ..OutboundPlan::default()
         };
@@ -917,6 +1141,9 @@ mod tests {
             stream: Some(StreamPayload {
                 kind: StreamKind::Finish,
                 qq: Ob11Id::Num(5),
+                id: Some("stream-1".to_owned()),
+                index: Some(3),
+                seq: Some(2),
             }),
             input_notify: Some(InputNotifyPayload {
                 kind: 1,
@@ -1043,5 +1270,185 @@ mod tests {
         assert!(plan.is_empty(), "reply 不是可发送内容");
         plan.text = "hi".to_owned();
         assert!(!plan.is_empty());
+    }
+
+    #[test]
+    fn markdown_payload_exposes_go_fields_and_round_trips() {
+        let segment: Segment = serde_json::from_str(
+            r##"{"type":"markdown","data":{"data":{"content":"# hi","custom_template_id":"tpl-1","keyboard":{"content":{"rows":[]}}}}}"##,
+        )
+        .expect("markdown 段反序列化失败");
+        let plan = OutboundPlan::from_segments(&[segment]);
+        let payload = &plan.markdown[0];
+
+        assert_eq!(payload.content().as_deref(), Some("# hi"));
+        assert_eq!(payload.custom_template_id().as_deref(), Some("tpl-1"));
+        assert!(payload.keyboard().is_some(), "markdown 内嵌键盘应可读出");
+        assert_eq!(
+            payload.decode().expect("应为 base64(JSON)")["content"],
+            "# hi"
+        );
+
+        // foundItems 契约：原样 base64；双向映射都不丢字段
+        let items = plan.to_found_items();
+        assert_eq!(items["markdown"], vec![payload.raw.clone()]);
+        assert_eq!(
+            OutboundPlan::from_found_items(&items).expect("还原失败"),
+            plan
+        );
+        assert_eq!(OutboundPlan::from_segments(&plan.to_segments()), plan);
+
+        // JSON → base64 的规范化与 Go 的 `mdContentMap` 分支一致
+        assert_eq!(
+            MarkdownPayload::from_json(r#"{"content":"hi"}"#).expect("编码失败"),
+            MarkdownPayload {
+                raw: "eyJjb250ZW50IjoiaGkifQ==".to_owned()
+            }
+        );
+        assert!(MarkdownPayload::from_json("not json").is_err());
+        assert!(
+            MarkdownPayload {
+                raw: "not-base64".to_owned()
+            }
+            .decode()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn card_payload_aggregates_kv_and_exposes_go_fields() {
+        // 冒号与 `=` 混写（Go 的 card 正则只认 `k=v`，冒号是本 crate 的兜底写法）
+        let segments = crate::cqcode::parse(
+            "[CQ:card,title:标题,desc=描述,pic=https://x.com/p.png,url=https://x.com]",
+        );
+        let plan = OutboundPlan::from_segments(&segments);
+
+        let fields = plan.card[0].fields().expect("card 应为 JSON 对象");
+        assert_eq!(fields.title.as_deref(), Some("标题"));
+        assert_eq!(fields.desc.as_deref(), Some("描述"));
+        assert_eq!(fields.pic.as_deref(), Some("https://x.com/p.png"));
+        assert_eq!(fields.url.as_deref(), Some("https://x.com"));
+
+        let items = plan.to_found_items();
+        let raw: serde_json::Value =
+            serde_json::from_str(&items["card"][0]).expect("card 应为 JSON");
+        assert_eq!(raw["title"], "标题");
+        assert_eq!(
+            OutboundPlan::from_found_items(&items).expect("还原失败"),
+            plan
+        );
+        assert_eq!(OutboundPlan::from_segments(&plan.to_segments()), plan);
+
+        // 字段表 → 载荷：只写有值的键（与 Go 的 map marshal 同序）
+        let payload = CardPayload::from_fields(&CardFields {
+            title: Some("t".to_owned()),
+            ..CardFields::default()
+        });
+        assert_eq!(payload.raw, r#"{"title":"t"}"#);
+        assert_eq!(
+            payload.fields().expect("应为对象"),
+            CardFields {
+                title: Some("t".to_owned()),
+                ..CardFields::default()
+            }
+        );
+        assert!(
+            CardPayload {
+                raw: r#""x""#.to_owned()
+            }
+            .fields()
+            .is_err(),
+            "非对象载荷应报错"
+        );
+    }
+
+    #[test]
+    fn stream_payload_covers_all_stages_and_optional_fields() {
+        for (kind, expected) in [
+            ("start", StreamKind::Start),
+            ("mid", StreamKind::Mid),
+            ("finish", StreamKind::Finish),
+        ] {
+            let segment = Segment::stream(kind, Ob11Id::Num(99999))
+                .param("id", "stream-1")
+                .param("index", "0")
+                .param("seq", "2");
+            let plan = OutboundPlan::from_segments(&[segment]);
+
+            let stream = plan.stream.as_ref().expect("应有 stream");
+            assert_eq!(stream.kind, expected);
+            assert_eq!(stream.qq, Ob11Id::Num(99999));
+            assert_eq!(stream.id.as_deref(), Some("stream-1"));
+            assert_eq!(stream.index, Some(0), "首片 index 为 0，不能被当成缺省");
+            assert_eq!(stream.seq, Some(2));
+
+            let items = plan.to_found_items();
+            let raw: serde_json::Value =
+                serde_json::from_str(&items["stream"][0]).expect("stream 应为 JSON");
+            assert_eq!(raw["type"], kind);
+            assert_eq!(raw["qq"], "99999");
+            assert_eq!(raw["id"], "stream-1");
+            assert_eq!(raw["index"], "0");
+            assert_eq!(raw["seq"], "2");
+
+            assert_eq!(
+                OutboundPlan::from_found_items(&items).expect("还原失败"),
+                plan
+            );
+            assert_eq!(OutboundPlan::from_segments(&plan.to_segments()), plan);
+        }
+
+        // CQ 文本：冒号与 `=` 混写（Go 的 streamPattern 原生是 `type:start,qq:123`）
+        let plan = OutboundPlan::from_segments(&crate::cqcode::parse(
+            "[CQ:stream,type:start,qq=123,id:abc,index=0,seq:2]",
+        ));
+        let stream = plan.stream.expect("CQ 混写应解析成 stream");
+        assert_eq!(stream.kind, StreamKind::Start);
+        assert_eq!(stream.qq, Ob11Id::Num(123));
+        assert_eq!(stream.id.as_deref(), Some("abc"));
+        assert_eq!(stream.index, Some(0));
+        assert_eq!(stream.seq, Some(2));
+
+        // Go 只写 type/qq 的形态：可选字段缺省，JSON 里不出现空键
+        let plan = OutboundPlan::from_segments(&[Segment::stream("mid", Ob11Id::Num(1))]);
+        assert!(plan.stream.as_ref().expect("应有 stream").id.is_none());
+        assert_eq!(
+            plan.to_found_items()["stream"][0],
+            r#"{"qq":"1","type":"mid"}"#
+        );
+    }
+
+    #[test]
+    fn stream_payload_reads_go_stream_chunk_keys() {
+        let items = found(&[(
+            "stream",
+            &[r#"{"type":"mid","qq":"7","stream_msg_id":"abc","index":1,"msg_seq":4}"#],
+        )]);
+        let plan = OutboundPlan::from_found_items(&items).expect("应接受 Go 的键名");
+        let stream = plan.stream.as_ref().expect("应有 stream");
+        assert_eq!(stream.kind, StreamKind::Mid);
+        assert_eq!(stream.id.as_deref(), Some("abc"));
+        assert_eq!(stream.index, Some(1));
+        assert_eq!(stream.seq, Some(4));
+        // 回写时统一成 CQ 参数口径（id / index / seq）
+        assert_eq!(
+            plan.to_found_items()["stream"][0],
+            r#"{"id":"abc","index":"1","qq":"7","seq":"4","type":"mid"}"#
+        );
+    }
+
+    #[test]
+    fn missing_rich_payloads_stay_visible_in_extra() {
+        let segments = vec![
+            Segment::new("markdown"),
+            Segment::new("keyboard"),
+            Segment::new("card"),
+        ];
+        let plan = OutboundPlan::from_segments(&segments);
+        assert!(plan.markdown.is_empty());
+        assert!(plan.keyboard.is_empty());
+        assert!(plan.card.is_empty());
+        assert_eq!(plan.extra, segments, "缺载荷的段进 extra，不静默丢弃");
+        assert_eq!(plan.to_found_items().get("markdown"), None);
     }
 }

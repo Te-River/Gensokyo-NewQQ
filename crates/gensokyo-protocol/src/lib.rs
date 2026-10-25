@@ -12,7 +12,8 @@
 //!   music（qqmusic）/ active / wakeup / node / set_group / remove / poke 等）。
 //! - [`action`]：`ActionRequest` / `ActionResponse` 与常用 action 的参数、结果类型。
 //! - [`outbound`]：`foundItems` 的类型化替代 [`outbound::OutboundPlan`]，含
-//!   `from_found_items` / `to_found_items` / `from_segments` / `to_segments`。
+//!   `from_found_items` / `to_found_items` / `from_segments` / `to_segments`；markdown /
+//!   keyboard / card / stream / input_notify 的载荷类型与「与 Go 的字段差异」见模块文档。
 //! - [`registry`]：`Handler` trait + 显式注册表、别名与 [`registry::KNOWN_ACTIONS`]。
 //!   handler 返回 [`registry::HandlerFuture`]，runtime 直接 await（无 `spawn_blocking`）。
 //!
