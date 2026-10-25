@@ -12,7 +12,31 @@ name = "gensokyo"
 path = "src/main.rs"
 
 [dependencies]
+gensokyo-config.workspace = true
+gensokyo-core.workspace = true
+gensokyo-runtime.workspace = true
 clap.workspace = true
+thiserror.workspace = true
+# 进程级异步运行时 + Ctrl-C 信号；`enable_all` 需要 net/time 驱动
+tokio = { workspace = true, features = [
+    "net",
+    "rt-multi-thread",
+    "signal",
+    "time",
+] }
+# 日志时间戳（RFC3339）
+time.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { workspace = true, features = [
+    "io-util",
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "time",
+] }
 
 [lints]
 workspace = true
