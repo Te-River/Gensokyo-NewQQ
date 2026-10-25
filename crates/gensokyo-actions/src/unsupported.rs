@@ -32,6 +32,12 @@
 //! Go 的实现不触达上游：固定回 `clients: []` + `tiny_id: 0`（见 `handlers/get_online_clients.go`）。
 //! 本 crate 的 [`crate::qqapi::ActionContext`] 不持有 WS 客户端集合，无法给出真实列表，因此逐字段
 //! 照抄 Go 的空回执——这是 Go 的既定语义，不是「查不到就编空」。
+//!
+//! # 参数校验与 `1500` 的小工具
+//!
+//! [`checked_unsupported`] / [`required_text`] / [`required_object`] / [`required_add_del_op`]
+//! 供 [`crate::panels`] 与 [`crate::interaction`] 里同样「端点未落地」的 action 复用，避免三份
+//! 拷贝。
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -70,27 +76,67 @@ pub struct OnlineClientsData {
 }
 
 /// 取 `params` 并校验群 ID 必填。
-fn group_params(request: &ActionRequest<Value>) -> Result<&Map<String, Value>> {
+pub(crate) fn group_params(request: &ActionRequest<Value>) -> Result<&Map<String, Value>> {
     let object = params_object(request)?;
     params::required_id(object, "group_id")?;
     Ok(object)
 }
 
 /// 取 `params` 并校验成员 ID 必填（`user_id`，OneBot 标准字段名）。
-fn group_member_params(request: &ActionRequest<Value>) -> Result<&Map<String, Value>> {
+pub(crate) fn group_member_params(request: &ActionRequest<Value>) -> Result<&Map<String, Value>> {
     let object = group_params(request)?;
     params::required_id(object, "user_id")?;
     Ok(object)
 }
 
 /// 必填文本字段：缺失 / `null` / 空串 → 参数错误。
-fn required_text(object: &Map<String, Value>, key: &str) -> Result<String> {
+pub(crate) fn required_text(object: &Map<String, Value>, key: &str) -> Result<String> {
     params::optional_text(object, key)?.ok_or_else(|| Error::Protocol(format!("缺少 {key}")))
 }
 
+/// 必填 JSON 对象字段（`panel` / `menu` / `context` / `operation`）。
+pub(crate) fn required_object<'a>(
+    object: &'a Map<String, Value>,
+    key: &str,
+) -> Result<&'a Map<String, Value>> {
+    match object.get(key) {
+        Some(Value::Object(value)) => Ok(value),
+        None | Some(Value::Null) => Err(Error::Protocol(format!("缺少 {key}"))),
+        Some(_) => Err(Error::Protocol(format!("{key} 必须是 JSON 对象"))),
+    }
+}
+
+/// `op` 只允许 `add` / `del`（面板关联对象、成员黑名单共用）。
+pub(crate) fn required_add_del_op(object: &Map<String, Value>) -> Result<()> {
+    match params::optional_text(object, "op")?.as_deref() {
+        Some("add" | "del") => Ok(()),
+        Some(other) => Err(Error::Protocol(format!("op 只支持 add / del: {other}"))),
+        None => Err(Error::Protocol("缺少 op".to_owned())),
+    }
+}
+
 /// `1500` + 固定说明。
-fn unsupported(request: &ActionRequest<Value>, message: &str) -> ActionResponse<Value> {
+pub(crate) fn unsupported(request: &ActionRequest<Value>, message: &str) -> ActionResponse<Value> {
     failed(request, RETCODE_UPSTREAM, message)
+}
+
+/// 参数校验（`# 1400`）通过后回 `1500` 的公共流程：先校验再报「功能不存在」。
+///
+/// `params` 缺失 / `null` 视为空对象（与 [`params_or_empty`] 同口径），供
+/// [`crate::panels`] 与 [`crate::interaction`] 中「端点未落地」的 action 共用。
+pub(crate) fn checked_unsupported(
+    request: &ActionRequest<Value>,
+    message: &str,
+    validate: fn(&Map<String, Value>) -> Result<()>,
+) -> Result<ActionResponse<Value>> {
+    let object = match params_or_empty(request) {
+        Ok(object) => object,
+        Err(err) => return Ok(bad_request(request, &err)),
+    };
+    match validate(&object) {
+        Ok(()) => Ok(unsupported(request, message)),
+        Err(err) => Ok(bad_request(request, &err)),
+    }
 }
 
 /// `get_group_at_all_remain`。

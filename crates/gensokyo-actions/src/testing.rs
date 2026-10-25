@@ -254,7 +254,7 @@ pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
 /// 一份 `string_ob11 = true` 的配置快照：临时目录写一个最小 `config.yml` 后立即删除。
 ///
 /// `string_ob11` 决定响应 ID 的形态；取 `true` 时 ID 一律字符串，测试断言不需要区分
-/// 「虚拟号是否可解析成整数」。
+/// 「虚拟号是否可解析成整数」。`app_id` 供 `get_avatar` 拼头像 URL（Go 用同一个配置项）。
 pub(crate) fn config() -> Arc<ConfigManager> {
     static MANAGER: OnceLock<Arc<ConfigManager>> = OnceLock::new();
     MANAGER
@@ -263,7 +263,8 @@ pub(crate) fn config() -> Arc<ConfigManager> {
                 "gensokyo-actions-admin-test-{}.yml",
                 std::process::id()
             ));
-            std::fs::write(&path, "string_ob11: true\n").expect("写临时 config.yml 失败");
+            std::fs::write(&path, "string_ob11: true\napp_id: 102001234\n")
+                .expect("写临时 config.yml 失败");
             let manager = Arc::new(ConfigManager::new(&path).expect("加载临时 config.yml 失败"));
             let _ = std::fs::remove_file(&path);
             manager

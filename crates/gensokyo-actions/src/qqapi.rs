@@ -24,6 +24,8 @@
 //! | [`QqApi::get_group_join_request_list`] | `GET /v2/groups/{gid}/join_request_list` | 真实调用 |
 //! | [`QqApi::send_group_message`] | `POST /v2/groups/{gid}/messages` | 真实调用（deferred 执行链） |
 //! | [`QqApi::send_c2c_message`] | `POST /v2/users/{uid}/messages` | 真实调用（deferred 执行链） |
+//! | [`QqApi::upload_group_file`] | `POST /v2/groups/{gid}/files` | 真实调用（deferred 媒体上传） |
+//! | [`QqApi::upload_c2c_file`] | `POST /v2/users/{uid}/files` | 真实调用（deferred 媒体上传） |
 //! | [`QqApi::set_group_kick`] | `batch_remove_members` | 未落地，`Unsupported` |
 //! | [`QqApi::set_group_leave`] | 官方无机器人退群端点 | 未落地，`Unsupported` |
 //! | [`QqApi::get_group_list`] | 官方无「列出机器人所在群」端点 | 未落地，`Unsupported` |
@@ -53,7 +55,10 @@ use std::sync::Arc;
 use gensokyo_config::ConfigManager;
 use gensokyo_core::{Error, Result};
 use gensokyo_protocol::Segment;
-use gensokyo_qq::dto::{MemberMuteState, MessageResponse, MessageToCreate, RestrictChatSetting};
+use gensokyo_qq::dto::{
+    FileUpload, MediaResponse, MemberMuteState, MessageResponse, MessageToCreate,
+    RestrictChatSetting,
+};
 use gensokyo_qq::{
     BotInGroupState, GroupInfo, GroupMember, GroupMemberList, HttpTransport, JoinRequestList,
     OpenApiClient,
@@ -132,6 +137,38 @@ pub trait QqApi: Send + Sync + fmt::Debug {
         user_openid: String,
         msg: MessageToCreate,
     ) -> QqFuture<'_, MessageResponse>;
+
+    /// 上传群会话媒体（`POST /v2/groups/{group_openid}/files`），返回 [`MediaResponse::file_info`]。
+    ///
+    /// deferred 执行链先取字节再上传：拿到 `file_info` 后填进
+    /// [`gensokyo_qq::dto::Media`]，随 [`QqApi::send_group_message`] 发出。
+    ///
+    /// 默认实现返回 [`Error::Unsupported`]：只跑查询类 action 的替身不必实现媒体上传。
+    fn upload_group_file(
+        &self,
+        _group_openid: &str,
+        _file: FileUpload,
+    ) -> QqFuture<'_, MediaResponse> {
+        Box::pin(async {
+            Err(Error::Unsupported(
+                "upload_group_file: 当前 QqApi 实现不支持媒体上传".to_owned(),
+            ))
+        })
+    }
+
+    /// 上传 C2C 媒体（`POST /v2/users/{user_openid}/files`）；语义同
+    /// [`QqApi::upload_group_file`]。
+    fn upload_c2c_file(
+        &self,
+        _user_openid: &str,
+        _file: FileUpload,
+    ) -> QqFuture<'_, MediaResponse> {
+        Box::pin(async {
+            Err(Error::Unsupported(
+                "upload_c2c_file: 当前 QqApi 实现不支持媒体上传".to_owned(),
+            ))
+        })
+    }
 
     /// 批量移出群成员（单批 ≤ 20，`add_blacklist` 同时拉黑）。
     ///
@@ -339,6 +376,28 @@ impl<T: HttpTransport> QqApi for OpenApiClient<T> {
     ) -> QqFuture<'_, MessageResponse> {
         Box::pin(async move {
             OpenApiClient::send_c2c_message(self, &user_openid, &msg)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn upload_group_file(
+        &self,
+        group_openid: &str,
+        file: FileUpload,
+    ) -> QqFuture<'_, MediaResponse> {
+        let group_openid = group_openid.to_owned();
+        Box::pin(async move {
+            OpenApiClient::upload_group_file(self, &group_openid, &file)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn upload_c2c_file(&self, user_openid: &str, file: FileUpload) -> QqFuture<'_, MediaResponse> {
+        let user_openid = user_openid.to_owned();
+        Box::pin(async move {
+            OpenApiClient::upload_c2c_file(self, &user_openid, &file)
                 .await
                 .map_err(qq_error)
         })

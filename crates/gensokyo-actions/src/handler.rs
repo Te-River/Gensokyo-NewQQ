@@ -168,13 +168,25 @@ impl Handler for SendMsgAsyncHandler {
     }
 }
 
-/// 三个 handler 的公共流程：规划 → `failed(1400)` 或 `ok(deferred)`，两路都回传 echo。
+/// 六个 handler 的公共流程：规划 → `failed(1400)` 或 `ok(deferred)`，两路都回传 echo。
 fn respond(
     request: &ActionRequest<Value>,
     planner: fn(&Value) -> Result<SendRequest>,
 ) -> Result<ActionResponse<Value>> {
     let null = Value::Null;
     let params = request.params.as_ref().unwrap_or(&null);
+    respond_to_params(request, params, planner)
+}
+
+/// 用调用方给的 `params` 走同一条规划流程。
+///
+/// `.handle_quick_operation` 把 `context` / `operation` 还原成发送参数后复用这里，响应形状与
+/// 同步发送 action 完全一致（[`DEFERRED_FIELD`] + [`SendRequest`]）。
+pub(crate) fn respond_to_params(
+    request: &ActionRequest<Value>,
+    params: &Value,
+    planner: fn(&Value) -> Result<SendRequest>,
+) -> Result<ActionResponse<Value>> {
     let planned = match planner(params) {
         Ok(planned) => planned,
         Err(err) => {
