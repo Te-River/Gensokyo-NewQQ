@@ -56,6 +56,12 @@ pub enum Error {
     /// 压缩参数非法（如质量阶梯为空）。
     #[error("压缩参数非法: {0}")]
     InvalidCompressOptions(String),
+    /// silk 工具链不可用：外部 `ffmpeg` / `pts` 未安装或不在 PATH。
+    #[error("silk 工具链不可用: {0}")]
+    SilkUnavailable(String),
+    /// silk 编解码失败：外部进程非零退出、产物缺失或参数非法。
+    #[error("silk 编解码失败: {0}")]
+    SilkCodec(String),
     /// 本地文件读写失败。
     #[error("IO 失败: {0}")]
     Io(#[from] std::io::Error),

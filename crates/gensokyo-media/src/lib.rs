@@ -37,6 +37,15 @@
 //! - 透明通道：PNG 输入默认输出 PNG 并保留 alpha；显式 [`compress::ImageFormat::Jpeg`] 时按 Go
 //!   `compressPNG` 的做法压到白底。
 //!
+//! ## M2d：silk 音频编解码（外部进程版）
+//! - [`silk::SilkCodec`]：`encode_to_silk`（ffmpeg → 16-bit 单声道 PCM → `pts` → Silk v3）与
+//!   `decode_silk`（`pts` → PCM → ffmpeg 转目标容器），参数顺序对齐 Go `silk/silk.go`。
+//! - [`silk::ProcessRunner`]：唯一的进程出口。生产实现 [`silk::CommandRunner`]
+//!   （`std::process::Command`），测试用假执行器断言程序名 / 参数 / 错误映射。
+//! - 程序路径可配置：`GENSOKYO_FFMPEG` / `GENSOKYO_PTS`，缺省 `ffmpeg` / `pts`（走 PATH）。
+//!   找不到程序返回 [`Error::SilkUnavailable`]，非零退出 / 产物缺失返回 [`Error::SilkCodec`]。
+//! - 临时 PCM 落在 `<os temp>/gensokyo-silk/`，成功与失败都由 `Drop` 清理。
+//!
 //! # 与 Go 的差异（M2a）
 //! - **SSRF / 重定向 / 私网拦截**：Go `internal/application/media/fetcher.go` 有
 //!   `checkSSRF`（DNS 解析 + 私网/回环拒绝）与 `MaxRedirects`。本 crate **不做**这些，
@@ -81,17 +90,28 @@
 //! - **编码产物不逐字节对齐**：Go 用标准库默认参数，这里用 `image` crate 默认参数，像素与体积量级
 //!   接近但不保证相等。
 //!
+//! # 与 Go 的差异（M2d）
+//! 细节在 [`silk`] 的模块文档里，要点：
+//! - **不嵌入二进制**：Go `go:embed exec/*` 带 8 个平台的 `silk_codec-*`；本 crate 只调用外部
+//!   `ffmpeg` / `pts`（体积与平台矩阵留 M4），部署环境必须自带这两个工具。
+//! - **没有内建快速路径**：Go 的 WAV 直提、MP3 解码、线性重采样、立体声下混全部交给 ffmpeg
+//!   （`-ar` / `-ac 1`）。
+//! - **错误不再静默**：Go 的工具缺失 / 非零退出只打日志并返回 `nil`；这里返回
+//!   [`Error::SilkUnavailable`] / [`Error::SilkCodec`]。
+//! - **产物位置**：Go 写到临时目录再读回内存；这里 `pts` 直接写调用方给的输出路径。
+//!
 //! # 依赖边界
 //! 只用 workspace 已锁定并已在本 crate 依赖图里的 crate（`reqwest` / `tokio` / `base64` /
 //! `thiserror` / `rustls` / `tracing`）。M2c 起新增 `image`（workspace 早已声明，此前未入图）——
-//! 这是 M2c 唯一的新依赖边。
+//! 这是 M2c 唯一的新依赖边。M2d 不新增依赖：silk 走 `std::process` + `std::env`。
 //!
-//! # 未做项（留给 M2d+）
+//! # 未做项（留给 M2e+）
+//! - silk 编解码器的**内嵌二进制**（`silk/exec/` 的 8 个平台产物）：M2d 只调用外部 `ffmpeg` /
+//!   `pts`，体积与平台矩阵留到 M4。
 //! - GIF 逐帧压缩（Go `compressGIF`），以及 BMP 解码。
 //! - COS 自签上传（`imagehosting/cos.go` 的 q-sign）与 Nature 的内置 COS 密钥直传。
 //! - Bilibili 登录态上传与分片（`imagehosting/bilibili.go`）。
 //! - 星野的 PUT 直传（`imagehosting/signed.go` 的 xingye 分支）与 QQ频道（oss_type 6）上传。
-//! - silk 音频编解码（`silk/` + `go-silk/` 的 C ABI 封装）。
 //! - 视频处理（抽帧 / 转码 / 体积压缩）。
 //! - 上传到 QQ（`/v2/.../files` 的 `file_data` / 分片上传）——由 `gensokyo-qq` + actions 负责。
 //! - QR 码生成。
@@ -103,11 +123,9 @@ pub mod error;
 pub mod fetch;
 pub mod hosting;
 pub mod image;
+pub mod silk;
 pub mod sniff;
 pub mod source;
-
-/// silk 音频编解码（`silk/` + `go-silk/` 的 C ABI 封装）。
-pub mod silk {}
 
 pub use compress::{
     CompressOptions, DEFAULT_MAX_SIDE, GO_QUALITY_LADDER, ImageFormat, compress_image,
@@ -124,5 +142,6 @@ pub use hosting::{
     UploadResponse, upload, upload_plan,
 };
 pub use image::image_size;
+pub use silk::{CommandRunner, DEFAULT_SAMPLE_RATE, ProcessOutput, ProcessRunner, SilkCodec};
 pub use sniff::{ImageKind, sniff_content_type, sniff_image};
 pub use source::MediaSource;
