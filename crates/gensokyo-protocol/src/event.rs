@@ -8,16 +8,24 @@
 //! - `sub_type` / `notice_type` / `real_*` 保持字符串：QQ 仍在扩展，枚举化会在新值上炸。
 //! - 每个事件都带 `#[serde(flatten)] extra`，`Processor` 追加的
 //!   `real_user_id` / `to_me` / `platform` 等字段不会丢失，也不会让解析失败。
+//! - 反序列化是手写实现（见文件末尾「手写反序列化（事件热路径）」）：`flatten`、内部标签
+//!   枚举与 `untagged` 都会先把 JSON 缓冲成中间值，热路径上等于每条事件走两遍。
 //! - `message` 同时接受 CQ 字符串与消息段数组（[`MessageContent`]），由 `array_value` 决定。
 
+use std::borrow::Cow;
 use std::fmt;
 
-use serde::de::Deserializer;
+use serde::de::value::MapAccessDeserializer;
+use serde::de::{
+    self, DeserializeSeed, Deserializer, IgnoredAny, IntoDeserializer, MapAccess, SeqAccess,
+    Visitor,
+};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use gensokyo_core::Ob11Id;
 
-use crate::segment::MessageContent;
+use crate::segment::{MessageContent, Segment};
 
 pub use crate::Extra;
 
@@ -36,7 +44,8 @@ pub mod post_type {
 }
 
 /// 一条上报事件。
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+// `Deserialize` 手写：见文件末尾「手写反序列化（事件热路径）」。
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "post_type", rename_all = "snake_case")]
 pub enum Event {
     /// 消息事件。
@@ -123,6 +132,15 @@ impl MessageType {
             Self::Other(value) => value,
         }
     }
+
+    /// 线上字符串 → 枚举，未知取值原样保留。
+    fn from_wire(value: &str) -> Self {
+        match value {
+            "private" => Self::Private,
+            "group" => Self::Group,
+            _ => Self::Other(value.to_owned()),
+        }
+    }
 }
 
 impl fmt::Display for MessageType {
@@ -139,12 +157,36 @@ impl Serialize for MessageType {
 
 impl<'de> Deserialize<'de> for MessageType {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = String::deserialize(deserializer)?;
-        Ok(match raw.as_str() {
-            "private" => Self::Private,
-            "group" => Self::Group,
-            _ => Self::Other(raw),
-        })
+        struct MessageTypeVisitor;
+
+        impl<'de> Visitor<'de> for MessageTypeVisitor {
+            type Value = MessageType;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("message_type 字符串")
+            }
+
+            fn visit_borrowed_str<E: de::Error>(self, value: &'de str) -> Result<Self::Value, E> {
+                Ok(MessageType::from_wire(value))
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(MessageType::from_wire(value))
+            }
+
+            fn visit_string<E: de::Error>(self, value: String) -> Result<Self::Value, E> {
+                // 已知取值不需要留住缓冲区，只有 `Other` 才把 `String` 交出去。
+                Ok(if value == "private" {
+                    MessageType::Private
+                } else if value == "group" {
+                    MessageType::Group
+                } else {
+                    MessageType::Other(value)
+                })
+            }
+        }
+
+        deserializer.deserialize_str(MessageTypeVisitor)
     }
 }
 
@@ -195,7 +237,7 @@ pub mod sub_type {
 }
 
 /// 消息发送者。
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Sender {
     /// 发送者 ID（虚拟）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -233,7 +275,7 @@ pub struct Sender {
 }
 
 /// 匿名用户信息。
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Anonymous {
     /// 匿名 ID（线上可能是数字或字符串）。
     pub id: Ob11Id,
@@ -249,7 +291,7 @@ pub struct Anonymous {
 }
 
 /// 文件信息（`group_upload` / `offline_file` 事件内嵌）。
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct File {
     /// 文件 ID。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -269,7 +311,7 @@ pub struct File {
 }
 
 /// 消息事件。
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MessageEvent {
     /// 事件时间戳（秒）。
     pub time: i64,
@@ -385,7 +427,7 @@ pub enum NoticeKind {
 }
 
 /// 通知事件。
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct NoticeEvent {
     /// 事件时间戳（秒）。
     pub time: i64,
@@ -471,7 +513,7 @@ impl NoticeEvent {
 }
 
 /// 请求事件。
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RequestEvent {
     /// 事件时间戳（秒）。
     pub time: i64,
@@ -500,7 +542,7 @@ pub struct RequestEvent {
 }
 
 /// 元事件。
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MetaEvent {
     /// 事件时间戳（秒）。
     pub time: i64,
@@ -523,7 +565,7 @@ pub struct MetaEvent {
 }
 
 /// 心跳状态。
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct HeartbeatStatus {
     /// 是否在线。
     #[serde(default)]
@@ -534,6 +576,707 @@ pub struct HeartbeatStatus {
     /// 附加字段。
     #[serde(default, flatten, skip_serializing_if = "is_empty")]
     pub extra: Extra,
+}
+
+// ---------------------------------------------------------------------------
+// 手写反序列化（事件热路径）
+//
+// 这些类型原来的 `#[derive(Deserialize)]` 会在三处经过 serde 的 `Content` 中间表示：
+// 内部标签枚举（`Event` 的 `#[serde(tag = "post_type")]`）、`#[serde(flatten)]`
+// （每个带 `extra` 的结构体）与 `#[serde(untagged)]`（`Ob11Id` / `MessageContent`）。
+// 每一处都要先把整段 JSON 或整个嵌套对象缓冲成中间值，再逐字段二次转换；一条群消息
+// 因此要走上八趟。下面的实现单趟直读目标类型：`post_type` 就地分派、未知字段逐条落进
+// `extra`、ID 与消息内容直接按数字 / 字符串 / 数组分支。公开类型与字段名保持不变。
+// ---------------------------------------------------------------------------
+
+/// 借用形态的 JSON 字符串：无转义时零拷贝，有转义时退回 `String`。
+struct BorrowedStr<'de>(Cow<'de, str>);
+
+impl<'de> Deserialize<'de> for BorrowedStr<'de> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct BorrowedStrVisitor;
+
+        impl<'de> Visitor<'de> for BorrowedStrVisitor {
+            type Value = BorrowedStr<'de>;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("字符串")
+            }
+
+            fn visit_borrowed_str<E: de::Error>(self, value: &'de str) -> Result<Self::Value, E> {
+                Ok(BorrowedStr(Cow::Borrowed(value)))
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(BorrowedStr(Cow::Owned(value.to_owned())))
+            }
+
+            fn visit_string<E: de::Error>(self, value: String) -> Result<Self::Value, E> {
+                Ok(BorrowedStr(Cow::Owned(value)))
+            }
+        }
+
+        deserializer.deserialize_str(BorrowedStrVisitor)
+    }
+}
+
+/// [`Ob11Id`] 的直读包装：按数字 / 字符串分支，不进 `untagged` 的 `Content` 中转。
+struct Ob11IdWire(Ob11Id);
+
+impl Ob11IdWire {
+    fn into_inner(self) -> Ob11Id {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for Ob11IdWire {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Ob11IdVisitor;
+
+        impl<'de> Visitor<'de> for Ob11IdVisitor {
+            type Value = Ob11IdWire;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("数字或字符串形态的 OneBot ID")
+            }
+
+            fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(Ob11IdWire(Ob11Id::Num(value)))
+            }
+
+            fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
+                let value =
+                    i64::try_from(value).map_err(|_| E::custom("OneBot ID 超出 i64 范围"))?;
+                Ok(Ob11IdWire(Ob11Id::Num(value)))
+            }
+
+            fn visit_borrowed_str<E: de::Error>(self, value: &'de str) -> Result<Self::Value, E> {
+                Ok(Ob11IdWire(Ob11Id::Str(value.to_owned())))
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(Ob11IdWire(Ob11Id::Str(value.to_owned())))
+            }
+
+            fn visit_string<E: de::Error>(self, value: String) -> Result<Self::Value, E> {
+                Ok(Ob11IdWire(Ob11Id::Str(value)))
+            }
+        }
+
+        deserializer.deserialize_any(Ob11IdVisitor)
+    }
+}
+
+/// [`MessageContent`] 的直读包装：按字符串 / 数组分支，不进 `untagged` 的 `Content` 中转。
+struct MessageContentWire(MessageContent);
+
+impl<'de> Deserialize<'de> for MessageContentWire {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct MessageContentVisitor;
+
+        impl<'de> Visitor<'de> for MessageContentVisitor {
+            type Value = MessageContentWire;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("CQ 字符串或消息段数组")
+            }
+
+            fn visit_borrowed_str<E: de::Error>(self, value: &'de str) -> Result<Self::Value, E> {
+                Ok(MessageContentWire(MessageContent::Text(value.to_owned())))
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(MessageContentWire(MessageContent::Text(value.to_owned())))
+            }
+
+            fn visit_string<E: de::Error>(self, value: String) -> Result<Self::Value, E> {
+                Ok(MessageContentWire(MessageContent::Text(value)))
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let mut segments = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                while let Some(segment) = seq.next_element::<Segment>()? {
+                    segments.push(segment);
+                }
+                Ok(MessageContentWire(MessageContent::Array(segments)))
+            }
+        }
+
+        deserializer.deserialize_any(MessageContentVisitor)
+    }
+}
+
+/// 前缀键值对 + 底层 `MapAccess` 的串接，`post_type` 不在首位时才用到。
+struct Chained<'a, A> {
+    buffered: std::vec::IntoIter<(String, Value)>,
+    pending: Option<Value>,
+    rest: &'a mut A,
+}
+
+impl<'a, A> Chained<'a, A> {
+    fn new(buffered: Vec<(String, Value)>, rest: &'a mut A) -> Self {
+        Self {
+            buffered: buffered.into_iter(),
+            pending: None,
+            rest,
+        }
+    }
+}
+
+/// 把已缓冲的 [`Value`] 交回给 seed。
+///
+/// `Value` 的 `IntoDeserializer` 错误类型固定是 `serde_json::Error`，这里转回调用方的错误类型。
+fn seed_from_value<'de, S: DeserializeSeed<'de>, E: de::Error>(
+    seed: S,
+    value: Value,
+) -> Result<S::Value, E> {
+    seed.deserialize(value.into_deserializer())
+        .map_err(E::custom)
+}
+
+/// 同 [`seed_from_value`]，用于已缓冲的对象键。
+fn seed_from_key<'de, S: DeserializeSeed<'de>, E: de::Error>(
+    seed: S,
+    key: String,
+) -> Result<S::Value, E> {
+    seed.deserialize(key.into_deserializer())
+}
+
+impl<'de, A: MapAccess<'de>> MapAccess<'de> for Chained<'_, A> {
+    type Error = A::Error;
+
+    fn next_key_seed<K: DeserializeSeed<'de>>(
+        &mut self,
+        seed: K,
+    ) -> Result<Option<K::Value>, Self::Error> {
+        if let Some((key, value)) = self.buffered.next() {
+            self.pending = Some(value);
+            return seed_from_key(seed, key).map(Some);
+        }
+        self.rest.next_key_seed(seed)
+    }
+
+    fn next_value_seed<V: DeserializeSeed<'de>>(
+        &mut self,
+        seed: V,
+    ) -> Result<V::Value, Self::Error> {
+        match self.pending.take() {
+            Some(value) => seed_from_value(seed, value),
+            None => self.rest.next_value_seed(seed),
+        }
+    }
+
+    fn size_hint(&self) -> Option<usize> {
+        self.rest
+            .size_hint()
+            .map(|rest| rest.saturating_add(self.buffered.len()))
+    }
+}
+
+impl<'de> Deserialize<'de> for Event {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(EventVisitor)
+    }
+}
+
+/// 用「已缓冲的前缀 + 剩余 `MapAccess`」反序列化事件体。
+fn decode_body<'de, T: Deserialize<'de>, A: MapAccess<'de>>(
+    buffered: Vec<(String, Value)>,
+    rest: &mut A,
+) -> Result<T, A::Error> {
+    T::deserialize(MapAccessDeserializer::new(Chained::new(buffered, rest)))
+}
+
+struct EventVisitor;
+
+impl<'de> Visitor<'de> for EventVisitor {
+    type Value = Event;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("带 post_type 的 OneBot 事件对象")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Event, A::Error> {
+        let mut buffered: Vec<(String, Value)> = Vec::new();
+        loop {
+            let Some(key) = map.next_key::<BorrowedStr<'de>>()? else {
+                return Err(de::Error::missing_field("post_type"));
+            };
+            if key.0.as_ref() != "post_type" {
+                // `post_type` 之前的键：正常负载里没有，真出现时只缓冲到分派为止。
+                buffered.push((key.0.into_owned(), map.next_value::<Value>()?));
+                continue;
+            }
+
+            let tag = map.next_value::<BorrowedStr<'de>>()?;
+            return match tag.0.as_ref() {
+                post_type::MESSAGE => decode_body(buffered, &mut map).map(Event::Message),
+                post_type::MESSAGE_SENT => decode_body(buffered, &mut map).map(Event::MessageSent),
+                post_type::NOTICE => decode_body(buffered, &mut map).map(Event::Notice),
+                post_type::REQUEST => decode_body(buffered, &mut map).map(Event::Request),
+                post_type::META_EVENT => decode_body(buffered, &mut map).map(Event::MetaEvent),
+                _ => {
+                    // 未来新增的 post_type：整条事件丢弃，但必须把剩余键值读干净。
+                    while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                    Ok(Event::Unknown)
+                }
+            };
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Sender {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(SenderVisitor)
+    }
+}
+
+struct SenderVisitor;
+
+impl<'de> Visitor<'de> for SenderVisitor {
+    type Value = Sender;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("消息发送者对象")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Sender, A::Error> {
+        let mut sender = Sender::default();
+        while let Some(key) = map.next_key::<BorrowedStr<'de>>()? {
+            match key.0.as_ref() {
+                "user_id" => {
+                    sender.user_id = map
+                        .next_value::<Option<Ob11IdWire>>()?
+                        .map(Ob11IdWire::into_inner);
+                }
+                "nickname" => sender.nickname = map.next_value()?,
+                "card" => sender.card = map.next_value()?,
+                "role" => sender.role = map.next_value()?,
+                "sex" => sender.sex = map.next_value()?,
+                "age" => sender.age = map.next_value()?,
+                "area" => sender.area = map.next_value()?,
+                "level" => sender.level = map.next_value()?,
+                "title" => sender.title = map.next_value()?,
+                "tiny_id" => sender.tiny_id = map.next_value()?,
+                _ => {
+                    sender
+                        .extra
+                        .insert(key.0.into_owned(), map.next_value::<Value>()?);
+                }
+            }
+        }
+        Ok(sender)
+    }
+}
+
+impl<'de> Deserialize<'de> for Anonymous {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(AnonymousVisitor)
+    }
+}
+
+struct AnonymousVisitor;
+
+impl<'de> Visitor<'de> for AnonymousVisitor {
+    type Value = Anonymous;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("匿名用户对象")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Anonymous, A::Error> {
+        let mut id = None;
+        let mut name = String::new();
+        let mut flag = String::new();
+        let mut extra = Extra::new();
+        while let Some(key) = map.next_key::<BorrowedStr<'de>>()? {
+            match key.0.as_ref() {
+                "id" => id = Some(map.next_value::<Ob11IdWire>()?.into_inner()),
+                "name" => name = map.next_value()?,
+                "flag" => flag = map.next_value()?,
+                _ => {
+                    extra.insert(key.0.into_owned(), map.next_value::<Value>()?);
+                }
+            }
+        }
+        Ok(Anonymous {
+            id: id.ok_or_else(|| de::Error::missing_field("id"))?,
+            name,
+            flag,
+            extra,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for File {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(FileVisitor)
+    }
+}
+
+struct FileVisitor;
+
+impl<'de> Visitor<'de> for FileVisitor {
+    type Value = File;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("文件信息对象")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<File, A::Error> {
+        let mut file = File::default();
+        while let Some(key) = map.next_key::<BorrowedStr<'de>>()? {
+            match key.0.as_ref() {
+                "id" => file.id = map.next_value()?,
+                "name" => file.name = map.next_value()?,
+                "size" => file.size = map.next_value()?,
+                "url" => file.url = map.next_value()?,
+                _ => {
+                    file.extra
+                        .insert(key.0.into_owned(), map.next_value::<Value>()?);
+                }
+            }
+        }
+        Ok(file)
+    }
+}
+
+impl<'de> Deserialize<'de> for HeartbeatStatus {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(HeartbeatStatusVisitor)
+    }
+}
+
+struct HeartbeatStatusVisitor;
+
+impl<'de> Visitor<'de> for HeartbeatStatusVisitor {
+    type Value = HeartbeatStatus;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("心跳状态对象")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<HeartbeatStatus, A::Error> {
+        let mut status = HeartbeatStatus::default();
+        while let Some(key) = map.next_key::<BorrowedStr<'de>>()? {
+            match key.0.as_ref() {
+                "online" => status.online = map.next_value()?,
+                "good" => status.good = map.next_value()?,
+                _ => {
+                    status
+                        .extra
+                        .insert(key.0.into_owned(), map.next_value::<Value>()?);
+                }
+            }
+        }
+        Ok(status)
+    }
+}
+
+impl<'de> Deserialize<'de> for MessageEvent {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(MessageEventVisitor)
+    }
+}
+
+struct MessageEventVisitor;
+
+impl<'de> Visitor<'de> for MessageEventVisitor {
+    type Value = MessageEvent;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("消息事件对象")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<MessageEvent, A::Error> {
+        let mut time = None;
+        let mut self_id = None;
+        let mut message_type = None;
+        let mut sub_type = None;
+        let mut message_id = None;
+        let mut user_id = None;
+        let mut group_id = None;
+        let mut message = None;
+        let mut raw_message = None;
+        let mut font = None;
+        let mut sender = None;
+        let mut anonymous = None;
+        let mut message_seq = None;
+        let mut to_me = None;
+        let mut extra = Extra::new();
+
+        while let Some(key) = map.next_key::<BorrowedStr<'de>>()? {
+            match key.0.as_ref() {
+                "time" => time = Some(map.next_value()?),
+                "self_id" => self_id = Some(map.next_value::<Ob11IdWire>()?.into_inner()),
+                "message_type" => message_type = Some(map.next_value()?),
+                "sub_type" => sub_type = map.next_value()?,
+                "message_id" => message_id = Some(map.next_value::<Ob11IdWire>()?.into_inner()),
+                "user_id" => user_id = Some(map.next_value::<Ob11IdWire>()?.into_inner()),
+                "group_id" => {
+                    group_id = map
+                        .next_value::<Option<Ob11IdWire>>()?
+                        .map(Ob11IdWire::into_inner);
+                }
+                "message" => message = Some(map.next_value::<MessageContentWire>()?.0),
+                "raw_message" => raw_message = Some(map.next_value()?),
+                "font" => font = map.next_value()?,
+                "sender" => sender = map.next_value()?,
+                "anonymous" => anonymous = map.next_value()?,
+                "message_seq" => message_seq = map.next_value()?,
+                "to_me" => to_me = map.next_value()?,
+                // `post_type` 是 `Event` 的标签而不是本结构的字段；重复出现时同样丢弃。
+                "post_type" => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+                _ => {
+                    extra.insert(key.0.into_owned(), map.next_value::<Value>()?);
+                }
+            }
+        }
+
+        Ok(MessageEvent {
+            time: time.ok_or_else(|| de::Error::missing_field("time"))?,
+            self_id: self_id.ok_or_else(|| de::Error::missing_field("self_id"))?,
+            message_type: message_type.ok_or_else(|| de::Error::missing_field("message_type"))?,
+            sub_type,
+            message_id: message_id.ok_or_else(|| de::Error::missing_field("message_id"))?,
+            user_id: user_id.ok_or_else(|| de::Error::missing_field("user_id"))?,
+            group_id,
+            message: message.unwrap_or_default(),
+            raw_message: raw_message.unwrap_or_default(),
+            font,
+            sender,
+            anonymous,
+            message_seq,
+            to_me,
+            extra,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for NoticeEvent {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(NoticeEventVisitor)
+    }
+}
+
+struct NoticeEventVisitor;
+
+impl<'de> Visitor<'de> for NoticeEventVisitor {
+    type Value = NoticeEvent;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("通知事件对象")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<NoticeEvent, A::Error> {
+        let mut time = None;
+        let mut self_id = None;
+        let mut notice_type = None;
+        let mut sub_type = None;
+        let mut group_id = None;
+        let mut user_id = None;
+        let mut operator_id = None;
+        let mut target_id = None;
+        let mut message_id = None;
+        let mut duration = None;
+        let mut file = None;
+        let mut card_new = None;
+        let mut card_old = None;
+        let mut honor_type = None;
+        let mut online = None;
+        let mut client = None;
+        let mut extra = Extra::new();
+
+        while let Some(key) = map.next_key::<BorrowedStr<'de>>()? {
+            match key.0.as_ref() {
+                "time" => time = Some(map.next_value()?),
+                "self_id" => self_id = Some(map.next_value::<Ob11IdWire>()?.into_inner()),
+                "notice_type" => notice_type = Some(map.next_value()?),
+                "sub_type" => sub_type = map.next_value()?,
+                "group_id" => {
+                    group_id = map
+                        .next_value::<Option<Ob11IdWire>>()?
+                        .map(Ob11IdWire::into_inner);
+                }
+                "user_id" => {
+                    user_id = map
+                        .next_value::<Option<Ob11IdWire>>()?
+                        .map(Ob11IdWire::into_inner);
+                }
+                "operator_id" => {
+                    operator_id = map
+                        .next_value::<Option<Ob11IdWire>>()?
+                        .map(Ob11IdWire::into_inner);
+                }
+                "target_id" => {
+                    target_id = map
+                        .next_value::<Option<Ob11IdWire>>()?
+                        .map(Ob11IdWire::into_inner);
+                }
+                "message_id" => {
+                    message_id = map
+                        .next_value::<Option<Ob11IdWire>>()?
+                        .map(Ob11IdWire::into_inner);
+                }
+                "duration" => duration = map.next_value()?,
+                "file" => file = map.next_value()?,
+                "card_new" => card_new = map.next_value()?,
+                "card_old" => card_old = map.next_value()?,
+                "honor_type" => honor_type = map.next_value()?,
+                "online" => online = map.next_value()?,
+                "client" => client = map.next_value()?,
+                "post_type" => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+                _ => {
+                    extra.insert(key.0.into_owned(), map.next_value::<Value>()?);
+                }
+            }
+        }
+
+        Ok(NoticeEvent {
+            time: time.ok_or_else(|| de::Error::missing_field("time"))?,
+            self_id: self_id.ok_or_else(|| de::Error::missing_field("self_id"))?,
+            notice_type: notice_type.ok_or_else(|| de::Error::missing_field("notice_type"))?,
+            sub_type,
+            group_id,
+            user_id,
+            operator_id,
+            target_id,
+            message_id,
+            duration,
+            file,
+            card_new,
+            card_old,
+            honor_type,
+            online,
+            client,
+            extra,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for RequestEvent {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(RequestEventVisitor)
+    }
+}
+
+struct RequestEventVisitor;
+
+impl<'de> Visitor<'de> for RequestEventVisitor {
+    type Value = RequestEvent;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("请求事件对象")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<RequestEvent, A::Error> {
+        let mut time = None;
+        let mut self_id = None;
+        let mut request_type = None;
+        let mut sub_type = None;
+        let mut user_id = None;
+        let mut group_id = None;
+        let mut comment = None;
+        let mut flag = None;
+        let mut extra = Extra::new();
+
+        while let Some(key) = map.next_key::<BorrowedStr<'de>>()? {
+            match key.0.as_ref() {
+                "time" => time = Some(map.next_value()?),
+                "self_id" => self_id = Some(map.next_value::<Ob11IdWire>()?.into_inner()),
+                "request_type" => request_type = Some(map.next_value()?),
+                "sub_type" => sub_type = map.next_value()?,
+                "user_id" => {
+                    user_id = map
+                        .next_value::<Option<Ob11IdWire>>()?
+                        .map(Ob11IdWire::into_inner);
+                }
+                "group_id" => {
+                    group_id = map
+                        .next_value::<Option<Ob11IdWire>>()?
+                        .map(Ob11IdWire::into_inner);
+                }
+                "comment" => comment = Some(map.next_value()?),
+                "flag" => flag = Some(map.next_value()?),
+                "post_type" => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+                _ => {
+                    extra.insert(key.0.into_owned(), map.next_value::<Value>()?);
+                }
+            }
+        }
+
+        Ok(RequestEvent {
+            time: time.ok_or_else(|| de::Error::missing_field("time"))?,
+            self_id: self_id.ok_or_else(|| de::Error::missing_field("self_id"))?,
+            request_type: request_type.ok_or_else(|| de::Error::missing_field("request_type"))?,
+            sub_type,
+            user_id,
+            group_id,
+            comment: comment.unwrap_or_default(),
+            flag: flag.unwrap_or_default(),
+            extra,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for MetaEvent {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(MetaEventVisitor)
+    }
+}
+
+struct MetaEventVisitor;
+
+impl<'de> Visitor<'de> for MetaEventVisitor {
+    type Value = MetaEvent;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("元事件对象")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<MetaEvent, A::Error> {
+        let mut time = None;
+        let mut self_id = None;
+        let mut meta_event_type = None;
+        let mut sub_type = None;
+        let mut interval = None;
+        let mut status = None;
+        let mut extra = Extra::new();
+
+        while let Some(key) = map.next_key::<BorrowedStr<'de>>()? {
+            match key.0.as_ref() {
+                "time" => time = Some(map.next_value()?),
+                "self_id" => self_id = Some(map.next_value::<Ob11IdWire>()?.into_inner()),
+                "meta_event_type" => meta_event_type = Some(map.next_value()?),
+                "sub_type" => sub_type = map.next_value()?,
+                "interval" => interval = map.next_value()?,
+                "status" => status = map.next_value()?,
+                "post_type" => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+                _ => {
+                    extra.insert(key.0.into_owned(), map.next_value::<Value>()?);
+                }
+            }
+        }
+
+        Ok(MetaEvent {
+            time: time.ok_or_else(|| de::Error::missing_field("time"))?,
+            self_id: self_id.ok_or_else(|| de::Error::missing_field("self_id"))?,
+            meta_event_type: meta_event_type
+                .ok_or_else(|| de::Error::missing_field("meta_event_type"))?,
+            sub_type,
+            interval,
+            status,
+            extra,
+        })
+    }
 }
 
 fn is_empty(map: &Extra) -> bool {
@@ -774,5 +1517,59 @@ mod tests {
         let encoded = serde_json::to_string(&event).expect("序列化失败");
         let decoded: Event = serde_json::from_str(&encoded).expect("二次反序列化失败");
         assert_eq!(event, decoded);
+    }
+
+    /// 事件反序列化计时（只打印、**不断言耗时**：慢机器或 debug 构建不该让测试变红）。
+    ///
+    /// 样本与 `xtask bench` 的 `Event::deserialize group message` 同形；数字要跟 bench
+    /// 对比时用同一个 profile 跑：`cargo test -p gensokyo-protocol --release -- --nocapture
+    /// deserialize_group_message_timing`（debug 构建只看相对趋势）。
+    #[test]
+    fn deserialize_group_message_timing() {
+        const ITERS: u32 = 20_000;
+        const WARMUP: u32 = 200;
+        const SAMPLE: &str = r#"{
+  "post_type": "message",
+  "message_type": "group",
+  "sub_type": "normal",
+  "time": 1700000000,
+  "self_id": 10000,
+  "message_id": 8888,
+  "user_id": 12345,
+  "group_id": 99999,
+  "raw_message": "求闻史纪 [CQ:at,qq=10001] 第七版",
+  "message": [
+    {"type": "text", "data": {"text": "求闻史纪 "}},
+    {"type": "at", "data": {"qq": "10001"}},
+    {"type": "text", "data": {"text": " 第七版"}},
+    {"type": "image", "data": {"file": "8f3c.png", "url": "https://multimedia.nt.qq.com.cn/download?appid=1407"}}
+  ],
+  "font": 0,
+  "sender": {"user_id": 12345, "nickname": "稗田阿求", "card": "阿求", "role": "member", "sex": "unknown", "age": 0},
+  "real_user_id": "A1B2C3D4E5F6",
+  "to_me": true,
+  "extra_qq_field": {"nested": [1, 2, 3]}
+}"#;
+
+        let first = serde_json::from_str::<Event>(SAMPLE).expect("事件样本反序列化失败");
+        let segments = first
+            .message()
+            .map_or(0, |event| event.message.segments().len());
+
+        for _ in 0..WARMUP {
+            let _ =
+                std::hint::black_box(serde_json::from_str::<Event>(std::hint::black_box(SAMPLE)));
+        }
+        let start = std::time::Instant::now();
+        for _ in 0..ITERS {
+            let _ =
+                std::hint::black_box(serde_json::from_str::<Event>(std::hint::black_box(SAMPLE)));
+        }
+        let ns_per_op = start.elapsed().as_secs_f64() * 1e9 / f64::from(ITERS);
+        println!(
+            "[perf] Event::deserialize group message ({} bytes, {segments} segments): \
+             {ns_per_op:.0} ns/op ({ITERS} iters)",
+            SAMPLE.len()
+        );
     }
 }
