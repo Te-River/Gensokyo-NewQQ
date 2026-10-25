@@ -13,9 +13,19 @@ redb.workspace = true
 md-5.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+
+[build-dependencies]
+tonic-prost-build.workspace = true
+prost-build.workspace = true
+protoc-bin-vendored.workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
+tokio-stream = { version = "0.1.19", features = ["net"] }
 
 [lints]
 workspace = true

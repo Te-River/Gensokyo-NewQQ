@@ -3,6 +3,7 @@
 //! 表的定义、key 构造与 value 编码逐条对齐 Go `idmap/map_service.go`，差异见 crate 文档。
 
 mod encoding;
+pub mod grpc;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -36,6 +37,11 @@ const VUIN_TO_IDENTITY: TableDefinition<'static, &'static str, &'static [u8]> =
     TableDefinition::new("vuin_to_identity");
 const LAST_SEEN: TableDefinition<'static, &'static str, &'static [u8]> =
     TableDefinition::new("last_seen");
+
+/// 身份库：配置 KV（Go `ConfigBucket` = `"config"`），key 为 `"<section>:<subtype>"`，
+/// value 是原始字符串字节（Go `WriteConfig` 直接 `b.Put(key, []byte(value))`）。
+const CONFIG: TableDefinition<'static, &'static str, &'static [u8]> =
+    TableDefinition::new("config");
 
 /// 两个库各自的 `meta` 表（Go 同名 bucket）。
 const META: TableDefinition<'static, &'static str, &'static [u8]> = TableDefinition::new("meta");
@@ -211,6 +217,7 @@ impl IdMapStore {
             let _ = txn.open_table(IDENTITY_TO_VUIN).map_err(rb)?;
             let _ = txn.open_table(VUIN_TO_IDENTITY).map_err(rb)?;
             let _ = txn.open_table(LAST_SEEN).map_err(rb)?;
+            let _ = txn.open_table(CONFIG).map_err(rb)?;
             let existing = meta
                 .get(SCHEMA_VERSION_KEY)
                 .map_err(rb)?
@@ -286,6 +293,23 @@ impl IdMapStore {
             debug!(identity = %normalized.raw, vuin, "idmap 身份命中");
         }
         Ok((normalized.raw, vuin))
+    }
+
+    /// 只查身份对应的 vUIN，**不分配**（Go `lookupVirtualIdentity` / `RetrieveVirtualValue`
+    /// 的新库路径：查不到就是查不到）。
+    ///
+    /// # Errors
+    ///
+    /// 身份未登记返回 [`StorageError::NotFound`]；redb 事务失败或正表数据损坏返回对应变体。
+    pub fn lookup_virtual_value(&self, identity: &str) -> Result<i64, StorageError> {
+        let normalized =
+            normalize_identity(identity, &self.options.app_id, self.options.uin.as_deref());
+        let txn = self.identity_db.begin_read().map_err(rb)?;
+        let forward = txn.open_table(IDENTITY_TO_VUIN).map_err(rb)?;
+        match forward.get(normalized.key.as_str()).map_err(rb)? {
+            Some(guard) => decode_vuin(guard.value()),
+            None => Err(StorageError::NotFound(format!("身份 {}", normalized.raw))),
+        }
     }
 
     /// 从 vUIN 反查身份（Go `retrieveIdentity`）。
@@ -571,6 +595,61 @@ impl IdMapStore {
         cache.get(&vuin).map(|entry| entry.name.clone())
     }
 
+    /// 写配置（Go `WriteConfig`）：身份库 `config` 表，key `"<section>:<subtype>"`，
+    /// value 是原始字符串字节（与 bbolt 的 `b.Put(key, []byte(value))` 逐字节一致）。
+    ///
+    /// # Errors
+    ///
+    /// redb 事务失败时返回 [`StorageError`]。
+    pub fn write_config(
+        &self,
+        section: &str,
+        subtype: &str,
+        value: &str,
+    ) -> Result<(), StorageError> {
+        let key = config_key(section, subtype);
+        let txn = self.identity_db.begin_write().map_err(rb)?;
+        {
+            let mut table = txn.open_table(CONFIG).map_err(rb)?;
+            table.insert(key.as_str(), value.as_bytes()).map_err(rb)?;
+        }
+        txn.commit().map_err(rb)?;
+        Ok(())
+    }
+
+    /// 读配置（Go `ReadConfig`）：键不存在返回 [`StorageError::NotFound`]。
+    ///
+    /// # Errors
+    ///
+    /// 键不存在、value 不是合法 UTF-8、redb 事务失败时返回 [`StorageError`]。
+    pub fn read_config(&self, section: &str, subtype: &str) -> Result<String, StorageError> {
+        let key = config_key(section, subtype);
+        let txn = self.identity_db.begin_read().map_err(rb)?;
+        let table = txn.open_table(CONFIG).map_err(rb)?;
+        match table.get(key.as_str()).map_err(rb)? {
+            Some(guard) => decode_text(guard.value()),
+            None => Err(StorageError::NotFound(format!("config {key}"))),
+        }
+    }
+
+    /// 删配置（Go `DeleteConfig`）：返回删除前该键是否存在。
+    ///
+    /// Go 对不存在的键也算成功（bbolt `Delete` 幂等），gRPC 侧因此恒回 `success`。
+    ///
+    /// # Errors
+    ///
+    /// redb 事务失败时返回 [`StorageError`]。
+    pub fn delete_config(&self, section: &str, subtype: &str) -> Result<bool, StorageError> {
+        let key = config_key(section, subtype);
+        let txn = self.identity_db.begin_write().map_err(rb)?;
+        let removed = {
+            let mut table = txn.open_table(CONFIG).map_err(rb)?;
+            table.remove(key.as_str()).map_err(rb)?.is_some()
+        };
+        txn.commit().map_err(rb)?;
+        Ok(removed)
+    }
+
     /// 从已提交状态里找下一个未被占用的 vUIN（Go `allocateVuinTx` 的前缀扫描）。
     fn next_free_vuin(&self, current: i64) -> Result<i64, StorageError> {
         let mut candidate = if current <= 0 {
@@ -725,6 +804,11 @@ fn is_openid(value: &str) -> bool {
 /// Go `lastSeenKey`：`"default:<十进制 vUIN>"`。
 fn last_seen_key(vuin: i64) -> String {
     format!("{LAST_SEEN_SCOPE}:{vuin}")
+}
+
+/// Go `joinSectionAndKey`：`"<section>:<subtype>"`。
+fn config_key(section: &str, subtype: &str) -> String {
+    format!("{section}:{subtype}")
 }
 
 /// Go `StoreLatestMsgID` 的 key 构造：`"<群>:<用户>"`。

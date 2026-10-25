@@ -44,6 +44,19 @@ tokio-tungstenite = "0.30.0"
 tungstenite = "0.30.0"
 reqwest = "0.13.5"
 
+# gRPC（M1f）：IDMapService，proto 与 Go 共享 `proto/idmap.proto`（service 全名/字段号不可变）。
+# tonic 0.14 起 prost 代码生成与运行时拆到 tonic-prost(-build)，tonic 本体只管通用 gRPC 实现；
+# 默认特性含 codegen/router/transport/channel/server，不含 TLS provider，因此不引入 ring / C 工具链。
+tonic = "0.14.6"
+tonic-prost = "0.14.6"
+prost = "0.14.4"
+tonic-build = "0.14.6"
+tonic-prost-build = "0.14.6"
+prost-build = "0.14.4"
+# 构建机不预装 protoc：用随 crate 分发的预编译二进制（不是 C 工具链依赖，
+# 也避免 edition 2024 下 unsafe { env::set_var("PROTOC", ..) } 撞上 workspace 的 forbid(unsafe_code)）
+protoc-bin-vendored = "3.3.0"
+
 # WebUI（M3）：编译期嵌入 `webui/dist` 静态资源 + 按扩展名推导 Content-Type
 rust-embed = "8.13.0"
 mime_guess = "2.0.5"

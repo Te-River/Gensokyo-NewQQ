@@ -1,8 +1,8 @@
 //! gensokyo-storage：idmap、echo、cookie、bbolt 导入、IDMapService gRPC。
 //!
 //! M1d 落地 [`idmap`] 的**本地**存储（redb），M1e 落地 [`echo`] 的进程内映射，
-//! 分别对齐 Go `idmap/map_service.go` + `idmap/service.go` 与 `echo/echo.go` +
-//! `echo/messageidmap.go`；gRPC/HTTP 远程回退与 bbolt 导入留给后续里程碑。
+//! M1f 落地 [`idmap::grpc`] 的 `IDMapService`（tonic，17 个 RPC 中 14 个已接线，3 个明确
+//! `unimplemented`，见该模块文档）。HTTP 远程回退与 bbolt 导入留给后续里程碑。
 //!
 //! # 库文件
 //!
@@ -25,6 +25,7 @@
 //! | `identity_to_vuin` | `normalizeIdentity().Key`（`openid:QQ:<AppID>:<raw>` / `ruin:<平台>:<序号>:<id>` / `raw:<raw>`） | 8 字节大端 `uint64` vUIN |
 //! | `vuin_to_identity` | `"<十进制 vUIN>:<Key>"`（Go `vuinIdentityKey`） | 原始身份串（Go `identity.Raw`） |
 //! | `last_seen` | `"default:<十进制 vUIN>"`（Go `lastSeenKey`） | 原始身份串 |
+//! | `config` | `"<section>:<subtype>"`（Go `joinSectionAndKey`） | 原始字符串字节（Go `WriteConfig`） |
 //! | `meta` | `current_vuin` / `schema_version` | 8 字节大端 `uint64` / `"2"` |
 //!
 //! 消息库：
@@ -63,9 +64,11 @@
 //!   [`IdMapOptions::uin`] 显式传入（`None` 等价 Go 关闭隔离）。
 //! - **名称缓存**：Go 用 `sync.Map` + 后台每 10 分钟清理；本 crate 用 `Mutex<HashMap>`
 //!   + 读时惰性过期，写满 [`USER_NAME_SWEEP_THRESHOLD`] 条时顺带清理过期项。
-//! - **身份库缺 `config` / `UserInfo` 桶**：Go `initNewDBs` 在身份库额外建 `config` /
-//!   `UserInfo` 两个 bucket（配置与用户信息复用）；本 crate M1d 未建，**M1e 的 bbolt
-//!   导入器落地前必须补上**，否则导入器在身份库里无表可写。
+//! - **身份库缺 `UserInfo` 桶**：Go `initNewDBs` 在身份库额外建 `config` / `UserInfo` 两个
+//!   bucket。`config` 已由 M1f 补上（[`IdMapStore::write_config`] /
+//!   [`IdMapStore::read_config`] / [`IdMapStore::delete_config`]，供 gRPC `WriteConfigV2` 等
+//!   使用）；`UserInfo` 仍未建，**M1e 的 bbolt 导入器落地前必须补上**，否则导入器在身份库里
+//!   无表可写。
 //!
 //! # 并发
 //!
@@ -78,6 +81,7 @@ pub mod idmap;
 
 pub use echo::{Clock, EchoStore, MessageGroupPair, MessageScene};
 pub use error::StorageError;
+pub use idmap::grpc::{IdMapClient, IdMapService};
 pub use idmap::{IdMapOptions, IdMapStore, USER_NAME_SWEEP_THRESHOLD};
 
 /// 消息 ID 懒加载 / msg_seq / SSM 补发队列 / REFIDX 等进程内映射（Go `echo/`）。
