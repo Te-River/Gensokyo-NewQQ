@@ -59,11 +59,13 @@
 use serde::de::DeserializeOwned;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Number, Value};
+use serde_json::{Map, Value};
 
 use gensokyo_core::{Error, Result};
 use gensokyo_protocol::action::{SendGroupMsgParams, SendPrivateMsgParams};
 use gensokyo_protocol::{MessageContent, OutboundPlan, Segment};
+
+use crate::params::{id_field, normalized_number, object as params_object};
 
 /// 出站消息的收件人。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -274,12 +276,6 @@ pub fn plan_send_msg(params: &Value) -> Result<SendRequest> {
     }
 }
 
-fn params_object(params: &Value) -> Result<&Map<String, Value>> {
-    params
-        .as_object()
-        .ok_or_else(|| Error::Protocol("params 缺失或不是 JSON 对象".to_owned()))
-}
-
 fn require_message(object: &Map<String, Value>) -> Result<()> {
     match object.get("message") {
         None | Some(Value::Null) => Err(Error::Protocol("缺少 message".to_owned())),
@@ -297,51 +293,6 @@ fn auto_escape_flag(object: &Map<String, Value>) -> Result<bool> {
         Some(Value::Bool(flag)) => Ok(*flag),
         Some(_) => Err(Error::Protocol("auto_escape 必须是布尔值".to_owned())),
     }
-}
-
-/// 读取 ID 字段：`None` 表示缺失 / `null` / 空串；`0` 非法（对齐 Go 的 `checkZero*`）。
-///
-/// 返回值是规范化后的 JSON 值（数字 → 整数，字符串原样），供协议类型反序列化。
-fn id_field(object: &Map<String, Value>, key: &str) -> Result<Option<Value>> {
-    match object.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(text)) if text.is_empty() => Ok(None),
-        Some(Value::String(text)) => {
-            if text == "0" {
-                return Err(Error::Protocol(format!("{key} 不能为 0")));
-            }
-            Ok(Some(Value::String(text.clone())))
-        }
-        Some(Value::Number(number)) => {
-            let normalized = normalized_number(key, number)?;
-            if normalized.as_i64() == Some(0) {
-                return Err(Error::Protocol(format!("{key} 不能为 0")));
-            }
-            Ok(Some(Value::Number(normalized)))
-        }
-        Some(_) => Err(Error::Protocol(format!("{key} 必须是数字或字符串"))),
-    }
-}
-
-/// 数字 ID → 整数。
-///
-/// `Number::to_string()` 会把 `1e3` / `1000.0` 渲染成 `"1000.0"`；这里整数优先，浮点仅在
-/// 整值且在 `i64` 范围内时折叠（`1e3` → `1000`），非整值 / 越界拒绝。
-fn normalized_number(key: &str, number: &Number) -> Result<Number> {
-    if let Some(value) = number.as_i64() {
-        return Ok(Number::from(value));
-    }
-    if let Some(value) = number.as_u64() {
-        return Ok(Number::from(value));
-    }
-    let value = number
-        .as_f64()
-        .ok_or_else(|| Error::Protocol(format!("{key} 不是有效数字")))?;
-    let in_range = (i64::MIN as f64..=i64::MAX as f64).contains(&value);
-    if value.fract() != 0.0 || !in_range {
-        return Err(Error::Protocol(format!("{key} 必须是整数: {number}")));
-    }
-    Ok(Number::from(value as i64))
 }
 
 /// 把 `params` 规范成协议类型可接受的 JSON：覆盖已规范化的 ID 字段，单个消息段对象包成数组。
