@@ -488,6 +488,24 @@ settings:
 
 当`cq_parse_mode: new`时，性能相比原先提升7~20倍
 
+### Rust 重写与 Go 的同负载实测（2026-10-25）
+
+同一台机器（Ryzen 5 5600U / 6C12T / 13.8GB / Windows 11）、同一语义的本地 action（`get_login_info`，无 QQ 网络 I/O），`oha 1.16.0`、64 并发 × 50,000 请求、相同请求体、日志级别统一 `3`（error）、交替跑 3 轮取中位数：
+
+| 指标 | Go 1.26.4 | Rust 1.99.1 | 对比 |
+|------|-----------|-------------|------|
+| 吞吐（req/s） | 43,512 | **53,870** | Rust ≈**1.24×** |
+| 平均延迟 | 1.45 ms | **1.17 ms** | Rust ≈1.24× 更低 |
+| P50 | **0.84 ms** | 1.08 ms | Go 低约 29% |
+| P99 | 13.20 ms | **2.83 ms** | Rust ≈4.7× 更低 |
+| 常驻内存（RSS） | 44.3 MB | **10.6 MB** | Rust ≈4.2× 更低 |
+| 二进制体积 | 43.81 MB | **8.12 MB** | Rust ≈5.4× 更小 |
+| 成功率 | 100% | 100% | — |
+
+结论是**各有胜负**：Rust 吞吐/均值/P99/内存/体积更好，Go 的 P50 更低；三轮波动约 ±15%，不是稳定碾压。重要方法学提醒：Go 若保持默认 `INFO` 且每请求打日志，吞吐会掉到约 2.9k req/s——压测必须统一日志级别。
+
+说明：Go 的 HTTP API 按路径分发（测 `/get_login_info`），Rust 走统一 action 入口（测 `/action`）；两边都关闭 WebUI、无 QQ 网络调用。这是**单机 loopback 的管线对比**，不代表公网或 QQ 端到端延迟；Rust 侧仍在补齐 action/媒体，未覆盖全部业务路径。复现方法与原始数字见 [docs/rust-perf.md](./docs/rust-perf.md)。
+
 ## 特别鸣谢
 
 - 感谢[`mnixry/nonebot-plugin-gocqhttp`](https://github.com/mnixry/nonebot-plugin-gocqhttp/) 本项目采用了mnixry编写的前端并实现了与它对应的基于qq官方api的后端

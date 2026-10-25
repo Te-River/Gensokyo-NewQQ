@@ -42,6 +42,21 @@ Ctrl-C，并打一条 `warn`。
 `app_id: 12345` / `client_secret: "<YOUR_CLIENT_SECRET>"`，因此新装机器会走「有凭据」路径，
 直到真正请求上游才暴露凭据无效。
 
+## 性能参考
+
+同机同负载（`get_login_info`，无 QQ I/O，日志统一 `error`，`oha` 64 并发 × 50k、相同请求体、3 轮中位）：
+
+| 指标 | Go 1.26.4 | Rust（本 crate） | 对比 |
+|------|-----------|------------------|------|
+| 吞吐 | 43,512 req/s | **53,870 req/s** | ≈1.24× |
+| 平均 | 1.45 ms | **1.17 ms** | ≈1.24× 更低 |
+| P50 | **0.84 ms** | 1.08 ms | Go 低约 29% |
+| P99 | 13.20 ms | **2.83 ms** | ≈4.7× 更低 |
+| RSS | 44.3 MB | **10.6 MB** | ≈4.2× 更低 |
+| 二进制 | 43.81 MB | **8.12 MB** | ≈5.4× 更小 |
+
+口径与复现见仓库根 [readme.md](../../readme.md#性能) 与 [docs/rust-perf.md](../../docs/rust-perf.md)；这是 loopback 管线对比，不代表公网延迟。注意 Go 的 INFO 每请求日志会把吞吐压到 ~2.9k。
+
 ## M1j 明确不做
 
 - 不连接 QQ 网关（WebSocket）：不发 `meta_event/lifecycle/connect`（入站事件转换属 M1h-b）。
