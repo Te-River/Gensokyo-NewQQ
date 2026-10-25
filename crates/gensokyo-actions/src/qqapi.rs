@@ -22,6 +22,8 @@
 //! | [`QqApi::set_group_ban`] | `POST /v2/groups/{gid}/restrict_chat_setting` | 真实调用 |
 //! | [`QqApi::get_group_bot_state`] | `GET /v2/groups/{gid}/bot_state` | 真实调用 |
 //! | [`QqApi::get_group_join_request_list`] | `GET /v2/groups/{gid}/join_request_list` | 真实调用 |
+//! | [`QqApi::send_group_message`] | `POST /v2/groups/{gid}/messages` | 真实调用（deferred 执行链） |
+//! | [`QqApi::send_c2c_message`] | `POST /v2/users/{uid}/messages` | 真实调用（deferred 执行链） |
 //! | [`QqApi::set_group_kick`] | `batch_remove_members` | 未落地，`Unsupported` |
 //! | [`QqApi::set_group_leave`] | 官方无机器人退群端点 | 未落地，`Unsupported` |
 //! | [`QqApi::get_group_list`] | 官方无「列出机器人所在群」端点 | 未落地，`Unsupported` |
@@ -51,7 +53,7 @@ use std::sync::Arc;
 use gensokyo_config::ConfigManager;
 use gensokyo_core::{Error, Result};
 use gensokyo_protocol::Segment;
-use gensokyo_qq::dto::{MemberMuteState, RestrictChatSetting};
+use gensokyo_qq::dto::{MemberMuteState, MessageResponse, MessageToCreate, RestrictChatSetting};
 use gensokyo_qq::{
     BotInGroupState, GroupInfo, GroupMember, GroupMemberList, HttpTransport, JoinRequestList,
     OpenApiClient,
@@ -59,6 +61,8 @@ use gensokyo_qq::{
 use gensokyo_storage::IdMapStore;
 
 use crate::rfc3339;
+use crate::send::SendTarget;
+use crate::util;
 
 /// [`QqApi`] 的异步返回，形态与 [`gensokyo_protocol::HandlerFuture`] 一致。
 pub type QqFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
@@ -111,6 +115,23 @@ pub trait QqApi: Send + Sync + fmt::Debug {
         cursor: Option<&str>,
         limit: Option<u32>,
     ) -> QqFuture<'_, JoinRequestList>;
+
+    /// 发送群消息（`send_*` 的 deferred 计划由 runtime 在执行链上调用）。
+    ///
+    /// 入参取所有权：调用方（deferred 执行链）已经把 [`gensokyo_qq::dto::MessageToCreate`]
+    /// 构造好，直接移动进来可省一次克隆。
+    fn send_group_message(
+        &self,
+        group_openid: String,
+        msg: MessageToCreate,
+    ) -> QqFuture<'_, MessageResponse>;
+
+    /// 发送 C2C 消息（私聊 / 群临时会话）。
+    fn send_c2c_message(
+        &self,
+        user_openid: String,
+        msg: MessageToCreate,
+    ) -> QqFuture<'_, MessageResponse>;
 
     /// 批量移出群成员（单批 ≤ 20，`add_blacklist` 同时拉黑）。
     ///
@@ -298,6 +319,30 @@ impl<T: HttpTransport> QqApi for OpenApiClient<T> {
                 .map_err(qq_error)
         })
     }
+
+    fn send_group_message(
+        &self,
+        group_openid: String,
+        msg: MessageToCreate,
+    ) -> QqFuture<'_, MessageResponse> {
+        Box::pin(async move {
+            OpenApiClient::send_group_message(self, &group_openid, &msg)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn send_c2c_message(
+        &self,
+        user_openid: String,
+        msg: MessageToCreate,
+    ) -> QqFuture<'_, MessageResponse> {
+        Box::pin(async move {
+            OpenApiClient::send_c2c_message(self, &user_openid, &msg)
+                .await
+                .map_err(qq_error)
+        })
+    }
 }
 
 /// `set_group_kick` 的上游回执（对齐 Go `BatchRemoveMembersResponse`）。
@@ -434,6 +479,29 @@ impl ActionContext {
         self.idmap.as_deref()
     }
 
+    /// ID 文本 → 上游 OpenID：32 位 OpenID 直通，其余按虚拟号经 idmap 反查。
+    ///
+    /// `label` 是请求字段名（错误文案），`kind` 是被反查的目标（`group_openid` /
+    /// `user_openid` / `member_openid`）。口径与 handler 侧完全一致（[`crate::util`]）。
+    ///
+    /// # Errors
+    /// 既不是 32 位 OpenID 也不是虚拟号、未装配 idmap、或虚拟号未绑定时返回
+    /// [`Error::Protocol`]。
+    pub fn resolve_openid(&self, label: &str, raw: &str, kind: &str) -> Result<String> {
+        util::resolve_identity_text(self, label, raw, kind).map(|resolved| resolved.openid)
+    }
+
+    /// deferred 计划的收件人 → 上游 OpenID（群聊取 `group_openid`，私聊取 `user_openid`）。
+    ///
+    /// # Errors
+    /// 同 [`ActionContext::resolve_openid`]。
+    pub fn resolve_send_target(&self, target: &SendTarget) -> Result<String> {
+        match target {
+            SendTarget::Group(id) => self.resolve_openid("group_id", id, "group_openid"),
+            SendTarget::Private(id) => self.resolve_openid("user_id", id, "user_openid"),
+        }
+    }
+
     /// 当前快照的 `string_ob11`：决定响应里的 ID 是 JSON 数字还是字符串。
     #[must_use]
     pub fn string_ob11(&self) -> bool {
@@ -524,6 +592,22 @@ mod tests {
                 _cursor: Option<&str>,
                 _limit: Option<u32>,
             ) -> super::QqFuture<'_, gensokyo_qq::JoinRequestList> {
+                Box::pin(async { Err(super::Error::Unsupported("未配置".to_owned())) })
+            }
+
+            fn send_group_message(
+                &self,
+                _group_openid: String,
+                _msg: gensokyo_qq::dto::MessageToCreate,
+            ) -> super::QqFuture<'_, gensokyo_qq::dto::MessageResponse> {
+                Box::pin(async { Err(super::Error::Unsupported("未配置".to_owned())) })
+            }
+
+            fn send_c2c_message(
+                &self,
+                _user_openid: String,
+                _msg: gensokyo_qq::dto::MessageToCreate,
+            ) -> super::QqFuture<'_, gensokyo_qq::dto::MessageResponse> {
                 Box::pin(async { Err(super::Error::Unsupported("未配置".to_owned())) })
             }
         }

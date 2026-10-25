@@ -1,11 +1,13 @@
 //! 运行时共享状态。
 //!
-//! [`AppState`] 只强依赖「配置快照 + handler 注册表」；idmap / echo / OpenAPI 是 M1h-b
-//! （入站事件）与 M1i（`send_*`）才需要的句柄，用 builder 选择性注入，缺省 `None`。
+//! [`AppState`] 只强依赖「配置快照 + handler 注册表」；action 依赖容器
+//! （[`gensokyo_actions::ActionContext`]）、idmap / echo / OpenAPI 是 M1h-b（入站事件）与
+//! M1i（`send_*`）才需要的句柄，用 builder 选择性注入，缺省 `None`。
 //! 这样 M1h-a 的传输层可以单独测试，不必先把存储与上游客户端装配起来。
 
 use std::sync::Arc;
 
+use gensokyo_actions::ActionContext;
 use gensokyo_config::ConfigManager;
 use gensokyo_protocol::Registry;
 use gensokyo_qq::{OpenApiClient, ReqwestTransport};
@@ -20,6 +22,7 @@ use crate::event_hub::EventHub;
 pub struct AppState {
     config: Arc<ConfigManager>,
     registry: Arc<Registry>,
+    actions: Option<Arc<ActionContext>>,
     idmap: Option<Arc<IdMapStore>>,
     echo: Option<Arc<EchoStore>>,
     api: Option<Arc<OpenApiClient<ReqwestTransport>>>,
@@ -34,6 +37,7 @@ impl AppState {
         Self {
             config,
             registry,
+            actions: None,
             idmap: None,
             echo: None,
             api: None,
@@ -48,6 +52,29 @@ impl AppState {
         let mut registry = Registry::new();
         builtin::register_all(&mut registry, Arc::clone(&config));
         Self::new(config, Arc::new(registry))
+    }
+
+    /// 构造「内置 action + `gensokyo_actions` 全集」的状态。
+    ///
+    /// 注册表 = 3 个内置 action（`get_status` / `get_version_info` / `get_login_info`）+
+    /// [`gensokyo_actions::register_all`]（41 个注册名 + 3 个 Go 兼容别名）；deferred 执行链
+    /// 需要 [`ActionContext`] 里的 [`gensokyo_actions::QqApi`] 才能把 `send_*` 真正发到 QQ。
+    #[must_use]
+    pub fn with_actions(config: Arc<ConfigManager>, actions: Arc<ActionContext>) -> Self {
+        Self::with_builtin_handlers(config).with_action_context(actions)
+    }
+
+    /// 挂上 action 依赖并重建注册表（内置 3 个 + action 全集）。
+    ///
+    /// 注意：注册表被整体替换，此前经 [`AppState::new`] 注入的自定义 handler 不会保留。
+    #[must_use]
+    pub fn with_action_context(mut self, actions: Arc<ActionContext>) -> Self {
+        let mut registry = Registry::new();
+        builtin::register_all(&mut registry, Arc::clone(&self.config));
+        gensokyo_actions::register_all(&mut registry, Arc::clone(&actions));
+        self.registry = Arc::new(registry);
+        self.actions = Some(actions);
+        self
     }
 
     /// 注入 idmap（M1h-b 的入站转换需要虚拟 ID ↔ OpenID 映射）。
@@ -119,6 +146,18 @@ impl AppState {
         self.registry.as_ref()
     }
 
+    /// action 依赖容器（未装配时为 `None`，`send_*` 的 deferred 计划此时只能回 1500）。
+    #[must_use]
+    pub fn actions(&self) -> Option<&ActionContext> {
+        self.actions.as_deref()
+    }
+
+    /// action 依赖容器的 `Arc`（[`crate::dispatcher::Dispatcher`] 要持有）。
+    #[must_use]
+    pub fn actions_arc(&self) -> Option<Arc<ActionContext>> {
+        self.actions.clone()
+    }
+
     /// idmap 句柄（未注入时为 `None`）。
     #[must_use]
     pub fn idmap(&self) -> Option<&IdMapStore> {
@@ -144,8 +183,10 @@ impl AppState {
     }
 
     /// 基于当前注册表的分发器（克隆一个 `Arc`，开销可忽略）。
+    ///
+    /// 装配了 [`ActionContext`] 时一并挂上，deferred 计划才会被真正执行。
     #[must_use]
     pub fn dispatcher(&self) -> Dispatcher {
-        Dispatcher::new(Arc::clone(&self.registry))
+        Dispatcher::new(Arc::clone(&self.registry)).with_actions(self.actions_arc())
     }
 }

@@ -76,6 +76,10 @@ impl Runtime {
     pub async fn start_with(state: AppState, options: RuntimeOptions) -> Result<RuntimeHandle> {
         let settings = state.config().snapshot();
 
+        // 注册表在 `AppState` 装配时创建（内置 3 个 + `gensokyo_actions::register_all`）；
+        // 这里只记录规模，`send_*` 的 deferred 计划由 dispatcher 在执行链上完成。
+        tracing::info!(actions = state.registry().len(), "action 注册表已就绪");
+
         // Go 在启动时按 text_intent 算 intent 位并打印（main.go:316-353）；Rust 侧不维持
         // botgo WS 会话，这里只把解析结果落进日志（未知名字在 [`IntentPlan`] 内 warn）。
         let intent_plan = crate::intent::IntentPlan::from_settings(&settings);

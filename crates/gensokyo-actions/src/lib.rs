@@ -32,12 +32,27 @@
 //! 两张清单由单测 `implemented_actions_are_known_or_documented_extensions` 机器核对：每个已实现
 //! action 必须落在 KNOWN_ACTIONS 或 EXTENSION_ACTIONS 里，别名必须指向已实现的 handler。
 //!
+//! # deferred 执行链路
+//!
+//! 1. [`register::register_all`] 把 41 个 handler 装进 `gensokyo_protocol::Registry`（runtime 装配，
+//!    见 `gensokyo-runtime::AppState::with_actions`）。
+//! 2. 客户端调 `send_group_msg` / `send_private_msg` / `send_msg`（含 `*_async`）：handler 只做参数
+//!    解析，`data` = [`send::SendRequest`] JSON + `"deferred": true`，**不触达上游**。
+//! 3. runtime 的 `dispatcher::Dispatcher` 看到 `deferred` 后反序列化 `SendRequest`，把
+//!    [`send::MessageOut`] 合成 `MessageToCreate`（文本 + `[CQ:at]` → `<@openid>` + 单个 media），
+//!    收件人经 [`qqapi::ActionContext::resolve_send_target`] 还原成上游 OpenID。
+//! 4. 按 target 调 [`qqapi::QqApi::send_group_message`] / [`qqapi::QqApi::send_c2c_message`]，
+//!    最终回客户端 `data = {"message_id": …}`——计划本身（含 `deferred` 标记）不会泄漏。
+//!
+//! 尚未接线的部分：媒体上传（图片需先拿到上游 `file_info`）、echo / 懒消息回写。
+//!
 //! # 尚未实现
 //!
-//! - **`send_*` 的真实发送**：仍走 deferred 计划（[`handler::DEFERRED_FIELD`]），媒体上传、
-//!   `MessageToCreate`、echo / 懒消息回写由 `gensokyo-runtime` 接线（见 [`send`] 模块文档）。
-//! - **媒体类 action**：`[CQ:image]` / `[CQ:record]` / `[CQ:video]` / `[CQ:file]` 的上传与发送、
-//!   图床选择。
+//! - **`send_*` 的真实发送**：handler 仍只产出 deferred 计划（[`handler::DEFERRED_FIELD`]），
+//!   真正的 QQ 调用在 `gensokyo-runtime` 的 deferred 执行链上完成，链路见下文。
+//! - **媒体上传**：`[CQ:image]` / `[CQ:record]` / `[CQ:video]` / `[CQ:file]` 的上传、图床选择
+//!   仍未接线；deferred 执行链只接受「已是上游 `file_info`」的图片（[`gensokyo_protocol::MediaRef::Unknown`]），
+//!   其余媒体形态回 `1500`，不做静默丢弃。
 //! - **入群审批 / 黑名单 / 面板 / 菜单**（KNOWN_ACTIONS 剩余部分）：`set_group_add_request`、
 //!   `get_group_member_blacklist`、`set_group_member_blacklist`、`join_approval_strategy_*`、
 //!   `create_panel` / `set_panel` / `delete_panel` / `get_panel` / `get_panel_list` /
@@ -76,6 +91,8 @@ pub mod media;
 /// 消息类 action（撤回 / 消息详情 / 合并转发）。
 pub mod messages;
 pub mod qqapi;
+/// 统一注册入口：41 个 handler + Go 兼容别名。
+pub mod register;
 pub mod send;
 /// 运行控制与凭证 action（重启 / 清缓存 / cookies / csrf）。
 pub mod system;
@@ -106,6 +123,7 @@ pub use qqapi::{
     ActionContext, FriendEntry, KickResult, MsgDetail, QqApi, QqFuture, RetractRequest,
     StrangerProfile,
 };
+pub use register::register_all;
 pub use send::{
     MessageOut, SendRequest, SendTarget, plan_send_group_msg, plan_send_msg, plan_send_private_msg,
 };

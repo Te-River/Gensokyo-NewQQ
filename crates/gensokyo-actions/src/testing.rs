@@ -13,7 +13,10 @@ use gensokyo_config::ConfigManager;
 use gensokyo_core::{Error, Result};
 use gensokyo_protocol::action::{ActionRequest, ActionResponse};
 use gensokyo_protocol::{Segment, Status};
-use gensokyo_qq::dto::{BotInGroupState, GroupInfo, GroupMember, GroupMemberList, JoinRequestList};
+use gensokyo_qq::dto::{
+    BotInGroupState, GroupInfo, GroupMember, GroupMemberList, JoinRequestList, MessageResponse,
+    MessageToCreate,
+};
 
 use crate::qqapi::{
     ActionContext, FriendEntry, KickResult, MsgDetail, QqApi, QqFuture, RetractRequest,
@@ -21,7 +24,7 @@ use crate::qqapi::{
 };
 
 /// 一次上游调用的入参记录。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Call {
     /// `set_group_kick(group_openid, member_openids, add_blacklist)`
     Kick(String, Vec<String>, bool),
@@ -41,6 +44,10 @@ pub(crate) enum Call {
     StrangerInfo(String),
     /// `send_like(user_openid, times)`
     SendLike(String, u32),
+    /// `send_group_message(group_openid, msg)`
+    SendGroup(String, MessageToCreate),
+    /// `send_c2c_message(user_openid, msg)`
+    SendC2c(String, MessageToCreate),
 }
 
 /// 记录入参、按槽位注入结果的 `QqApi` 替身。
@@ -59,6 +66,8 @@ pub(crate) struct FakeQqApi {
     pub(crate) friends: Mutex<Option<Result<Vec<FriendEntry>>>>,
     pub(crate) stranger: Mutex<Option<Result<StrangerProfile>>>,
     pub(crate) like: Mutex<Option<Result<()>>>,
+    pub(crate) group_send: Mutex<Option<Result<MessageResponse>>>,
+    pub(crate) c2c_send: Mutex<Option<Result<MessageResponse>>>,
 }
 
 impl FakeQqApi {
@@ -204,6 +213,28 @@ impl QqApi for FakeQqApi {
         Box::pin(async move {
             self.record(Call::SendLike(user_openid, times));
             take(&self.like)
+        })
+    }
+
+    fn send_group_message(
+        &self,
+        group_openid: String,
+        msg: MessageToCreate,
+    ) -> QqFuture<'_, MessageResponse> {
+        Box::pin(async move {
+            self.record(Call::SendGroup(group_openid, msg));
+            take(&self.group_send)
+        })
+    }
+
+    fn send_c2c_message(
+        &self,
+        user_openid: String,
+        msg: MessageToCreate,
+    ) -> QqFuture<'_, MessageResponse> {
+        Box::pin(async move {
+            self.record(Call::SendC2c(user_openid, msg));
+            take(&self.c2c_send)
         })
     }
 }

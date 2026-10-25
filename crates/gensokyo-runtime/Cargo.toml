@@ -13,6 +13,8 @@ gensokyo-config.workspace = true
 gensokyo-protocol.workspace = true
 gensokyo-storage.workspace = true
 gensokyo-qq.workspace = true
+# 出站 action 全集（41 个 handler）与 deferred 计划类型（`SendRequest` / `MessageOut`）
+gensokyo-actions.workspace = true
 # WebUI 静态页与 `/api` 登录路由（M3）；`disable_webui=false` 时挂进 listener
 gensokyo-webui.workspace = true
 # 正向 WS / HTTP API 服务端；`ws` 提供 WebSocket 升级

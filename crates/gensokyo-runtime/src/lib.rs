@@ -42,6 +42,15 @@
 //!   都是 action（含 `/api/**`）。
 //! - 会话清理：每 10 分钟一次 `SessionStore::cleanup`，定时任务随 [`RuntimeHandle`] 停止。
 //!
+//! # M1i deferred 发送执行
+//! - [`AppState::with_actions`]：注册表 = 内置 3 个 action + `gensokyo_actions::register_all`
+//!   （41 个注册名 + 3 个 Go 兼容别名），并挂上 [`AppState::actions`]（`ActionContext`）。
+//! - [`dispatcher::Dispatcher`]：handler 回 `data.deferred == true` 时执行
+//!   [`deferred::execute`]——反序列化 `SendRequest`、收件人反查 OpenID、`MessageOut` 合成
+//!   `MessageToCreate`（文本 + `[CQ:at]` → `<@openid>` + 单个已上传 media），按 target 调
+//!   `QqApi::send_group_message` / `send_c2c_message`，最终 `data = {"message_id": …}`；
+//!   失败与未装配 `ActionContext` 一律 `retcode 1500`。
+//!
 //! # 未做项（后续里程碑）
 //! - 消息段：图片 / 语音 / 视频 / ark 卡片 / markdown / card 一律停留在文本形态，
 //!   `array_value` 不生效（细节见 [`inbound`] 模块文档）。
@@ -50,6 +59,8 @@
 //!   `union_webhook` 扇出亦未做。
 //! - 反向 WS 上收到的 OneBot action 不 dispatch；`sendFailures` 补发队列未实现。
 //! - 具体 `send_*` / 群管理 action（M1i）、有界队列与令牌桶（[`queue`]）。
+//!   `send_*` 已能真正发送（见上一节），仍未接线的是媒体上传（图片需先拿 `file_info`）与
+//!   echo / 懒消息回写；群管理其余端点、有界队列与令牌桶仍属后续里程碑。
 //! - 正向 WS 连接建立时仍**不发送** `meta_event/lifecycle/connect`（只有反向 WS 发），
 //!   与 Go 的行为差异保留到正向 WS 的 M1h-b 后续对齐。
 //! - WebUI 与 Go 主服务器路由：M1h-a 的 WS 独立监听 `0.0.0.0:{port}`（Go 是挂在主服务器
@@ -58,6 +69,8 @@
 pub mod auth;
 pub mod boot;
 pub mod builtin;
+/// `send_*` 的 deferred 计划执行（计划 → `MessageToCreate` → QQ 上游）。
+pub mod deferred;
 pub mod dispatcher;
 pub mod event_hub;
 pub mod http_api;
@@ -75,6 +88,7 @@ pub mod ws_client;
 pub mod ws_server;
 
 pub use boot::{DEFAULT_SHUTDOWN_TIMEOUT, Runtime, RuntimeHandle, RuntimeOptions};
+pub use deferred::DEFERRED_FIELD;
 pub use dispatcher::{Dispatcher, RETCODE_BAD_REQUEST, RETCODE_INTERNAL, RETCODE_UNKNOWN_ACTION};
 pub use event_hub::EventHub;
 pub use inbound::Inbound;

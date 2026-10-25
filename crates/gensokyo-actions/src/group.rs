@@ -730,6 +730,23 @@ mod tests {
                 take(&self.join_requests)
             })
         }
+
+        // 本组 action 不发送消息：显式报「未配置」，避免依赖默认实现掩盖接线遗漏。
+        fn send_group_message(
+            &self,
+            _group_openid: String,
+            _msg: gensokyo_qq::dto::MessageToCreate,
+        ) -> QqFuture<'_, gensokyo_qq::dto::MessageResponse> {
+            Box::pin(async { Err(Error::Unsupported("未配置 send_group_message".to_owned())) })
+        }
+
+        fn send_c2c_message(
+            &self,
+            _user_openid: String,
+            _msg: gensokyo_qq::dto::MessageToCreate,
+        ) -> QqFuture<'_, gensokyo_qq::dto::MessageResponse> {
+            Box::pin(async { Err(Error::Unsupported("未配置 send_c2c_message".to_owned())) })
+        }
     }
 
     /// 单测里的最小 `block_on`：handler 只 await 一次 FakeQqApi，一次 poll 即 `Ready`。

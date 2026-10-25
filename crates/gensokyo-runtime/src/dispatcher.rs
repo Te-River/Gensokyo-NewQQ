@@ -1,10 +1,18 @@
-//! action 分发：注册表查询、错误码映射、panic 隔离、`echo` 回传。
+//! action 分发：注册表查询、错误码映射、panic 隔离、`echo` 回传、deferred 计划执行。
 //!
 //! 错误码沿用 OneBot V11 语义（与 Go 的 `callapi` 回退路径一致）：
 //! - `1400`：请求 JSON 或参数非法（[`gensokyo_core::Error::Protocol`]）；
 //! - `1404`：未知 action（含 [`gensokyo_core::Error::Unsupported`]）；
 //! - `1500`：内部错误——配置缺失、存储/上游/IO 失败，以及 handler panic；panic 对外只回
 //!   通用文案，全文只进日志。
+//!
+//! # deferred 计划
+//!
+//! `send_*` 的 handler 只回计划（`data.deferred == true`）。分发器识别到该标记后执行
+//! [`crate::deferred::execute`]：反序列化 [`gensokyo_actions::SendRequest`] → 合成
+//! `MessageToCreate` → 按 target 调上游发送，成功时用 `data = {"message_id": …}` 替换计划，
+//! **计划本身（含 `deferred` 标记）不会回给客户端**。执行失败（含未装配
+//! [`gensokyo_actions::ActionContext`]）一律 `retcode 1500`。
 //!
 //! handler 是异步 trait（`gensokyo_protocol::Handler`），[`dispatch_json`] 直接 await：
 //! 每条消息不再额外经一次 `spawn_blocking` 线程池调度；handler 需要上游 I/O 时自己 await。
@@ -15,29 +23,41 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use futures::FutureExt;
+use gensokyo_actions::{ActionContext, SendRequest};
 use gensokyo_core::Error as CoreError;
 use gensokyo_protocol::Registry;
 use gensokyo_protocol::action::{ActionRequest, ActionResponse, Echo};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// 请求 JSON 或参数非法。
 pub const RETCODE_BAD_REQUEST: i32 = 1400;
 /// 未知 action。
 pub const RETCODE_UNKNOWN_ACTION: i32 = 1404;
-/// 内部错误（含 handler panic）。
+/// 内部错误（含 handler panic 与 deferred 执行失败）。
 pub const RETCODE_INTERNAL: i32 = 1500;
 
 /// 把 action 请求喂给注册表。
 #[derive(Debug, Clone)]
 pub struct Dispatcher {
     registry: Arc<Registry>,
+    actions: Option<Arc<ActionContext>>,
 }
 
 impl Dispatcher {
-    /// 绑定一个注册表。
+    /// 绑定一个注册表（未装配 action 依赖：deferred 计划会以 `1500` 失败）。
     #[must_use]
     pub fn new(registry: Arc<Registry>) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            actions: None,
+        }
+    }
+
+    /// 挂上 action 依赖容器，`send_*` 的 deferred 计划才会真正执行。
+    #[must_use]
+    pub fn with_actions(mut self, actions: Option<Arc<ActionContext>>) -> Self {
+        self.actions = actions;
+        self
     }
 
     /// 分发一条请求，**不**返回 `Err`：所有失败都表达为 `status=failed` + `retcode`。
@@ -59,13 +79,7 @@ impl Dispatcher {
         let guarded = AssertUnwindSafe(async { handler.handle(request).await }).catch_unwind();
 
         match guarded.await {
-            Ok(Ok(mut response)) => {
-                // handler 未显式回填 echo 时由分发器兜底，保证 OneBot 客户端能对上请求。
-                if response.echo.is_none() {
-                    response.echo = request.echo.clone();
-                }
-                response
-            }
+            Ok(Ok(response)) => self.finalize(response, request).await,
             Ok(Err(err)) => failure(retcode_for(&err), err.to_string(), request.echo.clone()),
             Err(payload) => {
                 let message = panic_message(payload.as_ref());
@@ -74,6 +88,48 @@ impl Dispatcher {
                 failure(RETCODE_INTERNAL, "handler panic", request.echo.clone())
             }
         }
+    }
+
+    /// 收尾：deferred 计划就地执行并替换成发送结果，最后兜底 `echo`。
+    async fn finalize(
+        &self,
+        mut response: ActionResponse<Value>,
+        request: &ActionRequest<Value>,
+    ) -> ActionResponse<Value> {
+        let deferred = response
+            .data
+            .as_ref()
+            .filter(|data| crate::deferred::is_deferred(data))
+            .cloned();
+        if let Some(data) = deferred {
+            // 计划只是 handler → runtime 的内部握手载荷，不能泄漏给客户端。
+            let echo = response.echo.clone();
+            response = match self.run_deferred(data).await {
+                Ok(message_id) => {
+                    ActionResponse::ok(json!({ "message_id": message_id })).with_echo(echo)
+                }
+                Err(message) => failure(RETCODE_INTERNAL, message, echo),
+            };
+        }
+
+        // handler 未显式回填 echo 时由分发器兜底，保证 OneBot 客户端能对上请求。
+        if response.echo.is_none() {
+            response.echo = request.echo.clone();
+        }
+        response
+    }
+
+    /// 执行 deferred 计划；失败一律按 `1500` 上报（含未装配 [`ActionContext`]、计划损坏、
+    /// 收件人无法反查、上游发送失败）。
+    async fn run_deferred(&self, data: Value) -> Result<String, String> {
+        let Some(context) = self.actions.as_ref() else {
+            return Err("deferred 计划需要装配 ActionContext（QqApi）".to_owned());
+        };
+        let plan: SendRequest = serde_json::from_value(data)
+            .map_err(|err| format!("deferred 计划反序列化失败: {err}"))?;
+        crate::deferred::execute(context, &plan)
+            .await
+            .map_err(|err| err.to_string())
     }
 }
 
