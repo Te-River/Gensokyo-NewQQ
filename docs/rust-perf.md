@@ -87,17 +87,19 @@ cargo run --release -p xtask -- bench
 
 **环境**：AMD Ryzen 5 5600U（6C/12T）、13.8 GB、Windows 11 26300、Go 1.26.4、rustc 1.99.1（release，LTO=thin）、oha 1.16.0。
 
-**场景**：本地 `get_login_info`（无 QQ 网络 I/O）；Go 走 HTTP API 路径 `/get_login_info`，Rust 走统一 action 入口 `POST /action`；两边均 `disable_webui: true`、`log_level: 3`（error）、无反向 WS，请求体相同。64 并发、50,000 请求/轮，Go/Rust 交替跑 3 轮取中位，预热 3,000。
+**场景**：本地 `get_login_info`（无 QQ 网络 I/O）；Go 走 HTTP API 路径 `/get_login_info`，Rust 走统一 action 入口 `POST /action`；两边均 `disable_webui: true`、`log_level: 3`（error）、无反向 WS，请求体相同。64 并发、50,000 请求/轮，Go/Rust 交替跑 **10 轮**，取均值 ± 标准差（括号内为 10 轮区间），预热 3,000。
 
 | 指标 | Go | Rust | 对比 |
 |------|----|------|------|
-| 吞吐 | 43,512 req/s | **53,870 req/s** | Rust ≈1.24× |
-| 平均 | 1.45 ms | **1.17 ms** | Rust ≈1.24× 更低 |
-| P50 | **0.84 ms** | 1.08 ms | Go 低约 29% |
-| P99 | 13.20 ms | **2.83 ms** | Rust ≈4.7× 更低 |
-| RSS | 44.3 MB | **10.6 MB** | Rust ≈4.2× 更低 |
-| 二进制 | 43.81 MB | **8.12 MB** | Rust ≈5.4× 更小 |
+| 吞吐 | 49,137 ± 4,085 req/s（41,954–56,059） | **50,581 ± 5,241 req/s（40,157–58,006）** | ≈1.03×，区间重叠 |
+| 平均 | 1.295 ms | **1.264 ms** | ≈2.4% 更低 |
+| P50 | **0.779 ms** | 1.144 ms | Go 低约 32% |
+| P99 | 11.02 ms | **3.43 ms** | ≈3.2× 更低 |
+| RSS | 43.4 MB | **10.8 MB** | ≈4.0× 更低 |
+| 二进制 | 43.81 MB | **8.12 MB** | ≈5.4× 更小 |
 | 成功率 | 100% | 100% | — |
+
+**读法**：吞吐分布高度重叠，不能宣称 Rust 吞吐显著领先；稳定差异在尾部延迟（P99）、内存与体积，而 Go 的 P50 更低。高并发下单次均值受调度/后台进程影响，**必须多轮取均值并看标准差**。
 
 **关键方法学**：Go 保持默认 `INFO` 且每请求打日志时，吞吐会掉到约 2.9k req/s（约 15× 差距），P99 升到百毫秒级；关掉后两端恢复同一量级。压测必须统一日志级别，否则结论完全失真。
 
@@ -108,7 +110,7 @@ cargo run --release -p xtask -- bench
 - Go：`oha -c 64 -n 50000 -m POST -H "Content-Type: application/json" -d '{"action":"get_login_info","params":{},"echo":1}' http://127.0.0.1:5701/get_login_info`
 - Rust：同 body，URL 换 `http://127.0.0.1:5702/action`。
 
-**边界**：loopback 单机、入口形态不同（Go 路径分发 vs Rust 统一 action）、Rust 尚未覆盖全部 action/媒体；三轮波动约 ±15%，数字用于管线对比与回归基线，不是公网 SLA，也不代表 QQ 端到端延迟。
+**边界**：loopback 单机、入口形态不同（Go 路径分发 vs Rust 统一 action）、Rust 尚未覆盖全部 action/媒体；数字用于管线对比与回归基线，不是公网 SLA，也不代表 QQ 端到端延迟。
 
 ## 5. 发布配置
 
