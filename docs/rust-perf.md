@@ -72,6 +72,17 @@ cargo run --release -p xtask -- bench
 
 读法：CQ 解析 ≈ 790 ns/段（20 段），是三者中最贵的一条，也是 §6 的第一优化对象。
 
+### 4.1 优化后（2026-10-25）
+
+| 用例 | 优化前 | 优化后 | 提升 | 口径 |
+|------|--------|--------|------|------|
+| `cqcode::parse` | 14.7 µs | ≈ 7.3 µs | ≈ 2.0× | 同进程 A/B，交替 20 轮取 min |
+| `Event::deserialize` | 6.92 µs | 4.15 µs | −40% | 同进程 A/B，10 次中位 |
+| `dispatch_json`（get_status） | 68.8 µs | 20.9 µs | −69.6% | debug/current_thread，20k 次 |
+
+说明：CQ 剩余成本是 `Segment` 形状固定的 169 次分配（≈10 µs 地板），进一步优化需把参数改成借用/Cow 形态；`Event` 仍有 `Segment::Scalar` 的 untagged 缓冲热点。两者都属 API 级改动，留待后续评估。
+
+
 ## 5. 发布配置
 
 `Cargo.toml` 根部：

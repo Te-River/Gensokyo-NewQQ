@@ -36,6 +36,9 @@ jobs:
         with:
           toolchain: "1.99.1"
           components: clippy
+      - name: Ensure webui/dist placeholder
+        shell: bash
+        run: mkdir -p webui/dist && printf '<!doctype html><title>Gensokyo</title>' > webui/dist/index.html
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
@@ -51,6 +54,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99.1"
+      - name: Ensure webui/dist placeholder
+        shell: bash
+        run: mkdir -p webui/dist && printf '<!doctype html><title>Gensokyo</title>' > webui/dist/index.html
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --locked
       - run: cargo test --workspace --locked
