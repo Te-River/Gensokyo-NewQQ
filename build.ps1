@@ -1,11 +1,17 @@
-# Gensokyo build script
-# Single target:
+﻿# Gensokyo build script —— Rust 薄包装
+# 实际构建逻辑在 `cargo xtask build`（见 docs/rust-build.md），本脚本只做“Go 命名 → Rust 三元组”
+# 的参数翻译：不再调用 Go 工具链，也不再自己创建 webui/dist 占位目录（xtask 负责）。
+#
+# 单目标（缺省宿主）：
 #   .\build.ps1
 #   .\build.ps1 linux amd64
 #   .\build.ps1 -NoWebUI
-# All default targets (双版本: 完整版 + noWebUI):
+# 全部目标（矩阵 × 双版本，与 CI cross_compile.yml 对齐）：
 #   .\build.ps1 -All
 #   .\build.ps1 -LinuxOnly
+#
+# 注意：cargo 由 PATH 决定，会遵守 rust-toolchain.toml（1.99.1 / 宿主 abi）。本机若没有
+# MSVC 的 link.exe，先用 `rustup override set 1.99.1-x86_64-pc-windows-gnu` 切到 GNU 工具链。
 
 param(
     [Parameter(Position = 0)]
@@ -15,7 +21,7 @@ param(
     [string]$TargetArch = "",
 
     [Parameter(Position = 2)]
-    [string]$UPXLevel = "7",
+    [int]$UPXLevel = 7,
 
     [switch]$All,
     [switch]$LinuxOnly,
@@ -24,10 +30,6 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-
-$env:GOPROXY = 'https://mirrors.aliyun.com/goproxy,https://goproxy.cn,https://mirrors.tuna.tsinghua.edu.cn/goproxy,direct'
-$env:GOFLAGS = '-mod=mod'
-$env:CGO_ENABLED = '0'
 
 # 兼容 --xxx 写法（PowerShell 标准是 -xxx）
 if ($TargetOS -match '^--?[Aa]ll$') { $All = $true; $TargetOS = '' }
@@ -38,163 +40,67 @@ if ($TargetOS -eq 'all') {
     $All = $true
     $TargetOS = ''
 }
-if ($LinuxOnly) {
-    $All = $true
+
+# Go 命名 → Rust 三元组。只覆盖“单目标构建”会点名的平台；全量走 xtask 自己的矩阵。
+$TripleMap = @{
+    'linux-amd64'   = 'x86_64-unknown-linux-gnu'
+    'linux-386'     = 'i686-unknown-linux-gnu'
+    'linux-arm'     = 'armv7-unknown-linux-gnueabihf'
+    'linux-arm64'   = 'aarch64-unknown-linux-gnu'
+    'darwin-amd64'  = 'x86_64-apple-darwin'
+    'darwin-arm64'  = 'aarch64-apple-darwin'
+    'windows-amd64' = 'x86_64-pc-windows-msvc'
+    'windows-386'   = 'i686-pc-windows-msvc'
+    'android-arm64' = 'aarch64-linux-android'
 }
 
-function Ensure-WebUIDist {
-    $webuiDist = 'webui/dist'
-    if (-not (Test-Path "$webuiDist/css/style.css")) {
-        $null = New-Item -ItemType Directory -Force -Path "$webuiDist/css", "$webuiDist/fonts", "$webuiDist/icons", "$webuiDist/js" 2>$null
-        Set-Content -Path "$webuiDist/placeholder.html" -Value '' -NoNewline
-        Set-Content -Path "$webuiDist/css/placeholder.css" -Value '' -NoNewline
-        Set-Content -Path "$webuiDist/fonts/placeholder.txt" -Value '' -NoNewline
-        Set-Content -Path "$webuiDist/icons/placeholder.txt" -Value '' -NoNewline
-        Set-Content -Path "$webuiDist/js/placeholder.js" -Value '' -NoNewline
+function Get-HostOS {
+    switch ([System.Environment]::OSVersion.Platform.ToString()) {
+        'Win32NT' { return 'windows' }
+        'MacOSX' { return 'darwin' }
+        default { return 'linux' }
     }
 }
 
-function Get-BuildLdflags {
-    $gitCommit = ''
-    try {
-        $gitCommit = (git rev-parse --short HEAD 2>$null).Trim()
-    } catch {
-        $gitCommit = ''
+function Get-HostArch {
+    switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()) {
+        'X64' { return 'amd64' }
+        'X86' { return '386' }
+        'Arm64' { return 'arm64' }
+        default { throw "无法识别宿主架构: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)" }
     }
-
-    if ($gitCommit) {
-        $buildType = 'git'
-        $buildSpec = $gitCommit
-    } else {
-        $buildType = 'dev'
-        $epoch = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-        $buildSpec = ('{0}.{1:D3}' -f [math]::Floor($epoch / 1000), ($epoch % 1000))
-    }
-
-    Write-Host "Build info: $buildType-$buildSpec" -ForegroundColor Gray
-    return "-s -w -X github.com/hoshinonyaruko/gensokyo/buildinfo.BuildType=$buildType -X github.com/hoshinonyaruko/gensokyo/buildinfo.BuildSpec=$buildSpec"
 }
 
-function Invoke-GensokyoBuild {
-    param(
-        [Parameter(Mandatory = $true)]
-        [hashtable]$Target,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Ldflags,
-
-        [switch]$NoWebUI
-    )
-
-    $env:GOOS = $Target.GOOS
-    $env:GOARCH = $Target.GOARCH
-
-    $ext = if ($Target.GOOS -eq 'windows') { '.exe' } else { '' }
-    $suffix = if ($NoWebUI) { '-noWebui' } else { '' }
-    $tagArg = if ($NoWebUI) { '-tags=small' } else { '' }
-    $outName = "gensokyo-$($Target.OS)-$($Target.Arch)$suffix$ext"
-    $outPath = "release/$outName"
-
-    Write-Host "[build] $($Target.GOOS)/$($Target.GOARCH) -> $outPath" -ForegroundColor Yellow
-    go build -trimpath -ldflags="$Ldflags" $tagArg -v -o $outPath .
-
-    if ($LASTEXITCODE -ne 0) {
-        throw "Build failed: $($Target.GOOS)/$($Target.GOARCH)"
-    }
-
-    Write-Host "  OK: $outPath" -ForegroundColor Green
-    return $outPath
-}
-
-function Invoke-Upx {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string[]]$Outputs
-    )
-
-    if ($NoUPX) {
-        Write-Host "UPX disabled." -ForegroundColor Gray
-        return
-    }
-
-    $upx = Get-Command 'upx' -ErrorAction SilentlyContinue
-    if (-not $upx) {
-        Write-Host 'UPX not found, skip compression.' -ForegroundColor Gray
-        Write-Host 'Install: winget install upx' -ForegroundColor Gray
-        return
-    }
-
-    foreach ($output in $Outputs) {
-        Write-Host "[upx] Compressing $output..." -ForegroundColor Yellow
-        & $upx.Source "-$UPXLevel" $output
-        if ($LASTEXITCODE -ne 0) {
-            throw "UPX failed: $output"
+$triple = ''
+if (-not $All -and -not $LinuxOnly) {
+    if ($TargetOS -or $TargetArch) {
+        # 只给了一个维度时，另一个按宿主补齐（保留 Go 版 `.\build.ps1 linux` 的用法）
+        $osName = if ($TargetOS) { $TargetOS } else { Get-HostOS }
+        $archName = if ($TargetArch) { $TargetArch } else { Get-HostArch }
+        $key = "$osName-$archName".ToLowerInvariant()
+        if (-not $TripleMap.ContainsKey($key)) {
+            $available = ($TripleMap.Keys | Sort-Object) -join ', '
+            throw "不支持的单目标: $key`n可用: $available`n全量构建请用 -All / -LinuxOnly"
         }
+        $triple = $TripleMap[$key]
     }
+    # 两者都没给：宿主构建不传 --target，交给 cargo 自己选（避免强绑 msvc/gnu abi）
 }
 
-$targets = @()
-if ($All) {
-    $targets = @(
-        @{GOOS = 'linux';   GOARCH = 'amd64'; OS = 'linux';   Arch = 'amd64' }
-        @{GOOS = 'linux';   GOARCH = '386';   OS = 'linux';   Arch = '386' }
-        @{GOOS = 'linux';   GOARCH = 'arm64'; OS = 'linux';   Arch = 'arm64' }
-        @{GOOS = 'windows'; GOARCH = 'amd64'; OS = 'windows'; Arch = 'amd64' }
-        @{GOOS = 'windows'; GOARCH = '386';   OS = 'windows'; Arch = '386' }
-    )
-    if ($LinuxOnly) {
-        $targets = $targets | Where-Object { $_.GOOS -eq 'linux' }
-    }
-} else {
-    $targetOSValue = if ($TargetOS) { $TargetOS } else { (go env GOOS) }
-    $targetArchValue = if ($TargetArch) { $TargetArch } else { (go env GOARCH) }
-    $targets = @(@{GOOS = $targetOSValue; GOARCH = $targetArchValue; OS = $targetOSValue; Arch = $targetArchValue })
+$cargoArgs = @('xtask', 'build')
+if ($All) { $cargoArgs += '--all' }
+if ($LinuxOnly) { $cargoArgs += '--linux-only' }
+if ($NoWebUI) { $cargoArgs += '--no-webui' }
+if ($NoUPX) { $cargoArgs += '--no-upx' } else { $cargoArgs += @('--upx-level', "$UPXLevel") }
+if ($triple) { $cargoArgs += @('--target', $triple) }
+
+Write-Host "=== Gensokyo Build ===" -ForegroundColor Cyan
+Write-Host "cargo $($cargoArgs -join ' ')" -ForegroundColor Gray
+
+& cargo @cargoArgs
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "构建失败（退出码 $LASTEXITCODE）" -ForegroundColor Red
+    exit $LASTEXITCODE
 }
 
-Write-Host '=== Gensokyo Build ===' -ForegroundColor Cyan
-Write-Host "Go Proxy: $env:GOPROXY" -ForegroundColor Gray
-Write-Host "Targets : $($targets.Count) platform(s)" -ForegroundColor Gray
-
-$ldflags = Get-BuildLdflags
-
-Write-Host "`n[deps] Downloading dependencies..." -ForegroundColor Yellow
-go mod tidy
-
-Ensure-WebUIDist
-
-$outputs = @()
-$failed = @()
-foreach ($target in $targets) {
-    try {
-        if ($All) {
-            # -All 构建双版本: 完整版 + noWebUI
-            $outputs += Invoke-GensokyoBuild -Target $target -Ldflags $ldflags
-            $outputs += Invoke-GensokyoBuild -Target $target -Ldflags $ldflags -NoWebUI
-        } else {
-            $noWebUIParam = if ($NoWebUI) { @{ NoWebUI = $true } } else { @{} }
-            $outputs += Invoke-GensokyoBuild -Target $target -Ldflags $ldflags @noWebUIParam
-        }
-    } catch {
-        $failed += "$($target.GOOS)/$($target.GOARCH)"
-        Write-Host "  FAILED: $($target.GOOS)/$($target.GOARCH)" -ForegroundColor Red
-        Write-Host "  $_" -ForegroundColor Red
-        if (-not $All) {
-            exit 1
-        }
-    }
-}
-
-if ($outputs.Count -gt 0) {
-    Invoke-Upx -Outputs $outputs
-}
-
-Write-Host "`n=== Build Complete: $($outputs.Count) succeeded ===" -ForegroundColor Cyan
-foreach ($output in $outputs) {
-    $size = (Get-Item $output).Length / 1MB
-    Write-Host "  $output  ($([math]::Round($size, 1)) MB)" -ForegroundColor White
-}
-
-if ($failed.Count -gt 0) {
-    Write-Host "Failed targets: $($failed -join ', ')" -ForegroundColor Red
-    exit 1
-}
+Write-Host "产物见 release/（已被 .gitignore 忽略）" -ForegroundColor Green

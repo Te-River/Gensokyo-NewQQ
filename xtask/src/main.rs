@@ -1,9 +1,10 @@
 //! 构建 / 发布辅助（`build.ps1` 的 Rust 侧等价物）。
 //!
-//! M0 提供：产物命名规则（只打印，不打包）与 TLS 依赖下限断言。
+//! - `build`：release 构建 + 产物复制到 `release/`（见 `docs/rust-build.md`）。
+//! - `check-tls-floors`：TLS 依赖下限断言。
+//! - `bench`：同步微基准（见 `docs/rust-perf.md`）。
 
 use std::collections::BTreeMap;
-use std::env::consts::{ARCH, OS};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,6 +13,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 mod bench;
+mod build;
 
 /// TLS 组件安全下限（design §9.1；RustSec-2026-0382/0383 / CVE-2026-111943）。
 const TLS_FLOORS: &[(&str, Version)] = &[
@@ -142,42 +144,6 @@ fn check_tls_floors(lock_path: &Path) -> Result<()> {
     bail!("TLS 下限断言失败:\n  - {}", problems.join("\n  - "));
 }
 
-/// Rust 的 OS 常量 → Go 的 `GOOS` 命名（与既有产物名一致）。
-fn go_os_name(os: &str) -> &str {
-    match os {
-        "macos" => "darwin",
-        other => other,
-    }
-}
-
-/// Rust 的 ARCH 常量 → Go 的 `GOARCH` 命名。
-fn go_arch_name(arch: &str) -> &str {
-    match arch {
-        "x86_64" => "amd64",
-        "x86" => "386",
-        "aarch64" => "arm64",
-        other => other,
-    }
-}
-
-/// 产物路径：`release/gensokyo-{os}-{arch}[-noWebui][.exe]`。
-fn artifact_path(os: &str, arch: &str, no_webui: bool, windows: bool) -> String {
-    let flavor = if no_webui { "-noWebui" } else { "" };
-    let ext = if windows { ".exe" } else { "" };
-    format!("release/gensokyo-{os}-{arch}{flavor}{ext}")
-}
-
-/// 解析 `--target <os>-<arch>`（Go 命名，例如 `linux-amd64`）。
-fn parse_target(target: &str) -> Result<(String, String)> {
-    let mut parts = target.split('-');
-    let os = parts.next().unwrap_or_default();
-    let arch = parts.next().unwrap_or_default();
-    if os.is_empty() || arch.is_empty() || parts.next().is_some() {
-        bail!("--target 需要 <os>-<arch> 形式（Go 命名），例如 linux-amd64");
-    }
-    Ok((os.to_owned(), arch.to_owned()))
-}
-
 #[derive(Debug, Parser)]
 #[command(name = "xtask", about = "Gensokyo-NewQQ 构建辅助")]
 struct Cli {
@@ -187,15 +153,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Xtask {
-    /// 打印产物命名规则（M0 占位）。
-    Build {
-        /// 目标，`<os>-<arch>`（Go 命名）；缺省用当前平台。
-        #[arg(long)]
-        target: Option<String>,
-        /// 生成无 WebUI 精简版（等价于 Go 的 `-tags=small`）。
-        #[arg(long = "no-webui")]
-        no_webui: bool,
-    },
+    /// release 构建并把产物复制到 `release/`（docs/rust-build.md）。
+    Build(build::BuildArgs),
     /// 断言 Cargo.lock 中的 TLS 组件不低于安全下限。
     CheckTlsFloors,
     /// 跑固定迭代的同步微基准（方法论与基线见 docs/rust-perf.md）。
@@ -210,19 +169,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Xtask::Build { target, no_webui } => {
-            let (os, arch) = match target {
-                Some(target) => parse_target(&target)?,
-                None => (go_os_name(OS).to_owned(), go_arch_name(ARCH).to_owned()),
-            };
-            let windows = os == "windows";
-            println!("产物命名规则: release/gensokyo-{{os}}-{{arch}}[-noWebui][.exe]");
-            println!(
-                "当前目标产物: {}",
-                artifact_path(&os, &arch, no_webui, windows)
-            );
-            println!("M0 只打印规则；实际打包与交叉编译在 M1 接入。");
-        }
+        Xtask::Build(args) => build::run(args)?,
         Xtask::CheckTlsFloors => {
             let lock_path = find_lockfile()?;
             check_tls_floors(&lock_path)?;
