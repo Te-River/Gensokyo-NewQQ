@@ -1,4 +1,4 @@
-name: Rust
+﻿name: Rust
 
 on:
   push:
@@ -19,9 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # dtolnay/rust-toolchain 无 1.99.1 tag（`git ls-remote --tags` 为空），ref 只能取 @master；
-      # 真正的编译器版本由 `toolchain` 输入钉死，与 rust-toolchain.toml 一致。
-      - uses: dtolnay/rust-toolchain@master
+      # dtolnay/rust-toolchain 鏃?1.99.1 tag锛坄git ls-remote --tags` 涓虹┖锛夛紝ref 鍙兘鍙?@master锛?      # 鐪熸鐨勭紪璇戝櫒鐗堟湰鐢?`toolchain` 杈撳叆閽夋锛屼笌 rust-toolchain.toml 涓€鑷淬€?      - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99.1"
           components: rustfmt
@@ -38,7 +36,7 @@ jobs:
           components: clippy
       - name: Ensure webui/dist placeholder
         shell: bash
-        run: mkdir -p webui/dist && printf '<!doctype html><title>Gensokyo</title>' > webui/dist/index.html
+        run: mkdir -p webui/dist && printf '<!doctype html><title>Gensokyo WebUI</title><h1>Gensokyo WebUI</h1>' > webui/dist/index.html
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
@@ -56,7 +54,7 @@ jobs:
           toolchain: "1.99.1"
       - name: Ensure webui/dist placeholder
         shell: bash
-        run: mkdir -p webui/dist && printf '<!doctype html><title>Gensokyo</title>' > webui/dist/index.html
+        run: mkdir -p webui/dist && printf '<!doctype html><title>Gensokyo WebUI</title><h1>Gensokyo WebUI</h1>' > webui/dist/index.html
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --locked
       - run: cargo test --workspace --locked
@@ -92,6 +90,5 @@ jobs:
         with:
           toolchain: "1.99.1"
       - uses: Swatinem/rust-cache@v2
-      # `cargo xtask` 会把尾随参数转发给 xtask 二进制，`--locked` 必须落在 cargo run 上，
-      # 否则 cargo 可能在校验前静默改写 Cargo.lock。
-      - run: cargo run --locked --package xtask -- check-tls-floors
+      # `cargo xtask` 浼氭妸灏鹃殢鍙傛暟杞彂缁?xtask 浜岃繘鍒讹紝`--locked` 蹇呴』钀藉湪 cargo run 涓婏紝
+      # 鍚﹀垯 cargo 鍙兘鍦ㄦ牎楠屽墠闈欓粯鏀瑰啓 Cargo.lock銆?      - run: cargo run --locked --package xtask -- check-tls-floors
