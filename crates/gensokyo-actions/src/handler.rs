@@ -11,9 +11,11 @@
 //! 与 `gensokyo_runtime::dispatcher::RETCODE_BAD_REQUEST` 同值），`echo` 原样回传。
 //!
 //! 别名（`send_to_group`）不在这里注册：由 `gensokyo_protocol::Registry` 的别名表指向
-//! [`SendGroupHandler`]。
+//! [`SendGroupHandler`]。go-cqhttp 的 `send_group_msg_async` / `send_private_msg_async` /
+//! `send_msg_async` 不是别名而是**独立注册名**（Go 里各自 `RegisterHandler` 到同一个函数），
+//! 因此这里是三个独立 handler（[`SendGroupAsyncHandler`] 等），共用同一套规划函数。
 //!
-//! 三个 handler 只做规划、不碰 I/O，但仍按异步 trait 返回 `Box::pin(async move { … })`：
+//! 六个 handler 只做规划、不碰 I/O，但仍按异步 trait 返回 `Box::pin(async move { … })`：
 //! 后续 action 要 await QQ API 时无需再改注册表契约。
 
 use gensokyo_core::{Error, Result};
@@ -95,6 +97,77 @@ impl Handler for SendMsgHandler {
     }
 }
 
+/// `send_group_msg_async`（go-cqhttp 扩展名）。
+///
+/// Go 的 `handlers/send_group_msg_async.go` 只是把该 action 注册到 `HandleSendGroupMsg`，语义与
+/// 同步版完全相同；「异步」指调用方不等结果，服务端仍按同一路径发送。本 crate 的 deferred 计划
+/// 本就是「先回收据、发送由 runtime 接管」，因此直接复用 [`plan_send_group_msg`]，响应形状与
+/// [`SendGroupHandler`] 一致。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SendGroupAsyncHandler;
+
+impl SendGroupAsyncHandler {
+    /// 构造（handler 无状态）。
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl Handler for SendGroupAsyncHandler {
+    fn name(&self) -> &'static str {
+        "send_group_msg_async"
+    }
+
+    fn handle<'a>(&'a self, request: &'a ActionRequest<Value>) -> HandlerFuture<'a> {
+        Box::pin(async move { respond(request, plan_send_group_msg) })
+    }
+}
+
+/// `send_private_msg_async`（go-cqhttp 扩展名，Go 复用 `HandleSendPrivateMsg`）。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SendPrivateAsyncHandler;
+
+impl SendPrivateAsyncHandler {
+    /// 构造（handler 无状态）。
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl Handler for SendPrivateAsyncHandler {
+    fn name(&self) -> &'static str {
+        "send_private_msg_async"
+    }
+
+    fn handle<'a>(&'a self, request: &'a ActionRequest<Value>) -> HandlerFuture<'a> {
+        Box::pin(async move { respond(request, plan_send_private_msg) })
+    }
+}
+
+/// `send_msg_async`（go-cqhttp 扩展名，Go 复用 `HandleSendMsg`）。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SendMsgAsyncHandler;
+
+impl SendMsgAsyncHandler {
+    /// 构造（handler 无状态）。
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl Handler for SendMsgAsyncHandler {
+    fn name(&self) -> &'static str {
+        "send_msg_async"
+    }
+
+    fn handle<'a>(&'a self, request: &'a ActionRequest<Value>) -> HandlerFuture<'a> {
+        Box::pin(async move { respond(request, plan_send_msg) })
+    }
+}
+
 /// 三个 handler 的公共流程：规划 → `failed(1400)` 或 `ok(deferred)`，两路都回传 echo。
 fn respond(
     request: &ActionRequest<Value>,
@@ -130,7 +203,8 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        DEFERRED_FIELD, RETCODE_BAD_REQUEST, SendGroupHandler, SendMsgHandler, SendPrivateHandler,
+        DEFERRED_FIELD, RETCODE_BAD_REQUEST, SendGroupAsyncHandler, SendGroupHandler,
+        SendMsgAsyncHandler, SendMsgHandler, SendPrivateAsyncHandler, SendPrivateHandler,
     };
     use gensokyo_protocol::Handler;
     use gensokyo_protocol::Status;
@@ -155,6 +229,14 @@ mod tests {
     fn request(action: &str, params: Value) -> ActionRequest<Value> {
         serde_json::from_value(json!({"action": action, "params": params, "echo": "e-1"}))
             .expect("请求应可反序列化")
+    }
+
+    fn request_without_params(action: &str) -> ActionRequest<Value> {
+        ActionRequest {
+            action: action.to_owned(),
+            params: None,
+            echo: Some(json!("e-1")),
+        }
     }
 
     fn ok_data(response: ActionResponse<Value>) -> Value {
@@ -232,6 +314,70 @@ mod tests {
         let private = ok_data(block_on(handler.handle(&private_req)).expect("私聊分派应成功"));
         assert_eq!(private["target"], json!({"private": "3"}));
         assert_eq!(SendMsgHandler.name(), "send_msg");
+    }
+
+    #[test]
+    fn async_variants_reuse_the_sync_plan() {
+        // (async handler, 同步 handler, params)：形状必须与同步版逐字段一致
+        let async_group = SendGroupAsyncHandler::new();
+        let sync_group = SendGroupHandler::new();
+        let params = json!({"group_id": 1, "message": "hi"});
+        let async_data = ok_data(
+            block_on(async_group.handle(&request("send_group_msg_async", params.clone())))
+                .expect("异步规划不应失败"),
+        );
+        let sync_data = ok_data(
+            block_on(sync_group.handle(&request("send_group_msg", params)))
+                .expect("同步规划不应失败"),
+        );
+        assert_eq!(async_data, sync_data);
+        assert_eq!(async_data[DEFERRED_FIELD], json!(true));
+        assert_eq!(async_group.name(), "send_group_msg_async");
+
+        let async_private = SendPrivateAsyncHandler::new();
+        let private_params = json!({"user_id": "abc", "message": "hi"});
+        let async_data = ok_data(
+            block_on(
+                async_private.handle(&request("send_private_msg_async", private_params.clone())),
+            )
+            .expect("异步规划不应失败"),
+        );
+        let sync_data = ok_data(
+            block_on(
+                SendPrivateHandler::new().handle(&request("send_private_msg", private_params)),
+            )
+            .expect("同步规划不应失败"),
+        );
+        assert_eq!(async_data, sync_data);
+        assert_eq!(async_private.name(), "send_private_msg_async");
+
+        let async_msg = SendMsgAsyncHandler::new();
+        let msg_params = json!({"message_type": "group", "group_id": 2, "message": "g"});
+        let async_data = ok_data(
+            block_on(async_msg.handle(&request("send_msg_async", msg_params.clone())))
+                .expect("异步规划不应失败"),
+        );
+        let sync_data = ok_data(
+            block_on(SendMsgHandler::new().handle(&request("send_msg", msg_params)))
+                .expect("同步规划不应失败"),
+        );
+        assert_eq!(async_data, sync_data);
+        assert_eq!(async_msg.name(), "send_msg_async");
+    }
+
+    #[test]
+    fn async_variants_fail_with_1400_like_the_sync_ones() {
+        for handler in [
+            &SendGroupAsyncHandler::new() as &dyn Handler,
+            &SendPrivateAsyncHandler::new(),
+            &SendMsgAsyncHandler::new(),
+        ] {
+            let response = block_on(handler.handle(&request_without_params(handler.name())))
+                .expect("参数错误也应是 Ok(失败响应)");
+            assert_eq!(response.status, Status::Failed);
+            assert_eq!(response.retcode, RETCODE_BAD_REQUEST);
+            assert_eq!(response.data, None);
+        }
     }
 
     #[test]
