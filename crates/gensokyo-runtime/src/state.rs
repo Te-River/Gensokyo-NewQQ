@@ -24,6 +24,7 @@ pub struct AppState {
     echo: Option<Arc<EchoStore>>,
     api: Option<Arc<OpenApiClient<ReqwestTransport>>>,
     hub: EventHub,
+    webui: Option<bool>,
 }
 
 impl AppState {
@@ -37,6 +38,7 @@ impl AppState {
             echo: None,
             api: None,
             hub: EventHub::default(),
+            webui: None,
         }
     }
 
@@ -74,6 +76,23 @@ impl AppState {
     pub fn with_hub(mut self, hub: EventHub) -> Self {
         self.hub = hub;
         self
+    }
+
+    /// 覆盖 WebUI 挂载开关（缺省跟随配置 `disable_webui`，测试与嵌入场景用）。
+    #[must_use]
+    pub fn with_webui(mut self, enabled: bool) -> Self {
+        self.webui = Some(enabled);
+        self
+    }
+
+    /// WebUI 是否挂载：显式覆盖优先，否则取 `!disable_webui`。
+    ///
+    /// 这里放在 `AppState` 而不是 `RuntimeOptions`，是为了不打断
+    /// `RuntimeOptions { ws_bind, http_bind }` 这种外部结构体字面量（`gensokyo-bin`）。
+    #[must_use]
+    pub fn webui_enabled(&self) -> bool {
+        self.webui
+            .unwrap_or_else(|| !self.config.snapshot().get_disable_webui())
     }
 
     /// 配置快照管理器（每次请求现读快照，热重载即时生效）。

@@ -57,6 +57,7 @@ const HTTP_PLAIN: &str = r#"  port: "5700"
   enable_ws_server: false
   http_address: "127.0.0.1:0"
   http_access_token: ""
+  disable_webui: true
   app_id: 12345
   custom_bot_name: TestBot
 "#;
@@ -65,6 +66,7 @@ const HTTP_TOKEN: &str = r#"  port: "5700"
   enable_ws_server: false
   http_address: "127.0.0.1:0"
   http_access_token: "s3cret"
+  disable_webui: true
 "#;
 
 /// 注入的 panic handler：验证传输层把 panic 隔离成 1500，而不是带走连接或进程。
@@ -517,9 +519,14 @@ async fn http_health_unknown_action_and_version_info() {
         "enable_ws_server=false 时不应启动 WS"
     );
 
-    let (status, body) = http_request(addr, "GET", "/", "", None).await;
+    // 探活走独立路径：这张路由表没挂 WebUI，`/health` 与 `/` 都回同一份文本。
+    let (status, body) = http_request(addr, "GET", "/health", "", None).await;
     assert_eq!(status, 200);
-    assert!(body.contains("gensokyo"), "健康检查文本: {body}");
+    assert_eq!(body, "gensokyo-runtime: ok", "健康检查正文: {body}");
+
+    let (status, body) = http_request(addr, "GET", "/", "", None).await;
+    assert_eq!(status, 200, "未挂 WebUI 时 GET / 仍是健康检查");
+    assert_eq!(body, "gensokyo-runtime: ok");
 
     let (status, body) = http_request(
         addr,

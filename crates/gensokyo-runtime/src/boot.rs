@@ -6,6 +6,11 @@
 //! - HTTP API：`http_address` 原样使用（空则不启动）。
 //! - webhook（`webhook_path`）：Go 与正向 WS 共用主服务器端口，这里 merge 进上面两个
 //!   listener 的路由表（见 [`crate::webhook`] 模块文档）。
+//! - WebUI（`!disable_webui`，可用 [`AppState::with_webui`] 覆盖）：静态页与 `/api` 登录
+//!   路由挂到两个 listener。HTTP API 端口上 `POST`（`/api` 以外）仍归 action，优先级见
+//!   [`crate::http_api`]；WS 端口只借出 WebUI 的 GET 面（Go 同样把 WebUI 挂主服务器端口，
+//!   action 留在 `http_address` 的 `NoRoute`）。两个 listener 都保留 `GET /health` 探活文本。
+//!   会话清理是个 10 分钟定时任务，随 [`RuntimeHandle`] 一起停。
 //! - 反向 WS（`ws_address[]`）：纯出站连接，不需要监听端口；地址全为空则不启动。
 //!
 //! [`RuntimeOptions`] 可覆盖两个绑定地址：测试用 `127.0.0.1:0` 取随机端口，避免端口冲突。
@@ -21,10 +26,12 @@
 
 use std::fmt;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
 use gensokyo_core::{Error, Result};
+use gensokyo_webui::{WebUi, WebUiState};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::{AbortHandle, JoinHandle};
@@ -35,6 +42,9 @@ use crate::ws_client::{WsClient, WsClientHandle};
 
 /// 优雅关闭的默认时限：超过它则强制中止残留任务（WS 长连接不会无限拖住退出）。
 pub const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// WebUI 会话清理间隔：会话 TTL 是 24h，10 分钟扫一次足够，且每次只短暂持写锁。
+const WEBUI_CLEANUP_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 /// 绑定地址覆盖；`None` 表示按配置（见模块文档）。
 #[derive(Debug, Clone, Default)]
@@ -100,6 +110,14 @@ impl Runtime {
             Some(crate::webhook::router(state.clone(), &path))
         };
 
+        // WebUI 在绑定前建好：路由表要它，会话清理任务也要它（两处共享同一个 `Arc`）。
+        let webui = if state.webui_enabled() {
+            Some(Arc::new(WebUiState::new(state.config_arc())))
+        } else {
+            tracing::info!("disable_webui=true，WebUI 未挂载");
+            None
+        };
+
         // 先把两个 listener 都绑好再 spawn：任一绑定失败时，已绑定的 socket 随局部变量
         // 释放关闭，不会出现「WS 已在跑、HTTP 启动失败」的半启动状态。
         let ws_listener = match &ws_target {
@@ -112,7 +130,10 @@ impl Runtime {
         };
 
         let ws = if let (Some((_, path)), Some((listener, addr))) = (ws_target, ws_listener) {
-            let app = merge_webhook(crate::ws_server::router(state.clone(), &path), &webhook);
+            let app = merge_webui(
+                merge_webhook(crate::ws_server::router(state.clone(), &path), &webhook),
+                &webui,
+            );
             Some(serve("正向 WS", listener, addr, app))
         } else {
             None
@@ -122,7 +143,7 @@ impl Runtime {
                 "HTTP API",
                 listener,
                 addr,
-                merge_webhook(crate::http_api::router(state.clone()), &webhook),
+                http_app(&state, &webui, &webhook),
             )
         });
 
@@ -137,11 +158,15 @@ impl Runtime {
             .any(|address| !address.trim().is_empty());
         let ws_client = has_ws_address.then(|| WsClient::start(state.clone()));
 
+        // 会话清理任务只在 WebUI 挂载时存在；句柄未 `shutdown` 就 drop 时由 `Drop` 中止。
+        let webui_cleanup = webui.as_ref().map(spawn_session_cleanup);
+
         Ok(RuntimeHandle {
             ws,
             http,
             ws_client,
             hub: state.hub().clone(),
+            webui_cleanup,
         })
     }
 }
@@ -154,6 +179,55 @@ fn merge_webhook(app: Router, webhook: &Option<Router>) -> Router {
         Some(webhook) => app.merge(webhook.clone()),
         None => app,
     }
+}
+
+/// 把 WebUI 路由并进 WS listener；未挂载时原样返回。
+///
+/// 这里不加 action 门：WS 端口没有 action 路由，未匹配的非 GET 请求由 WebUI 的静态回退
+/// 回 405，保持 M1h-a 的「只有 HTTP API 端口收 action」。
+///
+/// `/health` 一并挂上：WebUI 的静态回退把 `/health` 当成 SPA 路由回首页，探活就再也拿不到
+/// 文本。模板默认 `disable_webui=false` 且 `http_address` 为空，主 listener 正是这个 WS
+/// 端口，所以这条健康路由不能只在 HTTP API 端口存在。
+fn merge_webui(app: Router, webui: &Option<Arc<WebUiState>>) -> Router {
+    match webui {
+        Some(webui) => app
+            .merge(WebUi::router(Arc::clone(webui)))
+            .merge(crate::http_api::health_router()),
+        None => app,
+    }
+}
+
+/// HTTP API 端口的路由表：挂 WebUI 时 action 退居「`POST` 且非 `/api`」的门后。
+///
+/// 两个分支互斥的关键在 axum：`Router::merge` 不允许两边都带自定义回退，而 action 本身就是
+/// 回退，所以挂了 WebUI 就不能再 merge [`crate::http_api::router`]，改由
+/// [`crate::http_api::with_webui_router`] 组装（优先级说明见该函数）。
+fn http_app(state: &AppState, webui: &Option<Arc<WebUiState>>, webhook: &Option<Router>) -> Router {
+    let app = match webui {
+        Some(webui) => {
+            crate::http_api::with_webui_router(WebUi::router(Arc::clone(webui)), state.clone())
+        }
+        None => crate::http_api::router(state.clone()),
+    };
+    merge_webhook(app, webhook)
+}
+
+/// 后台清理过期 WebUI 会话；任务句柄存进 [`RuntimeHandle`]，随句柄停止。
+fn spawn_session_cleanup(webui: &Arc<WebUiState>) -> JoinHandle<()> {
+    let webui = Arc::clone(webui);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(WEBUI_CLEANUP_INTERVAL);
+        // `interval` 的第一次 tick 立即返回：先消费掉，避免启动瞬间做无意义的清扫。
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let removed = webui.sessions().cleanup();
+            if removed > 0 {
+                tracing::debug!(removed, "WebUI 会话已过期清理");
+            }
+        }
+    })
 }
 
 /// 一个已启动的 listener。
@@ -181,6 +255,8 @@ pub struct RuntimeHandle {
     http: Option<ServerHandle>,
     ws_client: Option<WsClientHandle>,
     hub: EventHub,
+    /// WebUI 会话清理任务（未挂 WebUI 时为 `None`）。
+    webui_cleanup: Option<JoinHandle<()>>,
 }
 
 impl RuntimeHandle {
@@ -227,6 +303,11 @@ impl RuntimeHandle {
             let addresses = client.address_count();
             client.shutdown(limit).await;
             tracing::debug!(addresses, "反向 WS 客户端已关闭");
+        }
+
+        // 会话清理是纯定时器：没有需要落盘的收尾，直接中止。
+        if let Some(task) = self.webui_cleanup.take() {
+            task.abort();
         }
 
         let mut servers: Vec<ServerHandle> = [self.ws.take(), self.http.take()]
@@ -280,6 +361,9 @@ impl RuntimeHandle {
         if let Some(client) = &self.ws_client {
             client.abort();
         }
+        if let Some(task) = &self.webui_cleanup {
+            task.abort();
+        }
         for server in [self.ws.as_ref(), self.http.as_ref()].into_iter().flatten() {
             server.task.abort();
         }
@@ -290,6 +374,9 @@ impl Drop for RuntimeHandle {
     /// 句柄没走 `shutdown` 就被丢弃时兜底：不 abort 的话 listener 任务会一直活着，
     /// 端口继续监听而调用方无从关闭；反向 WS 任务也会继续重连。
     fn drop(&mut self) {
+        if let Some(task) = self.webui_cleanup.take() {
+            task.abort();
+        }
         if let Some(client) = self.ws_client.take() {
             tracing::warn!("RuntimeHandle 未 shutdown 即被 drop，已中止反向 WS 客户端");
             drop(client);

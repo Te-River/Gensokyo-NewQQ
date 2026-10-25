@@ -30,6 +30,17 @@
 //! - [`boot::Runtime`]：以上四块与 M1h-a 的 listener 一起装配，全部由
 //!   [`RuntimeHandle::shutdown`] 收摊。
 //!
+//! # M3 WebUI 挂载
+//! - `disable_webui=false`（默认）时 [`boot::Runtime`] 建一份 [`gensokyo_webui::WebUiState`]
+//!   （配置走 `ConfigManager` 快照，热重载即时生效），把 `WebUi::router` 挂到 HTTP API 与
+//!   正向 WS 两个 listener；[`AppState::with_webui`] 可覆盖开关。
+//! - 优先级（挂载后）：`POST` 且路径**不在** `/api`、`/api/**` 下 → action；其余 → WebUI
+//!   （`GET /` 静态页、`GET /api/*` 查询、`POST /api/login|logout`）。WebUI 的静态回退只认
+//!   `GET`/`HEAD`，未注册的 `/api` 回 404。细节见 [`http_api`] 模块文档。
+//! - `disable_webui=true` 时路由表回到 M1h-a 原样：`GET /` 是健康检查文本，`POST` 任意路径
+//!   都是 action（含 `/api/**`）。
+//! - 会话清理：每 10 分钟一次 `SessionStore::cleanup`，定时任务随 [`RuntimeHandle`] 停止。
+//!
 //! # 未做项（后续里程碑）
 //! - 消息段：图片 / 语音 / 视频 / ark 卡片 / markdown / card 一律停留在文本形态，
 //!   `array_value` 不生效（细节见 [`inbound`] 模块文档）。

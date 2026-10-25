@@ -55,6 +55,25 @@ pub async fn post_json(addr: SocketAddr, path: &str, body: &str) -> (u16, String
     (status, text)
 }
 
+/// 裸 HTTP `GET`；返回 (状态码, 完整响应文本)。
+pub async fn get(addr: SocketAddr, path: &str) -> (u16, String) {
+    let mut stream = TcpStream::connect(addr).await.expect("连接测试服务失败");
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("写请求失败");
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.expect("读响应失败");
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let status = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_default();
+    (status, text)
+}
+
 /// 取响应 body（`\r\n\r\n` 之后的部分）。
 pub fn response_body(response: &str) -> &str {
     response.split_once("\r\n\r\n").map_or("", |(_, body)| body)

@@ -13,6 +13,8 @@ gensokyo-config.workspace = true
 gensokyo-protocol.workspace = true
 gensokyo-storage.workspace = true
 gensokyo-qq.workspace = true
+# WebUI 静态页与 `/api` 登录路由（M3）；`disable_webui=false` 时挂进 listener
+gensokyo-webui.workspace = true
 # 正向 WS / HTTP API 服务端；`ws` 提供 WebSocket 升级
 axum = { workspace = true, features = ["ws"] }
 # 反向 WS 客户端：`SinkExt` / `StreamExt` 拆读写两半
