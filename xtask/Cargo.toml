@@ -10,6 +10,10 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+# `bench` 子命令的被测对象；三者都是 workspace 已有依赖，不引入基准框架
+gensokyo-actions.workspace = true
+gensokyo-protocol.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

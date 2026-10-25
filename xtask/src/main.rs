@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
+mod bench;
+
 /// TLS 组件安全下限（design §9.1；RustSec-2026-0382/0383 / CVE-2026-111943）。
 const TLS_FLOORS: &[(&str, Version)] = &[
     ("rustls", Version::new(0, 23, 46)),
@@ -196,6 +198,12 @@ enum Xtask {
     },
     /// 断言 Cargo.lock 中的 TLS 组件不低于安全下限。
     CheckTlsFloors,
+    /// 跑固定迭代的同步微基准（方法论与基线见 docs/rust-perf.md）。
+    Bench {
+        /// 每个用例的正式迭代次数（预热固定 1000 次）。
+        #[arg(long, default_value_t = bench::DEFAULT_ITERS)]
+        iters: u64,
+    },
 }
 
 fn main() -> Result<()> {
@@ -219,6 +227,7 @@ fn main() -> Result<()> {
             let lock_path = find_lockfile()?;
             check_tls_floors(&lock_path)?;
         }
+        Xtask::Bench { iters } => bench::run(iters)?,
     }
 
     Ok(())

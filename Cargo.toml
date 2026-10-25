@@ -94,3 +94,19 @@ all = { level = "warn", priority = -1 }
 dbg_macro = "deny"
 unimplemented = "deny"
 todo = "warn"
+
+# 发布构建：LTO + 单 codegen unit 换运行期性能，strip 掉符号缩小产物。
+# 刻意不设 panic = "abort"：runtime 的 handler 隔离依赖 catch_unwind。
+# 方法论、复跑方式与当前基线数字见 docs/rust-perf.md。
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+strip = "symbols"
+
+# bench 与 release 同档：基准必须测发布口径的优化等级，否则数字没有意义。
+[profile.bench]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+strip = "symbols"
