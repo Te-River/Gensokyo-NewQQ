@@ -119,6 +119,13 @@ impl HttpTransport {
     pub fn from_client(client: reqwest::Client) -> Self {
         Self { client }
     }
+
+    /// 复用底层 `reqwest::Client`：图床上传出口（[`crate::hosting::HostingTransport`]）
+    /// 与下载出口共享同一连接池 / TLS 配置，不重复建客户端。
+    #[must_use]
+    pub(crate) fn client(&self) -> &reqwest::Client {
+        &self.client
+    }
 }
 
 impl MediaTransport for HttpTransport {

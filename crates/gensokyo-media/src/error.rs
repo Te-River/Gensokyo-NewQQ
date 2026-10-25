@@ -38,6 +38,12 @@ pub enum Error {
     /// 单次请求总超时（含响应体读取）。
     #[error("请求超时: {0:?}")]
     Timeout(Duration),
+    /// 图床后端未在 M2b 实现，或 `oss_type` 不属于本 crate 的图床枚举。
+    #[error("图床后端不支持: {0}")]
+    HostingUnsupported(String),
+    /// 图床响应无法解析出可用的上传 URL。
+    #[error("图床响应无效: {0}")]
+    HostingResponse(String),
     /// 本地文件读写失败。
     #[error("IO 失败: {0}")]
     Io(#[from] std::io::Error),
