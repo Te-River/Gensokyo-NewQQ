@@ -76,6 +76,15 @@ impl Runtime {
     pub async fn start_with(state: AppState, options: RuntimeOptions) -> Result<RuntimeHandle> {
         let settings = state.config().snapshot();
 
+        // Go 在启动时按 text_intent 算 intent 位并打印（main.go:316-353）；Rust 侧不维持
+        // botgo WS 会话，这里只把解析结果落进日志（未知名字在 [`IntentPlan`] 内 warn）。
+        let intent_plan = crate::intent::IntentPlan::from_settings(&settings);
+        tracing::info!(
+            bits = intent_plan.bits(),
+            handlers = ?intent_plan.enabled_handlers(),
+            "注册 intents"
+        );
+
         // 先把「绑定地址 + 路由路径」全部算出来并校验，再统一绑定：非法 ws_server_path
         // 会让 `Router::route` panic，在这里提前变成可诊断的启动错误。
         let ws_target = if settings.get_enable_ws_server() {

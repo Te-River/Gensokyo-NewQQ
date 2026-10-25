@@ -19,10 +19,11 @@
 //! - [`event_hub::EventHub`]：`tokio::sync::broadcast` 事件总线；webhook 发布、反向 WS
 //!   订阅，一条事件可同时送多个 OneBot 客户端。
 //! - [`inbound::Inbound`]：QQ 事件 `t` + `d` → OneBot [`gensokyo_protocol::Event`]。
-//!   已覆盖 8 个 `t`：`GROUP_AT_MESSAGE_CREATE` / `GROUP_MESSAGE_CREATE` /
-//!   `C2C_MESSAGE_CREATE` / `GROUP_ADD_ROBOT` / `GROUP_DEL_ROBOT` / `GROUP_MSG_REJECT` /
-//!   `GROUP_MSG_RECEIVE` / `FRIEND_ADD`，外加 `lifecycle/connect` 与 `heartbeat` 元事件；
-//!   未知事件返回空列表，不 panic。
+//!   覆盖 botgo 的 12 类自定义事件（群消息/群开关/关系链/群成员/入群申请）加
+//!   `GROUP_AT_MESSAGE_CREATE` / `C2C_MESSAGE_CREATE` 与 `lifecycle/connect`、`heartbeat`
+//!   元事件；未知事件返回空列表，不 panic。
+//! - [`intent::IntentPlan`]：`text_intent` 的 17 个 handler 名 → botgo intent 位
+//!   （对齐 Go `main.go:316-353`，含 `discover_unknown_events` 与摘位策略），启动时写日志。
 //! - [`ws_client::WsClient`]：读 `ws_address[]` 逐地址连接（`tokio-tungstenite`），
 //!   `reconnect_times` 指数退避、`heart_beat_interval` 心跳、`ws_token[]` +
 //!   URL `access_token` 鉴权，可优雅停止。
@@ -44,8 +45,7 @@
 //! # 未做项（后续里程碑）
 //! - 消息段：图片 / 语音 / 视频 / ark 卡片 / markdown / card 一律停留在文本形态，
 //!   `array_value` 不生效（细节见 [`inbound`] 模块文档）。
-//! - 群管理事件全量：`GROUP_MEMBER_ADD/REMOVE`、`GROUP_JOIN_REQUEST`、
-//!   `INTERACTION_CREATE`、频道 `GUILD_*` 未转换。
+//! - `INTERACTION_CREATE`、`MESSAGE_AUDIT_*`、`FORUM_*`、`AUDIO_*`、频道 `GUILD_*` 未转换。
 //! - webhook 的 ed25519 签名校验与 `op=13` 回调校验（workspace 无 ed25519 依赖），
 //!   `union_webhook` 扇出亦未做。
 //! - 反向 WS 上收到的 OneBot action 不 dispatch；`sendFailures` 补发队列未实现。
@@ -63,6 +63,8 @@ pub mod event_hub;
 pub mod http_api;
 /// QQ 事件 → OneBot 事件（`Processor/`，M1h-b）。
 pub mod inbound;
+/// `text_intent` → botgo intent 位（`main.go`，M1h-c）。
+pub mod intent;
 /// 有界队列 + 令牌桶（`messagequeue/`，M1i）。
 pub mod queue {}
 pub mod state;
@@ -76,6 +78,7 @@ pub use boot::{DEFAULT_SHUTDOWN_TIMEOUT, Runtime, RuntimeHandle, RuntimeOptions}
 pub use dispatcher::{Dispatcher, RETCODE_BAD_REQUEST, RETCODE_INTERNAL, RETCODE_UNKNOWN_ACTION};
 pub use event_hub::EventHub;
 pub use inbound::Inbound;
+pub use intent::IntentPlan;
 pub use state::AppState;
 pub use webhook::{ACK_BODY as WEBHOOK_ACK_BODY, MAX_BODY_BYTES as WEBHOOK_MAX_BODY_BYTES};
 pub use ws_client::{WsClient, WsClientHandle, WsClientOptions};
