@@ -73,7 +73,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 
 # 媒体 / 通用工具
 base64 = "0.23.1"
-image = "0.25.10"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 bytes = "1.12.1"
 futures = "0.3.34"
 parking_lot = "0.13.0"

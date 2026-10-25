@@ -27,6 +27,16 @@
 //! - [`hosting::HostingTransport`]：上传递出口（POST / PUT / GET），生产实现复用
 //!   [`fetch::HttpTransport`] 的 `reqwest::Client`，测试用 Fake 断言 multipart。
 //!
+//! ## M2c：图片压缩
+//! - [`compress::compress_image`]：解码 JPEG / PNG / WebP → 长边超过
+//!   [`compress::DEFAULT_MAX_SIDE`]（1024）时等比缩放 → 按质量阶梯编码；有体积目标时取**第一个**
+//!   不超过目标的结果，都不满足取体积最小的那个。不支持格式 / 解码失败 / 编码失败一律返回 [`Error`]。
+//! - [`compress::CompressOptions`]：`max_side`（0 = 不缩放）、`quality_ladder`
+//!   （默认 [`compress::GO_QUALITY_LADDER`] = 75/65/55/45/35/25，对齐 Go 的 max 75 / step 10 /
+//!   min 25）、`format`（`None` 沿用源格式）、`target_bytes`（`None` = 不设体积目标）。
+//! - 透明通道：PNG 输入默认输出 PNG 并保留 alpha；显式 [`compress::ImageFormat::Jpeg`] 时按 Go
+//!   `compressPNG` 的做法压到白底。
+//!
 //! # 与 Go 的差异（M2a）
 //! - **SSRF / 重定向 / 私网拦截**：Go `internal/application/media/fetcher.go` 有
 //!   `checkSSRF`（DNS 解析 + 私网/回环拒绝）与 `MaxRedirects`。本 crate **不做**这些，
@@ -59,21 +69,35 @@
 //! 图床侧的差异（不重试、URL 校验、文件部件 MIME、文件名清洗）集中在 [`hosting`] 的模块
 //! 文档里；尺寸探测的差异（JPEG 严格标记、Go 宽高写反、WebP/BMP 补齐）在 [`image`] 里。
 //!
+//! # 与 Go 的差异（M2c）
+//! 细节在 [`compress`] 的模块文档里，要点：
+//! - **尺寸缩放是新增能力**：Go `images/Compress.go` / `easycompress.go` 只按质量阶梯重编码、
+//!   从不缩放；本 crate 先等比缩到 `max_side` 再进阶梯（`max_side = 0` 回到 Go 行为）。
+//! - **PNG 默认保留透明**：Go `compressPNG` 一律转白底 JPEG；本 crate 只在显式要求 JPEG 时才压白底。
+//! - **没有「阈值 0 原样返回」短路**：Go `image_sizelimit == 0` 直接返回入参；本 crate 由调用方
+//!   决定（`target_bytes = None` = 不设体积目标，仍会缩放 + 按首档编码）。
+//! - **GIF 不在范围**：Go 会逐帧重编码 GIF，M2c 只解码 JPEG / PNG / WebP（GIF / BMP 报
+//!   [`Error::UnsupportedImageFormat`]）。
+//! - **编码产物不逐字节对齐**：Go 用标准库默认参数，这里用 `image` crate 默认参数，像素与体积量级
+//!   接近但不保证相等。
+//!
 //! # 依赖边界
 //! 只用 workspace 已锁定并已在本 crate 依赖图里的 crate（`reqwest` / `tokio` / `base64` /
-//! `thiserror` / `rustls` / `tracing`）。M2b **不新增任何依赖边**：图床响应用
-//! [`hosting`] 内部的极简 JSON 读取器，multipart body 手写，避免 `Cargo.lock` 变动。
+//! `thiserror` / `rustls` / `tracing`）。M2c 起新增 `image`（workspace 早已声明，此前未入图）——
+//! 这是 M2c 唯一的新依赖边。
 //!
-//! # 未做项（留给 M2c+）
-//! - 图片压缩（`images/Compress.go` 的 JPEG 质量阶梯、GIF 处理）——需要 `image` crate。
+//! # 未做项（留给 M2d+）
+//! - GIF 逐帧压缩（Go `compressGIF`），以及 BMP 解码。
 //! - COS 自签上传（`imagehosting/cos.go` 的 q-sign）与 Nature 的内置 COS 密钥直传。
 //! - Bilibili 登录态上传与分片（`imagehosting/bilibili.go`）。
 //! - 星野的 PUT 直传（`imagehosting/signed.go` 的 xingye 分支）与 QQ频道（oss_type 6）上传。
 //! - silk 音频编解码（`silk/` + `go-silk/` 的 C ABI 封装）。
+//! - 视频处理（抽帧 / 转码 / 体积压缩）。
 //! - 上传到 QQ（`/v2/.../files` 的 `file_data` / 分片上传）——由 `gensokyo-qq` + actions 负责。
 //! - QR 码生成。
 //! - SSRF 防护、重定向次数限制、DNS 私网拦截；图床上传的库内重试与退避。
 
+pub mod compress;
 pub mod data_uri;
 pub mod error;
 pub mod fetch;
@@ -85,6 +109,9 @@ pub mod source;
 /// silk 音频编解码（`silk/` + `go-silk/` 的 C ABI 封装）。
 pub mod silk {}
 
+pub use compress::{
+    CompressOptions, DEFAULT_MAX_SIDE, GO_QUALITY_LADDER, ImageFormat, compress_image,
+};
 pub use data_uri::{DataUri, cq_base64, decode_base64, encode_base64, to_data_uri};
 pub use error::{Error, Result};
 pub use fetch::{

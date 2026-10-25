@@ -25,6 +25,8 @@ tokio = { workspace = true, features = ["fs", "io-util", "time"] }
 base64.workspace = true
 # tracing：临时文件写失败且清理失败时的告警（fetch.rs 的 write_temp）
 tracing.workspace = true
+# image：M2c 图片压缩（JPEG / PNG / WebP 解码，JPEG / PNG 编码）；M2b 之前只用文件头探测
+image.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

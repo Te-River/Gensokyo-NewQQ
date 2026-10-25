@@ -44,6 +44,18 @@ pub enum Error {
     /// 图床响应无法解析出可用的上传 URL。
     #[error("图床响应无效: {0}")]
     HostingResponse(String),
+    /// 图片格式不在 M2c 解码范围（只解码 JPEG / PNG / WebP）。
+    #[error("不支持的图片格式: {0}")]
+    UnsupportedImageFormat(String),
+    /// 图片解码失败（数据损坏或被截断）。
+    #[error("图片解码失败: {0}")]
+    ImageDecode(String),
+    /// 图片编码失败。
+    #[error("图片编码失败: {0}")]
+    ImageEncode(String),
+    /// 压缩参数非法（如质量阶梯为空）。
+    #[error("压缩参数非法: {0}")]
+    InvalidCompressOptions(String),
     /// 本地文件读写失败。
     #[error("IO 失败: {0}")]
     Io(#[from] std::io::Error),
