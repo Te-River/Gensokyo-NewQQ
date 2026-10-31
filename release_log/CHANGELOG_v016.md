@@ -112,6 +112,19 @@
 - `handlers/cq_record_param_test.go`：`[CQ:record]` 正则捕获组语义（尾随 `,asr=` 不污染 URL、URL 含逗号不误切、管道级 `asr` 不泄漏进正文）
 - `handlers/qq_error_codes_test.go`：已知/未知错误码格式化
 
+### 依赖安全升级（CVE 排查，2026-10-22）
+
+依据 govulncheck 确认的 29 条可达告警，升级受影响的可达依赖与 Go 工具链；不改动业务逻辑，无调用点适配。
+
+- **修改**：`golang.org/x/net` v0.25.0 → v0.60.0（GO-2026-6617 / 6612 / 6611 / 6610 / 6603 / 5026 / 4918 / 3595）
+- **修改**：`google.golang.org/grpc` v1.65.0 → v1.84.0（GO-2026-6443 / 6348 / 6061 / 4762）；GO-2026-6443 的修复线经复扫确认为 v1.83.2，故取 v1.84.0
+- **修改**：`github.com/gorilla/websocket` v1.4.2 → v1.5.3（GO-2026-6278）
+- **修改**：`golang.org/x/text` v0.15.0 → v0.42.0（GO-2026-5970）；`x/net@v0.60.0` 要求 `x/text >= v0.42.0`，故取 v0.42.0（高于修复版 v0.39.0）
+- **修改**：`go.mod` 的 `go` 指令 1.25.0 → 1.26.10，标准库部分告警由工具链补丁修复（GO-2026-6809 / CVE-2026-111943，x509 中间证书信任）
+- **修改**：`.github/workflows/cross_compile.yml` 的 `node-version` 24 → 24.22.1（CVE-2026-111497）
+- **影响**：`go build ./...`、`go build -tags=small ./...`、`go vet ./...`、`go test ./handlers/` 全部通过
+- **说明**：最小版本选择连带抬高的间接依赖为 `golang.org/x/sys` v0.48.0、`golang.org/x/crypto` v0.57.0、`google.golang.org/protobuf` v1.36.11、`google.golang.org/genproto/googleapis/rpc`（2026-07-06 版本），均为上层模块的强制下界
+
 ---
 
 ## ✅ 提交记录
