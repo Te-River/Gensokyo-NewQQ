@@ -26,6 +26,13 @@ func ProcessCQCodePipeline(text string, foundItems map[string][]string, groupID 
 	// 2. Markdown：base64 直接存入；JSON 编码后存入
 	text = processCQMarkdownPipeline(text, foundItems)
 
+	// 2.1 markdown 载荷内的 @全员 归一：载荷在这里已 base64，文本侧扫描覆盖不到（F6）
+	normalizeAtEveryoneInFoundItems(foundItems)
+
+	// 2.5 @全员归一：[CQ:at,qq=all|everyone] → 官方 <qqbot-at-everyone />
+	// 先于 card 阶段，保证文本与 markdown 两条出站路径同源（P-G2）
+	text = NormalizeAtEveryone(text)
+
 	// 3. 卡片消息 [CQ:card,...]：参数提取为 JSON 存入
 	text = processCQCardPipeline(text, foundItems)
 

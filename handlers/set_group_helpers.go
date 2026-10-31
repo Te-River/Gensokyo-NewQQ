@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/hoshinonyaruko/gensokyo/idmap"
+	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/tencent-connect/botgo/dto"
 	"github.com/tencent-connect/botgo/openapi"
 )
@@ -46,6 +47,18 @@ func resolveMemberOpenID(userID string) (string, error) {
 // 无全员禁言写入字段（global_rule.mode 仅出现在查询响应中）
 var errWholeBanUnsupported = errors.New("官方未提供全员禁言写入字段，仅支持按成员禁言")
 
+// maxMuteDurationSeconds 是官方 POST /restrict_chat_setting 的禁言时长上限：30 天
+const maxMuteDurationSeconds = 30 * 24 * 60 * 60
+
+// clampMuteDuration 把禁言时长收敛到官方 30 天上限；<=0 表示解除禁言，原样返回。
+func clampMuteDuration(duration int) int {
+	if duration > maxMuteDurationSeconds {
+		mylog.Printf("禁言时长 %d 秒超过官方 30 天上限，截断为 %d 秒", duration, maxMuteDurationSeconds)
+		return maxMuteDurationSeconds
+	}
+	return duration
+}
+
 // applyRestrictChatSetting 按官方增量语义提交群成员禁言变更。
 // memberOpenID 非空时按 duration 增/删该成员禁言条目：
 // duration>0 → op=add + mute_expire_at=now+duration（RFC3339）；
@@ -56,6 +69,7 @@ func applyRestrictChatSetting(apiv2 openapi.OpenAPI, groupOpenID string, memberO
 	if allMute != nil {
 		return errWholeBanUnsupported
 	}
+	duration = clampMuteDuration(duration)
 	item := dto.MemberMuteState{MemberOpenID: memberOpenID}
 	if duration > 0 {
 		item.Op = "add"

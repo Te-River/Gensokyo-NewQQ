@@ -165,6 +165,8 @@ type Settings struct {
 	NativeMD                 bool   `yaml:"native_md"`
 	EntersAsBlock            bool   `yaml:"enters_as_block"`
 	ForceVerifyImageResource bool   `yaml:"force_verify_image_resource"`
+	//@全员限制(指针类型:nil=未配置,按默认 true 处理;显式 false 才关闭)
+	EnableAtEveryoneLimit *bool `yaml:"enable_at_everyone_limit"`
 	//发送行为修改
 	LazyMessageId     bool   `yaml:"lazy_message_id"`
 	RamDomSeq         bool   `yaml:"ramdom_seq"`

@@ -59,6 +59,8 @@ impl<T: HttpTransport> OpenApiClient<T> {
     }
 
     /// 群成员列表（`GET /v2/groups/{group_id}/members`），游标分页。
+    ///
+    /// `cursor` 为 `None` / 空串取首页；响应里的 `next_cursor` 为末页时是空串。
     pub async fn get_group_members(
         &self,
         group_openid: &str,
@@ -88,7 +90,7 @@ impl<T: HttpTransport> OpenApiClient<T> {
     }
 }
 
-/// 追加 `cursor` / `limit` 查询参数（`limit` 只在 `> 0` 时传）。
+/// 追加 `cursor` / `limit` 查询参数（`cursor` 空串与 `limit = 0` 都不传）。
 fn with_paging(mut path: String, cursor: Option<&str>, limit: Option<u32>) -> String {
     let mut query: Vec<String> = Vec::new();
     if let Some(cursor) = cursor.filter(|cursor| !cursor.is_empty()) {
@@ -102,4 +104,29 @@ fn with_paging(mut path: String, cursor: Option<&str>, limit: Option<u32>) -> St
         path.push_str(&query.join("&"));
     }
     path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::with_paging;
+
+    #[test]
+    fn members_path_forwards_cursor_and_limit() {
+        assert_eq!(
+            with_paging("/v2/groups/G/members".to_owned(), Some("nc"), Some(30)),
+            "/v2/groups/G/members?cursor=nc&limit=30"
+        );
+    }
+
+    #[test]
+    fn first_page_omits_empty_cursor_and_zero_limit() {
+        assert_eq!(
+            with_paging("/v2/groups/G/members".to_owned(), None, Some(30)),
+            "/v2/groups/G/members?limit=30"
+        );
+        assert_eq!(
+            with_paging("/v2/groups/G/members".to_owned(), Some(""), Some(0)),
+            "/v2/groups/G/members"
+        );
+    }
 }

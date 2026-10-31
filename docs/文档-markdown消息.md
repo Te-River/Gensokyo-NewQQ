@@ -124,7 +124,15 @@ data 支持：`string`（纯文本）、`base64://` 编码的 JSON，或 `map` �
 }
 ```
 
-### 模板 Markdown
+### 模板 Markdown（已废弃）
+
+> ⚠️ `custom_template_id` 已废弃，不再生效：官方消息接口已移除模板消息，Gensokyo 也不再按配置自动注入该字段。模板消息请改用原生 Markdown 内容：`{"markdown": {"content": "..."}}`。
+>
+> `native_md` 开关不再改变载荷形态：即使设为 `false` 也不会再产出 `params`，图文转 Markdown 统一构造原生 `content`。
+>
+> 显式携带 `custom_template_id` 但 `content` 为空时，群聊、私聊与新链统一返回 `retcode=1400`，不再发送 `msg_type=2` 空载荷（该判定先于 @全员 额度占用）。
+
+下例保留仅为兼容阅读（`custom_template_id` 仍可反序列化，其中的 `params` 形态已不再生效）：
 
 ```json
 {

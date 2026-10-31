@@ -18,7 +18,7 @@
 //! |------|----------|------|
 //! | [`QqApi::get_group_info`] | `GET /v2/groups/{gid}/info` | 真实调用 |
 //! | [`QqApi::get_group_member_info`] | `GET /v2/groups/{gid}/members/{mid}` | 真实调用 |
-//! | [`QqApi::get_group_member_list`] | `GET /v2/groups/{gid}/members` | 真实调用 |
+//! | [`QqApi::get_group_member_list`] / [`QqApi::get_group_member_page`] | `GET /v2/groups/{gid}/members` | 真实调用（后者带 `cursor` 分页） |
 //! | [`QqApi::set_group_ban`] | `POST /v2/groups/{gid}/restrict_chat_setting` | 真实调用 |
 //! | [`QqApi::get_group_bot_state`] | `GET /v2/groups/{gid}/bot_state` | 真实调用 |
 //! | [`QqApi::get_group_join_request_list`] | `GET /v2/groups/{gid}/join_request_list` | 真实调用 |
@@ -26,6 +26,11 @@
 //! | [`QqApi::send_c2c_message`] | `POST /v2/users/{uid}/messages` | 真实调用（deferred 执行链） |
 //! | [`QqApi::upload_group_file`] | `POST /v2/groups/{gid}/files` | 真实调用（deferred 媒体上传） |
 //! | [`QqApi::upload_c2c_file`] | `POST /v2/users/{uid}/files` | 真实调用（deferred 媒体上传） |
+//! | [`QqApi::prepare_media_image`] | `POST /v2/media-images/prepare` | 真实调用（素材管理） |
+//! | [`QqApi::put_presigned_image`] | `PUT <presigned_url>`（COS） | 真实调用（不带 Authorization） |
+//! | [`QqApi::complete_media_image`] | `POST /v2/media-images/complete` | 真实调用（素材管理） |
+//! | [`QqApi::list_media_images`] | `GET /v2/media-images?cursor=` | 真实调用（素材管理） |
+//! | [`QqApi::delete_media_image`] | `DELETE /v2/media-images/{id}/delete` | 真实调用（素材管理） |
 //! | [`QqApi::set_group_kick`] | `batch_remove_members` | 未落地，`Unsupported` |
 //! | [`QqApi::set_group_leave`] | 官方无机器人退群端点 | 未落地，`Unsupported` |
 //! | [`QqApi::get_group_list`] | 官方无「列出机器人所在群」端点 | 未落地，`Unsupported` |
@@ -55,6 +60,10 @@ use std::sync::Arc;
 use gensokyo_config::ConfigManager;
 use gensokyo_core::{Error, Result};
 use gensokyo_protocol::Segment;
+use gensokyo_qq::dto::media_image::{
+    MediaImageCompleteRequest, MediaImageCompleteResponse, MediaImageList,
+    MediaImagePrepareRequest, MediaImagePrepareResponse,
+};
 use gensokyo_qq::dto::{
     FileUpload, MediaResponse, MemberMuteState, MessageResponse, MessageToCreate,
     RestrictChatSetting,
@@ -101,6 +110,21 @@ pub trait QqApi: Send + Sync + fmt::Debug {
         group_openid: &str,
         limit: u32,
     ) -> QqFuture<'_, GroupMemberList>;
+
+    /// 群成员列表单页（带游标；`cursor` 为 `None` / 空串时取首页）。
+    ///
+    /// 独立成型而不给 [`QqApi::get_group_member_list`] 加形参：该方法已被 `deferred.rs`
+    /// 等 P-R2 文件里的替身实现，改签名会把改动扩散到别人的地盘。默认实现忽略游标、
+    /// 退回首页，与旧行为等价。
+    fn get_group_member_page(
+        &self,
+        group_openid: &str,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> QqFuture<'_, GroupMemberList> {
+        let _ = cursor;
+        self.get_group_member_list(group_openid, limit)
+    }
 
     /// 群成员禁言；`duration_secs <= 0` 表示立即解除。
     fn set_group_ban(
@@ -166,6 +190,67 @@ pub trait QqApi: Send + Sync + fmt::Debug {
         Box::pin(async {
             Err(Error::Unsupported(
                 "upload_c2c_file: 当前 QqApi 实现不支持媒体上传".to_owned(),
+            ))
+        })
+    }
+
+    /// 素材上传·申请（`POST /v2/media-images/prepare`）。
+    ///
+    /// 三个素材方法（prepare / put_presigned / complete）由 handler 按序编排：任一步失败都要能
+    /// 定位到具体环节，因此不合并成一个「上传」方法。
+    ///
+    /// 默认实现返回 [`Error::Unsupported`]：只跑查询类 action 的替身不必实现素材管理。
+    fn prepare_media_image(
+        &self,
+        _request: MediaImagePrepareRequest,
+    ) -> QqFuture<'_, MediaImagePrepareResponse> {
+        Box::pin(async {
+            Err(Error::Unsupported(
+                "prepare_media_image: 当前 QqApi 实现不支持素材管理".to_owned(),
+            ))
+        })
+    }
+
+    /// 素材上传·直传 COS（`PUT <presigned_url>`）；返回去引号后的 ETag（等于文件 md5）。
+    fn put_presigned_image(
+        &self,
+        _presigned_url: &str,
+        _content_type: &str,
+        _bytes: Vec<u8>,
+    ) -> QqFuture<'_, String> {
+        Box::pin(async {
+            Err(Error::Unsupported(
+                "put_presigned_image: 当前 QqApi 实现不支持素材管理".to_owned(),
+            ))
+        })
+    }
+
+    /// 素材上传·完成（`POST /v2/media-images/complete`）。
+    fn complete_media_image(
+        &self,
+        _request: MediaImageCompleteRequest,
+    ) -> QqFuture<'_, MediaImageCompleteResponse> {
+        Box::pin(async {
+            Err(Error::Unsupported(
+                "complete_media_image: 当前 QqApi 实现不支持素材管理".to_owned(),
+            ))
+        })
+    }
+
+    /// 素材列表（`GET /v2/media-images?cursor=`）；`cursor` 为 `None` 表示首页。
+    fn list_media_images(&self, _cursor: Option<&str>) -> QqFuture<'_, MediaImageList> {
+        Box::pin(async {
+            Err(Error::Unsupported(
+                "list_media_images: 当前 QqApi 实现不支持素材管理".to_owned(),
+            ))
+        })
+    }
+
+    /// 删除素材（`DELETE /v2/media-images/{image_id}/delete`）。
+    fn delete_media_image(&self, _image_id: &str) -> QqFuture<'_, ()> {
+        Box::pin(async {
+            Err(Error::Unsupported(
+                "delete_media_image: 当前 QqApi 实现不支持素材管理".to_owned(),
             ))
         })
     }
@@ -316,6 +401,22 @@ impl<T: HttpTransport> QqApi for OpenApiClient<T> {
         })
     }
 
+    fn get_group_member_page(
+        &self,
+        group_openid: &str,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> QqFuture<'_, GroupMemberList> {
+        let group_openid = group_openid.to_owned();
+        // async 块里不能借用入参，游标先转成所有权再透传
+        let cursor = cursor.map(str::to_owned);
+        Box::pin(async move {
+            OpenApiClient::get_group_members(self, &group_openid, cursor.as_deref(), Some(limit))
+                .await
+                .map_err(qq_error)
+        })
+    }
+
     fn set_group_ban(
         &self,
         group_openid: &str,
@@ -398,6 +499,61 @@ impl<T: HttpTransport> QqApi for OpenApiClient<T> {
         let user_openid = user_openid.to_owned();
         Box::pin(async move {
             OpenApiClient::upload_c2c_file(self, &user_openid, &file)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn prepare_media_image(
+        &self,
+        request: MediaImagePrepareRequest,
+    ) -> QqFuture<'_, MediaImagePrepareResponse> {
+        Box::pin(async move {
+            OpenApiClient::prepare_media_image(self, &request)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn put_presigned_image(
+        &self,
+        presigned_url: &str,
+        content_type: &str,
+        bytes: Vec<u8>,
+    ) -> QqFuture<'_, String> {
+        let presigned_url = presigned_url.to_owned();
+        let content_type = content_type.to_owned();
+        Box::pin(async move {
+            OpenApiClient::put_presigned_image(self, &presigned_url, &content_type, &bytes)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn complete_media_image(
+        &self,
+        request: MediaImageCompleteRequest,
+    ) -> QqFuture<'_, MediaImageCompleteResponse> {
+        Box::pin(async move {
+            OpenApiClient::complete_media_image(self, &request)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn list_media_images(&self, cursor: Option<&str>) -> QqFuture<'_, MediaImageList> {
+        let cursor = cursor.map(str::to_owned);
+        Box::pin(async move {
+            OpenApiClient::list_media_images(self, cursor.as_deref())
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn delete_media_image(&self, image_id: &str) -> QqFuture<'_, ()> {
+        let image_id = image_id.to_owned();
+        Box::pin(async move {
+            OpenApiClient::delete_media_image(self, &image_id)
                 .await
                 .map_err(qq_error)
         })

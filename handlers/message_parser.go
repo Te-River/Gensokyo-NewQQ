@@ -695,17 +695,25 @@ func SendGuildPrivateResponse(client callapi.Client, err error, message *callapi
 //   - shadow：legacy 产物生效，新解析器并行纯解析并 diff 上报（mylog）；
 //   - new：全走 cqparse 统一解析器，动作码以 PendingAction 返回。
 func parseMessageContent(paramsMessage callapi.ParamsContent, message callapi.ActionMessage, client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI) (string, map[string][]string, []cqparse.PendingAction) {
+	var (
+		messageText string
+		foundItems  map[string][]string
+		pendings    []cqparse.PendingAction
+	)
 	switch config.GetCQParseMode() {
 	case "new":
-		return parseMessageContentCQParse(paramsMessage, message, client, api, apiv2)
+		messageText, foundItems, pendings = parseMessageContentCQParse(paramsMessage, message, client, api, apiv2)
 	case "shadow":
-		messageText, foundItems := parseMessageContentLegacy(paramsMessage, message, client, api, apiv2)
+		messageText, foundItems = parseMessageContentLegacy(paramsMessage, message, client, api, apiv2)
 		runCQParseShadow(paramsMessage, message, client, api, apiv2, messageText, foundItems)
-		return messageText, foundItems, nil
 	default:
-		messageText, foundItems := parseMessageContentLegacy(paramsMessage, message, client, api, apiv2)
-		return messageText, foundItems, nil
+		messageText, foundItems = parseMessageContentLegacy(paramsMessage, message, client, api, apiv2)
 	}
+	// @全员归一收口：legacy 的 CQ 管道与 cqparse 新链都要覆盖。
+	// 文本侧幂等（已归一的不再变化）；markdown 载荷进库时已 base64，必须解码后单独归一（F6）。
+	messageText = NormalizeAtEveryone(messageText)
+	normalizeAtEveryoneInFoundItems(foundItems)
+	return messageText, foundItems, pendings
 }
 
 // buildCQParseInput 将 ParamsContent 归一为 cqparse.Input（字符串/段数组/TRSS 三形态）。
@@ -2550,6 +2558,12 @@ func unwrapNestedMarkdown(raw []byte) (struct {
 	return zero, false
 }
 
+// errTemplateMarkdownNoContent 表示 markdown 载荷只有废弃的模板字段（custom_template_id/params）
+// 而没有 content。官方已废弃模板消息，出站只认 content；缺 content 时构造出的 msg_type=2
+// 是空正文，发出去必被上游判为无效。对齐 Rust compose_markdown：按请求错误（retcode=1400）拒绝，
+// 不静默降级为文本（S1）。
+var errTemplateMarkdownNoContent = errors.New("markdown 载荷缺少 content：模板消息已废弃，只支持原生 markdown 内容")
+
 func parseMDData(mdData []byte) (*dto.Markdown, *keyboard.MessageKeyboard, error) {
 	// 定义一个用于解析 JSON 的临时结构体
 	type mdFields struct {
@@ -2593,11 +2607,13 @@ func parseMDData(mdData []byte) (*dto.Markdown, *keyboard.MessageKeyboard, error
 	// 处理 Markdown
 	var md *dto.Markdown
 	if temp.Markdown.CustomTemplateID != nil {
-		// 处理模板 Markdown
+		// 模板 Markdown 官方已废弃：出站只构造 content，不再透传 custom_template_id/params；
+		// 模板载荷没有 content 时无可发送的正文，直接报错（S1），由调用方回 retcode=1400。
+		if strings.TrimSpace(temp.Markdown.Content) == "" {
+			return nil, nil, errTemplateMarkdownNoContent
+		}
 		md = &dto.Markdown{
-			CustomTemplateID: *temp.Markdown.CustomTemplateID,
-			Params:           temp.Markdown.Params,
-			Content:          temp.Markdown.Content,
+			Content: temp.Markdown.Content,
 		}
 	} else if temp.Markdown.Content != "" {
 		// 处理自定义 Markdown
@@ -2795,6 +2811,11 @@ func ResolveMarkdownImages(content string, apiv2 openapi.OpenAPI) string {
 		if strings.HasPrefix(mediaPath, "data:") {
 			return "", false
 		}
+		// 素材管理引用（qqbot-media://image/v1/<token>）原样透传：
+		// 令牌与机器人绑定，本地无从校验；下载改写还会破坏官方「#宽px #高px」语法
+		if strings.HasPrefix(mediaPath, "qqbot-media://") {
+			return "", false
+		}
 		localPath := trimFilePrefix(mediaPath)
 		// 安全校验：防止路径穿越
 		safePath, err := safeLocalPath(localPath, ".")
@@ -2818,12 +2839,49 @@ func ResolveMarkdownImages(content string, apiv2 openapi.OpenAPI) string {
 	})
 }
 
+// keyboardMediaResolver 返回 keyboard 按钮图片的解析器：本地路径上传 CDN，
+// http(s) / data: / qqbot-media:// 原样透传（与 ResolveMarkdownImages 同口径，
+// 素材管理令牌与机器人绑定，本地无从校验也不该改写）。
+func keyboardMediaResolver(apiv2 openapi.OpenAPI) func(string) (string, bool) {
+	return func(mediaPath string) (string, bool) {
+		if strings.HasPrefix(mediaPath, "http://") || strings.HasPrefix(mediaPath, "https://") {
+			return "", false
+		}
+		if strings.HasPrefix(mediaPath, "data:") {
+			return "", false
+		}
+		if strings.HasPrefix(mediaPath, "qqbot-media://") {
+			return "", false
+		}
+		localPath := trimFilePrefix(mediaPath)
+		safePath, err := safeLocalPath(localPath, ".")
+		if err != nil {
+			mylog.Printf("安全校验失败，跳过Keyboard本地图片: %v", err)
+			return "", false
+		}
+		localPath = safePath
+		imageData, err := readLocalMedia(localPath)
+		if err != nil {
+			mylog.Printf("Error reading local image for keyboard: %v", err)
+			return "", false
+		}
+		base64Encoded := base64.StdEncoding.EncodeToString(imageData)
+		cdnURL, _, _, err := images.UploadBase64ImageToServer(base64Encoded, apiv2)
+		if err != nil {
+			mylog.Printf("Error uploading image for keyboard: %v", err)
+			return "", false
+		}
+		return cdnURL, true
+	}
+}
+
 // ResolveKeyboardImages 遍历 keyboard 中的所有按钮，将 render_data.label 和
 // render_data.visited_label 中的本地图片路径上传到 CDN 并替换为 URL。
 func ResolveKeyboardImages(kb *keyboard.MessageKeyboard, apiv2 openapi.OpenAPI) {
 	if kb == nil || kb.Content == nil {
 		return
 	}
+	resolve := keyboardMediaResolver(apiv2)
 	for _, row := range kb.Content.Rows {
 		if row == nil {
 			continue
@@ -2833,125 +2891,39 @@ func ResolveKeyboardImages(kb *keyboard.MessageKeyboard, apiv2 openapi.OpenAPI) 
 				continue
 			}
 			if btn.RenderData.Label != "" {
-				btn.RenderData.Label = resolveMarkdownMediaReferences(btn.RenderData.Label, func(mediaPath string) (string, bool) {
-					if strings.HasPrefix(mediaPath, "http://") || strings.HasPrefix(mediaPath, "https://") {
-						return "", false
-					}
-					if strings.HasPrefix(mediaPath, "data:") {
-						return "", false
-					}
-					localPath := trimFilePrefix(mediaPath)
-					safePath, err := safeLocalPath(localPath, ".")
-					if err != nil {
-						mylog.Printf("安全校验失败，跳过Keyboard本地图片: %v", err)
-						return "", false
-					}
-					localPath = safePath
-					imageData, err := readLocalMedia(localPath)
-					if err != nil {
-						mylog.Printf("Error reading local image for keyboard: %v", err)
-						return "", false
-					}
-					base64Encoded := base64.StdEncoding.EncodeToString(imageData)
-					cdnURL, _, _, err := images.UploadBase64ImageToServer(base64Encoded, apiv2)
-					if err != nil {
-						mylog.Printf("Error uploading image for keyboard: %v", err)
-						return "", false
-					}
-					return cdnURL, true
-				})
+				btn.RenderData.Label = resolveMarkdownMediaReferences(btn.RenderData.Label, resolve)
 			}
 			if btn.RenderData.VisitedLabel != "" {
-				btn.RenderData.VisitedLabel = resolveMarkdownMediaReferences(btn.RenderData.VisitedLabel, func(mediaPath string) (string, bool) {
-					if strings.HasPrefix(mediaPath, "http://") || strings.HasPrefix(mediaPath, "https://") {
-						return "", false
-					}
-					if strings.HasPrefix(mediaPath, "data:") {
-						return "", false
-					}
-					localPath := trimFilePrefix(mediaPath)
-					safePath, err := safeLocalPath(localPath, ".")
-					if err != nil {
-						mylog.Printf("安全校验失败，跳过Keyboard本地图片: %v", err)
-						return "", false
-					}
-					localPath = safePath
-					imageData, err := readLocalMedia(localPath)
-					if err != nil {
-						mylog.Printf("Error reading local image for keyboard: %v", err)
-						return "", false
-					}
-					base64Encoded := base64.StdEncoding.EncodeToString(imageData)
-					cdnURL, _, _, err := images.UploadBase64ImageToServer(base64Encoded, apiv2)
-					if err != nil {
-						mylog.Printf("Error uploading image for keyboard: %v", err)
-						return "", false
-					}
-					return cdnURL, true
-				})
+				btn.RenderData.VisitedLabel = resolveMarkdownMediaReferences(btn.RenderData.VisitedLabel, resolve)
 			}
 		}
 	}
 }
 
+// qqMusicSongInfo 抽成变量便于单测注入，默认走网络请求。
+var qqMusicSongInfo = QQMusicSongInfo
+
+// parseQQMuiscMDData 解析 [CQ:music,type=qq] 的歌曲 id。
+// 官方已废弃 custom_template_id（消息接口页标注），没有模板就没有 content，
+// 而 msg_type=2 不带 content 属无效载荷，故这里固定返回 nil markdown，
+// 由调用方退化为「文本 + 键盘」发送（键盘里的「立刻播放」按钮带分享链接）。
 func parseQQMuiscMDData(musicid string) (*dto.Markdown, *keyboard.MessageKeyboard, error) {
-	info, err := QQMusicSongInfo(musicid)
+	info, err := qqMusicSongInfo(musicid)
 	if err != nil {
 		return nil, nil, err
 	}
 	if !info.Get("track_info").Exists() {
 		return nil, nil, errors.New("song not found")
 	}
-	albumMid := info.Get("track_info.album.mid").String()
 	//pinfo, _ := FetchTrackInfo(info.Get("track_info.mid").Str)
 	jumpURL := "https://i.y.qq.com/v8/playsong.html?platform=11&appshare=android_qq&appversion=10030010&hosteuin=oKnlNenz7i-s7c**&songmid=" + info.Get("track_info.mid").Str + "&type=0&appsongtype=1&_wv=1&source=qq&ADTAG=qfshare"
-	content := info.Get("track_info.singer.0.name").String()
-
-	//专辑图片
-	PictureUrl := "https://y.gtimg.cn/music/photo_new/T002R180x180M000" + albumMid + ".jpg"
-	//专辑文字
-	musicContent := info.Get("track_info.name").Str + "\r" + content
-	// 处理 Markdown
-	var md *dto.Markdown
-	var CustomTemplateID string
-	//组合 mdParams
-	var mdParams []*dto.MarkdownParams
-	CustomTemplateID = config.GetCustomTemplateID()
-	if CustomTemplateID != "" {
-		if PictureUrl != "" {
-			height, width, err := images.GetImageDimensions(PictureUrl)
-			if err != nil {
-				mylog.Printf("获取图片宽高出错")
-			}
-			imgDesc := fmt.Sprintf("图片 #%dpx #%dpx", width, height)
-			// 创建 MarkdownParams 的实例
-			mdParams = []*dto.MarkdownParams{
-				{Key: "img_dec", Values: []string{imgDesc}},
-				{Key: "img_url", Values: []string{PictureUrl}},
-				{Key: "text_end", Values: []string{"\r" + musicContent}},
-			}
-		} else {
-			mdParams = []*dto.MarkdownParams{
-				{Key: "text_end", Values: []string{"\r" + musicContent}},
-			}
-		}
-	}
-	// 组合模板 Markdown
-	md = &dto.Markdown{
-		CustomTemplateID: CustomTemplateID,
-		Params:           mdParams,
-	}
-	// D2: 与 parseMDData 保持一致,受 force_verify_image_resource 开关控制
-	if config.GetForceVerifyImageResource() {
-		md.ForceVerifyImageResource = true
-	}
 	// 使用gjson获取musicUrl
 	//musicUrl := gjson.Get(pinfo, "url_mid.data.midurlinfo.0.purl").String()
 	// 处理 Keyboard
 	//kb := createMusicKeyboard(jumpURL, musicUrl)
 	kb := createMusicKeyboard(jumpURL)
 
-	return md, kb, nil
+	return nil, kb, nil
 }
 
 // QQMusicSongInfo 通过给定id在QQ音乐上查找曲目信息
@@ -3103,16 +3075,35 @@ func FetchSongDetail(songID string) (string, error) {
 
 // parseMarkdownFromMessage 从 base64 编码的 markdown JSON 数据中解析 dto.Markdown + keyboard
 // 输入格式: 原始 base64 字符串（无 base64:// 前缀）
+// 解析失败只记日志并返回 nil（legacy 调用方依赖 nil 判定）；出站新链改用
+// parseMarkdownFromMessageE 取回错误并回 retcode=1400（S1）。
 func parseMarkdownFromMessage(b64Data string) (*dto.Markdown, *keyboard.MessageKeyboard) {
-	decoded, err := base64.StdEncoding.DecodeString(b64Data)
-	if err != nil {
-		mylog.Printf("[CQ:markdown] base64 解码失败: %v", err)
-		return nil, nil
-	}
-	md, kb, err := parseMDData(decoded)
+	md, kb, err := parseMarkdownFromMessageE(b64Data)
 	if err != nil {
 		mylog.Printf("[CQ:markdown] 解析失败: %v", err)
 		return nil, nil
 	}
 	return md, kb
+}
+
+// parseMarkdownFromMessageE 与 parseMarkdownFromMessage 等价，但把解码/解析错误返回给调用方。
+func parseMarkdownFromMessageE(b64Data string) (*dto.Markdown, *keyboard.MessageKeyboard, error) {
+	decoded, err := base64.StdEncoding.DecodeString(b64Data)
+	if err != nil {
+		return nil, nil, fmt.Errorf("markdown 载荷 base64 解码失败: %w", err)
+	}
+	return parseMDData(decoded)
+}
+
+// markdownItemsError 返回 foundItems 中待发送 markdown 载荷的解析错误（nil 表示合法）。
+// 发送链与 @全员 计额都以此为准：载荷本身会被拒（模板缺 content）时，
+// 既不能发出无效载荷，也不能白扣当日 @全员 额度（S1/S3）。
+func markdownItemsError(foundItems map[string][]string) error {
+	items := foundItems["markdown"]
+	if len(items) == 0 {
+		return nil
+	}
+	// 多份时只发第一份（与 applyGroup/PrivateMarkdownKeyboard 同口径）
+	_, _, err := parseMarkdownFromMessageE(items[0])
+	return err
 }

@@ -25,6 +25,7 @@ type OpenAPI interface {
 	WebhookAPI
 	InteractionAPI
 	GroupAPI
+	MediaImageAPI
 }
 
 // Base 基础能力接口
@@ -76,11 +77,24 @@ type MessageAPI interface {
 	FileUploadMerge(ctx context.Context, id string, isGroup bool, req *dto.FileUploadRequest) (*dto.MediaResponse, error)
 }
 
-
 // InteractionAPI 互动接口
 type InteractionAPI interface {
 	// PutInteraction 更新互动信息
 	PutInteraction(ctx context.Context, interactionID string, body string) error
+}
+
+// MediaImageAPI 素材管理接口（官方 2026-10-21 新增）
+// PUT presigned_url 直传 COS 不在此接口内：botgo 的 request 会附带 API 域名与
+// QQBot Authorization，直传 COS 必须由调用侧用裸客户端发起。
+type MediaImageAPI interface {
+	// PrepareMediaImage 申请上传，返回 upload_id 与预签名 URL
+	PrepareMediaImage(ctx context.Context, req *dto.MediaImagePrepareRequest) (*dto.MediaImagePrepareResponse, error)
+	// CompleteMediaImage 完成上传，返回 image_id 与 qqbot-media:// 引用
+	CompleteMediaImage(ctx context.Context, req *dto.MediaImageCompleteRequest) (*dto.MediaImageCompleteResponse, error)
+	// ListMediaImages 素材图片列表 (cursor 为空表示首页)
+	ListMediaImages(ctx context.Context, cursor string) (*dto.MediaImageList, error)
+	// DeleteMediaImage 删除素材图片
+	DeleteMediaImage(ctx context.Context, imageID string) error
 }
 
 // WebhookAPI http 事件网关相关接口

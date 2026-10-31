@@ -83,6 +83,10 @@ pub struct ActionResponse<T = ()> {
     /// 原样回传的 echo。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub echo: Option<Echo>,
+    /// 分页游标（Gensokyo 扩展，放响应顶层）：仅分页类 action 填，
+    /// `None` 不序列化，既有响应形态不受影响。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 impl<T> ActionResponse<T> {
@@ -96,6 +100,7 @@ impl<T> ActionResponse<T> {
             message: None,
             wording: None,
             echo: None,
+            next_cursor: None,
         }
     }
 
@@ -109,6 +114,7 @@ impl<T> ActionResponse<T> {
             message: Some(message.into()),
             wording: None,
             echo: None,
+            next_cursor: None,
         }
     }
 
@@ -116,6 +122,13 @@ impl<T> ActionResponse<T> {
     #[must_use]
     pub fn with_echo(mut self, echo: Option<Echo>) -> Self {
         self.echo = echo;
+        self
+    }
+
+    /// 挂上分页游标（`None` 不序列化）。
+    #[must_use]
+    pub fn with_next_cursor(mut self, next_cursor: Option<String>) -> Self {
+        self.next_cursor = next_cursor;
         self
     }
 }
@@ -523,6 +536,20 @@ mod tests {
         let yaml = serde_norway::to_string(&ok).expect("序列化失败");
         assert!(yaml.contains("data: x"), "data 必须带值: {yaml}");
         assert_eq!(ok.status, Status::Ok);
+    }
+
+    #[test]
+    fn next_cursor_is_optional_top_level_field() {
+        // `data` 保持数组（OneBot 兼容），游标只加在响应顶层
+        let plain: ActionResponse<Vec<i32>> = ActionResponse::ok(vec![1, 2]);
+        let yaml = serde_norway::to_string(&plain).expect("序列化失败");
+        assert!(!yaml.contains("next_cursor"), "None 不应序列化: {yaml}");
+
+        let paged: ActionResponse<Vec<i32>> =
+            ActionResponse::ok(vec![1]).with_next_cursor(Some("nc".to_owned()));
+        let json = serde_json::to_value(&paged).expect("序列化失败");
+        assert_eq!(json["next_cursor"], serde_json::json!("nc"));
+        assert_eq!(json["data"], serde_json::json!([1]), "data 仍是数组");
     }
 
     #[test]

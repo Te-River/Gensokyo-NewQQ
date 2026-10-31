@@ -13,8 +13,8 @@
 //!
 //! # 限制
 //!
-//! - [`MAX_MEDIA_BYTES`]（5MB）对齐 Go `handlers/send_group_msg.go` 的 `file_data` 直传上限：
-//!   超限返回请求侧错误（`retcode 1400`）。Go 的超限路径走分片上传
+//! - [`MAX_MEDIA_BYTES`]（5MB，十进制 5_000_000 字节）对齐 Go `handlers/send_group_msg.go`
+//!   的 `file_data` 直传上限：超限返回请求侧错误（`retcode 1400`）。Go 的超限路径走分片上传
 //!   （`upload_prepare` / `upload_part_finish`），`gensokyo-qq` 尚未实现，因此这里的超限
 //!   直接报错而不是静默降级。
 //! - 不压缩、不转码、不抽帧：原字节直传（压缩是 `gensokyo_media::compress` 的独立能力）。
@@ -28,8 +28,9 @@ use gensokyo_media::{
 };
 use gensokyo_protocol::MediaRef;
 
-/// 单条媒体的大小上限：5MB，对齐 Go `file_data` 直传上限。
-pub const MAX_MEDIA_BYTES: u64 = 5 * 1024 * 1024;
+/// 单条媒体的大小上限：5MB（**十进制 5_000_000 字节**，与 Go `file_data` 直传上限同口径，
+/// 不用 `5 * 1024 * 1024` 的二进制口径）。
+pub const MAX_MEDIA_BYTES: u64 = 5_000_000;
 
 /// 取回的一份媒体。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,5 +190,43 @@ impl MediaTransport for LazyHttpTransport {
                 Box::pin(async move { Err(gensokyo_media::Error::Transport(message)) })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn media_limit_is_decimal_five_megabytes() {
+        assert_eq!(
+            MAX_MEDIA_BYTES, 5_000_000,
+            "官方 5MB 按十进制口径：5 * 1024 * 1024 会少放行 24_288 字节"
+        );
+        let runtime = MediaRuntime::default();
+        assert_eq!(runtime.max_bytes(), MAX_MEDIA_BYTES);
+    }
+
+    #[tokio::test]
+    async fn local_file_at_limit_passes_and_one_byte_over_is_rejected() {
+        let runtime = MediaRuntime::default();
+        let dir = tempfile::tempdir().expect("临时目录");
+
+        let exact = dir.path().join("exact.bin");
+        std::fs::write(&exact, vec![0u8; MAX_MEDIA_BYTES as usize]).expect("写 5_000_000 字节失败");
+        let fetched = runtime
+            .fetch(&MediaRef::Local(exact))
+            .await
+            .expect("恰好 5_000_000 字节应放行");
+        assert_eq!(fetched.bytes.len() as u64, MAX_MEDIA_BYTES);
+
+        let over = dir.path().join("over.bin");
+        std::fs::write(&over, vec![0u8; MAX_MEDIA_BYTES as usize + 1])
+            .expect("写 5_000_001 字节失败");
+        let err = runtime
+            .fetch(&MediaRef::Local(over))
+            .await
+            .expect_err("5_000_001 字节必须拒绝");
+        assert!(matches!(err, Error::Protocol(_)), "超限应映射 1400: {err}");
     }
 }

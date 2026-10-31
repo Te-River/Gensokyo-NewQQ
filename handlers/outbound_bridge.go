@@ -149,6 +149,12 @@ func TryOutbound(client callapi.Client, api, apiv2 openapi.OpenAPI, msg callapi.
 // eventID 注入群 msg_id/event_id 解析（member add 的被动回复，legacy cqcode.go:270-280）；
 // eventIDSet 标记 CQ 是否显式决定过 eventID（remove 为显式清空，禁止 2000 分支回填）。
 func TryOutboundWithCQ(client callapi.Client, api, apiv2 openapi.OpenAPI, msg callapi.ActionMessage, messageText string, foundItems map[string][]string, kind identity.TargetKind, wakeup bool, realGroupID, eventID string, eventIDSet bool) (bool, string) {
+	return TryOutboundWithCQRollback(client, api, apiv2, msg, messageText, foundItems, kind, wakeup, realGroupID, eventID, eventIDSet, nil)
+}
+
+// TryOutboundWithCQRollback 在 TryOutboundWithCQ 之上增加 onSendError 回调：
+// P-G2 @全员 走 new 链发送失败时用它归还「每群每自然日 1 次」的额度。
+func TryOutboundWithCQRollback(client callapi.Client, api, apiv2 openapi.OpenAPI, msg callapi.ActionMessage, messageText string, foundItems map[string][]string, kind identity.TargetKind, wakeup bool, realGroupID, eventID string, eventIDSet bool, onSendError func()) (bool, string) {
 	mode := ArchMode()
 	if mode == "legacy" || outboundSvc == nil {
 		return false, ""
@@ -179,6 +185,18 @@ func TryOutboundWithCQ(client callapi.Client, api, apiv2 openapi.OpenAPI, msg ca
 			return true, ""
 		}
 		return false, ""
+	}
+
+	// S1：模板 markdown 缺 content 属请求错误——发送前拦截并回 1400，
+	// 既不构造 msg_type=2 空载荷，也不落到 legacy 的文本降级。
+	// @全员 额度已在 atEveryonePresent 处提前判定（非法载荷不计额），这里再兜一层回滚。
+	if mdErr := markdownItemsError(foundItems); mdErr != nil {
+		if onSendError != nil {
+			onSendError()
+		}
+		mylog.Printf("[outbound] 拒绝非法 markdown 载荷: %v", mdErr)
+		ret, _ := sendActionResult(client, msg, mdErr.Error(), 1400)
+		return true, ret
 	}
 
 	// legacy 上下文（虚拟 ID/echo/预执行 event_id/原群）随 ctx 传入发送链，供 msg_id/event_id 解析复用 legacy 语义。
@@ -213,6 +231,9 @@ func TryOutboundWithCQ(client callapi.Client, api, apiv2 openapi.OpenAPI, msg ca
 	res, err := outboundSvc.Send(sendCtx, cmd)
 	if err != nil {
 		mylog.Printf("[outbound] 发送失败: %v", err)
+		if onSendError != nil {
+			onSendError()
+		}
 	}
 	return true, sendOutboundReceipt(client, api, apiv2, msg, target, res.MessageID, err)
 }
@@ -466,6 +487,11 @@ func legacyMediaKey(s message.MediaSource) (string, string) {
 
 // SendFoundItemsGroup 按 legacy 语义把 foundItems 发送到群，返回 QQ 消息 ID。
 func SendFoundItemsGroup(ctx context.Context, groupOpenID, messageText string, foundItems map[string][]string, apiv2 openapi.OpenAPI) (string, error) {
+	// S1：非法 markdown 载荷（模板缺 content）在任何发送之前拒绝，
+	// 避免先发出文本/媒体、再报错留下半条消息。
+	if mdErr := markdownItemsError(foundItems); mdErr != nil {
+		return "", mdErr
+	}
 	messageID, eventID := resolveGroupMessageContext(ctx, groupOpenID, foundItems)
 	var lastID string
 
@@ -511,8 +537,12 @@ func SendFoundItemsGroup(ctx context.Context, groupOpenID, messageText string, f
 		reply := generateGroupMessage(messageID, eventID, nil, messageText, msgseq, apiv2, groupOpenID)
 		if gm, ok := reply.(*dto.MessageToCreate); ok {
 			gm.Timestamp = time.Now().Unix()
-			applyGroupMarkdownKeyboard(gm, foundItems, apiv2)
-			applyGroupCard(gm, foundItems)
+			if mdErr := applyGroupMarkdownKeyboard(gm, foundItems, apiv2); mdErr != nil {
+				return lastID, mdErr
+			}
+			if err := applyGroupCard(gm, foundItems); err != nil {
+				return lastID, err
+			}
 			applyGroupReply(gm, foundItems)
 			resp, err := postGroupMessageWithEventIDFallback(ctx, apiv2, groupOpenID, gm)
 			if resp != nil && resp.Message != nil {
@@ -527,7 +557,11 @@ func SendFoundItemsGroup(ctx context.Context, groupOpenID, messageText string, f
 
 	// 纯卡片（无文本）
 	if cardItems, ok := foundItems["card"]; ok && len(cardItems) > 0 {
-		if gm := buildGroupCard(cardItems[0], messageID, eventID); gm != nil {
+		gm, cardErr := buildGroupCard(cardItems[0], messageID, eventID)
+		if cardErr != nil {
+			return lastID, cardErr
+		}
+		if gm != nil {
 			delete(foundItems, "card")
 			resp, err := postGroupMessageWithEventIDFallback(ctx, apiv2, groupOpenID, gm)
 			if resp != nil && resp.Message != nil {
@@ -599,6 +633,10 @@ func SendFoundItemsGroup(ctx context.Context, groupOpenID, messageText string, f
 // SendFoundItemsPrivate 按 legacy 语义把 foundItems 发送到私聊，返回 QQ 消息 ID。
 // wakeup=true 时使用 IsWakeup 语义（MsgID/EventID 置空）。
 func SendFoundItemsPrivate(ctx context.Context, userOpenID, messageText string, foundItems map[string][]string, wakeup bool, apiv2 openapi.OpenAPI) (string, error) {
+	// S1：非法 markdown 载荷（模板缺 content）在任何发送之前拒绝（与群聊同口径）。
+	if mdErr := markdownItemsError(foundItems); mdErr != nil {
+		return "", mdErr
+	}
 	messageID, eventID := resolvePrivateMessageContext(ctx, userOpenID, foundItems)
 	if wakeup {
 		messageID, eventID = "", ""
@@ -640,12 +678,17 @@ func SendFoundItemsPrivate(ctx context.Context, userOpenID, messageText string, 
 		}
 	}
 
-	if strings.TrimSpace(messageText) != "" || len(foundItems["markdown"]) > 0 || len(foundItems["keyboard"]) > 0 {
+	if strings.TrimSpace(messageText) != "" || len(foundItems["markdown"]) > 0 || len(foundItems["keyboard"]) > 0 || len(foundItems["card"]) > 0 {
 		msgseq := nextMappingSeq(messageID)
 		reply := generatePrivateMessage(messageID, eventID, nil, messageText, msgseq, apiv2, userOpenID)
 		if gm, ok := reply.(*dto.MessageToCreate); ok {
 			gm.Timestamp = time.Now().Unix()
-			applyPrivateMarkdownKeyboard(gm, foundItems, userOpenID, apiv2)
+			if mdErr := applyPrivateMarkdownKeyboard(gm, foundItems, userOpenID, apiv2); mdErr != nil {
+				return lastID, mdErr
+			}
+			if cardErr := applyPrivateCard(gm, foundItems); cardErr != nil {
+				return lastID, cardErr
+			}
 			applyPrivateReply(gm, foundItems["reply_msg_id"], userOpenID)
 			applyWakeup(gm, wakeup)
 			resp, err := postC2CMessageWithEventIDFallback(ctx, apiv2, userOpenID, gm)
@@ -892,12 +935,19 @@ func applyGroupReply(gm *dto.MessageToCreate, foundItems map[string][]string) {
 	gm.EventID = ""
 }
 
-func applyGroupMarkdownKeyboard(gm *dto.MessageToCreate, foundItems map[string][]string, apiv2 openapi.OpenAPI) {
+func applyGroupMarkdownKeyboard(gm *dto.MessageToCreate, foundItems map[string][]string, apiv2 openapi.OpenAPI) error {
 	var md *dto.Markdown
 	var kb *keyboard.MessageKeyboard
 	if mdItems, ok := foundItems["markdown"]; ok && len(mdItems) > 0 {
-		md, kb = parseMarkdownFromMessage(mdItems[0])
+		var mdErr error
+		md, kb, mdErr = parseMarkdownFromMessageE(mdItems[0])
+		if mdErr != nil {
+			// 解析失败（含模板缺 content）不得静默降级：把错误交回发送链回 1400（S1）
+			return mdErr
+		}
 		if md != nil && md.Content != "" {
+			// @全员：markdown 优先时把文本侧标签迁移进 content（P-G2）
+			md.Content = migrateAtEveryoneToMarkdown(md.Content, gm.Content)
 			md.Content = ResolveMarkdownAtMentions(md.Content)
 			md.Content = ResolveMarkdownImages(md.Content, apiv2)
 		}
@@ -922,14 +972,22 @@ func applyGroupMarkdownKeyboard(gm *dto.MessageToCreate, foundItems map[string][
 			}
 		}
 	}
+	return nil
 }
 
-func applyPrivateMarkdownKeyboard(gm *dto.MessageToCreate, foundItems map[string][]string, userOpenID string, apiv2 openapi.OpenAPI) {
+func applyPrivateMarkdownKeyboard(gm *dto.MessageToCreate, foundItems map[string][]string, userOpenID string, apiv2 openapi.OpenAPI) error {
 	var md *dto.Markdown
 	var kb *keyboard.MessageKeyboard
 	if mdItems, ok := foundItems["markdown"]; ok && len(mdItems) > 0 {
-		md, kb = parseMarkdownFromMessage(mdItems[0])
+		var mdErr error
+		md, kb, mdErr = parseMarkdownFromMessageE(mdItems[0])
+		if mdErr != nil {
+			// 解析失败（含模板缺 content）不得静默降级：把错误交回发送链回 1400（S1）
+			return mdErr
+		}
 		if md != nil && md.Content != "" {
+			// @全员：markdown 优先时把文本侧标签迁移进 content（P-G2）
+			md.Content = migrateAtEveryoneToMarkdown(md.Content, gm.Content)
 			md.Content = ResolveMarkdownAtMentions(md.Content)
 			md.Content = ResolveMarkdownImages(md.Content, apiv2)
 		}
@@ -956,60 +1014,33 @@ func applyPrivateMarkdownKeyboard(gm *dto.MessageToCreate, foundItems map[string
 			}
 		}
 	}
+	return nil
 }
 
-func applyGroupCard(gm *dto.MessageToCreate, foundItems map[string][]string) {
+func applyGroupCard(gm *dto.MessageToCreate, foundItems map[string][]string) error {
 	cardItems, ok := foundItems["card"]
 	if !ok || len(cardItems) == 0 || gm.MsgType == 2 {
-		return
+		return nil
 	}
-	var cardData map[string]string
-	if err := json.Unmarshal([]byte(cardItems[0]), &cardData); err != nil {
-		return
-	}
-	if cardData["pic"] == "" || cardData["url"] == "" {
-		delete(foundItems, "card")
-		return
-	}
-	gm.MsgType = 8
-	gm.Content = ""
-	gm.Card = &dto.GroupCard{
-		Type: "tuwen",
-		Content: &dto.GroupCardContent{
-			Title:       cardData["title"],
-			Description: cardData["desc"],
-			PicURL:      resolveCardPic(cardData["pic"]),
-			URL:         cardData["url"],
-		},
+	if err := applyCardToMessage(gm, cardItems); err != nil {
+		return err
 	}
 	delete(foundItems, "card")
+	return nil
 }
 
-func buildGroupCard(cardJSON, messageID, eventID string) *dto.MessageToCreate {
-	var cardData map[string]string
-	if err := json.Unmarshal([]byte(cardJSON), &cardData); err != nil {
-		return nil
-	}
-	if cardData["pic"] == "" || cardData["url"] == "" {
-		return nil
-	}
+func buildGroupCard(cardJSON, messageID, eventID string) (*dto.MessageToCreate, error) {
 	gm := &dto.MessageToCreate{
 		MsgType: 8,
 		MsgID:   messageID,
 		EventID: eventID,
 		MsgSeq:  echo.GetMappingSeq(messageID),
-		Card: &dto.GroupCard{
-			Type: "tuwen",
-			Content: &dto.GroupCardContent{
-				Title:       cardData["title"],
-				Description: cardData["desc"],
-				PicURL:      resolveCardPic(cardData["pic"]),
-				URL:         cardData["url"],
-			},
-		},
+	}
+	if err := applyCardToMessage(gm, []string{cardJSON}); err != nil {
+		return nil, err
 	}
 	gm.Timestamp = time.Now().Unix()
-	return gm
+	return gm, nil
 }
 
 func applyWakeup(gm *dto.MessageToCreate, wakeup bool) {

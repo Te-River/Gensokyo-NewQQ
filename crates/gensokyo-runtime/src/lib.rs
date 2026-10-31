@@ -73,6 +73,8 @@
 //! - WebUI 与 Go 主服务器路由：M1h-a 的 WS 独立监听 `0.0.0.0:{port}`（Go 是挂在主服务器
 //!   同一端口上），后续里程碑合并。
 
+/// @全员：CQ / 字面标签归一 + 每群每自然日 1 次的计数限流。
+pub mod at_everyone;
 pub mod auth;
 pub mod boot;
 pub mod builtin;

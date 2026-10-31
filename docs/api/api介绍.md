@@ -46,6 +46,9 @@
 |--------|------|------|------|
 | [`get_avatar`](./扩展api/扩展api-get_avatar.md) | get_avatar.go | `-` | 按虚拟用户 ID 反查 OpenID 并返回头像直链。 |
 | [`get_robot_share_link`](./扩展api/扩展api-get_robot_share_link.md) | get_robot_share_link.go | `-` | 获取机器人资料页分享链接。 |
+| [`upload_media_image`](./扩展api/扩展api-media_images.md) | media_images.go | `-` | 上传素材图片（prepare → 预签名 PUT → complete），返回 `image_id` 与 `qqbot-media://` 引用。 |
+| [`get_media_image_list`](./扩展api/扩展api-media_images.md) | media_images.go | `-` | 素材图片列表，`cursor` 分页（取上一页 `next_cursor`）。 |
+| [`delete_media_image`](./扩展api/扩展api-media_images.md) | media_images.go | `-` | 删除素材图片并释放配额；已发送消息不受影响。 |
 | [`put_interaction`](./扩展api/扩展api-put_interaction.md) | put_interaction.go | `q群 (Group Chat)` | 回复按钮交互结果。 |
 | [`send_private_msg_wakeup`](./扩展api/扩展api-send_private_msg_wakeup.md) | send_private_msg_wakeup.go | `私聊 (C2C)` | 发送 `is_wakeup=true` 的 C2C 召回消息。 |
 | `send_private_msg_sse` | send_private_msg_sse.go | `私聊 (C2C)` | SSE 私聊消息。 |

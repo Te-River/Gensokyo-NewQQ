@@ -240,7 +240,7 @@ Handler 签名：`func(client callapi.Client, api openapi.OpenAPI, apiv2 openapi
 | `local_record` / `url_record` / `url_records` / `base64_record` | 媒体 | 语音 |
 | `local_video` / `url_video` / `url_videos` / `base64_video` | 媒体 | 视频 |
 | `qqmusic` | 媒体 | QQ 音乐 |
-| `card` | 媒体 | JSON 编码的图文卡片参数（群聊 msg_type=8） |
+| `card` | 媒体 | JSON 编码的图文卡片参数（群聊 / 单聊，`msg_type=8`；四字段必填：`title`/`description`/`url`/`pic_url`） |
 | `input_notify` | 控制 | JSON 编码的输入状态参数（单聊 msg_type=6） |
 | `stream` | 控制 | JSON 编码的流式消息参数（单聊，type=start/mid/finish） |
 | `local_file` / `url_file` / `url_files` / `base64_file` | 媒体 | 文件 |
@@ -342,7 +342,9 @@ Handler 签名：`func(client callapi.Client, api openapi.OpenAPI, apiv2 openapi
 - **`removeAt` 与 `convertOtherAt`**：`GetRemoveAt()` 控制入站时是否剥离 @bot（仅对 `GROUP_AT_MESSAGE_CREATE` 事件生效；`GROUP_MESSAGE_CREATE` 全量群消息中的 @Bot 始终剥离，不依赖此配置），`GetConvertOtherAt()` 控制是否将 @其他人 转为 CQ 码
 - **`addAtGroup`**：`GetAddAtGroup()` 在出站群消息前自动添加 `[CQ:at,qq=AppID]`，注意这会与 `transformMessageTextAt` 中的 `[CQ:at]` 处理产生交互
 - **`arrayValue` 模式**：`GetArrayValue()` 控制消息以消息段数组（`[]interface{}`）还是字符串形式上报，影响 `ConvertToSegmentedMessage` 的调用
-- **`msg_type` 字段**：`MsgType=0` 是普通文本，`MsgType=2` 是 Markdown，`MsgType=6` 是输入状态（仅单聊），`MsgType=7` 是图文混合，`MsgType=8` 是卡片消息（仅群聊）
+- **`msg_type` 字段**：`MsgType=0` 是普通文本，`MsgType=2` 是 Markdown，`MsgType=6` 是输入状态（仅单聊），`MsgType=7` 是图文混合，`MsgType=8` 是卡片消息（群聊 / 单聊；四字段必填：`title` 1~50 字符、`description` 1~200 字符、`url`/`pic_url` 必须 `https://` 且 ≤1024 字节，缺一即整条 1400；卡片与 @全员 同现也回 1400）
+- **`qqbot-media://` 透传**：`upload_media_image` 返回的素材引用（`qqbot-media://image/v1/<token>`）在 Markdown 图片与 keyboard 按钮图片字段中原样透传，不下载、不转存
+- **@全员 限流**：`[CQ:at,qq=all]`（别名 `qq=everyone`）与字面 `<qqbot-at-everyone />` 归一为官方标签；仅群聊，每群每自然日 1 次（固定 `+08:00` 切日），`enable_at_everyone_limit` 默认 `true`，同日第 2 次与单聊带 @全员 均回 1400
 - **`IsWakeup` 字段**：`send_private_msg_wakeup` 的 `MessageToCreate` 必须设置 `IsWakeup=true` 且 `MsgID`/`EventID` 为空（互斥）
 
 ## 📁 关键目录结构

@@ -54,6 +54,35 @@
 
 > 2026-08 修复：此前 `auto_md` 把含 `[CQ:at]` 的 `messageText` 直接塞进 Markdown 参数，从未调用 `ResolveMarkdownAtMentions`，导致 QQ 官方 Markdown 渲染把 `[CQ:at,qq=数字]` 当纯文本显示（变形为 `[CO:at,qq=数字]`）。
 
+## @全员（`qq=all`）
+
+官方 2026-10-26 起群聊支持 @全部成员，写法为字面标签 `<qqbot-at-everyone />`（文本与 Markdown 都认）。Gensokyo 提供两种等价入口，发送前统一归一为该标签：
+
+| 写法 | 说明 |
+|------|------|
+| `[CQ:at,qq=all]` | 标准写法；亦接受宽松别名 `[CQ:at,qq=everyone]` 与误带的附加参数（如 `[CQ:at,qq=all,name=all]`）。 |
+| `<qqbot-at-everyone />` | 官方字面标签，原样保留；兼容手写无空格的 `<qqbot-at-everyone/>`。 |
+
+行为：
+
+- 纯文本与 Markdown 两条出站路径都会归一；markdown 优先时，文本里的标签会迁移进 `markdown.content`，避免正文被清空后标签丢失。
+- 仅群聊支持；单聊消息中出现 @全员 直接回 `retcode=1400`。
+- 机器人需为群管理员（由平台判定）。
+- **每群每自然日仅可发送 1 次**。本地限流由 `enable_at_everyone_limit` 控制，默认 `true`；同日第 2 次回 `retcode=1400`。计数只在发送前占用，发送失败自动回滚，不会白吃当天配额。
+- 自然日固定按 `+08:00`（北京时间）切分，Go / Rust 两侧一致，不受主机时区影响。计数落 idmap config 表 `at_everyone` section，跨重启保留，Go / Rust 共享同一 `idmap.db` 时互认。
+- 关闭 `enable_at_everyone_limit` 后本地既不计数也不拦截（官方限制仍在，超额由上游报错）。
+- 卡片与 @全员 同现回 `1400`：卡片会清空正文，@全员 标签无法承载；markdown 优先时不算冲突，卡片被丢弃。
+
+```text
+[CQ:at,qq=all]各位早上好
+→ <qqbot-at-everyone />各位早上好
+```
+
+```yaml
+# config.yml
+enable_at_everyone_limit: true   # 群聊 @全员 每群每自然日 1 次的本地限流（默认开启）
+```
+
 ## 写法
 
 ```text

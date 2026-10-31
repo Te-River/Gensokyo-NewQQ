@@ -410,7 +410,7 @@ settings:
 
   #── Markdown 消息 ──────────────────────────────────
   twoway_echo: false                  # 双向 echo
-  custom_template_id: ""              # 图文转 MD 模板 ID
+  custom_template_id: ""              # 已废弃，不再生效（改用 markdown.content）
   keyboard_id: ""                     # 图文转 MD 按钮 ID
   force_verify_image_resource: false  # Markdown 图片转存结果校验（转存失败返回 40034004 且不发送；仅需确保图片必然可显示时开启）
 

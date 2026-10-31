@@ -1178,7 +1178,7 @@ func generateMdByConfig() (md *dto.Markdown, kb *keyboard.MessageKeyboard) {
 	//相关配置获取
 	mdtext := config.GetLinkText()
 	mdtext = "\r" + mdtext
-	CustomTemplateID := config.GetCustomTemplateID()
+	// 官方已废弃 custom_template_id（消息接口页标注），不再按 config 自动注入模板
 	linkBots := config.GetLinkBots()
 	imgURL := config.GetLinkPic()
 
@@ -1189,50 +1189,23 @@ func generateMdByConfig() (md *dto.Markdown, kb *keyboard.MessageKeyboard) {
 		linkBots = getRandomSelection(linkBots, linknum)
 	}
 
-	var mdParams []*dto.MarkdownParams
-	if !config.GetNativeMD() {
-		//组合 mdParams
-		if imgURL != "" {
-			height, width, err := images.GetImageDimensions(imgURL)
-			if err != nil {
-				mylog.Printf("获取图片宽高出错")
-			}
-			imgDesc := fmt.Sprintf("图片 #%dpx #%dpx", width, height)
-			// 创建 MarkdownParams 的实例
-			mdParams = []*dto.MarkdownParams{
-				{Key: "img_dec", Values: []string{imgDesc}},
-				{Key: "img_url", Values: []string{imgURL}},
-				{Key: "text_end", Values: []string{mdtext}},
-			}
-		} else {
-			mdParams = []*dto.MarkdownParams{
-				{Key: "text_end", Values: []string{mdtext}},
-			}
+	// 模板 params 形态（native_md=false 时的旧行为）已随 custom_template_id 废弃：
+	// msg_type=2 只带 params 没有 content 是无效载荷，故两条分支统一产出原生 content。
+	var content string
+	if imgURL != "" {
+		height, width, err := images.GetImageDimensions(imgURL)
+		if err != nil {
+			mylog.Printf("获取图片宽高出错")
 		}
-
-		// 组合模板 Markdown
-		md = &dto.Markdown{
-			CustomTemplateID: CustomTemplateID,
-			Params:           mdParams,
-		}
+		imgDesc := fmt.Sprintf("图片 #%dpx #%dpx", width, height)
+		content = fmt.Sprintf("![%s](%s)\n%s", imgDesc, imgURL, mdtext)
 	} else {
-		// 使用原生Markdown格式
-		var content string
-		if imgURL != "" {
-			height, width, err := images.GetImageDimensions(imgURL)
-			if err != nil {
-				mylog.Printf("获取图片宽高出错")
-			}
-			imgDesc := fmt.Sprintf("图片 #%dpx #%dpx", width, height)
-			content = fmt.Sprintf("![%s](%s)\n%s", imgDesc, imgURL, mdtext)
-		} else {
-			content = mdtext
-		}
+		content = mdtext
+	}
 
-		// 原生 Markdown
-		md = &dto.Markdown{
-			Content: content,
-		}
+	// 原生 Markdown
+	md = &dto.Markdown{
+		Content: content,
 	}
 
 	// 创建自定义键盘

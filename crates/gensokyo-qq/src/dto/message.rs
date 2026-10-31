@@ -16,7 +16,7 @@ pub mod msg_type {
     pub const INPUT_NOTIFY: u32 = 6;
     /// 富媒体。
     pub const RICH_MEDIA: u32 = 7;
-    /// 卡片（仅群聊）。
+    /// 卡片（群聊与单聊）。
     pub const CARD: u32 = 8;
 }
 
@@ -48,6 +48,9 @@ pub struct MessageToCreate {
     /// Markdown 消息（`msg_type=2`）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub markdown: Option<Markdown>,
+    /// 图文卡片（`msg_type=8`，群聊与单聊均可）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub card: Option<MessageCard>,
     /// 消息按钮（`keyboard`），按 JSON 透传。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keyboard: Option<Value>,
@@ -94,6 +97,16 @@ impl MessageToCreate {
         }
     }
 
+    /// 图文卡片消息（`msg_type=8`，群聊与单聊均可）。
+    #[must_use]
+    pub fn card(card: MessageCard) -> Self {
+        Self {
+            msg_type: Some(msg_type::CARD),
+            card: Some(card),
+            ..Self::default()
+        }
+    }
+
     /// 设置 `msg_id`（被动回复）。
     #[must_use]
     pub fn with_msg_id(mut self, msg_id: impl Into<String>) -> Self {
@@ -132,7 +145,7 @@ impl MessageToCreate {
     /// 追加一个未建模字段。
     ///
     /// # 警告
-    /// 已建模字段名（`content` / `msg_type` / `markdown` / `keyboard` / `media` / `msg_id` /
+    /// 已建模字段名（`content` / `msg_type` / `markdown` / `card` / `keyboard` / `media` / `msg_id` /
     /// `event_id` / `msg_seq` / `is_wakeup` / `message_reference`）会被忽略并记录 `warn`：
     /// `extra` 走 `#[serde(flatten)]`，写入同名 key 会在 JSON 里产生重复键，服务端行为不确定。
     /// 这些字段请用对应的 builder（如 [`MessageToCreate::with_msg_id`]）设置。
@@ -167,10 +180,11 @@ impl MessageToCreate {
 }
 
 /// `MessageToCreate` 已建模的 JSON 字段名；`extra` 不允许占用这些 key（否则 flatten 出重复键）。
-const MODELLED_FIELDS: [&str; 10] = [
+const MODELLED_FIELDS: [&str; 11] = [
     "content",
     "msg_type",
     "markdown",
+    "card",
     "keyboard",
     "media",
     "msg_id",
@@ -210,6 +224,125 @@ impl Markdown {
             ..Self::default()
         }
     }
+}
+
+/// 图文卡片消息体（`msg_type=8`，官方 `type="tuwen"`）。
+///
+/// 对齐 `botgo/dto.GroupCard`：`{"type":"tuwen","content":{…}}`，群聊与单聊用同一结构。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageCard {
+    /// 卡片类型，官方当前只有 `tuwen`（图文）。
+    #[serde(rename = "type")]
+    pub card_type: String,
+    /// 卡片正文。
+    pub content: MessageCardContent,
+}
+
+impl MessageCard {
+    /// 图文卡片（`type="tuwen"`）。
+    #[must_use]
+    pub fn tuwen(content: MessageCardContent) -> Self {
+        Self {
+            card_type: "tuwen".to_owned(),
+            content,
+        }
+    }
+}
+
+/// 图文卡片的四个官方字段（对齐 `botgo/dto.GroupCardContent`）。
+///
+/// 四项**全部必填**（官方 2026-10 消息接口页）：缺字段 / trim 后为空 / 非法都由
+/// [`MessageCardContent::validate`] 拒绝为 `1400`。序列化时 `None` 仍省略该 key
+/// （Go 是 `omitempty`），因此结构体本身允许构造出不完整的卡片，校验是发送前的闸门。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MessageCardContent {
+    /// 标题（必填，1~50 字符）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// 描述（1~200 字符）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// 跳转链接（https，≤1024 字节）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// 封面图链接（https，≤1024 字节）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pic_url: Option<String>,
+}
+
+/// 卡片字段长度上限（字符数，与官方文档一致）。
+const CARD_TITLE_MAX: usize = 50;
+/// 卡片描述长度上限（字符数）。
+const CARD_DESCRIPTION_MAX: usize = 200;
+/// 卡片链接长度上限（**字节数**，与 Go `len()` 一致）。
+const CARD_URL_MAX: usize = 1024;
+
+impl MessageCardContent {
+    /// 官方字段校验（四字段**全部必填**）。
+    ///
+    /// - `title` 1~50 字符、`description` 1~200 字符：先 trim 再判空与长度（Go `buildTuwenCard`）；
+    /// - `url` / `pic_url` 必须 `https://` 开头（大小写不敏感）且按**字节**不超过 1024
+    ///   （Go 用 `len()`，不是字符数）；
+    /// - 缺字段或 trim 后为空一律视为缺失（官方四字段必填，缺失即 `1400`）。
+    ///
+    /// # Errors
+    /// 任一字段违反上述约束时返回 [`Error::InvalidMessage`]。
+    pub fn validate(&self) -> Result<()> {
+        check_card_len("title", self.title.as_deref(), CARD_TITLE_MAX)?;
+        check_card_len(
+            "description",
+            self.description.as_deref(),
+            CARD_DESCRIPTION_MAX,
+        )?;
+        check_card_url("url", self.url.as_deref())?;
+        check_card_url("pic_url", self.pic_url.as_deref())?;
+        Ok(())
+    }
+}
+
+/// 卡片文本字段：trim 后 1~`max` 个字符（按 Unicode 字符数，与 Go `RuneCountInString` 一致）。
+fn check_card_len(field: &str, value: Option<&str>, max: usize) -> Result<()> {
+    let trimmed = value.unwrap_or_default().trim();
+    let len = trimmed.chars().count();
+    if len == 0 {
+        return Err(Error::InvalidMessage(format!(
+            "卡片缺少 {field}（官方要求 1~{max} 字符）"
+        )));
+    }
+    if len > max {
+        return Err(Error::InvalidMessage(format!(
+            "卡片 {field} 长度必须在 1~{max} 字符之间（当前 {len}）"
+        )));
+    }
+    Ok(())
+}
+
+/// 卡片链接字段：必填，`https://` 开头（大小写不敏感），按字节不超过 1024。
+fn check_card_url(field: &str, value: Option<&str>) -> Result<()> {
+    let trimmed = value.unwrap_or_default().trim();
+    if trimmed.is_empty() {
+        return Err(Error::InvalidMessage(format!(
+            "卡片缺少 {field}（官方要求 https 链接，不超过 {CARD_URL_MAX} 字节）"
+        )));
+    }
+    const HTTPS: &[u8] = b"https://";
+    if !trimmed
+        .as_bytes()
+        .get(..HTTPS.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(HTTPS))
+    {
+        return Err(Error::InvalidMessage(format!(
+            "卡片 {field} 必须是 https 链接: {trimmed}"
+        )));
+    }
+    let len = trimmed.len();
+    if len > CARD_URL_MAX {
+        return Err(Error::InvalidMessage(format!(
+            "卡片 {field} 不能超过 {CARD_URL_MAX} 字节（当前 {len}）"
+        )));
+    }
+    Ok(())
 }
 
 /// Markdown 模板参数（键值对）。
@@ -390,11 +523,223 @@ mod tests {
 
     #[test]
     fn with_extra_keeps_unknown_fields() {
-        let message = MessageToCreate::text("hi").with_extra("card", json!({"type": "t"}));
-        assert_eq!(message.extra.get("card"), Some(&json!({"type": "t"})));
+        let message = MessageToCreate::text("hi").with_extra("foo", json!({"type": "t"}));
+        assert_eq!(message.extra.get("foo"), Some(&json!({"type": "t"})));
 
         let value = serde_json::to_value(&message).unwrap();
-        assert_eq!(value["card"], json!({"type": "t"}));
+        assert_eq!(value["foo"], json!({"type": "t"}));
         assert_eq!(value["content"], "hi");
+    }
+
+    #[test]
+    fn card_is_a_modelled_field() {
+        // `card` 已建模：写入 extra 会被忽略，出站 JSON 里只有结构化卡片
+        let message = MessageToCreate::card(MessageCard::tuwen(MessageCardContent {
+            title: Some("标题".to_owned()),
+            ..MessageCardContent::default()
+        }))
+        .with_extra("card", json!("override"));
+
+        assert!(message.extra.is_empty(), "已建模字段不得落进 extra");
+        assert_eq!(message.card.as_ref().map(|card| card.card_type.as_str()), Some("tuwen"));
+    }
+
+    #[test]
+    fn markdown_message_carries_content_only() {
+        let message = MessageToCreate::markdown("# 标题");
+        let value = serde_json::to_value(&message).unwrap();
+
+        assert_eq!(value["msg_type"], 2);
+        assert_eq!(value["markdown"], json!({"content": "# 标题"}));
+        assert!(
+            value["markdown"].get("template_id").is_none()
+                && value["markdown"].get("custom_template_id").is_none(),
+            "模板字段已废弃，出站不得构造: {value}"
+        );
+        assert!(value.get("content").is_none(), "markdown 消息只要 markdown 载荷");
+    }
+
+    #[test]
+    fn card_message_serializes_official_tuwen_shape() {
+        let message = MessageToCreate::card(MessageCard::tuwen(MessageCardContent {
+            title: Some("标题".to_owned()),
+            description: Some("描述".to_owned()),
+            url: Some("https://example.com/a".to_owned()),
+            pic_url: Some("https://example.com/a.png".to_owned()),
+        }));
+        let value = serde_json::to_value(&message).unwrap();
+
+        assert_eq!(value["msg_type"], 8);
+        assert_eq!(
+            value["card"],
+            json!({
+                "type": "tuwen",
+                "content": {
+                    "title": "标题",
+                    "description": "描述",
+                    "url": "https://example.com/a",
+                    "pic_url": "https://example.com/a.png",
+                }
+            })
+        );
+    }
+
+    /// 四字段齐备的合法卡片（各用例只改其中一项来验证隔离性）。
+    fn valid_card() -> MessageCardContent {
+        MessageCardContent {
+            title: Some("标题".to_owned()),
+            description: Some("描述".to_owned()),
+            url: Some("https://example.com/a".to_owned()),
+            pic_url: Some("https://example.com/a.png".to_owned()),
+        }
+    }
+
+    #[test]
+    fn card_content_absent_fields_are_omitted_in_json_but_rejected() {
+        let card = MessageCard::tuwen(MessageCardContent {
+            title: Some("只有标题".to_owned()),
+            ..MessageCardContent::default()
+        });
+        let value = serde_json::to_value(&card).unwrap();
+
+        assert_eq!(value, json!({"type": "tuwen", "content": {"title": "只有标题"}}));
+        // 序列化仍省略缺省键（Go omitempty），但四字段必填：发送前 validate 必须拒绝
+        assert!(
+            card.content.validate().is_err(),
+            "四字段缺一即 1400，不能靠省略字段绕过"
+        );
+    }
+
+    #[test]
+    fn card_content_requires_all_four_fields() {
+        assert!(valid_card().validate().is_ok(), "四字段齐备应放行");
+
+        let mut missing_title = valid_card();
+        missing_title.title = None;
+        assert!(missing_title.validate().is_err(), "缺 title 必须拒绝");
+
+        let mut missing_description = valid_card();
+        missing_description.description = None;
+        assert!(
+            missing_description.validate().is_err(),
+            "缺 description 必须拒绝（旧实现放行）"
+        );
+
+        let mut missing_url = valid_card();
+        missing_url.url = None;
+        assert!(missing_url.validate().is_err(), "缺 url 必须拒绝（旧实现放行）");
+
+        let mut missing_pic = valid_card();
+        missing_pic.pic_url = None;
+        assert!(
+            missing_pic.validate().is_err(),
+            "缺 pic_url 必须拒绝（旧实现放行）"
+        );
+    }
+
+    #[test]
+    fn card_content_treats_blank_as_missing() {
+        for blank in ["", "   ", "\t\n"] {
+            let mut content = valid_card();
+            content.title = Some(blank.to_owned());
+            assert!(content.validate().is_err(), "空白 title 必须拒绝: {blank:?}");
+
+            let mut content = valid_card();
+            content.description = Some(blank.to_owned());
+            assert!(
+                content.validate().is_err(),
+                "空白 description 必须拒绝（官方必填）: {blank:?}"
+            );
+
+            let mut content = valid_card();
+            content.url = Some(blank.to_owned());
+            assert!(
+                content.validate().is_err(),
+                "空白 url 必须拒绝（官方必填）: {blank:?}"
+            );
+
+            let mut content = valid_card();
+            content.pic_url = Some(blank.to_owned());
+            assert!(
+                content.validate().is_err(),
+                "空白 pic_url 必须拒绝（官方必填）: {blank:?}"
+            );
+        }
+
+        // 先 trim 再判长度：两侧空白不影响合法性（Go 同样 TrimSpace）
+        let mut padded = valid_card();
+        padded.title = Some("  标题  ".to_owned());
+        padded.description = Some(" 描述 ".to_owned());
+        padded.url = Some(" https://example.com/a ".to_owned());
+        padded.pic_url = Some(" https://example.com/a.png ".to_owned());
+        assert!(padded.validate().is_ok(), "trim 后合法应放行: {padded:?}");
+    }
+
+    #[test]
+    fn card_content_accepts_official_boundaries() {
+        let at_boundary = MessageCardContent {
+            title: Some("标".repeat(50)),
+            description: Some("描".repeat(200)),
+            url: Some(format!("https://example.com/{}", "a".repeat(1024 - 20))),
+            pic_url: Some(format!("https://example.com/{}", "a".repeat(1024 - 20))),
+        };
+        assert_eq!(at_boundary.title.as_deref().map(|t| t.chars().count()), Some(50));
+        assert_eq!(at_boundary.url.as_deref().map(|u| u.len()), Some(1024));
+        assert!(at_boundary.validate().is_ok(), "恰好 50/200/1024 应放行");
+    }
+
+    #[test]
+    fn card_content_rejects_out_of_range_fields() {
+        let mut long_title = valid_card();
+        long_title.title = Some("标".repeat(51));
+        assert!(long_title.validate().is_err(), "51 字符标题必须拒绝");
+
+        let mut long_description = valid_card();
+        long_description.description = Some("描".repeat(201));
+        assert!(long_description.validate().is_err(), "201 字符描述必须拒绝");
+
+        let mut too_long_url = valid_card();
+        too_long_url.url = Some(format!("https://example.com/{}", "a".repeat(1024)));
+        assert!(too_long_url.validate().is_err(), "超过 1024 字节的 url 必须拒绝");
+
+        let mut too_long_pic = valid_card();
+        too_long_pic.pic_url = Some(format!("https://example.com/{}", "a".repeat(1024)));
+        assert!(
+            too_long_pic.validate().is_err(),
+            "超过 1024 字节的 pic_url 必须拒绝"
+        );
+    }
+
+    #[test]
+    fn card_content_url_length_is_counted_in_bytes() {
+        // 406 字符但 1213 字节：Go 用 len()，按字符数会误放行
+        let long_url = format!("https://example.com/{}", "汉".repeat(400));
+        assert!(long_url.chars().count() < 1024, "字符数没超");
+        assert!(long_url.len() > 1024, "字节数超了");
+
+        let mut content = valid_card();
+        content.url = Some(long_url);
+        assert!(content.validate().is_err(), "URL 长度按字节，超 1024 字节必须拒绝");
+    }
+
+    #[test]
+    fn card_content_requires_https_links() {
+        for url in ["http://example.com/a", "/relative/a.png", "ftp://example.com/a"] {
+            let mut content = valid_card();
+            content.url = Some(url.to_owned());
+            assert!(content.validate().is_err(), "非 https 的 url 必须拒绝: {url}");
+
+            let mut content = valid_card();
+            content.pic_url = Some(url.to_owned());
+            assert!(
+                content.validate().is_err(),
+                "非 https 的 pic_url 必须拒绝: {url}"
+            );
+        }
+
+        // 协议前缀大小写不敏感（Go `strings.ToLower` 后比前缀）
+        let mut upper = valid_card();
+        upper.url = Some("HTTPS://example.com/a".to_owned());
+        assert!(upper.validate().is_ok(), "https 前缀大小写不敏感");
     }
 }

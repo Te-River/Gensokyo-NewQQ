@@ -11,6 +11,7 @@
 //!   [`http::ReqwestTransport`]（reqwest + rustls），测试实现只需一个记录请求的 fake。
 //! - [`openapi::OpenApiClient`]：群 / C2C 发消息、群 / C2C 上传文件，以及
 //!   [`group`] 中的群管理子集。
+//! - [`media_image`]：素材管理（prepare → PUT 直传 → complete，外加列表 / 删除）。
 //! - [`dto`]：`MessageToCreate`、`MessageResponse`、`MediaResponse` 与群管理结构。
 //!
 //! # 与 botgo 的差异
@@ -51,6 +52,7 @@ pub mod dto;
 pub mod error;
 pub mod group;
 pub mod http;
+pub mod media_image;
 pub mod openapi;
 pub mod token;
 

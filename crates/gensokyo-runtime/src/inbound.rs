@@ -25,8 +25,9 @@
 //! | `GROUP_MEMBER_ADD` | `notice` | `group_increase` + `sub_type=approve`、`operator_id=0` |
 //! | `GROUP_MEMBER_REMOVE` | `notice` | `group_decrease` + `sub_type=leave`、`operator_id=0` |
 //! | `GROUP_JOIN_REQUEST` | `request` | `request_type=group` + `sub_type=add`、`flag=join_request_id` |
+//! | `INTERACTION_CREATE` | `notice` | `interaction` + `sub_type=create`，互动对象整体落在 `data` |
 //!
-//! 其余 `t`（`GUILD_*` / `INTERACTION_CREATE` / `MESSAGE_AUDIT_*` / `FORUM_*` / `AUDIO_*`）
+//! 其余 `t`（`GUILD_*` / `MESSAGE_AUDIT_*` / `FORUM_*` / `AUDIO_*`）
 //! 返回空列表：未知事件不能打断链路，这也是 spec「未知事件不 panic」的落点。
 //!
 //! # 字段口径
@@ -57,7 +58,11 @@
 //!   idmap-pro（`StoreIDv2Pro`）与 `union_id` 切换；`GROUP_MEMBER_ADD` / `GROUP_JOIN_REQUEST`
 //!   的 `event_id` 只落在 `extra`，Go 侧 `echo.AddEvnetIDv2` 的被动回复缓存未做。
 //! - `message_sent`、`request` 的 `flag` 审批链路（Go 侧 `GROUP_ADD_ROBOT` 的 `flag` 也是空串）。
-//! - `INTERACTION_CREATE`、`MESSAGE_AUDIT_*`、`FORUM_*`、`AUDIO_*` 与频道 `GUILD_*`。
+//! - `global_interaction_to_message`（`true` 时 Go `ConvertInteractionToMessage` 把按钮回调
+//!   「伪装成 message」）：`INTERACTION_CREATE` 只走上报 `notice.interaction` 的主路径。
+//! - `auto_put_interaction` / `put_interaction_except`（自动回 `PutInteraction`）、
+//!   `union_id` 切换与 idmap-pro：回调的 `id` 原样留在 `data.id`，由客户端自己回应。
+//! - `MESSAGE_AUDIT_*`、`FORUM_*`、`AUDIO_*` 与频道 `GUILD_*`。
 //! - `union_webhook` 扇出（见 [`crate`] 文档）。
 
 use std::sync::Arc;
@@ -69,6 +74,7 @@ use gensokyo_protocol::event::{
     HeartbeatStatus, MessageEvent, MessageType, MetaEvent, NoticeEvent, RequestEvent, Sender,
 };
 use gensokyo_protocol::{Event, Extra, MessageContent};
+use gensokyo_qq::dto::interaction::Interaction;
 use gensokyo_storage::IdMapStore;
 use serde::Deserialize;
 use serde_json::Value;
@@ -290,6 +296,7 @@ impl Inbound {
                 self.group_member(&settings, data, envelope_id, GroupMemberFlavor::Remove)
             }
             "GROUP_JOIN_REQUEST" => self.group_join_request(&settings, data),
+            "INTERACTION_CREATE" => self.interaction(&settings, data),
             other => {
                 tracing::debug!(kind = other, "未支持的 QQ 事件，已忽略");
                 Ok(Vec::new())
@@ -778,6 +785,49 @@ impl Inbound {
         })])
     }
 
+    /// `INTERACTION_CREATE`：按钮 / 快捷菜单回调
+    /// （Go `Processor/ProcessInlineSearch.go:122-137` 的 `OnebotInteractionNotice`）。
+    ///
+    /// Go 的 `Data` 是整块 `dto.WSInteractionData`，`id`、`event_id`、`data.resolved.button_data`
+    /// 都在里面，因此这里不拆平到 notice 顶层，而是原样塞进 `extra["data"]`。
+    /// `time` 取当前秒（Go 同样用 `time.Now()`，不用负载里的 RFC3339 `timestamp`）。
+    fn interaction(
+        &self,
+        settings: &Settings,
+        data: &Value,
+    ) -> Result<Vec<Event>, serde_json::Error> {
+        let payload = Interaction::deserialize(data)?;
+        // Go 的 `fromuid` 只取 `GroupMemberOpenID`；单聊回调没有群成员，回退 `user_openid`
+        // 以免 user_id 恒空（群聊场景与 Go 完全一致）。
+        let user_raw = if payload.group_member_openid.is_empty() {
+            payload.user_openid.as_str()
+        } else {
+            payload.group_member_openid.as_str()
+        };
+        let mut extra = self.enhanced_extra(settings, user_raw, &payload.group_openid);
+        extra.insert("data".to_owned(), serde_json::to_value(&payload)?);
+
+        Ok(vec![Event::Notice(NoticeEvent {
+            time: now_unix(),
+            self_id: Ob11Id::num(self.self_id_of(settings)),
+            notice_type: "interaction".to_owned(),
+            sub_type: Some("create".to_owned()),
+            group_id: non_empty(&payload.group_openid).map(|raw| self.ob11_id(settings, &raw)),
+            user_id: non_empty(user_raw).map(|raw| self.ob11_id(settings, &raw)),
+            operator_id: None,
+            target_id: None,
+            message_id: None,
+            duration: None,
+            file: None,
+            card_new: None,
+            card_old: None,
+            honor_type: None,
+            online: None,
+            client: None,
+            extra,
+        })])
+    }
+
     /// `!native_ob11` 时补齐 Go 的「增强配置」字段。
     fn enhanced_extra(&self, settings: &Settings, user_raw: &str, group_raw: &str) -> Extra {
         let mut extra = Extra::new();
@@ -965,6 +1015,57 @@ mod tests {
             ""
         );
         assert_eq!(verify_comment(None), "");
+    }
+
+    #[test]
+    fn interaction_create_becomes_notice_interaction() {
+        use std::sync::Arc;
+
+        use gensokyo_config::ConfigManager;
+        use gensokyo_core::Ob11Id;
+        use gensokyo_protocol::Event;
+        use gensokyo_protocol::event::NoticeKind;
+
+        use super::Inbound;
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nsettings: {}\n").expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let inbound = Inbound::new(manager, None);
+
+        let data = json!({
+            "id": "i-1",
+            "event_id": "e-1",
+            "type": 11,
+            "chat_type": 1,
+            "group_openid": "G",
+            "group_member_openid": "M",
+            "data": {
+                "name": "按钮",
+                "type": 9,
+                "resolved": {"button_data": "/菜单", "button_id": "b-1"}
+            },
+            "version": 1
+        });
+        let events = inbound
+            .convert("INTERACTION_CREATE", Some(&data), None)
+            .expect("互动事件应可转换");
+
+        assert_eq!(events.len(), 1, "一条回调对应一条 notice");
+        let Event::Notice(notice) = &events[0] else {
+            panic!("INTERACTION_CREATE 应转成 notice");
+        };
+        assert_eq!(notice.notice_type, "interaction");
+        assert_eq!(notice.sub_type.as_deref(), Some("create"));
+        assert_eq!(notice.kind(), NoticeKind::Interaction);
+        // 没有 idmap 时回退原始 OpenID 字符串（不伪造数字）
+        assert_eq!(notice.group_id, Some(Ob11Id::Str("G".to_owned())));
+        assert_eq!(notice.user_id, Some(Ob11Id::Str("M".to_owned())));
+        // Go 把整块互动对象放在 `data`：id / event_id / button_data 都在里面
+        let payload = notice.extra.get("data").expect("应带 data 字段");
+        assert_eq!(payload["event_id"], json!("e-1"));
+        assert_eq!(payload["data"]["resolved"]["button_data"], json!("/菜单"));
     }
 
     #[test]

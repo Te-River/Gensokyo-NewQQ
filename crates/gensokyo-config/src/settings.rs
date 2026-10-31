@@ -437,6 +437,12 @@ pub struct Settings {
     pub fix_11300: bool,
     /// 仅 HTTP Bot 模式（Go `bool`，`http_only_bot`）。
     pub http_only_bot: bool,
+    /// 是否启用「每群每自然日 @全员 1 次」的本地限流（Go `bool`，`enable_at_everyone_limit`）。
+    ///
+    /// 默认 `true`：官方对群聊 @全体成员有每日 1 次的硬限制，本地拦截只是为了给出 1400 与
+    /// 明确文案；关掉只影响本地判定，上游仍会拒绝超额请求。
+    #[serde(default = "default_true")]
+    pub enable_at_everyone_limit: bool,
     /// 是否不替换 AppID（Go `bool`，`do_not_replace_appid`）。
     pub do_not_replace_appid: bool,
 
@@ -566,6 +572,14 @@ impl Settings {
     #[must_use]
     pub fn port_value(&self) -> &str {
         &self.port
+    }
+
+    /// 是否启用「每群每自然日 @全员 1 次」的本地限流（缺省 `true`）。
+    ///
+    /// 访问器写在这里而不是 `accessors.rs`：P-R2 只拥有 `settings.rs`，避免与并行包改同一文件。
+    #[must_use]
+    pub fn get_enable_at_everyone_limit(&self) -> bool {
+        self.enable_at_everyone_limit
     }
 }
 
@@ -776,6 +790,11 @@ fn float_to_u64(value: f64) -> Result<u64, String> {
     Ok(value as u64)
 }
 
+/// 缺省值 `true`（serde 的字段级默认；`#[derive(Default)]` 的零值是 `false`，故显式指定）。
+fn default_true() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use serde_norway::Value;
@@ -946,6 +965,7 @@ enableChangeWord: true
 defaultChangeWord: change-me
 fix_11300: true
 http_only_bot: true
+enable_at_everyone_limit: true
 do_not_replace_appid: true
 bind_prefix: /bind
 me_prefix: /me
@@ -1372,7 +1392,7 @@ msgid_ttl_seconds: -1_000
 
         // 键集一一对应：漏迁字段 / tag 写错都会让这里不等
         let fixture_keys = mapping_keys(&fixture);
-        assert_eq!(fixture_keys.len(), 184, "Go Settings 顶层 yaml tag 总数");
+        assert_eq!(fixture_keys.len(), 185, "Go Settings 顶层 yaml tag 总数");
         assert_eq!(
             fixture_keys,
             mapping_keys(&serialized),
@@ -1397,6 +1417,15 @@ msgid_ttl_seconds: -1_000
 
         // 全量取值相等：每个字段都必须承载夹具里写的值（含 Vec / 嵌套）
         assert_eq!(serialized, fixture, "往返后每个字段的值都必须与夹具一致");
+    }
+
+    #[test]
+    fn at_everyone_limit_defaults_to_true() {
+        let default = parse_str("http_only_bot: true").expect("解析失败");
+        assert!(default.get_enable_at_everyone_limit(), "缺省应启用限流");
+
+        let off = parse_str("enable_at_everyone_limit: false").expect("解析失败");
+        assert!(!off.get_enable_at_everyone_limit(), "显式 false 应关掉限流");
     }
 
     #[test]

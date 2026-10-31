@@ -202,6 +202,9 @@ impl CardPayload {
 
     /// 取出四个官方字段。
     ///
+    /// 别名与 Go `cardFieldsFromMap` 同口径：`desc` / `pic` 优先，为空时回退到
+    /// `description` / `pic_url`（Go 两者都认，避免同一份载荷两侧解析结果不同）。
+    ///
     /// # Errors
     /// 载荷不是 JSON 对象时返回 [`Error::Protocol`]。
     pub fn fields(&self) -> Result<CardFields> {
@@ -212,11 +215,18 @@ impl CardPayload {
         }
         Ok(CardFields {
             title: value.get("title").and_then(json_scalar),
-            desc: value.get("desc").and_then(json_scalar),
-            pic: value.get("pic").and_then(json_scalar),
+            desc: first_card_alias(&value, &["desc", "description"]),
+            pic: first_card_alias(&value, &["pic", "pic_url"]),
             url: value.get("url").and_then(json_scalar),
         })
     }
+}
+
+/// 别名取值：按顺序取第一个 trim 后非空的值（Go `firstNonEmptyCardValue`）。
+fn first_card_alias(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .filter_map(|key| value.get(*key).and_then(json_scalar))
+        .find(|candidate| !candidate.trim().is_empty())
 }
 
 /// 流式消息阶段（`[CQ:stream,type=…]`）。
@@ -1360,6 +1370,35 @@ mod tests {
             .is_err(),
             "非对象载荷应报错"
         );
+    }
+
+    #[test]
+    fn card_payload_accepts_official_field_aliases() {
+        // 官方卡片字段名（description / pic_url）与 Go 的 CQ 简写（desc / pic）都要认
+        let official = CardPayload {
+            raw: r#"{"title":"t","description":"d","pic_url":"https://x.com/p.png","url":"https://x.com"}"#
+                .to_owned(),
+        };
+        let fields = official.fields().expect("官方字段名应能解析");
+        assert_eq!(fields.desc.as_deref(), Some("d"));
+        assert_eq!(fields.pic.as_deref(), Some("https://x.com/p.png"));
+
+        // 两种写法同现时 desc / pic 优先（Go firstNonEmptyCardValue 的顺序）
+        let both = CardPayload {
+            raw: r#"{"desc":"简写","description":"全名","pic":"https://a/p.png","pic_url":"https://b/p.png"}"#
+                .to_owned(),
+        };
+        let fields = both.fields().expect("同现应能解析");
+        assert_eq!(fields.desc.as_deref(), Some("简写"));
+        assert_eq!(fields.pic.as_deref(), Some("https://a/p.png"));
+
+        // 简写为空/空白时回退到官方名（Go 用 TrimSpace 判空）
+        let blank = CardPayload {
+            raw: r#"{"desc":"  ","description":"全名","pic":"","pic_url":"https://b/p.png"}"#.to_owned(),
+        };
+        let fields = blank.fields().expect("空白简写应回退");
+        assert_eq!(fields.desc.as_deref(), Some("全名"));
+        assert_eq!(fields.pic.as_deref(), Some("https://b/p.png"));
     }
 
     #[test]

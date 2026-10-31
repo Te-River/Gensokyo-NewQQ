@@ -195,9 +195,9 @@ settings:
   union_id : false                  #启用罚壳id,将传入的罚壳id作为主id使用.
  
   #MD相关
-  custom_template_id : ""           #自动转换图文信息到md所需要的id *需要应用端支持双方向echo
+  custom_template_id : ""           #已废弃,不再生效(官方已移除模板消息,请改用原生 markdown.content)
   keyboard_id : ""                  #自动转换图文信息到md所需要的按钮id *需要应用端支持双方向echo
-  native_md : false                 #自动转换图文信息到md,使用原生markdown能力.
+  native_md : false                 #兼容保留,已不影响载荷形态:图文转md统一构造原生 markdown.content(不再产出 params)
   enters_as_block : false           #自动转换图文信息到md,\r \r\n \n 替换为空格.
   force_verify_image_resource : false  #发送markdown消息时官方校验图片转存结果,转存失败将返回错误(40034004)且消息不发送;仅需要确保图片必然可显示时开启
 
@@ -207,6 +207,7 @@ settings:
   bot_forum_title : "机器人帖子"                      # 机器人发帖子回复默认标题 
   AMsgRetryAsPMsg_Count : 30        #当主动信息发送失败时,自动转为后续的被动信息发送,需要开启Lazy message id,该配置项为所有群的主动转被动消息队列最大长度,建议30-100,无上限
   send_delay : 300                  #单位 毫秒 默认300ms 可以视情况减少到100或者50
+  enable_at_everyone_limit : true   #群聊 @全员 每群每自然日仅 1 次的本地限流(默认开启; 官方本身也有此限制, 关闭后不再计数也不拦截)
   enableChangeWord : false          #敏感词替换系统,具有IN和OUT两个文本维度,会在运行目录下释放txt文件,一行一个,格式为aaa####bbb,作用是将aaa替换为bbb,输入替换是对用户输入进行替换,输出则是替换机器人发出的文本信息.
   defaultChangeWord : "*"           #默认替换词,当开启
 
@@ -221,7 +222,7 @@ settings:
   status_prefix : "/gskstatus"      #运行状态查询指令; 设为 ""、/disabled 或 /disabled... 可禁用
   broadcast_prefix : "/gskbroadcast" #广播指令; 设为 ""、/disabled 或 /disabled... 可禁用
   unlock_prefix : "/unlock"         #保留兼容 该功能已随频道剔除失效
-  link_prefix : "/link"             #友情链接配置 配置custom_template_id后可用(https://www.yuque.com/km57bt/hlhnxg/tzbr84y59dbz6pib)
+  link_prefix : "/link"             #友情链接配置(原 custom_template_id 联动已废弃,不再生效)(https://www.yuque.com/km57bt/hlhnxg/tzbr84y59dbz6pib)
   auto_link : false                 #友情链接最高礼仪,机器人被添加到群内时发送友情链接.
   music_prefix : "点歌"             #[CQ:music,type=qq,id=123] 在消息文本组合qq音乐歌曲id,可以发送点歌,这是歌曲按钮第二个按钮的填充内容,应为你的机器人点歌插件的指令.
   link_bots : ["",""]               #发送友情链接时 下方按钮携带的机器人 格式 "appid-qq-name","appid-qq-name"或"http://xxx.com-文字" 链接中的-号自行用%2D替换 如 cgi-bin替换为cgi%2Dbin

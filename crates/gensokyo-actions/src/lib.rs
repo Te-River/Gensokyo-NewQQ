@@ -19,8 +19,8 @@
 //!
 //! # KNOWN_ACTIONS 覆盖率
 //!
-//! [`gensokyo_protocol::registry::KNOWN_ACTIONS`] 是 Go `callapi.RegisterHandler` 的全集（53 项）。
-//! 本 crate 覆盖其中 **50 项**：47 个注册名（[`IMPLEMENTED_ACTIONS`] 与 KNOWN_ACTIONS 的交集）
+//! [`gensokyo_protocol::registry::KNOWN_ACTIONS`] 是 Go `callapi.RegisterHandler` 的全集（56 项）。
+//! 本 crate 覆盖其中 **53 项**：50 个注册名（[`IMPLEMENTED_ACTIONS`] 与 KNOWN_ACTIONS 的交集）
 //! 加 3 个 Go 别名（`send_to_group` / `get_group_ban` / `get_group_whole_ban`，由
 //! [`gensokyo_protocol::registry::ACTION_ALIASES`] 指向对应 handler）。
 //!
@@ -37,7 +37,7 @@
 //!
 //! # deferred 执行链路
 //!
-//! 1. [`register::register_all`] 把 72 个 handler 装进 `gensokyo_protocol::Registry`（runtime 装配，
+//! 1. [`register::register_all`] 把 75 个 handler 装进 `gensokyo_protocol::Registry`（runtime 装配，
 //!    见 `gensokyo-runtime::AppState::with_actions`）。
 //! 2. 客户端调 `send_group_msg` / `send_private_msg` / `send_msg`（含 `*_async`）：handler 只做参数
 //!    解析，`data` = [`send::SendRequest`] JSON + `"deferred": true`，**不触达上游**。
@@ -90,12 +90,14 @@ pub mod handler;
 pub mod interaction;
 /// 媒体信息 action（图片 / 语音的本地回填）。
 pub mod media;
+/// 素材管理 action（上传 / 列表 / 删除素材图片）。
+pub mod media_image;
 /// 消息类 action（撤回 / 消息详情 / 合并转发）。
 pub mod messages;
 /// 面板 / 自定义菜单 / 自动审批策略 action（Go 的官方 v2 管理扩展）。
 pub mod panels;
 pub mod qqapi;
-/// 统一注册入口：72 个 handler + Go 兼容别名。
+/// 统一注册入口：75 个 handler + Go 兼容别名。
 pub mod register;
 pub mod send;
 /// 运行控制与凭证 action（重启 / 清缓存 / cookies / csrf）。
@@ -130,6 +132,10 @@ pub use interaction::{
     SetGroupAnonymousBanHandler, SetGroupMemberBlacklistHandler,
 };
 pub use media::{GetImageHandler, GetRecordHandler, MediaFileData};
+pub use media_image::{
+    DeleteMediaImageData, DeleteMediaImageHandler, GetMediaImageListHandler, MediaImageListData,
+    RETCODE_MEDIA_UPSTREAM, UploadMediaImageData, UploadMediaImageHandler,
+};
 pub use messages::{DeleteMsgHandler, GetForwardMsgHandler, GetMsgHandler};
 pub use panels::{
     CreatePanelHandler, DeletePanelHandler, GetCustomMenuHandler, GetPanelHandler,
@@ -169,6 +175,7 @@ pub const IMPLEMENTED_ACTIONS: &[&str] = &[
     "clean_cache",
     "create_panel",
     "delete_group_msg",
+    "delete_media_image",
     "delete_msg",
     "delete_panel",
     "get_avatar",
@@ -189,6 +196,7 @@ pub const IMPLEMENTED_ACTIONS: &[&str] = &[
     "get_group_member_list",
     "get_group_system_msg",
     "get_image",
+    "get_media_image_list",
     "get_msg",
     "get_online_clients",
     "get_panel",
@@ -234,6 +242,7 @@ pub const IMPLEMENTED_ACTIONS: &[&str] = &[
     "set_panel_target",
     "set_qq_profile",
     "set_restart",
+    "upload_media_image",
 ];
 
 /// [`gensokyo_protocol::registry::KNOWN_ACTIONS`] 里由 runtime 内置注册、本 crate 不重复注册的
@@ -381,6 +390,9 @@ mod tests {
             SetGroupAnonymousBanHandler, SetGroupMemberBlacklistHandler,
         };
         use crate::media::{GetImageHandler, GetRecordHandler};
+        use crate::media_image::{
+            DeleteMediaImageHandler, GetMediaImageListHandler, UploadMediaImageHandler,
+        };
         use crate::messages::{DeleteMsgHandler, GetForwardMsgHandler, GetMsgHandler};
         use crate::panels::{
             CreatePanelHandler, DeletePanelHandler, GetCustomMenuHandler, GetPanelHandler,
@@ -410,6 +422,7 @@ mod tests {
             Arc::new(CleanCacheHandler::new()),
             Arc::new(CreatePanelHandler::new()),
             Arc::new(DeleteGroupMsgHandler::new()),
+            Arc::new(DeleteMediaImageHandler::new(context.clone())),
             Arc::new(DeleteMsgHandler::new(context.clone())),
             Arc::new(DeletePanelHandler::new()),
             Arc::new(GetAvatarHandler::new(context.clone())),
@@ -430,6 +443,7 @@ mod tests {
             Arc::new(GetGroupMemberListHandler::new(context.clone())),
             Arc::new(GetGroupSystemMsgHandler::new()),
             Arc::new(GetImageHandler::new()),
+            Arc::new(GetMediaImageListHandler::new(context.clone())),
             Arc::new(GetMsgHandler::new(context.clone())),
             Arc::new(GetOnlineClientsHandler::new()),
             Arc::new(GetPanelHandler::new()),
@@ -475,6 +489,7 @@ mod tests {
             Arc::new(SetPanelTargetHandler::new()),
             Arc::new(SetQqProfileHandler::new()),
             Arc::new(SetRestartHandler::new()),
+            Arc::new(UploadMediaImageHandler::new(context.clone())),
         ];
 
         let mut names: Vec<&str> = handlers.iter().map(|handler| handler.name()).collect();

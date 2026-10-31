@@ -31,10 +31,13 @@
 //!
 //! # 刻意的差异（相对 Go）
 //!
-//! - **`set_group_ban` 的 `duration` 必填**：Go 的 `ParamsContent.Duration` 缺省为 0，等于静默解禁；
-//!   这里显式拒绝缺参，避免漏字段把成员放出来。
-//! - **`get_group_member_list` 只取单页**：[`QqApi::get_group_member_list`] 没有 cursor 入参，
-//!   Go 的「最多 100 页全量拉取 + 页间节流」尚未移植，`next_cursor` 也暂不外露。
+//! - **`set_group_ban` 的 `duration` 缺省视为 0**：与 Go 的 `ParamsContent.Duration` 同口径，
+//!   缺参等于「立即解禁」并放行（不报 1400）；给了非数字仍按 1400 拒绝。
+//! - **`set_group_ban` 超 30 天按 30 天算**：官方 `mute_expire_at` 最长 30 天
+//!   （[`MAX_BAN_SECONDS`]），超出即截断；`duration <= 0` 仍表示立即解除，原样透传。
+//! - **`get_group_member_list` 单页 + 游标接力**：`cursor` 入参原样透传给官方接口（空串等同
+//!   首屏），末页之后由客户端拿响应顶层的 `next_cursor` 继续翻；Go 的「最多 100 页全量拉取 +
+//!   页间节流」未移植，`data` 仍保持 OneBot 的数组形态。
 //! - **idmap 缺失时的中性值**：Go 侧 `StoreIDv2` 失败直接跳过成员；这里保留条目并置 `user_id=0`，
 //!   由调用方按 `member_openid` 决策。
 //! - **`joined_at` 解析**：Go 用 `time.Parse(RFC3339)`；这里用 `rfc3339`（无 `time` 依赖），
@@ -45,7 +48,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use gensokyo_core::{Error, Ob11Id, Result};
+use gensokyo_core::{Ob11Id, Result};
 use gensokyo_protocol::action::{ActionRequest, ActionResponse, GroupInfo, GroupMemberInfo};
 use gensokyo_protocol::{Extra, Handler, HandlerFuture};
 use gensokyo_qq::dto::{
@@ -67,6 +70,10 @@ pub const DEFAULT_MEMBER_PAGE: u32 = 30;
 
 /// `get_group_member_list` 单页上限：客户端要更多也截断，防止一次拉爆官方 QPM。
 pub const MAX_MEMBER_PAGE: u32 = 100;
+
+/// 官方群成员禁言上限：30 天（秒）。`restrict_chat_setting` 的 `mute_expire_at`
+/// 最远只能落在 30 天后，超出部分官方拒绝或不可预期，这里主动截断。
+pub const MAX_BAN_SECONDS: i64 = 30 * 24 * 60 * 60;
 
 /// 入群申请列表默认条数（官方默认 20）。
 pub const DEFAULT_JOIN_REQUEST_LIMIT: u32 = 20;
@@ -279,6 +286,11 @@ impl GetGroupMemberListHandler {
             Ok(group) => group,
             Err(err) => return Ok(bad_request(request, &err)),
         };
+        // `cursor` 缺省 / 空串都是首页（官方语义），统一收敛成 `None`
+        let cursor = match params::optional_text(object, "cursor") {
+            Ok(cursor) => cursor.filter(|cursor| !cursor.is_empty()),
+            Err(err) => return Ok(bad_request(request, &err)),
+        };
         let limit = match page_limit(object, DEFAULT_MEMBER_PAGE, MAX_MEMBER_PAGE) {
             Ok(limit) => limit,
             Err(err) => return Ok(bad_request(request, &err)),
@@ -286,7 +298,7 @@ impl GetGroupMemberListHandler {
         let page = match self
             .context
             .api()
-            .get_group_member_list(&group.openid, limit)
+            .get_group_member_page(&group.openid, cursor.as_deref(), limit)
             .await
         {
             Ok(page) => page,
@@ -303,7 +315,10 @@ impl GetGroupMemberListHandler {
                 member_info(&group_id, &ob11_id(&user_id, string_mode), member)
             })
             .collect();
-        ok_data(request, &members)
+        // 官方末页的 `next_cursor` 是空串：空串不当作「还有下一页」外露；
+        // `data` 保持数组（OneBot 兼容），游标走响应顶层
+        let next_cursor = Some(page.next_cursor).filter(|cursor| !cursor.is_empty());
+        Ok(ok_data(request, &members)?.with_next_cursor(next_cursor))
     }
 }
 
@@ -315,6 +330,12 @@ impl Handler for GetGroupMemberListHandler {
     fn handle<'a>(&'a self, request: &'a ActionRequest<Value>) -> HandlerFuture<'a> {
         Box::pin(self.run(request))
     }
+}
+
+/// 禁言时长截断：正时长超过 [`MAX_BAN_SECONDS`] 按 30 天计；`<= 0`（解禁）原样透传。
+#[must_use]
+pub fn clamp_ban_duration(duration: i64) -> i64 {
+    duration.min(MAX_BAN_SECONDS)
 }
 
 /// `set_group_ban`（别名 `get_group_ban` 由 runtime 的别名表指向本 handler）。
@@ -343,20 +364,16 @@ impl SetGroupBanHandler {
             Ok(member) => member,
             Err(err) => return Ok(bad_request(request, &err)),
         };
+        // Go 的 `ParamsContent.Duration` 缺省为 0：缺参等价于「立即解禁」，不报 1400
         let duration = match params::optional_i64(object, "duration") {
             Ok(Some(duration)) => duration,
-            Ok(None) => {
-                return Ok(bad_request(
-                    request,
-                    &Error::Protocol("缺少 duration".to_owned()),
-                ));
-            }
+            Ok(None) => 0,
             Err(err) => return Ok(bad_request(request, &err)),
         };
         if let Err(err) = self
             .context
             .api()
-            .set_group_ban(&group.openid, &member.openid, duration)
+            .set_group_ban(&group.openid, &member.openid, clamp_ban_duration(duration))
             .await
         {
             return Ok(upstream_error(request, &err));
@@ -591,7 +608,8 @@ mod tests {
     use super::{
         BotStateData, DEFAULT_JOIN_REQUEST_LIMIT, GetGroupBotStateHandler, GetGroupInfoHandler,
         GetGroupJoinRequestListHandler, GetGroupMemberInfoHandler, GetGroupMemberListHandler,
-        JoinRequestListData, MAX_JOIN_REQUEST_LIMIT, RETCODE_UPSTREAM, SetGroupBanHandler,
+        JoinRequestListData, MAX_BAN_SECONDS, MAX_JOIN_REQUEST_LIMIT, RETCODE_UPSTREAM,
+        SetGroupBanHandler, clamp_ban_duration,
     };
     use crate::handler::RETCODE_BAD_REQUEST;
     use crate::qqapi::{ActionContext, QqApi, QqFuture};
@@ -615,7 +633,7 @@ mod tests {
     enum Call {
         GroupInfo(String),
         MemberInfo(String, String),
-        MemberList(String, u32),
+        MemberList(String, Option<String>, u32),
         SetBan(String, String, i64),
         BotState(String),
         JoinRequestList(String, Option<String>, Option<u32>),
@@ -681,9 +699,19 @@ mod tests {
             group_openid: &str,
             limit: u32,
         ) -> QqFuture<'_, QqGroupMemberList> {
+            self.get_group_member_page(group_openid, None, limit)
+        }
+
+        fn get_group_member_page(
+            &self,
+            group_openid: &str,
+            cursor: Option<&str>,
+            limit: u32,
+        ) -> QqFuture<'_, QqGroupMemberList> {
             let group_openid = group_openid.to_owned();
+            let cursor = cursor.map(str::to_owned);
             Box::pin(async move {
-                self.record(Call::MemberList(group_openid, limit));
+                self.record(Call::MemberList(group_openid, cursor, limit));
                 take(&self.member_list)
             })
         }
@@ -912,7 +940,10 @@ mod tests {
         )));
         let data = ok_data(response.expect("handler 不应返回 Err"));
 
-        assert_eq!(api.calls(), vec![Call::MemberList(GROUP.to_owned(), 7)]);
+        assert_eq!(
+            api.calls(),
+            vec![Call::MemberList(GROUP.to_owned(), None, 7)]
+        );
         let members = data
             .as_array()
             .expect("get_group_member_list 的 data 是数组");
@@ -935,8 +966,68 @@ mod tests {
             let handler = GetGroupMemberListHandler::new(context);
             block_on(handler.handle(&request("get_group_member_list", params)))
                 .expect("handler 不应返回 Err");
-            assert_eq!(api.calls(), vec![Call::MemberList(GROUP.to_owned(), want)]);
+            assert_eq!(
+                api.calls(),
+                vec![Call::MemberList(GROUP.to_owned(), None, want)]
+            );
         }
+    }
+
+    #[test]
+    fn get_group_member_list_forwards_cursor_and_returns_next_cursor() {
+        let (context, api) = context();
+        *api.member_list.lock().unwrap() = Some(Ok(QqGroupMemberList {
+            members: vec![QqGroupMember {
+                member_openid: MEMBER.to_owned(),
+                ..QqGroupMember::default()
+            }],
+            next_cursor: "nc2".to_owned(),
+        }));
+
+        let handler = GetGroupMemberListHandler::new(context);
+        let response = block_on(handler.handle(&request(
+            "get_group_member_list",
+            json!({"group_id": GROUP, "cursor": "nc1", "limit": 30}),
+        )));
+        let response = response.expect("handler 不应返回 Err");
+
+        assert_eq!(
+            api.calls(),
+            vec![Call::MemberList(
+                GROUP.to_owned(),
+                Some("nc1".to_owned()),
+                30
+            )],
+            "cursor 必须原样透传给上游"
+        );
+        let json = serde_json::to_value(&response).expect("响应应可序列化");
+        assert_eq!(json["next_cursor"], json!("nc2"), "游标走响应顶层");
+        assert!(json["data"].is_array(), "data 仍是数组（OneBot 兼容）");
+    }
+
+    #[test]
+    fn get_group_member_list_omits_empty_next_cursor() {
+        let (context, api) = context();
+        *api.member_list.lock().unwrap() = Some(Ok(QqGroupMemberList::default()));
+
+        let handler = GetGroupMemberListHandler::new(context);
+        let response = block_on(handler.handle(&request(
+            "get_group_member_list",
+            json!({"group_id": GROUP, "cursor": ""}),
+        )));
+        let response = response.expect("handler 不应返回 Err");
+
+        // 空串游标等同首屏：收敛成 None 再传上游
+        assert_eq!(
+            api.calls(),
+            vec![Call::MemberList(GROUP.to_owned(), None, 30)]
+        );
+        let json = serde_json::to_value(&response).expect("响应应可序列化");
+        assert!(
+            json.get("next_cursor").is_none(),
+            "末页空串不应序列化 next_cursor: {json}"
+        );
+        assert_eq!(json["data"], json!([]));
     }
 
     #[test]
@@ -960,20 +1051,63 @@ mod tests {
     }
 
     #[test]
-    fn set_group_ban_requires_duration() {
+    fn clamp_ban_duration_truncates_above_thirty_days() {
+        assert_eq!(
+            clamp_ban_duration(MAX_BAN_SECONDS),
+            MAX_BAN_SECONDS,
+            "30 天整不截断"
+        );
+        assert_eq!(
+            clamp_ban_duration(MAX_BAN_SECONDS + 1),
+            MAX_BAN_SECONDS,
+            "超 1 秒按 30 天截断"
+        );
+        // 解禁（0 / 负数）与普通时长原样透传
+        assert_eq!(clamp_ban_duration(600), 600);
+        assert_eq!(clamp_ban_duration(0), 0);
+        assert_eq!(clamp_ban_duration(-1), -1);
+    }
+
+    #[test]
+    fn set_group_ban_clamps_duration_above_thirty_days() {
+        let (context, api) = context();
+        let handler = SetGroupBanHandler::new(context);
+        let response = block_on(handler.handle(&request(
+            "set_group_ban",
+            json!({"group_id": GROUP, "user_id": MEMBER, "duration": MAX_BAN_SECONDS + 1}),
+        )));
+        let response = response.expect("handler 不应返回 Err");
+
+        assert_eq!(response.status, Status::Ok);
+        assert_eq!(
+            api.calls(),
+            vec![Call::SetBan(
+                GROUP.to_owned(),
+                MEMBER.to_owned(),
+                MAX_BAN_SECONDS
+            )],
+            "超 30 天的时长必须在上游调用前截断"
+        );
+    }
+
+    #[test]
+    fn set_group_ban_missing_duration_releases_the_ban() {
+        // Go：duration 缺省为 0 = 立即解禁，仍然放行到上游，不报 1400
         let (context, api) = context();
         let handler = SetGroupBanHandler::new(context);
         let response = block_on(handler.handle(&request(
             "set_group_ban",
             json!({"group_id": GROUP, "user_id": MEMBER}),
         )));
-        let response = response.expect("参数错误也应是 Ok(失败响应)");
+        let response = response.expect("handler 不应返回 Err");
 
+        assert_eq!(response.status, Status::Ok);
+        assert_eq!(response.retcode, 0);
         assert_eq!(
-            failed(response),
-            (Status::Failed, RETCODE_BAD_REQUEST, None)
+            api.calls(),
+            vec![Call::SetBan(GROUP.to_owned(), MEMBER.to_owned(), 0)],
+            "缺 duration 必须按 0（解禁）透传给上游"
         );
-        assert!(api.calls().is_empty(), "缺参不应触达上游");
     }
 
     #[test]

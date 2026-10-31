@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
@@ -181,6 +180,25 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 	case "group":
 		// 解析消息内容
 		messageText, foundItems, msgPendings := parseMessageContent(message.Params, message, client, api, apiv2)
+		// S1：非法 markdown 载荷（模板缺 content）在新旧两链都要回 1400。
+		// 必须在 GuardAtEveryone 占额之前、任一发送分支之前拦截，避免空 msg_type=2 或白扣额度。
+		if mdErr := markdownItemsError(foundItems); mdErr != nil {
+			return sendActionResult(client, message, mdErr.Error(), 1400)
+		}
+		// P-G2：卡片四字段单点校验，任一发送分支之前拦截；
+		// markdown 优先时卡片会被丢弃（官方语义），此时不校验也不报错
+		if len(foundItems["markdown"]) == 0 {
+			if cardItems, ok := foundItems["card"]; ok && len(cardItems) > 0 {
+				if _, err := buildCardFromJSON(cardItems[0]); err != nil {
+					return sendActionResult(client, message, err.Error(), 1400)
+				}
+			}
+		}
+		// F2：卡片与 @全员 不能同现——卡片胜出会清空 content，标签发不出去但额度已扣。
+		// 必须在占额度之前判定（markdown 优先时卡片被丢弃，标签随 markdown 迁移，不算冲突）。
+		if len(foundItems["markdown"]) == 0 && len(foundItems["card"]) > 0 && atEveryonePresent(messageText, foundItems) {
+			return sendActionResult(client, message, "卡片与 @全员 不能同时使用：卡片消息不承载 @全员 标签", 1400)
+		}
 		// EventID
 		var eventID string
 		// eventIDSet：CQ 是否显式决定过 eventID（member remove 清空也算决定），
@@ -200,9 +218,28 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			}
 			cqPreExecuted = true
 		}
+		// P-G2：@全员「每群每自然日 1 次」限流——在任一发送分支之前占用额度。
+		// 跨群路由（[CQ:member,group_id=...]）时按实际目标群计数；发送失败用 rollback 归还。
+		var atEveryoneRollback func()
+		if atEveryonePresent(messageText, foundItems) {
+			atEveryoneGroupID := message.Params.GroupID.(string)
+			if realGroupID != "" {
+				atEveryoneGroupID = realGroupID
+			}
+			// 计数键统一用真实 group_openid（与 Rust 侧 idmap 同键），虚拟群号先反查
+			if resolved, resolveErr := resolveGroupOpenID(atEveryoneGroupID); resolveErr == nil && resolved != "" {
+				atEveryoneGroupID = resolved
+			}
+			rollback, guardErr := GuardAtEveryone(atEveryoneGroupID, message.ShadowDryRun)
+			if guardErr != nil {
+				return sendActionResult(client, message, guardErr.Error(), 1400)
+			}
+			atEveryoneRollback = rollback
+		}
 		// A 包出站接缝：arch_mode=new 走统一出站服务；shadow 执行并 diff；legacy 原逻辑。
 		// C1：预执行的 realGroupID/eventID/eventIDSet 透传（跨群路由 + member add 被动回复）。
-		if handled, ret := TryOutboundWithCQ(client, api, apiv2, message, messageText, foundItems, identity.TargetGroup, false, realGroupID, eventID, eventIDSet); handled {
+		// P-G2：atEveryoneRollback 透传，new 链发送失败时归还 @全员 当日额度。
+		if handled, ret := TryOutboundWithCQRollback(client, api, apiv2, message, messageText, foundItems, identity.TargetGroup, false, realGroupID, eventID, eventIDSet, atEveryoneRollback); handled {
 			return ret, nil
 		}
 		var SSM bool
@@ -605,6 +642,8 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 
 			// 如果有 markdown，改为 markdown 消息
 			if md != nil {
+				// @全员：markdown 优先时文本侧标签迁移进 markdown.content，否则随 content 清空丢失
+				md.Content = migrateAtEveryoneToMarkdown(md.Content, messageText)
 				groupMessage.Markdown = md
 				groupMessage.Keyboard = kb // 携带按钮
 				groupMessage.MsgType = 2
@@ -633,27 +672,11 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 
 			// 如果有 [CQ:card]，改为卡片消息 (msg_type=8)
 			if cardItems, ok := foundItems["card"]; ok && len(cardItems) > 0 && groupMessage.MsgType != 2 {
-				var cardData map[string]string
-				if err := json.Unmarshal([]byte(cardItems[0]), &cardData); err == nil {
-					if cardData["pic"] == "" || cardData["url"] == "" {
-						mylog.Printf("[CQ:card] pic 或 url 为空，跳过卡片消息发送")
-						delete(foundItems, "card")
-					} else {
-						groupMessage.MsgType = 8
-						groupMessage.Content = ""
-						groupMessage.Card = &dto.GroupCard{
-							Type: "tuwen",
-							Content: &dto.GroupCardContent{
-								Title:       cardData["title"],
-								Description: cardData["desc"],
-								PicURL:      resolveCardPic(cardData["pic"]),
-								URL:         cardData["url"],
-							},
-						}
-						delete(foundItems, "card")
-						mylog.Printf("[CQ:card] 将消息类型切换为卡片消息")
-					}
+				if cardErr := applyCardToMessage(groupMessage, cardItems); cardErr != nil {
+					return sendActionResult(client, message, cardErr.Error(), 1400)
 				}
+				delete(foundItems, "card")
+				mylog.Printf("[CQ:card] 将消息类型切换为卡片消息")
 			}
 
 			// 处理 [CQ:reply,id=数字] → message_reference + msg_id
@@ -718,6 +741,11 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				postGroupMessageWithRetry(apiv2, targetGroupID, groupMessage)
 			}
 
+			// P-G2：@全员 先占额度，发送失败时回滚，避免失败也消耗当日唯一一次
+			if err != nil && atEveryoneRollback != nil {
+				atEveryoneRollback()
+			}
+
 			rememberLatestBotGroupMessageInGroup(targetGroupID, resp)
 			if !config.GetNoRetMsg() {
 				//发送成功回执
@@ -740,48 +768,34 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 
 		}
 		// 纯卡片消息（无文本内容）处理
-		  if cardItems, ok := foundItems["card"]; ok && len(cardItems) > 0 {
-		   var cardData map[string]string
-		   if err := json.Unmarshal([]byte(cardItems[0]), &cardData); err == nil {
-		    if cardData["pic"] == "" || cardData["url"] == "" {
-		     mylog.Printf("[CQ:card] pic 或 url 为空，跳过纯卡片消息发送")
-		     delete(foundItems, "card")
-		    } else {
-		     cardMsg := &dto.MessageToCreate{
-		      MsgType: 8,
-		      Content: "",
-		      MsgID:   messageID,
-		      EventID: eventID,
-		      MsgSeq:  echo.GetMappingSeq(messageID),
-		      Card: &dto.GroupCard{
-		       Type: "tuwen",
-		       Content: &dto.GroupCardContent{
-		        Title:       cardData["title"],
-		        Description: cardData["desc"],
-		        PicURL:      resolveCardPic(cardData["pic"]),
-		        URL:         cardData["url"],
-		       },
-		      },
-		     }
-		     cardMsg.Timestamp = time.Now().Unix()
-		     delete(foundItems, "card")
-		     resp, err := apiv2.PostGroupMessage(context.TODO(), message.Params.GroupID.(string), cardMsg)
-		  if err != nil {
-		   mylog.Printf("发送卡片消息失败: %v", err)
-		   mylog.Printf("%s", FormatQQError(err))
-		  } else {
-		   mylog.Printf("[CQ:card] 纯卡片消息发送成功")
-		   rememberLatestBotGroupMessageInGroup(message.Params.GroupID.(string), resp)
-		   if !config.GetNoRetMsg() {
-		    if config.GetThreadsRetMsg() {
-		     go SendResponse(client, err, &message, resp, api, apiv2)
-		    } else {
-		     retmsg, _ = SendResponse(client, err, &message, resp, api, apiv2)
-		    }
-		   }
-		  }
-		 }
-		}
+		if cardItems, ok := foundItems["card"]; ok && len(cardItems) > 0 {
+			cardMsg := &dto.MessageToCreate{
+				MsgType: 8,
+				Content: "",
+				MsgID:   messageID,
+				EventID: eventID,
+				MsgSeq:  echo.GetMappingSeq(messageID),
+			}
+			if cardErr := applyCardToMessage(cardMsg, cardItems); cardErr != nil {
+				return sendActionResult(client, message, cardErr.Error(), 1400)
+			}
+			cardMsg.Timestamp = time.Now().Unix()
+			delete(foundItems, "card")
+			resp, err := apiv2.PostGroupMessage(context.TODO(), message.Params.GroupID.(string), cardMsg)
+			if err != nil {
+				mylog.Printf("发送卡片消息失败: %v", err)
+				mylog.Printf("%s", FormatQQError(err))
+			} else {
+				mylog.Printf("[CQ:card] 纯卡片消息发送成功")
+				rememberLatestBotGroupMessageInGroup(message.Params.GroupID.(string), resp)
+				if !config.GetNoRetMsg() {
+					if config.GetThreadsRetMsg() {
+						go SendResponse(client, err, &message, resp, api, apiv2)
+					} else {
+						retmsg, _ = SendResponse(client, err, &message, resp, api, apiv2)
+					}
+				}
+			}
 		}
 		var resp *dto.GroupMessageResponse
 		// 遍历foundItems并发送每种信息
@@ -1545,32 +1559,23 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 			MsgType:  2,
 		}
 	} else if qqmusic, ok := foundItems["qqmusic"]; ok && len(qqmusic) > 0 {
-		// 转换qq音乐id到一个md
-		music_id := qqmusic[0]
-		markdown, keyboard, err := parseQQMuiscMDData(music_id)
+		// [CQ:music]：模板废弃后没有可发的 markdown content，
+		// 退回「文本 + 键盘」——msg_type=2 的空载荷会被上游判为无效（F5）
+		_, keyboard, err := parseQQMuiscMDData(qqmusic[0])
 		if err != nil {
 			mylog.Printf("failed to parseMDData: %v", err)
 			return nil
 		}
-		if markdown != nil {
-			return &dto.MessageToCreate{
-				Content:  "",
-				MsgID:    id,
-				EventID:  eventid,
-				MsgSeq:   msgseq,
-				Markdown: markdown,
-				Keyboard: keyboard,
-				MsgType:  2,
-			}
-		} else {
-			return &dto.MessageToCreate{
-				Content:  "",
-				MsgID:    id,
-				EventID:  eventid,
-				MsgSeq:   msgseq,
-				Keyboard: keyboard,
-				MsgType:  2,
-			}
+		if keyboard != nil {
+			ResolveKeyboardImages(keyboard, apiv2)
+		}
+		return &dto.MessageToCreate{
+			Content:  "分享一首 QQ 音乐",
+			MsgID:    id,
+			EventID:  eventid,
+			MsgSeq:   msgseq,
+			Keyboard: keyboard,
+			MsgType:  0, // 普通文本：分享链接由键盘「立刻播放」承载
 		}
 	} else if videoURL, ok := foundItems["url_video"]; ok && len(videoURL) > 0 {
 		newvideolink := "http://" + videoURL[0]
@@ -2266,32 +2271,23 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 			MsgType:  2,
 		}
 	} else if qqmusic, ok := foundItems["qqmusic"]; ok && len(qqmusic) > 0 {
-		// 转换qq音乐id到一个md
-		music_id := qqmusic[0]
-		markdown, keyboard, err := parseQQMuiscMDData(music_id)
+		// [CQ:music]：模板废弃后没有可发的 markdown content，
+		// 退回「文本 + 键盘」——msg_type=2 的空载荷会被上游判为无效（F5）
+		_, keyboard, err := parseQQMuiscMDData(qqmusic[0])
 		if err != nil {
 			mylog.Printf("failed to parseMDData: %v", err)
 			return nil
 		}
-		if markdown != nil {
-			return &dto.MessageToCreate{
-				Content:  "",
-				MsgID:    id,
-				EventID:  eventid,
-				MsgSeq:   msgseq,
-				Markdown: markdown,
-				Keyboard: keyboard,
-				MsgType:  2,
-			}
-		} else {
-			return &dto.MessageToCreate{
-				Content:  "",
-				MsgID:    id,
-				EventID:  eventid,
-				MsgSeq:   msgseq,
-				Keyboard: keyboard,
-				MsgType:  2,
-			}
+		if keyboard != nil {
+			ResolveKeyboardImages(keyboard, apiv2)
+		}
+		return &dto.MessageToCreate{
+			Content:  "分享一首 QQ 音乐",
+			MsgID:    id,
+			EventID:  eventid,
+			MsgSeq:   msgseq,
+			Keyboard: keyboard,
+			MsgType:  0, // 普通文本：分享链接由键盘「立刻播放」承载
 		}
 	} else if videoURL, ok := foundItems["url_video"]; ok && len(videoURL) > 0 {
 		newvideolink := "http://" + videoURL[0]
@@ -2714,8 +2710,7 @@ func auto_md(message callapi.ActionMessage, messageText string, richMediaMessage
 		}
 		if transmd {
 			//将messageText和groupReply组合成一个md
-			// 处理 Markdown
-			CustomTemplateID := config.GetCustomTemplateID()
+			// 处理 Markdown（官方已废弃 custom_template_id，不再按 config 自动注入）
 			imgURL := richMediaMessage.URL
 			// 处理来自nt图床的链接
 			imgURL = processImgUrl(imgURL)
@@ -2756,8 +2751,7 @@ func auto_md(message callapi.ActionMessage, messageText string, richMediaMessage
 				}
 				// 组合模板 Markdown
 				md = &dto.Markdown{
-					CustomTemplateID: CustomTemplateID,
-					Params:           mdParams,
+					Params: mdParams,
 				}
 			} else {
 				// 使用原生Markdown格式
@@ -3116,6 +3110,8 @@ func postGroupRichMediaMessageWithRetry(apiv2 openapi.OpenAPI, groupID string, r
 // - 已经是 http(s) 链接 → 直接返回
 // - 本地文件路径 → 读取后通过 OSS 图床上传，返回 CDN URL
 // 出错时返回原值并在日志中记录
+// 注意：P-G2 起 [CQ:card] 的 pic_url 必须是 https（本地路径直接 1400），
+// 本函数仅保留给历史调用方，新代码不应再依赖本地路径上传。
 func resolveCardPic(pic string) string {
 	if pic == "" || strings.HasPrefix(pic, "http://") || strings.HasPrefix(pic, "https://") {
 		return pic

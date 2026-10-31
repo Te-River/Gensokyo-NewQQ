@@ -2308,6 +2308,22 @@ func GetCustomTemplateID() string {
 	return instance.Settings.CustomTemplateID
 }
 
+// 获取 EnableAtEveryoneLimit 的值
+// @全员「每群每自然日 1 次」限流开关，默认开启：字段未配置（nil）按 true 处理，
+// 只有显式写 enable_at_everyone_limit: false 才关闭。
+func GetEnableAtEveryoneLimit() bool {
+	mu.RLock()
+	defer mu.RUnlock()
+
+	if instance == nil {
+		return true
+	}
+	if instance.Settings.EnableAtEveryoneLimit == nil {
+		return true
+	}
+	return *instance.Settings.EnableAtEveryoneLimit
+}
+
 // 获取 KeyBoardIDD 的值
 func GetKeyBoardID() string {
 	mu.RLock()

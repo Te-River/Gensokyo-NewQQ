@@ -41,6 +41,33 @@
 - **软限制降级为提示**：按类型软限制（图片 20MB / 视频 30MB / 语音 20MB / 文件 200MB）不再作为直传判据，仅打印"平台侧将降级为文件类型下发"日志；硬限制 200MB（`getHardLimit`）不变
 - **入口重构**：`images.CreateAndUploadMediaMessage` / `CreateAndUploadMediaMessagePrivate` 调用点统一换为 `handlers` 包内的 `createAndUploadMediaMessage` / `...Private` 包装（超限先分流，≤5MB 仍交 `images` 包走 `file_data` 直传）；`images/upload_api.go` 同步补充字段
 
+### 素材管理三接口（官方 2026-10-21）
+
+新增 `upload_media_image` / `get_media_image_list` / `delete_media_image` 三个扩展 action，链路为 `prepare` → 预签名 PUT → `complete`：
+
+- **新增**：`handlers/media_images.go` 注册三 action；`botgo/openapi/v2/media_image.go` + `botgo/dto/media_image.go` 提供 v2 端点与 DTO；Rust 新链同步（`crates/gensokyo-qq/src/media_image.rs`、`crates/gensokyo-actions/src/media_image.rs`）
+- **入参**：`upload_media_image` 的 `file` 支持本地路径 / `file://` / `base64://` / `data:`（不支持 `http(s)` 链接）；`file_name` 与 `content_type` 可选，扩展名与 `content_type` 必须同族一致
+- **返回**：`image_id`、`url`（`qqbot-media://image/v1/<token>`）、`ttl`（`7776000`）、`preview_url`、`expires_at`；列表按 `cursor` 分页带 `next_cursor`/`total`；删除按 `image_id` 释放配额（已发送消息不受影响）
+- **限制**：单图 ≤10MB（十进制 10,000,000 字节）、png/jpeg/gif/webp、单机器人 100 张、自最后引用起 90 天滑动过期；官方素材错误码（`40035001`~`40035010` 中已覆盖的 8 个）转中文说明
+- **透传**：`qqbot-media://` 在 Markdown 图片与 keyboard 按钮图片字段中**原样透传**（不下载、不转存，`handlers/message_parser.go`）
+
+### 群聊 @全员（官方 2026-10-26）
+
+`[CQ:at,qq=all]`（宽松别名 `qq=everyone`）与字面 `<qqbot-at-everyone />` 归一为官方标签，群聊文本与 Markdown 均支持：
+
+- **新增**：`handlers/at_everyone.go` 负责归一与「每群每自然日 1 次」本地限流；Rust 新链同步（`crates/gensokyo-runtime/src/at_everyone.rs`）
+- **配置**：新增 `enable_at_everyone_limit`（默认 `true`）；关闭后既不计数也不拦截
+- **行为**：先占当天名额再发送、发送失败自动回滚；同日第 2 次与单聊带 @全员 均回 `1400`；markdown 优先时标签迁移进 `markdown.content`
+- **时区**：自然日固定按 `+08:00`（北京时间）切分，Go / Rust 两侧一致，不受主机时区影响
+
+### 图文卡片支持单聊（官方 2026-10-28）
+
+`[CQ:card]` 由仅群聊扩展为群聊 / 单聊同构（`msg_type=8` + `card{type:"tuwen",content{...}}`）：
+
+- **新增**：`handlers/card_payload.go` 统一构造与校验；`handlers/send_private_msg.go` 接入卡片发送
+- **字段**：四字段必填——`title` 1~50 字符、`description` 1~200 字符、`url` / `pic_url` 必须 `https://` 且 ≤1024 字节；缺任一项即回 `1400`
+- **失败**：任一字段非法、`title` 缺失或 JSON 解析失败时整条消息回 `1400`
+
 ---
 
 ## 🐛 修复
@@ -92,6 +119,43 @@
 - **描述更新**：`11253` 改为官方措辞「应用无接口访问权限」
 - **双语义说明**：`10004` 在不同接口语义不同（频道/Guild vs 取 token 的"机器人不存在"），以注释说明避免混淆
 
+### `[CQ:card]` 校验收紧：本地路径 / `http` 一律 1400
+
+- **修改**：`handlers/card_payload.go` 的 `buildTuwenCard` 成为唯一构造与校验点；四字段必填——`title` 1~50 字符、`description` 1~200 字符、`url`/`pic_url` 必须 `https://` 且 ≤1024 字节（Rust `crates/gensokyo-qq/src/dto/message.rs` 同口径）
+- **影响**：旧的「非法卡片跳过、继续发文本」与「本地路径自动 OSS 上传」移除；现在整条消息回 `retcode=1400`，不再静默降级；卡片与 @全员 同现（markdown 未优先）也回 `1400`
+
+### `[CQ:music]` 不再发送空 Markdown
+
+- **修改**：`handlers/send_group_msg.go` 的 `[CQ:music]` 分支改为普通文本（`msg_type=0`，正文「分享一首 QQ 音乐」）+ 键盘按钮承载播放链接
+- **影响**：不再发出只有模板 `params` / 空 `content` 的 `msg_type=2` 无效载荷
+
+### `native_md` 不再改变 Markdown 载荷形态
+
+- **修改**：`Processor/Processor.go` 两条分支统一构造原生 `markdown.content`；`native_md=false` 不再产出 `{"params":…}`
+- **影响**：模板 `params` 形态随 `custom_template_id` 一并废弃；`native_md` 仅作兼容配置保留，不影响载荷
+
+### `custom_template_id` / `template_id` 自动注入移除
+
+- **修改**：`Processor/Processor.go`、`handlers/message_parser.go`、`handlers/send_group_msg.go` 不再按配置自动注入模板字段；模板消息改走原生 `markdown.content`
+- **影响**：字段仍可反序列化，但不再生效；`template_id` / `custom_template_id` 出站不构造（Rust 新链同口径）
+
+### 禁言时长超过 30 天按 30 天截断
+
+- **修改**：`handlers/set_group_helpers.go` 新增 `maxMuteDurationSeconds`（30 天）与 `clampMuteDuration`，`set_group_ban` / `[CQ:set_group,action=ban]` 共用；Rust 新链 `crates/gensokyo-actions/src/group.rs` 同步 `MAX_BAN_SECONDS`
+- **影响**：超长 `duration` 不再被上游拒绝，按 30 天提交
+
+### @全员限流默认开启
+
+- **修改**：`structs/structs.go` 新增 `enable_at_everyone_limit`（`*bool`，缺省 `true`）；`config.GetEnableAtEveryoneLimit` 仅显式 `false` 关闭
+- **影响**：同群同日第 2 次 @全员、单聊带 @全员 都回 `1400`；计数落 idmap config 表 `at_everyone`，跨重启保留
+
+### Rust 新链补齐事件 / 分页 / 上传上限 / 出站类型
+
+- **事件**：新增 `INTERACTION_CREATE` → `notice.interaction`（`sub_type=create`，互动对象整体落在 `data`）
+- **分页**：`get_group_member_list` 支持 `cursor`，响应顶层带 `next_cursor`
+- **上传上限**：直传统一 5,000,000 字节（十进制 5MB），与 Go `file_data` 口径一致
+- **出站**：支持 markdown（`msg_type=2`，只带 `content`）与卡片（`msg_type=8`，群聊 / 单聊）
+
 ---
 
 ## 📝 工程与文档变更
@@ -103,6 +167,18 @@
 - `docs/cq码/扩展CQ码/扩展cq码-cq-set_group.md`：补 `whole_ban` 固定失败说明（`set_group_ban` 增量语义）
 - `docs/cq码/标准CQ码/标准cq码-cq-file.md`：补 5MB 直传上限与自动分片说明
 - `docs/本版新增功能.md`：`API` 表三行更新、新增「入站事件新增字段（2026-09-16）」「富媒体上传：5MB 直传上限与自动分片」小节、`事件字段` 补 `GROUP_JOIN_REQUEST`、错误码补码说明
+
+### 文档同步（素材管理 / @全员 / 单聊卡片）
+
+- `docs/api/扩展api/扩展api-media_images.md`：新增三个 action 的完整参数、返回、错误码与示例
+- `docs/api/api介绍.md`：扩展 API 表补 `upload_media_image` / `get_media_image_list` / `delete_media_image`
+- `docs/本版新增功能.md`：`API` 表补三行，新增「素材管理」「@全员」小节，`[CQ:card]` 改为群聊/单聊口径
+- `docs/cq码/扩展CQ码/扩展cq码-cq-card.md`：补单聊支持、四字段必填与字段边界、`https` 限制、整条 1400 行为（含与 @全员 同现）
+- `docs/cq码/扩展CQ码/扩展cq码-cq-at.md`：补 `qq=all` / 字面标签、每群每自然日 1 次、时区与限流开关
+- `AGENTS.md`：`foundItems` 的 `card` 行、`msg_type=8` 群聊/单聊、`qqbot-media://` 透传、@全员 限流
+- `template/config_template.go` / `crates/gensokyo-config/templates/config.yml`：新增 `enable_at_everyone_limit: true` 中文注释；`custom_template_id` 标注已废弃
+- `readme.md` / `docs/文档-markdown消息.md`：`custom_template_id` 可用描述改为「已废弃，不再生效」
+- `docs/文档-markdown消息.md` / 两个 config 模板：补 `native_md` 不再改变载荷形态、`params` 形态废弃；`docs/本版新增功能.md` 补 `native_md` 与 `[CQ:music]` 小节
 
 ### 新增测试文件
 

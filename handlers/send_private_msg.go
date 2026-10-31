@@ -54,6 +54,25 @@ type streamInfo struct {
 	Index       int
 }
 
+// applyPrivateCard 把 [CQ:card] 挂到单聊消息上（msg_type=8、content 清空），
+// 载荷与群聊同构；消息已切换为 markdown 时 markdown 优先，卡片丢弃。
+// 校验失败返回中文原因，调用方回 retcode=1400。
+func applyPrivateCard(gm *dto.MessageToCreate, foundItems map[string][]string) error {
+	if gm == nil || gm.MsgType == 2 {
+		return nil
+	}
+	cardItems, ok := foundItems["card"]
+	if !ok || len(cardItems) == 0 {
+		return nil
+	}
+	if err := applyCardToMessage(gm, cardItems); err != nil {
+		return err
+	}
+	delete(foundItems, "card")
+	mylog.Printf("[CQ:card] 将私聊消息类型切换为卡片消息")
+	return nil
+}
+
 // sendInputNotify 发送 [CQ:input_notify] 输入状态通知（legacy 语义，供 legacy 与 new 出站桥复用）。
 // 返回 (retmsg, handled)：handled 表示解析成功并已处理（含回执）。
 func sendInputNotify(client callapi.Client, message *callapi.ActionMessage, messageID, userID string, foundItems map[string][]string, apiv2 openapi.OpenAPI) (string, bool) {
@@ -297,6 +316,10 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 
 		// 解析消息内容
 		messageText, foundItems, msgPendings := parseMessageContent(message.Params, message, client, api, apiv2)
+		// S1：非法 markdown 载荷（模板缺 content）在新旧两链都要回 1400，且不得落成空载荷发送
+		if mdErr := markdownItemsError(foundItems); mdErr != nil {
+			return sendActionResult(client, message, mdErr.Error(), 1400)
+		}
 		// 修 M1：私聊路径显式拦截动作码（Parse 内已按 Scope 拦截，此处兜底丢弃）
 		if len(msgPendings) > 0 {
 			mylog.Printf("[cqparse] 私聊路径拦截 %d 个动作码,不执行不发送", len(msgPendings))
@@ -309,6 +332,19 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			// 覆盖 user_id 为目标用户，交由召回 handler 统一处理（含虚拟ID→OpenID转换）
 			message.Params.UserID = targetUserID
 			return HandleSendPrivateMsgWakeup(client, api, apiv2, message)
+		}
+
+		// P-G2：卡片四字段单点校验；@全员 官方仅群聊支持，单聊命中即 1400
+		// markdown 优先时卡片会被丢弃（与群聊同语义），此时不校验
+		if len(foundItems["markdown"]) == 0 {
+			if cardItems, ok := foundItems["card"]; ok && len(cardItems) > 0 {
+				if _, cardErr := buildCardFromJSON(cardItems[0]); cardErr != nil {
+					return sendActionResult(client, message, cardErr.Error(), 1400)
+				}
+			}
+		}
+		if atEveryonePresent(messageText, foundItems) {
+			return sendActionResult(client, message, "@全部成员 仅群聊支持，单聊消息不能包含 <qqbot-at-everyone />", 1400)
 		}
 
 		// A 包出站接缝：arch_mode=new 走统一出站服务；shadow 执行并 diff；legacy 原逻辑。
@@ -487,7 +523,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			return ret, nil
 		}
 
-		if strings.TrimSpace(messageText) != "" || len(msgPendings) > 0 || len(foundItems["markdown"]) > 0 || len(foundItems["keyboard"]) > 0 {
+		if strings.TrimSpace(messageText) != "" || len(msgPendings) > 0 || len(foundItems["markdown"]) > 0 || len(foundItems["keyboard"]) > 0 || len(foundItems["card"]) > 0 {
 			msgseq := echo.IncrementMappingSeq(messageID)
 			groupReply := generatePrivateMessage(messageID, eventID, nil, messageText, msgseq, apiv2, UserID)
 
@@ -549,6 +585,11 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			           mylog.Printf("[CQ:keyboard] 私聊消息附加内嵌键盘")
 			          }
 			         }
+			        }
+
+			        // P-G2：单聊图文卡片（msg_type=8），载荷与群聊同构；markdown 优先
+			        if cardErr := applyPrivateCard(groupMessage, foundItems); cardErr != nil {
+			         return sendActionResult(client, message, cardErr.Error(), 1400)
 			        }
 
 			        // 处理 [CQ:reply,id=数字] → message_reference + msg_id（私聊场景校验避免越权）

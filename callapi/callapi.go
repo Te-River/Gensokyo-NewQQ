@@ -93,17 +93,17 @@ type ParamsContent struct {
 	Reason               string `json:"reason,omitempty"`                  // 拒绝理由(扩展参数)
 	AddToMemberBlacklist bool   `json:"add_to_member_blacklist,omitempty"` // 是否同时拉黑(扩展参数)
 	// 群聊管理扩展 action 参数
-	NextIndex      int      `json:"next_index,omitempty"`      // 入群申请列表分页游标(旧字段, 官方已改 cursor)
-	Cursor         string   `json:"cursor,omitempty"`          // 分页游标(策略列表/入群申请列表)
-	Limit          int      `json:"limit,omitempty"`           // 单页数量(策略列表/入群申请列表)
-	StrategyID     string   `json:"strategy_id,omitempty"`     // 策略 ID
+	NextIndex      int        `json:"next_index,omitempty"`      // 入群申请列表分页游标(旧字段, 官方已改 cursor)
+	Cursor         string     `json:"cursor,omitempty"`          // 分页游标(策略列表/入群申请列表)
+	Limit          int        `json:"limit,omitempty"`           // 单页数量(策略列表/入群申请列表)
+	StrategyID     string     `json:"strategy_id,omitempty"`     // 策略 ID
 	GroupOpenIDs   StringList `json:"group_openids,omitempty"`   // 关联群 openid 列表
-	GroupIDs       []uint64 `json:"group_ids,omitempty"`       // 关联 QQ 群号列表
-	IsEnable       string   `json:"is_enable,omitempty"`       // 策略启用状态 on/off
-	ExpireAt       string   `json:"expire_at,omitempty"`       // 策略过期时间(RFC3339)
-	Remark         string   `json:"remark,omitempty"`          // 策略备注
-	Op             string   `json:"op,omitempty"`              // 白名单/关联群操作 add/del
-	WhitelistUsers []string `json:"whitelist_users,omitempty"` // 白名单 QQ 号码列表
+	GroupIDs       []uint64   `json:"group_ids,omitempty"`       // 关联 QQ 群号列表
+	IsEnable       string     `json:"is_enable,omitempty"`       // 策略启用状态 on/off
+	ExpireAt       string     `json:"expire_at,omitempty"`       // 策略过期时间(RFC3339)
+	Remark         string     `json:"remark,omitempty"`          // 策略备注
+	Op             string     `json:"op,omitempty"`              // 白名单/关联群操作 add/del
+	WhitelistUsers []string   `json:"whitelist_users,omitempty"` // 白名单 QQ 号码列表
 	// 菜单/面板与成员管理扩展 action 参数
 	Scope        string      `json:"scope,omitempty"`         // 面板 scope (c2c/group/channel/dm)
 	TargetType   string      `json:"target_type,omitempty"`   // 面板对象范围 all|specific(仅 c2c/group 支持 specific)
@@ -117,6 +117,11 @@ type ParamsContent struct {
 	Context      Context   `json:"context,omitempty"`       // context 字段
 	Operation    Operation `json:"operation,omitempty"`     // operation 字段
 	CallbackData string    `json:"callback_data,omitempty"` // 新增: 用于接收 GenerateURLLink 的参数
+	// 素材管理扩展 action 参数（upload_media_image / delete_media_image）
+	File        string `json:"file,omitempty"`         // 图片内容：base64:// 前缀、data: 前缀、file:// 前缀或本地路径
+	FileName    string `json:"file_name,omitempty"`    // 可选：文件名（含扩展名），缺省从路径推导
+	ContentType string `json:"content_type,omitempty"` // 可选：image/png|jpeg|gif|webp，缺省按扩展名推导
+	ImageID     string `json:"image_id,omitempty"`     // delete_media_image 的图片 ID
 }
 
 // StringList 柔性字符串数组:OneBot 客户端对 user_id 类字段习惯发数字数组(JSON 数值),
@@ -170,6 +175,9 @@ func (p *ParamsContent) UnmarshalJSON(data []byte) error {
 		MessageID interface{} `json:"message_id"`
 		ChannelID interface{} `json:"channel_id"`
 		GuildID   interface{} `json:"guild_id"`
+		// File 同样柔性:老客户端可能给 file 传对象/数组,固定 string 会让整包 Unmarshal 失败、
+		// 请求被 wsclient 静默丢弃;这里先收原始值,再归一为字符串(归一逻辑见下方 switch)。
+		File interface{} `json:"file"`
 		*Alias
 	}{
 		Alias: (*Alias)(p),
@@ -231,6 +239,25 @@ func (p *ParamsContent) UnmarshalJSON(data []byte) error {
 		p.GuildID = v
 	default:
 		return fmt.Errorf("MessageID has unsupported type")
+	}
+
+	// file 归一为字符串：字符串直通、数字/布尔转文本、对象与数组保留原始 JSON 文本
+	// （handler 按前缀判定形态，不认识就回 1400；不能因类型不符让整包 Unmarshal 失败）。
+	switch v := aux.File.(type) {
+	case nil:
+		p.File = ""
+	case string:
+		p.File = v
+	case float64:
+		p.File = strconv.FormatFloat(v, 'f', -1, 64)
+	case bool:
+		p.File = strconv.FormatBool(v)
+	default:
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return fmt.Errorf("file has unsupported type: %w", err)
+		}
+		p.File = string(raw)
 	}
 
 	return nil

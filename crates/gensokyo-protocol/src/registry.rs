@@ -152,6 +152,7 @@ pub const KNOWN_ACTIONS: &[&str] = &[
     ".handle_quick_operation_async",
     "create_panel",
     "delete_group_msg",
+    "delete_media_image",
     "delete_msg",
     "delete_panel",
     "get_avatar",
@@ -167,6 +168,7 @@ pub const KNOWN_ACTIONS: &[&str] = &[
     "get_group_member_list",
     "get_group_whole_ban",
     "get_login_info",
+    "get_media_image_list",
     "get_online_clients",
     "get_panel",
     "get_panel_list",
@@ -201,6 +203,7 @@ pub const KNOWN_ACTIONS: &[&str] = &[
     "set_group_whole_ban",
     "set_panel",
     "set_panel_target",
+    "upload_media_image",
 ];
 
 /// Go 里指向同一实现的兼容别名（alias → canonical）。
