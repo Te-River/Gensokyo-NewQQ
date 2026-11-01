@@ -25,6 +25,11 @@ func TestNormalizeAtEveryone(t *testing.T) {
 		{"大小写不敏感", "[CQ:at,qq=ALL] 公告", atEveryoneTag + " 公告"},
 		{"字面标签原样保留", "公告 " + atEveryoneTag, "公告 " + atEveryoneTag},
 		{"普通 at 不受影响", "[CQ:at,qq=12345] 公告", "[CQ:at,qq=12345] 公告"},
+		// G2：at 与逗号之间夹空白同样归一，否则 markdown 校验会把它当「有 qq 的普通 at」放行
+		{"at 与逗号之间有空格", "[CQ:at ,qq=all] 公告", atEveryoneTag + " 公告"},
+		// 负例：段名不是 at 时不得误判（atx / avatar 都不是 at 段）
+		{"形似码 atx 不归一", "[CQ:atx,qq=all] 公告", "[CQ:atx,qq=all] 公告"},
+		{"形似码 avatar 不归一", "[CQ:avatar] 公告", "[CQ:avatar] 公告"},
 		{"无 at 原样", "公告正文", "公告正文"},
 	}
 	for _, tc := range cases {
@@ -379,5 +384,90 @@ func TestSendGroupMsgAtEveryoneRollbackOnSendError(t *testing.T) {
 	}
 	if got, _ := store.Read(group); got != "" {
 		t.Fatalf("发送失败后计数应已回滚, got %q", got)
+	}
+}
+
+// ---------- 空白容错（与 Rust 的 key/value trim 对齐） ----------
+
+// TestNormalizeAtEveryoneWhitespace 键名/取值两侧空白不得影响归一（审计 §8-1）。
+func TestNormalizeAtEveryoneWhitespace(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"等号两侧空白", "[CQ:at, qq = all] 公告", atEveryoneTag + " 公告"},
+		{"值大写 + 空白", "[CQ:at,qq = ALL] 公告", atEveryoneTag + " 公告"},
+		{"逗号后双空白 + 别名", "[CQ:at,  qq=Everyone  ] 公告", atEveryoneTag + " 公告"},
+		{"空白 + 附加参数", "[CQ:at, qq = all , name=全体] 公告", atEveryoneTag + " 公告"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := NormalizeAtEveryone(tc.in)
+			if got != tc.want {
+				t.Fatalf("NormalizeAtEveryone(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			if strings.Contains(strings.ToLower(got), "[cq:at") {
+				t.Fatalf("检测到就必须归一，不得残留 CQ 码: %q", got)
+			}
+		})
+	}
+}
+
+// markdown 载荷内的空白写法同样要归一，否则既不计额也不渲染。
+func TestNormalizeAtEveryoneInMarkdownWhitespace(t *testing.T) {
+	payload := base64.StdEncoding.EncodeToString([]byte(`{"markdown":{"content":"[CQ:at, qq = all] 公告"}}`))
+	got := normalizeAtEveryoneInMarkdown(payload)
+	decoded, err := base64.StdEncoding.DecodeString(got)
+	if err != nil {
+		t.Fatalf("载荷应仍是合法 base64: %v", err)
+	}
+	if !strings.Contains(string(decoded), atEveryoneTag) {
+		t.Fatalf("空白写法的 CQ 码应归一为官方标签, got %s", decoded)
+	}
+	if !atEveryonePresent("", map[string][]string{"markdown": {got}}) {
+		t.Fatalf("归一后的 markdown 应被识别为带 @全员")
+	}
+}
+
+// TestSendGroupMsgWhitespaceAtEveryoneCountedOnce 空白写法归一后只计一次额度：
+// 同日第二次（换一种空白写法）必须回 1400 且不发。
+func TestSendGroupMsgWhitespaceAtEveryoneCountedOnce(t *testing.T) {
+	store := useMemAtEveryone(t)
+	group := openID32('g')
+	send := func(text, echo string) (string, *cardMockAPI) {
+		mock := &cardMockAPI{}
+		raw, err := HandleSendGroupMsg(&cardRecorderClient{}, nil, mock, callapi.ActionMessage{
+			Action: "send_group_msg",
+			Params: callapi.ParamsContent{
+				GroupID: group,
+				UserID:  openID32('u'),
+				Message: text,
+			},
+			Echo: echo,
+		})
+		if err != nil {
+			t.Fatalf("handler 返回错误: %v", err)
+		}
+		return raw, mock
+	}
+
+	_, mock := send("[CQ:at , qq = all] 公告", "ws-first")
+	mtc, ok := mock.lastGroup.(*dto.MessageToCreate)
+	if !ok {
+		t.Fatalf("应发送 MessageToCreate, got %T", mock.lastGroup)
+	}
+	if !strings.Contains(mtc.Content, atEveryoneTag) {
+		t.Fatalf("空白写法的 CQ 码应被归一, got %q", mtc.Content)
+	}
+	if strings.Contains(strings.ToLower(mtc.Content), "[cq:at") {
+		t.Fatalf("content 不应残留 CQ 码, got %q", mtc.Content)
+	}
+	if !strings.Contains(store.data[group], `"count":1`) {
+		t.Fatalf("应只扣一次额度, got %q", store.data[group])
+	}
+
+	raw, second := send("[CQ:at,qq = ALL] 公告", "ws-second")
+	if got := retcodeOf(t, raw); got != 1400 {
+		t.Fatalf("同日第二次应回 1400, got %d (%s)", got, raw)
+	}
+	if second.groupCalls != 0 {
+		t.Fatalf("超限时不应发送消息")
 	}
 }

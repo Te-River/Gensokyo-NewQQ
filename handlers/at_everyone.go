@@ -30,7 +30,11 @@ const (
 var (
 	// atEveryoneCQPattern 匹配 CQ 主入口 [CQ:at,qq=all] 与宽松别名 qq=everyone（大小写不敏感），
 	// 兼容误带的附加参数（如 [CQ:at,qq=all,name=all]）。
-	atEveryoneCQPattern = regexp.MustCompile(`(?i)\[CQ:at,qq=(?:all|everyone)(?:,[^\]]*)?\]`)
+	// 键名与取值两侧容忍空白（`[CQ:at, qq = all]`）：Rust 侧按 key/value trim 解析，
+	// Go 若不归一就是「检测得到却不归位」的语义分叉（审计 §8-1）。
+	// at 与逗号之间同样容忍空白（`[CQ:at ,qq=all]`）：markdown 校验按 at 段识别这类写法，
+	// 但 qq=all 不是数字、cqAtNumRe 渲染不了；不归一就会原样发出 CQ 码（G2）。
+	atEveryoneCQPattern = regexp.MustCompile(`(?i)\[CQ:at\s*,\s*qq\s*=\s*(?:all|everyone)\s*(?:,[^\]]*)?\]`)
 	// atEveryoneTagPattern 匹配官方标签，兼容手写无空格的 <qqbot-at-everyone/>。
 	atEveryoneTagPattern = regexp.MustCompile(`<qqbot-at-everyone\s*/>`)
 )

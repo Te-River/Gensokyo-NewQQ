@@ -51,8 +51,14 @@ var (
 	cqAnyRe = regexp.MustCompile(`\[CQ:[^\]]*\]`)
 	// replyNumRe 清理残留的 [CQ:reply,id=数字]
 	replyNumRe = regexp.MustCompile(`\[CQ:reply,id=\d+\]`)
-	// cqAtNumRe 匹配正文中的 [CQ:at,qq=数字]
-	cqAtNumRe = regexp.MustCompile(`\[CQ:at,qq=(\d+)\]`)
+	// cqAtNumRe 匹配正文中的 [CQ:at,qq=数字]，at 与逗号之间、键名与取值两侧都容忍空白
+	// （`[CQ:at ,qq=123]`、`[CQ:at, qq = 123 ]`），并容忍 qq 之后的附加参数
+	// （`[CQ:at,qq=123,name=x]`）：捕获组只取纯数字，附加参数随整段一起被替换。
+	// Rust 侧 at_mention_id 按 key 取值、忽略其余参数，at_everyone 的 CQ 正则也早已兼容这两种空白，
+	// Go 漏掉就会把带参 / 带空白的 at 段原样发出去（审计 §8-1/G1/G2）。
+	cqAtNumRe = regexp.MustCompile(`(?i)\[CQ:at\s*,\s*qq\s*=\s*(\d+)\s*(?:,[^\]]*)?\]`)
+	// cqDigitsRe 判断 qq 取值是否为纯数字（虚拟号），用于区分 qq=all|everyone 这类别名。
+	cqDigitsRe = regexp.MustCompile(`^\d+$`)
 )
 
 // ---------- 安全工具函数 ----------
@@ -2727,13 +2733,30 @@ func ResolvePlaceholderUserIDs(kb *keyboard.MessageKeyboard, realUserOpenID stri
 	}
 }
 
+// resolveAtVirtualID 把 at 段里的虚拟号反查成真实 OpenID。
+// 渲染（ResolveMarkdownAtMentions / resolvePlainTextAtMentions）与校验
+// （validateMarkdownAtMentions）共用同一入口：两边口径一致，校验放行的段渲染时也一定成功。
+// Pro 模式与文本路径同口径：虚拟号带子号，需走 RetrieveRowByIDv2Pro 且 690426430 代表私聊段。
+func resolveAtVirtualID(virtualID string) (string, error) {
+	if config.GetIdmapPro() {
+		realID, _, err := idmap.RetrieveRowByIDv2Pro("690426430", virtualID)
+		if err != nil {
+			return "", err
+		}
+		return realID, nil
+	}
+	return idmap.RetrieveRowByIDv2(virtualID)
+}
+
 // ResolveMarkdownAtMentions 将 markdown 内容中的 [CQ:at,qq=数字] 替换为
 // QQ API 官方 @ 语法 <qqbot-at-user id="OpenID" />，使其在群聊/频道中可渲染为蓝色 @。
+// 反查失败（未绑定的虚拟号）返回原段：markdown 侧这类载荷已被 validateMarkdownAtMentions
+// 在解析阶段拦成 1400（G4），走到这里只可能是文本路径复用了本函数。
 func ResolveMarkdownAtMentions(content string) string {
 	return cqAtNumRe.ReplaceAllStringFunc(content, func(m string) string {
 		submatches := cqAtNumRe.FindStringSubmatch(m)
 		if len(submatches) > 1 {
-			realUserID, err := idmap.RetrieveRowByIDv2(submatches[1])
+			realUserID, err := resolveAtVirtualID(submatches[1])
 			if err != nil {
 				mylog.Printf("Error resolving virtual ID in markdown: %v", err)
 				return m
@@ -2746,6 +2769,7 @@ func ResolveMarkdownAtMentions(content string) string {
 
 // resolvePlainTextAtMentions 将普通文本中的 [CQ:at,qq=数字] 替换为 QQ API 可识别的 @ 格式。
 // 优先使用缓存的用户名（@用户名），缓存失效时回退为 <@OpenID> 格式。
+// 反查失败时保留原段：文本路径是透传口径，把整段换成空串等于静默删字（G3）。
 func resolvePlainTextAtMentions(messageText string) string {
 	return cqAtNumRe.ReplaceAllStringFunc(messageText, func(m string) string {
 		submatches := cqAtNumRe.FindStringSubmatch(m)
@@ -2755,12 +2779,14 @@ func resolvePlainTextAtMentions(messageText string) string {
 				return "@" + username + " "
 			}
 			// 用户名缓存失效，回退为 <@OpenID> 格式
-			realID, err := idmap.RetrieveRowByIDv2(submatches[1])
-			if err == nil && realID != "" {
-				return "<@" + realID + "> "
+			realID, err := resolveAtVirtualID(submatches[1])
+			if err != nil || realID == "" {
+				mylog.Printf("Error resolving at mention %q, keep original CQ code: %v", m, err)
+				return m
 			}
+			return "<@" + realID + "> "
 		}
-		return ""
+		return m
 	})
 }
 
@@ -3073,6 +3099,76 @@ func FetchSongDetail(songID string) (string, error) {
 	return string(body), nil
 }
 
+// errMarkdownAtNoQQ 表示 markdown 正文里的 at 段缺少 qq 参数。
+// 对齐 Rust deferred::render_markdown：markdown 里的 `[CQ:at]` / `[CQ:at,foo]` 无法渲染成
+// <qqbot-at-user>，Rust 直接按请求错误拒绝（retcode=1400）；Go 早期原样透传，
+// 等于发一段不可 @ 的原文（审计 §8-2）。
+var errMarkdownAtNoQQ = errors.New("Markdown 中的 [CQ:at] 缺少 qq 参数")
+
+// errMarkdownAtUnbound 表示 markdown 正文里的数字 qq 在 idmap 里反查不到真实 OpenID。
+// Rust 对同样的输入回 1400；Go 若放行，渲染层只能把 [CQ:at,qq=数字] 原样发出去（G4）。
+var errMarkdownAtUnbound = errors.New("Markdown 中的 [CQ:at] 虚拟号未绑定")
+
+// errMarkdownAtMalformed 表示 markdown 正文里的 at 段写法渲染层识别不了，如 `[CQ:at,name=x,qq=1]`：
+// qq 不在 `[CQ:at,` 之后的位置，cqAtNumRe 取不到参数，也就渲染不成 <qqbot-at-user>；
+// 校验若只按键取值就会放行，最终仍把 CQ 码原文发给用户（G2）。
+// 注：`[CQ:at ,qq=1]` 这类 at 后带空白的写法现由 cqAtNumRe 直接支持，不再落到这里。
+var errMarkdownAtMalformed = errors.New("Markdown 中的 [CQ:at] 写法无法渲染")
+
+// markdownCQCodeRe 定位 markdown 正文里的任意 CQ 码（大小写不敏感），拆出类型与参数段。
+// 不用 cqAtNumRe：那只能匹配带 qq 数字的合法段，`[CQ:at]`（无逗号）与 `[CQ:at,foo]` 都漏。
+// 段名与参数之间容忍空白：`[CQ:at ]`、`[CQ:at ,qq=1]` 同样要能被认出，
+// 否则缺 qq 的写法既没被校验也没被渲染，属于「绕过校验」（G2）。
+var markdownCQCodeRe = regexp.MustCompile(`(?i)\[CQ:\s*([A-Za-z0-9_.-]+)\s*((?:,[^\]]*)?)\]`)
+
+// cqCodeParam 取 CQ 码参数段（形如 ",a=1,b=2"）中指定键的非空值，键名大小写不敏感。
+func cqCodeParam(params, key string) (string, bool) {
+	for _, part := range strings.Split(params, ",") {
+		k, v, found := strings.Cut(part, "=")
+		if !found || !strings.EqualFold(strings.TrimSpace(k), key) {
+			continue
+		}
+		if v = strings.TrimSpace(v); v != "" {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// validateMarkdownAtMentions 校验 markdown 正文里每个 at 段都能被渲染层正确渲染。
+// 文本路径（非 markdown）不校验，保持原样透传；这条校验只挂在 markdown 唯一解析入口上，
+// legacy 群/私聊与 cqparse 新链因此同口径。
+// 三条判据（对齐 Rust render_markdown）：
+//  1. 必须带非空 qq 参数，否则渲染不出 <qqbot-at-user>（审计 §8-2）；
+//  2. 数字 qq 必须能被 cqAtNumRe 认出且能在 idmap 反查到真实 OpenID，
+//     否则渲染层只会把 CQ 码原文发出去（G2/G4）；
+//  3. qq=all|everyone 在载荷入库前已被归一为 <qqbot-at-everyone />；若仍残留，有 qq 即视为合法。
+func validateMarkdownAtMentions(content string) error {
+	if content == "" {
+		return nil
+	}
+	for _, code := range markdownCQCodeRe.FindAllStringSubmatch(content, -1) {
+		if !strings.EqualFold(code[1], "at") {
+			continue
+		}
+		qq, ok := cqCodeParam(code[2], "qq")
+		if !ok {
+			return fmt.Errorf("%w: %s", errMarkdownAtNoQQ, code[0])
+		}
+		if !cqDigitsRe.MatchString(qq) {
+			continue
+		}
+		// 段形必须与渲染层同源：`[CQ:at ,qq=1]` 这类 cqAtNumRe 认不出的写法渲染不出来
+		if !cqAtNumRe.MatchString(code[0]) {
+			return fmt.Errorf("%w: %s", errMarkdownAtMalformed, code[0])
+		}
+		if _, err := resolveAtVirtualID(qq); err != nil {
+			return fmt.Errorf("%w: %s (%v)", errMarkdownAtUnbound, code[0], err)
+		}
+	}
+	return nil
+}
+
 // parseMarkdownFromMessage 从 base64 编码的 markdown JSON 数据中解析 dto.Markdown + keyboard
 // 输入格式: 原始 base64 字符串（无 base64:// 前缀）
 // 解析失败只记日志并返回 nil（legacy 调用方依赖 nil 判定）；出站新链改用
@@ -3092,7 +3188,18 @@ func parseMarkdownFromMessageE(b64Data string) (*dto.Markdown, *keyboard.Message
 	if err != nil {
 		return nil, nil, fmt.Errorf("markdown 载荷 base64 解码失败: %w", err)
 	}
-	return parseMDData(decoded)
+	md, kb, err := parseMDData(decoded)
+	if err != nil {
+		return nil, nil, err
+	}
+	// 解码后的 content 是唯一校验点：at 段缺 qq 在此拦下（Rust 同口径），
+	// 上层 markdownItemsError 会把它映射成 retcode=1400，且不占用 @全员 额度。
+	if md != nil {
+		if atErr := validateMarkdownAtMentions(md.Content); atErr != nil {
+			return nil, nil, atErr
+		}
+	}
+	return md, kb, nil
 }
 
 // markdownItemsError 返回 foundItems 中待发送 markdown 载荷的解析错误（nil 表示合法）。

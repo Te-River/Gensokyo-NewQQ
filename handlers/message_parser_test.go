@@ -1,12 +1,17 @@
 package handlers
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/hoshinonyaruko/gensokyo/callapi"
+	"github.com/hoshinonyaruko/gensokyo/idmap"
+	"github.com/tencent-connect/botgo/dto"
 )
 
 // seg 构造 OneBot 消息段（segment_type_koishi 格式）
@@ -34,9 +39,9 @@ func TestParseMessageContentFoundItems(t *testing.T) {
 		name       string
 		message    interface{}
 		wantText   string
-		wantKeys   map[string]int            // key → 期望 foundItems[key] 长度
-		wantValues map[string][]string       // key → 期望精确值
-		wantNotKey func(string) bool         // 额外负面断言
+		wantKeys   map[string]int      // key → 期望 foundItems[key] 长度
+		wantValues map[string][]string // key → 期望精确值
+		wantNotKey func(string) bool   // 额外负面断言
 	}{
 		{
 			name:     "纯文本字符串路径",
@@ -130,7 +135,7 @@ func TestParseMessageContentFoundItems(t *testing.T) {
 				"非 map 段",
 				123,
 			},
-			wantText: "",
+			wantText:   "",
 			wantNotKey: func(key string) bool { return true },
 		},
 		{
@@ -138,7 +143,7 @@ func TestParseMessageContentFoundItems(t *testing.T) {
 			message: []interface{}{
 				seg("markdown", map[string]interface{}{"data": base64.StdEncoding.EncodeToString([]byte("not-json"))}),
 			},
-			wantText: "",
+			wantText:   "",
 			wantNotKey: func(key string) bool { return key == "markdown" },
 		},
 		{
@@ -311,5 +316,398 @@ func TestParseMessageContentTextAtFallback(t *testing.T) {
 	// 纯 at 消息：transformMessageTextAt 回退保留原始 at 文本
 	if !strings.Contains(gotText, "[CQ:at,qq=12345]") {
 		t.Errorf("纯 at 消息未回退保留: %q", gotText)
+	}
+}
+
+// ---------- markdown at 段缺 qq → 1400（与 Rust render_markdown 同口径） ----------
+
+// mdContentPayload 把 markdown 正文包成 foundItems["markdown"] 形态的 base64 载荷。
+func mdContentPayload(t *testing.T, content string) string {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{"markdown": map[string]any{"content": content}})
+	if err != nil {
+		t.Fatalf("构造 markdown 载荷失败: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(raw)
+}
+
+// TestParseMarkdownFromMessageERejectsAtWithoutQQ markdown 正文的 at 段必须能被渲染层渲染：
+// 缺 qq 的 at 段、idmap 里查不到的数字 qq、渲染层认不出的写法（`[CQ:at,name=x,qq=1]`）都回 1400，
+// 与 Rust render_markdown 同口径（审计 §8-2 / G2 / G4）。
+// at 与逗号之间的空白（`[CQ:at ,qq=1]`）已由 cqAtNumRe 支持，走正常解析而非 1400。
+func TestParseMarkdownFromMessageERejectsAtWithoutQQ(t *testing.T) {
+	// 数字 qq 现在要过 idmap 反查（G4）：先绑定一个虚拟号，供合法用例使用
+	boundOpenID := "u0123456789abcdef0123456789abc123"
+	virtual, err := idmap.StoreIDv2(boundOpenID)
+	if err != nil {
+		t.Fatalf("StoreIDv2 失败: %v", err)
+	}
+	boundQQ := strconv.FormatInt(virtual, 10)
+
+	rejected := []struct {
+		name, content string
+		want          error
+	}{
+		{"无参数 at", "[CQ:at] 开会", errMarkdownAtNoQQ},
+		{"缺 qq 键", "[CQ:at,foo] 开会", errMarkdownAtNoQQ},
+		{"qq 空值", "[CQ:at,qq=] 开会", errMarkdownAtNoQQ},
+		{"qq 空白值", "[CQ:at, qq =  ] 开会", errMarkdownAtNoQQ},
+		{"小写前缀", "[cq:at] 开会", errMarkdownAtNoQQ},
+		{"中段出现", "开会 [CQ:at,foo] 了", errMarkdownAtNoQQ},
+		// G2：qq 不在 `[CQ:at,` 之后的位置，cqAtNumRe 取不到参数 → 渲染层认不出
+		{"参数顺序颠倒", "[CQ:at,name=x,qq=" + boundQQ + "] 开会", errMarkdownAtMalformed},
+		{"at 后只有空格", "[CQ:at ] 开会", errMarkdownAtNoQQ},
+		{"空白 at 无参数", "[CQ:at  ] 开会", errMarkdownAtNoQQ},
+		// G4：数字 qq 反查不到真实 OpenID，放行只会原样发出 CQ 码
+		{"未绑定的数字 qq", "[CQ:at,qq=987654321098] 开会", errMarkdownAtUnbound},
+		{"未绑定的数字 qq 带附加参数", "[CQ:at,qq=987654321098,name=x] 开会", errMarkdownAtUnbound},
+	}
+	for _, tc := range rejected {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := parseMarkdownFromMessageE(mdContentPayload(t, tc.content))
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("应返回 %v, got %v", tc.want, err)
+			}
+			if !strings.Contains(strings.ToLower(err.Error()), "[cq:at") {
+				t.Fatalf("错误信息应带出问题段, got %v", err)
+			}
+		})
+	}
+
+	accepted := []struct{ name, content string }{
+		{"数字 qq", "[CQ:at,qq=" + boundQQ + "] 开会"},
+		{"数字 qq 带附加参数", "[CQ:at,qq=" + boundQQ + ",name=x] 开会"},
+		{"空白容错", "[CQ:at, qq = " + boundQQ + "] 开会"},
+		{"at 后带空白再跟 qq", "[CQ:at ,qq=" + boundQQ + "] 开会"},
+		{"at 后带空白且键值带空白", "[CQ:at  , qq = " + boundQQ + " ] 开会"},
+		{"键名大写", "[CQ:AT,QQ = " + boundQQ + "] 开会"},
+		{"qq=all 若未归一仍算有 qq", "[CQ:at,qq=all] 开会"},
+		{"其他 CQ 码不受影响", "[CQ:image,file=https://x.com/p.png] 图"},
+		{"形似码 avatar 不是 at 段", "[CQ:avatar] 你好"},
+		{"形似码 avatar 带 qq 不是 at 段", "[CQ:avatar,qq=1] 你好"},
+		{"形似码 atx 不是 at 段", "[CQ:atx] 你好"},
+		{"形似码 atx 带 qq 不是 at 段", "[CQ:atx,qq=987654321098] 你好"},
+		{"无 at 段", "纯文本"},
+	}
+	for _, tc := range accepted {
+		t.Run(tc.name, func(t *testing.T) {
+			md, _, err := parseMarkdownFromMessageE(mdContentPayload(t, tc.content))
+			if err != nil {
+				t.Fatalf("合法载荷不应报错: %v", err)
+			}
+			if md == nil || md.Content != tc.content {
+				t.Fatalf("应保留原正文, got %#v", md)
+			}
+		})
+	}
+}
+
+// 文本路径不校验：不支持的 at 段原样透传（markdown 才回 1400）。
+func TestTextAtWithoutQQPassesThrough(t *testing.T) {
+	for _, text := range []string{
+		"[CQ:at,foo] 你好",
+		"[CQ:at] 你好",
+		// at 与参数之间夹空白：管道不解析 at，原样透传给下游
+		"[CQ:at ,qq=1] 你好",
+		"[CQ:at ] 你好",
+	} {
+		foundItems := map[string][]string{}
+		if out := ProcessCQCodePipeline(text, foundItems, "g-test-openid"); out != text {
+			t.Fatalf("ProcessCQCodePipeline(%q) = %q, want 原样透传", text, out)
+		}
+	}
+
+	// handler 级：文本路径不拦，正常发出一跳
+	SetOutboundService(nil)
+	t.Cleanup(func() { SetOutboundService(nil) })
+	mock := &cardMockAPI{}
+	raw, err := HandleSendGroupMsg(&cardRecorderClient{}, nil, mock, callapi.ActionMessage{
+		Action: "send_group_msg",
+		Params: callapi.ParamsContent{
+			GroupID: openID32('g'),
+			UserID:  openID32('u'),
+			Message: "[CQ:at,foo] 你好",
+		},
+		Echo: "text-at-no-qq",
+	})
+	if err != nil {
+		t.Fatalf("handler 返回错误: %v", err)
+	}
+	if got := retcodeOf(t, raw); got == 1400 {
+		t.Fatalf("文本路径不应回 1400, got %d (%s)", got, raw)
+	}
+	if mock.groupCalls != 1 {
+		t.Fatalf("文本路径应正常发送一次, got %d", mock.groupCalls)
+	}
+}
+
+// G1：`[CQ:at,qq=虚拟号,name=x]` 这类带附加参数的 at 段同样要解析。
+// Rust 侧按 key 取值、忽略其他参数，at_everyone 的 CQ 正则也一直兼容附加参数。
+func TestResolveMarkdownAtMentionsExtraParams(t *testing.T) {
+	realOpenID := "u0123456789abcdef0123456789abc125"
+	virtual, err := idmap.StoreIDv2(realOpenID)
+	if err != nil {
+		t.Fatalf("StoreIDv2 失败: %v", err)
+	}
+	qq := strconv.FormatInt(virtual, 10)
+	want := `<qqbot-at-user id="` + realOpenID + `" /> 你好`
+
+	for _, tc := range []struct{ name, in string }{
+		{"紧凑附加参数", "[CQ:at,qq=" + qq + ",name=x] 你好"},
+		{"空白附加参数", "[CQ:at, qq = " + qq + " , name = 小明 ] 你好"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ResolveMarkdownAtMentions(tc.in); got != want {
+				t.Fatalf("ResolveMarkdownAtMentions(%q) = %q, want %q", tc.in, got, want)
+			}
+		})
+	}
+
+	// 校验侧也必须放行同一形态，否则渲染层根本没机会跑（G1 + G4）
+	md, _, err := parseMarkdownFromMessageE(mdContentPayload(t, "[CQ:at,qq="+qq+",name=x] 你好"))
+	if err != nil {
+		t.Fatalf("带附加参数的已绑定 at 不应被拒: %v", err)
+	}
+	if md == nil {
+		t.Fatalf("载荷应解析成功")
+	}
+}
+
+// G3：文本路径反查失败时保留原文，绝不能把整段静默删成空串。
+func TestResolvePlainTextAtMentionsUnboundKeepsOriginal(t *testing.T) {
+	for _, in := range []string{
+		"[CQ:at,qq=987654321098] 你好",
+		"[CQ:at,qq=987654321098,name=x] 你好",
+		// at 后带空白的写法现已能解析，但反查失败时同样保留原文
+		"[CQ:at ,qq=987654321098] 你好",
+		"[CQ:at ] 你好",
+	} {
+		if got := resolvePlainTextAtMentions(in); got != in {
+			t.Fatalf("resolvePlainTextAtMentions(%q) = %q, want 保留原文", in, got)
+		}
+	}
+}
+
+// `[CQ:at, qq = 虚拟号]` 在 markdown 里同样要解析成 <qqbot-at-user>（空白容错）。
+func TestResolveMarkdownAtMentionsWhitespaceParams(t *testing.T) {
+	realOpenID := "u0123456789abcdef0123456789abcdef"
+	virtual, err := idmap.StoreIDv2(realOpenID)
+	if err != nil {
+		t.Fatalf("StoreIDv2 失败: %v", err)
+	}
+	qq := strconv.FormatInt(virtual, 10)
+
+	want := `<qqbot-at-user id="` + realOpenID + `" /> 你好`
+	if got := ResolveMarkdownAtMentions("[CQ:at, qq = " + qq + "] 你好"); got != want {
+		t.Fatalf("空白容错的 at 段应解析为官方标签, got %q", got)
+	}
+	// at 与逗号之间的空白同样要解析（G2 修复后与 Rust 的 at 段识别对齐）
+	if got := ResolveMarkdownAtMentions("[CQ:at ,qq = " + qq + "] 你好"); got != want {
+		t.Fatalf("at 后带空白的 at 段应解析为官方标签, got %q", got)
+	}
+	if got := ResolveMarkdownAtMentions("[CQ:at  , qq = " + qq + " ] 你好"); got != want {
+		t.Fatalf("at 后带空白且键值带空白的 at 段应解析为官方标签, got %q", got)
+	}
+	// 缺 qq 的 at 段不经此函数处理（由 parseMarkdownFromMessageE 提前拒绝）
+	if got := ResolveMarkdownAtMentions("[CQ:at,foo]"); got != "[CQ:at,foo]" {
+		t.Fatalf("缺 qq 的 at 段应原样保留, got %q", got)
+	}
+}
+
+// 文本路径的 at 段：紧凑写法与空白写法都转 <@openid>（契约 5；空白容错与 Rust 同口径）。
+func TestResolvePlainTextAtMentionsWhitespaceParams(t *testing.T) {
+	realOpenID := "u0123456789abcdef0123456789abcdee"
+	virtual, err := idmap.StoreIDv2(realOpenID)
+	if err != nil {
+		t.Fatalf("StoreIDv2 失败: %v", err)
+	}
+	qq := strconv.FormatInt(virtual, 10)
+	want := "<@" + realOpenID + "> 你好"
+
+	for _, tc := range []struct{ name, in string }{
+		{"紧凑写法", "[CQ:at,qq=" + qq + "]你好"},
+		{"空白写法", "[CQ:at, qq = " + qq + " ]你好"},
+		{"at 后带空白", "[CQ:at ,qq=" + qq + "]你好"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolvePlainTextAtMentions(tc.in); got != want {
+				t.Fatalf("resolvePlainTextAtMentions(%q) = %q, want %q", tc.in, got, want)
+			}
+		})
+	}
+}
+
+// ---------- markdown at 缺 qq：四条出站路径都回 1400 且一次都不发 ----------
+
+// legacy 群聊：markdown 里缺 qq 的 at 段 → 1400。
+func TestHandleSendGroupMsgMarkdownAtWithoutQQReturns1400(t *testing.T) {
+	SetOutboundService(nil)
+	t.Cleanup(func() { SetOutboundService(nil) })
+
+	mock := &cardMockAPI{}
+	payload := mdContentPayload(t, "[CQ:at,foo] 开会")
+	raw, err := HandleSendGroupMsg(&cardRecorderClient{}, nil, mock, callapi.ActionMessage{
+		Action: "send_group_msg",
+		Params: callapi.ParamsContent{
+			GroupID: openID32('g'),
+			UserID:  openID32('u'),
+			Message: "[CQ:markdown,data=base64://" + payload + "]",
+		},
+		Echo: "md-at-no-qq-group",
+	})
+	if err != nil {
+		t.Fatalf("handler 返回错误: %v", err)
+	}
+	if got := retcodeOf(t, raw); got != 1400 {
+		t.Fatalf("legacy 群聊应回 1400, got %d (%s)", got, raw)
+	}
+	if !strings.Contains(raw, "缺少 qq 参数") {
+		t.Fatalf("回执应说明缺 qq 参数, got %s", raw)
+	}
+	if mock.groupCalls != 0 {
+		t.Fatalf("非法载荷不应发出, got %d 次发送", mock.groupCalls)
+	}
+}
+
+// G4：markdown 里的数字 at 反查不到真实 OpenID → 1400 且一次都不发（Rust 同口径）。
+// 放行只会让渲染层把 [CQ:at,qq=未绑定号] 原样发给用户。
+func TestHandleSendGroupMsgMarkdownAtUnboundReturns1400(t *testing.T) {
+	SetOutboundService(nil)
+	t.Cleanup(func() { SetOutboundService(nil) })
+
+	mock := &cardMockAPI{}
+	payload := mdContentPayload(t, "[CQ:at,qq=987654321098] 开会")
+	raw, err := HandleSendGroupMsg(&cardRecorderClient{}, nil, mock, callapi.ActionMessage{
+		Action: "send_group_msg",
+		Params: callapi.ParamsContent{
+			GroupID: openID32('g'),
+			UserID:  openID32('u'),
+			Message: "[CQ:markdown,data=base64://" + payload + "]",
+		},
+		Echo: "md-at-unbound-group",
+	})
+	if err != nil {
+		t.Fatalf("handler 返回错误: %v", err)
+	}
+	if got := retcodeOf(t, raw); got != 1400 {
+		t.Fatalf("未绑定的数字 at 应回 1400, got %d (%s)", got, raw)
+	}
+	if !strings.Contains(raw, "虚拟号未绑定") {
+		t.Fatalf("回执应说明虚拟号未绑定, got %s", raw)
+	}
+	if mock.groupCalls != 0 {
+		t.Fatalf("非法载荷不应发出, got %d 次发送", mock.groupCalls)
+	}
+}
+
+// G2 修复：markdown 里 `[CQ:at ,qq=数字]`（at 与逗号之间带空白）走正常解析——
+// 已绑定 → 渲染成 <qqbot-at-user> 正常发出；未绑定 / 缺 qq → 仍回 1400，不能放行 CQ 码原文。
+func TestHandleSendGroupMsgMarkdownAtSpaceForm(t *testing.T) {
+	SetOutboundService(nil)
+	t.Cleanup(func() { SetOutboundService(nil) })
+
+	boundOpenID := "u0123456789abcdef0123456789abc127"
+	virtual, err := idmap.StoreIDv2(boundOpenID)
+	if err != nil {
+		t.Fatalf("StoreIDv2 失败: %v", err)
+	}
+	boundQQ := strconv.FormatInt(virtual, 10)
+
+	send := func(content, echo string) (string, *cardMockAPI) {
+		mock := &cardMockAPI{}
+		raw, err := HandleSendGroupMsg(&cardRecorderClient{}, nil, mock, callapi.ActionMessage{
+			Action: "send_group_msg",
+			Params: callapi.ParamsContent{
+				GroupID: openID32('g'),
+				UserID:  openID32('u'),
+				Message: "[CQ:markdown,data=base64://" + mdContentPayload(t, content) + "]",
+			},
+			Echo: echo,
+		})
+		if err != nil {
+			t.Fatalf("handler 返回错误: %v", err)
+		}
+		return raw, mock
+	}
+
+	// 已绑定：正常发出，正文里的 CQ 码渲染成官方 @ 标签
+	_, mock := send("[CQ:at , qq = "+boundQQ+"] 开会", "md-at-space-bound")
+	if mock.groupCalls != 1 {
+		t.Fatalf("已绑定的空白写法应正常发送一次, got %d", mock.groupCalls)
+	}
+	mtc, ok := mock.lastGroup.(*dto.MessageToCreate)
+	if !ok {
+		t.Fatalf("应发送 MessageToCreate, got %T", mock.lastGroup)
+	}
+	if mtc.Markdown == nil || !strings.Contains(mtc.Markdown.Content, `<qqbot-at-user id="`+boundOpenID+`" />`) {
+		t.Fatalf("CQ 码应渲染成官方标签, got %#v", mtc.Markdown)
+	}
+
+	// 未绑定：仍回 1400 且不发
+	raw, mock := send("[CQ:at ,qq=987654321098] 开会", "md-at-space-unbound")
+	if got := retcodeOf(t, raw); got != 1400 {
+		t.Fatalf("未绑定的空白写法应回 1400, got %d (%s)", got, raw)
+	}
+	if mock.groupCalls != 0 {
+		t.Fatalf("非法载荷不应发出, got %d 次发送", mock.groupCalls)
+	}
+
+	// 缺 qq 的空白写法：1400
+	raw, mock = send("[CQ:at ] 开会", "md-at-space-noqq")
+	if got := retcodeOf(t, raw); got != 1400 {
+		t.Fatalf("缺 qq 的空白写法应回 1400, got %d (%s)", got, raw)
+	}
+	if mock.groupCalls != 0 {
+		t.Fatalf("非法载荷不应发出, got %d 次发送", mock.groupCalls)
+	}
+}
+
+// legacy 私聊：markdown 里缺 qq 的 at 段 → 1400。
+func TestHandleSendPrivateMsgMarkdownAtWithoutQQReturns1400(t *testing.T) {
+	SetOutboundService(nil)
+	t.Cleanup(func() { SetOutboundService(nil) })
+
+	mock := &cardMockAPI{}
+	payload := mdContentPayload(t, "[CQ:at] 开会")
+	raw, err := HandleSendPrivateMsg(&cardRecorderClient{}, nil, mock, callapi.ActionMessage{
+		Action: "send_private_msg",
+		Params: callapi.ParamsContent{
+			UserID:  openID32('u'),
+			Message: "[CQ:markdown,data=base64://" + payload + "]",
+		},
+		Echo: "md-at-no-qq-private",
+	})
+	if err != nil {
+		t.Fatalf("handler 返回错误: %v", err)
+	}
+	if got := retcodeOf(t, raw); got != 1400 {
+		t.Fatalf("legacy 私聊应回 1400, got %d (%s)", got, raw)
+	}
+	if mock.c2cCalls != 0 {
+		t.Fatalf("非法载荷不应发出, got %d 次发送", mock.c2cCalls)
+	}
+}
+
+// 新链群聊：同一校验前置到 SendFoundItemsGroup。
+func TestSendFoundItemsGroupRejectsMarkdownAtWithoutQQ(t *testing.T) {
+	mock := &cardMockAPI{}
+	found := map[string][]string{"markdown": {mdContentPayload(t, "[CQ:at,foo] 开会")}}
+	if _, err := SendFoundItemsGroup(context.Background(), openID32('g'), "", found, mock); !errors.Is(err, errMarkdownAtNoQQ) {
+		t.Fatalf("应返回 errMarkdownAtNoQQ, got %v", err)
+	}
+	if mock.groupCalls != 0 {
+		t.Fatalf("非法载荷不应发出, got %d 次发送", mock.groupCalls)
+	}
+}
+
+// 新链私聊：同一校验前置到 SendFoundItemsPrivate。
+func TestSendFoundItemsPrivateRejectsMarkdownAtWithoutQQ(t *testing.T) {
+	mock := &cardMockAPI{}
+	found := map[string][]string{"markdown": {mdContentPayload(t, "[CQ:at] 开会")}}
+	if _, err := SendFoundItemsPrivate(context.Background(), openID32('u'), "", found, false, mock); !errors.Is(err, errMarkdownAtNoQQ) {
+		t.Fatalf("应返回 errMarkdownAtNoQQ, got %v", err)
+	}
+	if mock.c2cCalls != 0 {
+		t.Fatalf("非法载荷不应发出, got %d 次发送", mock.c2cCalls)
 	}
 }

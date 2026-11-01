@@ -60,7 +60,7 @@
 
 | 写法 | 说明 |
 |------|------|
-| `[CQ:at,qq=all]` | 标准写法；亦接受宽松别名 `[CQ:at,qq=everyone]` 与误带的附加参数（如 `[CQ:at,qq=all,name=all]`）。 |
+| `[CQ:at,qq=all]` | 标准写法；亦接受宽松别名 `[CQ:at,qq=everyone]`、误带的附加参数（如 `[CQ:at,qq=all,name=all]`），以及参数空白写法（`[CQ:at, qq = all]`、`[CQ:at,qq = ALL]`）。 |
 | `<qqbot-at-everyone />` | 官方字面标签，原样保留；兼容手写无空格的 `<qqbot-at-everyone/>`。 |
 
 行为：
@@ -72,6 +72,7 @@
 - 自然日固定按 `+08:00`（北京时间）切分，Go / Rust 两侧一致，不受主机时区影响。计数落 idmap config 表 `at_everyone` section，跨重启保留，Go / Rust 共享同一 `idmap.db` 时互认。
 - 关闭 `enable_at_everyone_limit` 后本地既不计数也不拦截（官方限制仍在，超额由上游报错）。
 - 卡片与 @全员 同现回 `1400`：卡片会清空正文，@全员 标签无法承载；markdown 优先时不算冲突，卡片被丢弃。
+- Markdown 内容中缺少 `qq` 参数的 at 段（`[CQ:at]`、`[CQ:at,foo]`、`[CQ:at,qq=]`）回 `retcode=1400`，不静默发出原文；普通文本消息中的同类残缺段保持原样透传，与 Go / Rust 两侧一致。
 
 ```text
 [CQ:at,qq=all]各位早上好

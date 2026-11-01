@@ -11,7 +11,7 @@
 //!
 //! | 段 | 落到 | 说明 |
 //! |----|------|------|
-//! | 文本 | `content` | 按 CQ 重新分词，`[CQ:at,qq=…]` 转 v2 的 `<@openid>`（虚拟号经 idmap 反查）；`auto_escape = true` 时原样发送、不解析 |
+//! | 文本 | `content` | 按 CQ 重新分词，`[CQ:at,qq=…]` 转 v2 的 `<@openid>`（虚拟号经 idmap 反查）；缺 `qq` 的 at 段（`[CQ:at]` / `[CQ:at ]` / `[CQ:at,foo]` / `[CQ:at,qq=]`）与反查失败的数字虚拟号都原样透传（后者只 `warn`）；`at` 后与键值两侧允许空白（`[CQ:at , qq = 1]` 照常解析）；`auto_escape = true` 时原样发送、不解析 |
 //! | `[CQ:at,qq=all]` / `[CQ:at,qq=everyone]` / 字面 `<qqbot-at-everyone />` | `<qqbot-at-everyone />` | 仅群聊，且受「每群每自然日 1 次」限制，见下节「@全员」 |
 //! | `markdown` | `markdown` + `msg_type=2` | 只取 `content`：模板字段（`template_id` / `custom_template_id`）已废弃，出站不构造；文本被丢弃、`card` 让位 |
 //! | `card` | `card` + `msg_type=8` | 群聊与单聊同构；`{type:"tuwen", content:{title,description,url,pic_url}}`，四字段校验见 [`compose_card`] |
@@ -35,7 +35,9 @@
 //! [`at_everyone::dedupe_tag`] 收敛成一个（字面标签与 CQ 写法可能同时出现）。文本与 markdown
 //! 的 @用户 走两套标签：
 //! 文本仍是旧式 `<@openid>`，markdown 是官方 `<qqbot-at-user id="openid" />`（数字虚拟号
-//! 必须经 idmap 反查，失败 `1400`）。发送前扫最终载荷：
+//! 必须经 idmap 反查，失败 `1400`）。缺 `qq` 的 at 段两条路径口径不同：markdown 正文
+//! `1400`（否则会原样发一段不可渲染的 CQ 码），文本路径原样透传（与 Go 一致）；数字虚拟号
+//! 反查失败同样只在 markdown `1400`，文本路径保留原文并 `warn`。发送前扫最终载荷：
 //!
 //! - 单聊出现标签 → `1400`（官方只允许群聊，静默丢弃不可接受）；
 //! - 群聊出现标签 → 先占当天的名额（[`at_everyone::reserve`]，落 idmap config 的
@@ -207,7 +209,9 @@ fn record_sent_message(echo: Option<&EchoStore>, message_id: &str) {
 /// `openid` 由调用方从 `target` 还原：媒体上传要按群 / C2C 选端点，两者都要它。
 ///
 /// # Errors
-/// 文本里的 `[CQ:at]` 缺 `qq`、`at` 虚拟号无法反查、reply 无法还原，或消息含本阶段不支持的段。
+/// markdown 正文里的 `[CQ:at]` 缺 `qq`、markdown 里的 `at` 虚拟号无法反查、reply 无法还原，
+/// 或消息含本阶段
+/// 不支持的段。
 pub async fn compose(
     context: &ActionContext,
     target: &SendTarget,
@@ -315,6 +319,10 @@ fn migrate_at_everyone(content: &str, rendered_text: &str) -> String {
 /// markdown 只认 `<qqbot-at-user id="OpenID" />`，文本那套 `<@openid>` 在 markdown 里不会
 /// 渲染成 @。数字虚拟号必须经 idmap 反查到真实 OpenID；反查失败直接 `1400`——Go 这里会原样
 /// 留着 CQ 码（等于发一段不可渲染的文本），Rust 侧不静默。
+/// 缺 `qq` 的 at 段（`[CQ:at]` / `[CQ:at ]` / `[CQ:at,foo]` / `[CQ:at,qq=]`）同样 `1400`：
+/// markdown 里留一段 CQ 码只会显示成字面文本。`at` 后带空白、但参数齐备的写法
+/// （`[CQ:at ,qq=1]`）照常解析，不算缺 `qq`。
+/// 文本路径相反，原样透传（见 [`render_text`]）。
 ///
 /// 只替换 at 段，其余字节原样保留：不重新转义 `[` `]`，否则会破坏 `[文本](链接)` 语法。
 fn render_markdown(context: &ActionContext, content: &str) -> Result<String> {
@@ -340,7 +348,7 @@ fn render_markdown(context: &ActionContext, content: &str) -> Result<String> {
         };
         let code = &after[..=end];
         let id = at_everyone::at_mention_id(code).ok_or_else(|| {
-            Error::Protocol(format!("markdown 里的 {code} 缺少 qq 参数"))
+            Error::Protocol(format!("markdown 里的 {code} 不是合法的 at 段（缺 qq）"))
         })?;
         let openid = context.resolve_openid("qq", id, "user_openid")?;
         out.push_str("<qqbot-at-user id=\"");
@@ -380,37 +388,68 @@ fn compose_card(plan: &OutboundPlan, rendered_text: &str) -> Result<Option<Messa
 }
 
 /// 文本主体 → v2 `content`：`[CQ:at,qq=…]` 转 `<@openid>`，`qq=all` / `everyone` 转 @全员标签，
-/// 其余 CQ 码保持原样。
+/// 缺 `qq` 的 at 段与其余 CQ 码保持原样。
+///
+/// 缺 `qq` 的 at 段（`[CQ:at]` / `[CQ:at ]` / `[CQ:at,foo]` / `[CQ:at,qq=]`）在文本路径
+/// **原样透传**，不报错（与 Go 文本路径一致）；`at` 后带空白但参数齐备的写法照常反查。
+/// 数字虚拟号反查失败同样保留原文并 `warn`。markdown 路径相反，这两种情况都 `1400`，见
+/// [`render_markdown`]。
+/// 这里按 at 段切原文再逐段渲染，而不是整条过一遍 `cqcode::parse`：解析器会丢掉
+/// `[CQ:at,foo]` 里那个不成对的参数，重新序列化后就吐不出原文了。
 fn render_text(context: &ActionContext, message: &MessageOut) -> Result<String> {
     if message.auto_escape {
         return Ok(message.text.clone());
     }
 
-    let mut out = String::new();
-    for segment in cqcode::parse(&message.text) {
+    let text = message.text.as_str();
+    let mut out = String::with_capacity(text.len());
+    let mut from = 0;
+    while let Some(start) = at_everyone::find_at_code(text, from) {
+        let after = &text[start..];
+        let Some(end) = after.find(']') else {
+            // 未闭合的 at 段：剩余部分按原文处理（与 `normalize` 的 malformed 分支一致）
+            out.push_str(&render_plain(&text[from..]));
+            return Ok(at_everyone::dedupe_tag(&out));
+        };
+        let code = &after[..=end];
+        out.push_str(&render_plain(&text[from..start]));
+        match at_everyone::at_mention_id(code) {
+            // @全员 是另一套标签，`all` / `everyone` 大小写不敏感（Go 同样认 `ALL`）
+            Some(id) if at_everyone::is_everyone_id(id) => out.push_str(at_everyone::TAG),
+            // 文本消息官方仍在用旧式 `<@openid>`（标注即将弃用但当前可用）
+            Some(id) if !id.is_empty() => match context.resolve_openid("qq", id, "user_openid") {
+                Ok(openid) => {
+                    out.push_str("<@");
+                    out.push_str(&openid);
+                    out.push('>');
+                }
+                // 文本路径反查失败只告警、保留 CQ 原文：与 Go 同口径，不让整条文本消息 1400
+                // （markdown 路径相反，反查失败仍然 1400，见 [`render_markdown`]）
+                Err(err) => {
+                    tracing::warn!(%id, error = %err, "文本 @ 反查失败，保留 CQ 原文");
+                    out.push_str(code);
+                }
+            },
+            // 缺 `qq`（含 `qq=` 空值）：原样透传，与 Go 文本路径一致
+            _ => out.push_str(code),
+        }
+        from = start + end + 1;
+    }
+    out.push_str(&render_plain(&text[from..]));
+    // 字面标签与 CQ 写法可能同时出现，收敛成一个
+    Ok(at_everyone::dedupe_tag(&out))
+}
+
+/// 一段不含 at 段（或含不了 at 段）的文本：走一次 CQ 解析，文本段取原文，其余码段回写等价 CQ。
+fn render_plain(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for segment in cqcode::parse(text) {
         match segment.kind.as_str() {
             "text" => out.push_str(segment.text_content().unwrap_or_default()),
-            "at" => {
-                // CQ `at` 段的参数名是 `qq`（不是 `id`），见 `cqcode::CODES`。
-                let id = segment
-                    .get("qq")
-                    .ok_or_else(|| Error::Protocol("[CQ:at] 缺少 qq".to_owned()))?;
-                // 文本消息官方仍在用旧式 `<@openid>`（标注即将弃用但当前可用）；
-                // @全员 是另一套标签，`all` / `everyone` 大小写不敏感（Go 同样认 `ALL`）。
-                if at_everyone::is_everyone_id(id) {
-                    out.push_str(at_everyone::TAG);
-                    continue;
-                }
-                let openid = context.resolve_openid("qq", id, "user_openid")?;
-                out.push_str("<@");
-                out.push_str(&openid);
-                out.push('>');
-            }
             _ => out.push_str(&segment.to_cq()),
         }
     }
-    // 字面标签与 CQ 写法可能同时出现，收敛成一个
-    Ok(at_everyone::dedupe_tag(&out))
+    out
 }
 
 /// `[CQ:reply]` 目标 → 上游真实消息 ID。
@@ -1397,6 +1436,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn whitespace_at_everyone_counts_once_per_day() {
+        // 空白写法归一后同样只计 1 次额度：同日第二次（换一种空白写法）回 1400
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let (_idmap_dir, idmap) = idmap_store();
+        let context = context.with_idmap(Arc::clone(&idmap));
+        let media = no_media();
+        let first = text_plan(SendTarget::Group(OPENID.to_owned()), "[CQ:at, qq = all] 开会");
+
+        execute(&context, &first, &deps(&media, None))
+            .await
+            .expect("空白写法首次应放行");
+        assert_eq!(
+            api.sent()[0].content.as_deref(),
+            Some("<qqbot-at-everyone /> 开会"),
+            "空白写法必须归一为官方标签"
+        );
+
+        let second = text_plan(SendTarget::Group(OPENID.to_owned()), "[CQ:at,qq = ALL] 开会");
+        let err = execute(&context, &second, &deps(&media, None))
+            .await
+            .expect_err("同日第二次必须拒绝");
+
+        assert!(matches!(err, Error::Protocol(_)), "超限应映射 1400: {err}");
+        assert_eq!(api.sent().len(), 1, "超限的第二次不应发送");
+    }
+
+    #[tokio::test]
     async fn at_everyone_limit_switch_off_allows_repeats_without_counting() {
         let api = Arc::new(FakeQqApi::default().with_send("MSG-1").with_send("MSG-2"));
         let (_dir, context) =
@@ -1535,6 +1602,182 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn at_everyone_with_space_before_comma_is_normalized() {
+        // `[CQ:at ,qq=all]` / `[CQ:at , qq = ALL]`：空白形态同样归一为标签并计 1 次额度
+        for (text, expected) in [
+            ("[CQ:at ,qq=all] 开会", "<qqbot-at-everyone /> 开会"),
+            ("[CQ:at , qq = ALL] 开会", "<qqbot-at-everyone /> 开会"),
+        ] {
+            let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+            let (_dir, context) = context(Arc::clone(&api));
+            let (_idmap_dir, idmap) = idmap_store();
+            let context = context.with_idmap(Arc::clone(&idmap));
+            let media = no_media();
+            let plan = text_plan(SendTarget::Group(OPENID.to_owned()), text);
+
+            execute(&context, &plan, &deps(&media, None))
+                .await
+                .expect("空白写法的 @全员 应归一为官方标签");
+
+            assert_eq!(api.sent()[0].content.as_deref(), Some(expected), "{text}");
+
+            // 额度只计一次：同群同日再来一条必须 1400
+            let err = execute(&context, &plan, &deps(&media, None))
+                .await
+                .expect_err("同日第二条必须拒绝");
+            assert!(
+                matches!(err, Error::Protocol(_)),
+                "{text} 的空白写法同样要占额度: {err}"
+            );
+        }
+    }
+
+    // ---- 文本路径的 @用户：缺 qq 原样透传，齐备才反查 ----
+
+    #[tokio::test]
+    async fn text_at_without_qq_is_passed_through() {
+        // 文本路径缺 qq 不报错：原样透传（与 Go 一致），只有 markdown 才 1400
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let text = "[CQ:at] 你好 [CQ:at,foo] 世界 [CQ:at,qq=]";
+        let plan = text_plan(SendTarget::Group(OPENID.to_owned()), text);
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("文本路径缺 qq 不应报错");
+
+        let sent = api.sent();
+        assert_eq!(
+            sent[0].content.as_deref(),
+            Some(text),
+            "缺 qq 的 at 段必须原样保留"
+        );
+        assert_eq!(sent[0].msg_type, None, "纯文本不应带 msg_type");
+    }
+
+    #[tokio::test]
+    async fn text_at_with_space_before_comma_still_resolves() {
+        // `[CQ:at ,qq=N]` 与紧凑写法同口径：照样反查成 `<@openid>`；
+        // 裸 at 段（`[CQ:at ]`）仍按缺 qq 原样透传
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let (_idmap_dir, idmap) = idmap_store();
+        let (_, vuin) = idmap
+            .retrieve_virtual_value(MEMBER_OPENID)
+            .expect("登记身份失败");
+        let context = context.with_idmap(Arc::clone(&idmap));
+        let media = no_media();
+        let plan = text_plan(
+            SendTarget::Group(OPENID.to_owned()),
+            &format!("[CQ:at ,qq={vuin}] 你好 [CQ:at ] 世界"),
+        );
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("文本路径带空白的 at 段不应报错");
+
+        let expected = format!("<@{MEMBER_OPENID}> 你好 [CQ:at ] 世界");
+        assert_eq!(
+            api.sent()[0].content.as_deref(),
+            Some(expected.as_str()),
+            "参数齐备的空白写法要反查，裸 at 段（带空白）仍原样透传"
+        );
+    }
+
+    #[tokio::test]
+    async fn text_at_mention_resolution_failure_keeps_the_code() {
+        // 未装配 idmap：数字虚拟号反查失败 → 文本保留原文（只 warn），不像 markdown 那样 1400
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let text = "[CQ:at,qq=123456] 你好";
+        let plan = text_plan(SendTarget::Group(OPENID.to_owned()), text);
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("文本路径反查失败不应报错");
+
+        assert_eq!(
+            api.sent()[0].content.as_deref(),
+            Some(text),
+            "反查失败必须保留 CQ 原文"
+        );
+    }
+
+    #[tokio::test]
+    async fn text_avatar_cq_is_not_treated_as_at() {
+        // `[CQ:avatar]` 不是 at 段：文本路径同样原样放行，不误判成缺 qq
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let text = "[CQ:avatar] 你好";
+        let plan = text_plan(SendTarget::Group(OPENID.to_owned()), text);
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("非 at 的 CQ 码应原样放行");
+
+        assert_eq!(api.sent()[0].content.as_deref(), Some(text), "非 at 段不得被改写");
+    }
+
+    #[tokio::test]
+    async fn text_at_mention_still_resolves_to_openid() {
+        // 齐备的 at 段照旧走 idmap 反查 → 旧式 `<@openid>`
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let (_idmap_dir, idmap) = idmap_store();
+        let (_, vuin) = idmap
+            .retrieve_virtual_value(MEMBER_OPENID)
+            .expect("登记身份失败");
+        let context = context.with_idmap(Arc::clone(&idmap));
+        let media = no_media();
+        let plan = text_plan(
+            SendTarget::Group(OPENID.to_owned()),
+            &format!("[CQ:at,qq={vuin}] 你好"),
+        );
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("文本 @用户 应发送成功");
+
+        let expected = format!("<@{MEMBER_OPENID}> 你好");
+        assert_eq!(
+            api.sent()[0].content.as_deref(),
+            Some(expected.as_str()),
+            "数字虚拟号仍要反查成 <@openid>"
+        );
+    }
+
+    #[tokio::test]
+    async fn text_at_mention_accepts_whitespace_params() {
+        // 键名/取值两侧空白要照样解析（与 Go `cqAtNumRe` 的 `\s*` 同口径）
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let (_idmap_dir, idmap) = idmap_store();
+        let (_, vuin) = idmap
+            .retrieve_virtual_value(MEMBER_OPENID)
+            .expect("登记身份失败");
+        let context = context.with_idmap(Arc::clone(&idmap));
+        let media = no_media();
+        let plan = text_plan(
+            SendTarget::Group(OPENID.to_owned()),
+            &format!("[CQ:at, qq = {vuin} ] 你好"),
+        );
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("空白写法的 at 段也应发送成功");
+
+        let expected = format!("<@{MEMBER_OPENID}> 你好");
+        assert_eq!(
+            api.sent()[0].content.as_deref(),
+            Some(expected.as_str()),
+            "空白写法不得把 at 段原样发出去"
+        );
+    }
+
     // ---- markdown @用户 / 文本+markdown 的 @全员 迁移 / 卡片冲突 ----
 
     /// 用 `content` 构造一份 markdown 计划（json 编码由 serde 负责，避免手写转义）。
@@ -1588,6 +1831,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn markdown_at_mention_accepts_whitespace_params() {
+        // markdown 侧同一口径：键名/取值空白仍要渲染成 <qqbot-at-user>
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let (_idmap_dir, idmap) = idmap_store();
+        let (_, vuin) = idmap
+            .retrieve_virtual_value(MEMBER_OPENID)
+            .expect("登记身份失败");
+        let context = context.with_idmap(Arc::clone(&idmap));
+        let media = no_media();
+        let plan = request(
+            SendTarget::Group(OPENID.to_owned()),
+            markdown_plan(&format!("[CQ:at, qq = {vuin} ] 你好")),
+        );
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("markdown 空白写法的 at 段应发送成功");
+
+        let content = api.sent()[0]
+            .markdown
+            .as_ref()
+            .and_then(|markdown| markdown.content.clone())
+            .expect("markdown 必须有正文");
+        assert_eq!(
+            content,
+            format!("<qqbot-at-user id=\"{MEMBER_OPENID}\" /> 你好"),
+            "空白写法不得残留 CQ 码"
+        );
+    }
+
+    #[tokio::test]
     async fn markdown_at_mention_resolution_failure_is_a_request_error() {
         // 未装配 idmap：数字虚拟号无法反查 → 1400，不静默留 CQ 码
         let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
@@ -1603,6 +1878,92 @@ mod tests {
             .expect_err("反查失败必须拒绝");
         assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
         assert!(api.sent().is_empty(), "反查失败不应发送");
+    }
+
+    #[tokio::test]
+    async fn markdown_at_without_qq_is_a_request_error() {
+        // markdown 正文缺 qq 一律 1400：裸 at 段（含 `at` 后带空白的写法）、不成对的参数、
+        // 空的 qq 值
+        for content in [
+            "[CQ:at] 你好",
+            "[CQ:at ] 你好",
+            "[CQ:at,foo] 你好",
+            "[CQ:at ,foo] 你好",
+            "[CQ:at,qq=] 你好",
+        ] {
+            let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+            let (_dir, context) = context(Arc::clone(&api));
+            let media = no_media();
+            let plan = request(
+                SendTarget::Group(OPENID.to_owned()),
+                markdown_plan(content),
+            );
+
+            let err = execute(&context, &plan, &deps(&media, None))
+                .await
+                .expect_err("markdown 缺 qq 必须拒绝");
+            assert!(
+                matches!(err, Error::Protocol(_)),
+                "{content} 应映射 1400: {err}"
+            );
+            assert!(api.sent().is_empty(), "{content} 不应发送");
+        }
+    }
+
+    #[tokio::test]
+    async fn markdown_at_with_space_before_comma_still_resolves() {
+        // `[CQ:at , qq = N]`：空白不改变渲染结果，markdown 里必须是官方 @ 标签
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let (_idmap_dir, idmap) = idmap_store();
+        let (_, vuin) = idmap
+            .retrieve_virtual_value(MEMBER_OPENID)
+            .expect("登记身份失败");
+        let context = context.with_idmap(Arc::clone(&idmap));
+        let media = no_media();
+        let plan = request(
+            SendTarget::Group(OPENID.to_owned()),
+            markdown_plan(&format!("[CQ:at , qq = {vuin} ] 你好")),
+        );
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("markdown 空白写法的 at 段应发送成功");
+
+        let content = api.sent()[0]
+            .markdown
+            .as_ref()
+            .and_then(|markdown| markdown.content.clone())
+            .expect("markdown 必须有正文");
+        assert_eq!(
+            content,
+            format!("<qqbot-at-user id=\"{MEMBER_OPENID}\" /> 你好"),
+            "空白写法不得残留 CQ 码"
+        );
+    }
+
+    #[tokio::test]
+    async fn markdown_avatar_cq_is_not_treated_as_at() {
+        // `[CQ:avatar]` 不是 at 段：不能被误判成缺 qq 而拒掉
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let plan = request(
+            SendTarget::Group(OPENID.to_owned()),
+            markdown_plan("[CQ:avatar] 你好"),
+        );
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("非 at 的 CQ 码应原样放行");
+
+        let sent = api.sent();
+        let content = sent[0]
+            .markdown
+            .as_ref()
+            .and_then(|markdown| markdown.content.as_deref())
+            .expect("markdown 必须有正文");
+        assert_eq!(content, "[CQ:avatar] 你好", "非 at 段不得被改写");
     }
 
     #[tokio::test]

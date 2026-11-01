@@ -135,8 +135,8 @@ Rust 侧 44 项硬占位（`retcode=1500`）的拆分，**28 项属未到里程�
 
 ## 遗留风险与已知限制
 
-1. **带空格的 `[CQ:at, qq = all]` 两侧不一致**：Go 的正则 `\[CQ:at,qq=(?:all|everyone)...`（`handlers/at_everyone.go:33`）要求无空格，带空格写法不归一、按普通 at 码原样出站；Rust 的 `at_mention_id` 对键与值都 `trim`（`crates/gensokyo-runtime/src/at_everyone.rs:130-133`），同写法会被归一为 @全员并占用当日额度。两侧均不报错，但语义分叉。
-2. **非 `qq` 参数的 at 段策略不同**：Go 只在 CQ 管线末尾替换 `qq=all|everyone`，其余 at 段进入文本/Legacy 展示路径；Rust 仅在 Markdown 渲染时把数字 at 转 `qqbot-at-user`，文本保持旧式。同一段输入在两侧的最终字节不同，属已知且已文档化的分叉。
+1. **带空格的 `[CQ:at, qq = all]` 已统一（2026-11-01）**：Go 的 `atEveryoneCQPattern` 与 `cqAtNumRe` 已改为容忍 `qq`、`=`、取值两侧空白；Rust 的 `at_mention_id` 本就对键值做 `trim`。两侧现均归一为标签并按同日额度计一次（`handlers/at_everyone.go:33`、`handlers/message_parser.go:55`、`crates/gensokyo-runtime/src/at_everyone.rs:134-148`）。
+2. **缺 `qq` 的 at 段已统一（2026-11-01）**：契约定为「Markdown 内 `[CQ:at]` / `[CQ:at,foo]` / `[CQ:at,qq=]` → `1400`；普通文本原样透传」，Go 在 `parseMarkdownFromMessageE` 统一校验（`handlers/message_parser.go:3145-3149`），Rust 在 `render_markdown` 报错、`render_text` 透传（`crates/gensokyo-runtime/src/deferred.rs:393-428`）。
 3. **Rust keyboard / music / stream / input_notify 仍回 1400**（`deferred.rs:20`、`:587-590`）：本轮只放开 markdown 与 card，其余段类型保持显式拒绝而非静默丢弃。
 4. **成员列表分页语义差异**：Go 循环拉取最多 100 页后合并返回（`handlers/get_group_member_list.go`），Rust 单页 + `next_cursor` 接力（`crates/gensokyo-actions/src/group.rs:36-39`）。同一 OneBot 调用的返回条数在两侧不同，客户端需按 `next_cursor` 自行翻页。
 5. **shadow diff 长期非空**：新链与 legacy 的 `foundItems` 键集合历史差异导致 `[outbound-shadow]` 日志几乎每次都有差异（`handlers/outbound_bridge.go:323-340`），只能当噪声参考，不能作为回归判据。
