@@ -27,9 +27,9 @@
 //!
 //! # 时区
 //!
-//! 两侧统一按**固定 UTC+08:00** 切自然日（[`date_at`]）：Go 用本地时区
-//! （`time.Now().Format("2006-01-02")`，部署在 CST 即 +08:00），Rust 侧写死偏移而不读系统
-//! 时区，容器 `TZ=UTC` 时两侧不会在跨零点前后各判一天。
+//! 两侧统一按**固定 UTC+08:00** 切自然日（[`date_at`]）：Go 用 `time.FixedZone("CST", 8*3600)`
+//! （`handlers/at_everyone.go:40-43`），Rust 侧写死偏移而不读系统时区，
+//! 容器 `TZ=UTC` 时两侧不会在跨零点前后各判一天。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -325,8 +325,8 @@ fn unix_now_seconds() -> u64 {
 
 /// Unix 秒 → 固定 UTC+08:00 自然日的 `YYYY-MM-DD`。
 ///
-/// 偏移写死而不读系统时区：容器默认 `TZ=UTC` 时若按本地时区算，会和 Go 侧（CST 部署）在
-/// 本地 00:00~08:00 之间各判一天，同一条群昨天发过今天却放行。
+/// 偏移写死而不读系统时区：容器默认 `TZ=UTC` 时若按本地时区算，会和 Go 侧（同样固定
+/// +08:00）在本地 00:00~08:00 之间各判一天，同一条群昨天发过今天却放行。
 fn date_at(unix_seconds: u64) -> String {
     format_date(unix_seconds.saturating_add(DAY_OFFSET_SECONDS) / SECONDS_PER_DAY)
 }
