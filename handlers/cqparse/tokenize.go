@@ -6,9 +6,10 @@ import "strings"
 const cqPrefix = "[CQ:"
 
 // Tokenize 将字符串消息扫描为 Token 流。
-// 规则（架构设计 §4.3）：
-//  1. 仅识别大写 [CQ:，action 为 [a-z_]+ 且后随 , 或 ]；
-//  2. 参数区逐段扫 k=v，逗号切分；无 = 的尾随段并入前一 key 的值（C3 修复）；
+// 规则（架构设计 §4.3 + 统一空白契约 §1/§2）：
+//  1. 仅识别大写 [CQ:，action 为 [a-z_]+，其后、`,` 或 `]` 之前允许任意空白；
+//  2. 参数区逐段扫 k=v，逗号切分；键与 `=`、`=` 与值两侧允许空白（buildParams 各自 trim）；
+//     无 = 的尾随段并入前一 key 的值（C3 修复）；
 //  3. 段值以 { 开头时做花括号配平扫描（允许 JSON 内含 ]/,），修 C1；
 //  4. 无闭合 ]、空 action、配平失败 → KindText（原样保留）。
 func Tokenize(s string) Doc {
@@ -56,6 +57,14 @@ func tryParseCode(s string, start int) (Token, int, bool) {
 	}
 	action := s[aStart:p]
 	if action == "" || p >= len(s) {
+		return Token{}, 0, false
+	}
+	// 段名与 ',' 或 ']' 之间允许任意空白（统一契约 §1；键值两侧空白由 buildParams trim）
+	// 空白集为 ASCII 五元集 {空格, \t, \n, \f, \r}，与 legacy 正则 `\s` 及 Rust is_cq_space 同口径（G-A）
+	for p < len(s) && (s[p] == ' ' || s[p] == '\t' || s[p] == '\n' || s[p] == '\f' || s[p] == '\r') {
+		p++
+	}
+	if p >= len(s) {
 		return Token{}, 0, false
 	}
 	var segments []string
@@ -134,6 +143,8 @@ func scanSegments(s string, from int) (segments []string, end int, ok bool) {
 			segStart = q + 1
 			segHasEq = false
 			atValueStart = true
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+			// 空白不重置 JSON 值起点判定：`data = {"k":1}` 与 `data={"k":1}` 同口径（统一契约 §2）
 		default:
 			atValueStart = false
 		}

@@ -42,6 +42,8 @@ func splitCQParams(s string) []string {
 }
 
 // parseCQParams 解析 CQ 码参数为 key->value。
+// 统一契约 §2/§3：键与 `=`、`=` 与值两侧允许空白；键 trim、值仅 trim 首尾空白，
+// 内部空白保留（如 file=my file.txt）。键名区分大小写的现状不变。
 func parseCQParams(s string) map[string]string {
 	m := map[string]string{}
 	if s == "" {
@@ -52,7 +54,11 @@ func parseCQParams(s string) map[string]string {
 		if eq < 0 {
 			continue
 		}
-		m[kv[:eq]] = UnescapeCQ(kv[eq+1:])
+		key := strings.TrimSpace(kv[:eq])
+		if key == "" {
+			continue
+		}
+		m[key] = UnescapeCQ(strings.TrimSpace(kv[eq+1:]))
 	}
 	return m
 }

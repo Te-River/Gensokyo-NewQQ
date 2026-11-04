@@ -558,7 +558,11 @@ impl OutboundPlan {
                 "text" => plan
                     .text
                     .push_str(segment.text_content().unwrap_or_default()),
-                "at" => plan.text.push_str(&segment.to_cq()),
+                "at" => {
+                    // at 段是透传臂：回写 parse 的原文切片（自产段回退规范化序列化），
+                    // 用户的空白形态不被 to_cq() 改写，to_segments 重分词时逐字节还原
+                    plan.text.push_str(&segment.raw_or_cq());
+                }
                 "reply" => {
                     if plan.reply_msg_id.is_none() {
                         plan.reply_msg_id = segment.id_param("id");
@@ -646,7 +650,8 @@ impl OutboundPlan {
             out.push(Segment::reply(reply.clone()));
         }
         if !self.text.is_empty() {
-            // text 里可能有 [CQ:at] 字面量，按 CQ 重新分词
+            // text 里可能有 [CQ:at] 字面量，按 CQ 重新分词；parse 出的段携带原文切片
+            // （from_segments 的 at 臂已按 raw 原样写入），下游透传消费走 raw_or_cq 不改字节
             out.extend(cqcode::parse(&self.text));
         }
         if let Some(active) = &self.active {
@@ -935,6 +940,7 @@ mod tests {
         CardFields, CardPayload, FileRef, FoundItems, InputNotifyPayload, MarkdownPayload,
         MediaRef, OutboundPlan, StreamKind, StreamPayload,
     };
+    use crate::cqcode;
     use crate::segment::Segment;
 
     fn found(pairs: &[(&str, &[&str])]) -> FoundItems {
@@ -1106,6 +1112,22 @@ mod tests {
         let plan = OutboundPlan::from_segments(&segments);
         assert_eq!(plan.text, "[CQ:at,qq=10000] hi");
         assert_eq!(plan.to_segments(), segments);
+    }
+
+    /// Major 回归用例：at 臂是透传臂，回写 parse 的原文切片——用户的空白形态不被
+    /// 规范化改写，`to_segments` 重分词后逐字节还原（自产段仍走规范化，行为不变）。
+    #[test]
+    fn from_segments_at_arm_keeps_whitespace_bytes() {
+        let segments = cqcode::parse("hi[CQ:at , qq = 123]");
+        let plan = OutboundPlan::from_segments(&segments);
+        assert_eq!(plan.text, "hi[CQ:at , qq = 123]");
+        let back = plan.to_segments();
+        assert_eq!(back, segments, "往返后 text/at 段语义一致");
+        assert_eq!(
+            back[1].raw_or_cq(),
+            "[CQ:at , qq = 123]",
+            "重分词得到的 at 段应仍携带原文切片"
+        );
     }
 
     #[test]
@@ -1394,7 +1416,8 @@ mod tests {
 
         // 简写为空/空白时回退到官方名（Go 用 TrimSpace 判空）
         let blank = CardPayload {
-            raw: r#"{"desc":"  ","description":"全名","pic":"","pic_url":"https://b/p.png"}"#.to_owned(),
+            raw: r#"{"desc":"  ","description":"全名","pic":"","pic_url":"https://b/p.png"}"#
+                .to_owned(),
         };
         let fields = blank.fields().expect("空白简写应回退");
         assert_eq!(fields.desc.as_deref(), Some("全名"));

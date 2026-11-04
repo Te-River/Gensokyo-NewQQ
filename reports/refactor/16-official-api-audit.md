@@ -137,7 +137,9 @@ Rust 侧 44 项硬占位（`retcode=1500`）的拆分，**28 项属未到里程�
 
 1. **带空格的 `[CQ:at, qq = all]` 已统一（2026-11-01）**：Go 的 `atEveryoneCQPattern` 与 `cqAtNumRe` 已改为容忍 `qq`、`=`、取值两侧空白；Rust 的 `at_mention_id` 本就对键值做 `trim`。两侧现均归一为标签并按同日额度计一次（`handlers/at_everyone.go:33`、`handlers/message_parser.go:55`、`crates/gensokyo-runtime/src/at_everyone.rs:134-148`）。
 2. **缺 `qq` 的 at 段已统一（2026-11-01）**：契约定为「Markdown 内 `[CQ:at]` / `[CQ:at,foo]` / `[CQ:at,qq=]` → `1400`；普通文本原样透传」，Go 在 `parseMarkdownFromMessageE` 统一校验（`handlers/message_parser.go:3145-3149`），Rust 在 `render_markdown` 报错、`render_text` 透传（`crates/gensokyo-runtime/src/deferred.rs:393-428`）。
-   - 未统一项：`qq` 不是首个参数的写法（`[CQ:at,name=x,qq=123]`）——Go 的 `cqAtNumRe` 只认 `qq` 紧跟段名，判 `errMarkdownAtMalformed` 回 1400；Rust 按键取值可解析。两侧都不静默发送，差别在「拒绝 vs 照发」，留待后续统一。
+   - `qq` 非首参写法（`[CQ:at,name=x,qq=123]`）**已于 2026-11-03 统一**：Go 改按键取值（`cqAtSegRe` + `cqAtSegmentQQ`），与 Rust 同口径正常解析；不再判 malformed。
+3. **CQ 参数空白容错已全量适配（2026-11-03）**：全部 CQ 段类型双侧统一——段名后/参数间/`=` 两侧容忍空白；词法切分空白集 = ASCII `{ ,\t,\n,\f,\r}`（同 Go 正则 `\s`），键/值首尾 trim = Unicode `TrimSpace` 语义（Go `cqCodeParam`/`buildParams` 对偶）；值内部空白保留。Rust `Segment` 挂 raw 原文，透传臂逐字节保真（`deferred.rs`/`outbound.rs`）；Rust parse 采用与 Go `scanSegments` 同款花括号配平，含逗号 JSON 不截断、配平失败不吞内嵌合法码（`cursor=start+1`）。详见 `release_log/CHANGELOG_v016.md`「CQ 码空白容错全量适配」。
+   - 保留的既有结构差异（裁定不扩面）：Go legacy 媒体正则位置锚定（`file`/`data` 须首键）vs Rust 全按键取值；段名前空白形态（`[CQ: image,…]`）Go Markdown 判 malformed 1400 vs Rust 按文本透传。
 3. **Rust keyboard / music / stream / input_notify 仍回 1400**（`deferred.rs:20`、`:587-590`）：本轮只放开 markdown 与 card，其余段类型保持显式拒绝而非静默丢弃。
 4. **成员列表分页语义差异**：Go 循环拉取最多 100 页后合并返回（`handlers/get_group_member_list.go`），Rust 单页 + `next_cursor` 接力（`crates/gensokyo-actions/src/group.rs:36-39`）。同一 OneBot 调用的返回条数在两侧不同，客户端需按 `next_cursor` 自行翻页。
 5. **shadow diff 长期非空**：新链与 legacy 的 `foundItems` 键集合历史差异导致 `[outbound-shadow]` 日志几乎每次都有差异（`handlers/outbound_bridge.go:323-340`），只能当噪声参考，不能作为回归判据。

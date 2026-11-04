@@ -68,6 +68,17 @@
 - **字段**：四字段必填——`title` 1~50 字符、`description` 1~200 字符、`url` / `pic_url` 必须 `https://` 且 ≤1024 字节；缺任一项即回 `1400`
 - **失败**：任一字段非法、`title` 缺失或 JSON 解析失败时整条消息回 `1400`
 
+### CQ 码空白容错全量适配（2026-11-03）
+
+Go 与 Rust 两侧的 CQ 码解析统一容忍参数空白，识别宽松书写形态，与既有规范形态同行为：
+
+- **覆盖**：全部 CQ 段类型——Go legacy（`handlers/cqcode.go`、`message_parser.go`、`cqcode_pipeline.go`、`at_everyone.go`、`avatar.go`、`send_group_msg_raw.go`）、新链（`internal/domain/message`、`handlers/cqparse`）、Rust 协议层（`crates/gensokyo-protocol/src/cqcode.rs`）
+- **口径**：段名后、参数间、`=` 两侧允许任意空白；键 trim；值仅首尾 trim、内部空白保留（`[CQ:record,file = my voice.amr]` 的值为 `my voice.amr`）；`qq` 允许出现在任意参数位（如 `[CQ:at,name=x,qq=123]`）
+- **保真**：Rust 解析后 Segment 保留原文 raw 切片，透传臂逐字节输出原样（空白形态不被静默规范化）；解析采用与 Go 同款花括号配平，含逗号的 JSON 参数（`[CQ:keyboard,data={…,2}]`）不截断，配平失败不吞后文合法码
+- **空白集**：词法切分层统一 ASCII `{空格,\t,\n,\f,\r}`（同 Go 正则 `\s`；`\v`/全角空格不算段名空白）；键值 trim 双侧统一 Unicode `TrimSpace` 语义
+- **不变项**：CQ 转义口径（出站仅转 `,` `]` `&`、入站认 `&#91;`）、段名/键大小写现状（at 与 markdown 路径不敏感，其余区分）、stream 冒号语法、Go 媒体正则位置锚定等既有差异均保持
+- **测试**：`go build/vet`、`go test ./...` 全绿（28 包含测）；`cargo test --workspace` 33 suites 零失败、`cargo clippy -D warnings` 零告警；双侧镜像契约用例表钉死行为
+
 ---
 
 ## 🐛 修复

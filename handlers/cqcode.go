@@ -23,26 +23,32 @@ import (
 // ",asr=<转义值>"（值内 , 与 ] 已转义为 &#44; / &#93;），插件把入站原文回灌
 // 出站时，URL 必须到 ,asr= 为止。只以已知参数名 asr 作切分点（而非任意逗号），
 // 因此 URL 自身含逗号（如 https://x/a,b.wav）仍完整落入捕获组。
+//
+// 统一空白契约（与 Rust 侧同口径）：段名之后、`,` 或 `]` 之前允许任意空白；
+// 键与 `=`、`=` 与值两侧允许空白（`\s*键\s*=\s*值`）；值只在两侧 trim，
+// 内部空白保留（`\s*=\s*(.+?)\s*\]` 的前后 `\s*` 即此语义）。
+// 段名与键名的大小写口径维持现状：本组正则区分大小写，仅 at/markdown-at 校验
+// 与 @全员 归一路径带 (?i)，本轮不放宽。
 var (
-	httpUrlImagePattern  = regexp.MustCompile(`\[CQ:image,file=http://(.+?)\]`)
-	httpsUrlImagePattern = regexp.MustCompile(`\[CQ:image,file=https://(.+?)\]`)
-	base64ImagePattern   = regexp.MustCompile(`\[CQ:image,file=base64://(.+?)\]`)
-	base64RecordPattern  = regexp.MustCompile(`\[CQ:record,file=base64://(.+?)(?:,asr=[^\]]*)?\]`)
-	httpUrlRecordPattern = regexp.MustCompile(`\[CQ:record,file=http://(.+?)(?:,asr=[^\]]*)?\]`)
-	httpsUrlRecordPattern = regexp.MustCompile(`\[CQ:record,file=https://(.+?)(?:,asr=[^\]]*)?\]`)
-	httpUrlVideoPattern  = regexp.MustCompile(`\[CQ:video,file=http://(.+?)\]`)
-	httpsUrlVideoPattern = regexp.MustCompile(`\[CQ:video,file=https://(.+?)\]`)
-	base64VideoPattern   = regexp.MustCompile(`\[CQ:video,file=base64://(.+?)\]`)
-	mdPattern            = regexp.MustCompile(`\[CQ:markdown,data=base64://(.+?)\]`)
-	mdJSONPattern        = regexp.MustCompile(`\[CQ:markdown,data=(\{.*\})\]`)
-	qqMusicPattern       = regexp.MustCompile(`\[CQ:music,type=qq,id=(\d+)\]`)
+	httpUrlImagePattern  = regexp.MustCompile(`\[CQ:image\s*,\s*file\s*=\s*http://(.+?)\s*\]`)
+	httpsUrlImagePattern = regexp.MustCompile(`\[CQ:image\s*,\s*file\s*=\s*https://(.+?)\s*\]`)
+	base64ImagePattern   = regexp.MustCompile(`\[CQ:image\s*,\s*file\s*=\s*base64://(.+?)\s*\]`)
+	base64RecordPattern  = regexp.MustCompile(`\[CQ:record\s*,\s*file\s*=\s*base64://(.+?)(?:\s*,\s*asr\s*=[^\]]*)?\s*\]`)
+	httpUrlRecordPattern = regexp.MustCompile(`\[CQ:record\s*,\s*file\s*=\s*http://(.+?)(?:\s*,\s*asr\s*=[^\]]*)?\s*\]`)
+	httpsUrlRecordPattern = regexp.MustCompile(`\[CQ:record\s*,\s*file\s*=\s*https://(.+?)(?:\s*,\s*asr\s*=[^\]]*)?\s*\]`)
+	httpUrlVideoPattern  = regexp.MustCompile(`\[CQ:video\s*,\s*file\s*=\s*http://(.+?)\s*\]`)
+	httpsUrlVideoPattern = regexp.MustCompile(`\[CQ:video\s*,\s*file\s*=\s*https://(.+?)\s*\]`)
+	base64VideoPattern   = regexp.MustCompile(`\[CQ:video\s*,\s*file\s*=\s*base64://(.+?)\s*\]`)
+	mdPattern            = regexp.MustCompile(`\[CQ:markdown\s*,\s*data\s*=\s*base64://(.+?)\s*\]`)
+	mdJSONPattern        = regexp.MustCompile(`\[CQ:markdown\s*,\s*data\s*=\s*(\{.*\})\s*\]`)
+	qqMusicPattern       = regexp.MustCompile(`\[CQ:music\s*,\s*type\s*=\s*qq\s*,\s*id\s*=\s*(\d+)\s*\]`)
 	cardPattern          = regexp.MustCompile(`\[CQ:card[^\]]*\]`)
-	inputNotifyPattern   = regexp.MustCompile(`\[CQ:input_notify,type=(\d+)(?:,second=(\d+))?\]`)
-	streamPattern        = regexp.MustCompile(`\[CQ:stream,type:(\w+),qq:(\d+)\]`)
-	keyboardPattern      = regexp.MustCompile(`\[CQ:keyboard,data=base64://(.+?)\]`)
-	keyboardJSONPattern  = regexp.MustCompile(`\[CQ:keyboard,data=(\{.*\})\]`)
-	replyRe              = regexp.MustCompile(`\[CQ:reply,id=(\d+)\]`)
-	wakeupPattern        = regexp.MustCompile(`\[CQ:wakeup,userid=([^\]]+)\]`)
+	inputNotifyPattern   = regexp.MustCompile(`\[CQ:input_notify\s*,\s*type\s*=\s*(\d+)\s*(?:,\s*second\s*=\s*(\d+)\s*)?\]`)
+	streamPattern        = regexp.MustCompile(`\[CQ:stream\s*,\s*type\s*:\s*(\w+)\s*,\s*qq\s*:\s*(\d+)\s*\]`)
+	keyboardPattern      = regexp.MustCompile(`\[CQ:keyboard\s*,\s*data\s*=\s*base64://(.+?)\s*\]`)
+	keyboardJSONPattern  = regexp.MustCompile(`\[CQ:keyboard\s*,\s*data\s*=\s*(\{.*\})\s*\]`)
+	replyRe              = regexp.MustCompile(`\[CQ:reply\s*,\s*id\s*=\s*(\d+)\s*\]`)
+	wakeupPattern        = regexp.MustCompile(`\[CQ:wakeup\s*,\s*userid\s*=\s*([^\]]+?)\s*\]`)
 	localImagePattern    *regexp.Regexp
 	localRecordPattern   *regexp.Regexp
 	localVideoPattern    *regexp.Regexp
@@ -50,24 +56,28 @@ var (
 )
 
 // initPlatformPatterns 初始化平台相关的正则表达式（Windows vs Unix 路径前缀差异）
+// 空白口径与包级正则一致：段名后、键值两侧容忍空白，值仅 trim 首尾。
 func initPlatformPatterns() {
 	if runtime.GOOS == "windows" {
-		localImagePattern = regexp.MustCompile(`\[CQ:image,file=file:///([^\]]+?)\]`)
-		localRecordPattern = regexp.MustCompile(`\[CQ:record,file=file:///([^\]]+?)(?:,asr=[^\]]*)?\]`)
-		localVideoPattern = regexp.MustCompile(`\[CQ:video,file=file:///([^\]]+?)\]`)
+		localImagePattern = regexp.MustCompile(`\[CQ:image\s*,\s*file\s*=\s*file:///([^\]]+?)\s*\]`)
+		localRecordPattern = regexp.MustCompile(`\[CQ:record\s*,\s*file\s*=\s*file:///([^\]]+?)(?:\s*,\s*asr\s*=[^\]]*)?\s*\]`)
+		localVideoPattern = regexp.MustCompile(`\[CQ:video\s*,\s*file\s*=\s*file:///([^\]]+?)\s*\]`)
 	} else {
-		localImagePattern = regexp.MustCompile(`\[CQ:image,file=file://([^\]]+?)\]`)
-		localRecordPattern = regexp.MustCompile(`\[CQ:record,file=file://([^\]]+?)(?:,asr=[^\]]*)?\]`)
-		localVideoPattern = regexp.MustCompile(`\[CQ:video,file=file://([^\]]+?)\]`)
+		localImagePattern = regexp.MustCompile(`\[CQ:image\s*,\s*file\s*=\s*file://([^\]]+?)\s*\]`)
+		localRecordPattern = regexp.MustCompile(`\[CQ:record\s*,\s*file\s*=\s*file://([^\]]+?)(?:\s*,\s*asr\s*=[^\]]*)?\s*\]`)
+		localVideoPattern = regexp.MustCompile(`\[CQ:video\s*,\s*file\s*=\s*file://([^\]]+?)\s*\]`)
 	}
 }
 
 // ProcessCQFile 解析 [CQ:file,file=xxx,file_name=yyy] 并移除
-// file_name 为可选参数，不填时由后续处理自动从路径/URL 提取文件名
+// file_name 为可选参数，不填时由后续处理自动从路径/URL 提取文件名。
+// 空白容忍（统一契约 §1/§2/§3）：段名后与键值两侧可带空白，键 trim、值仅 trim 首尾。
 func ProcessCQFile(text string, foundItems map[string][]string) string {
-	re := regexp.MustCompile(`\[CQ:file,([^\]]*)\]`)
+	re := regexp.MustCompile(`\[CQ:file\s*,([^\]]*)\]`)
 	text = re.ReplaceAllStringFunc(text, func(match string) string {
-		inner := match[len("[CQ:file,") : len(match)-1]
+		// 参数区 = 首个逗号之后（段名与逗号之间允许空白，不能按固定前缀长度切片）
+		comma := strings.IndexByte(match, ',')
+		inner := match[comma+1 : len(match)-1]
 		var filePath, fileName string
 		for _, part := range strings.Split(inner, ",") {
 			kv := strings.SplitN(part, "=", 2)
@@ -141,10 +151,11 @@ func ProcessCQKeyboard(text string, foundItems map[string][]string) string {
 	return text
 }
 
-// ProcessCQActive 解析 [CQ:active] 或 [CQ:active,type=xxx,sub_type=yyy] 并移除
+// ProcessCQActive 解析 [CQ:active] 或 [CQ:active,type=xxx,sub_type=yyy] 并移除。
+// 空白容忍（统一契约 §1/§2/§3）：段名后与键值两侧可带空白。
 func ProcessCQActive(text string, foundItems map[string][]string) string {
 	// 先匹配带参数的 [CQ:active,type=xxx,sub_type=yyy]
-	re := regexp.MustCompile(`\[CQ:active,([^\]]*)\]`)
+	re := regexp.MustCompile(`\[CQ:active\s*,([^\]]*)\]`)
 	text = re.ReplaceAllStringFunc(text, func(match string) string {
 		inner := match[1 : len(match)-1]
 		if idx := strings.Index(inner, ","); idx >= 0 {
@@ -164,8 +175,8 @@ func ProcessCQActive(text string, foundItems map[string][]string) string {
 		foundItems["active"] = []string{"true"}
 		return ""
 	})
-	// 再匹配裸 [CQ:active]（无参数）
-	bareRe := regexp.MustCompile(`\[CQ:active\]`)
+	// 再匹配裸 [CQ:active]（无参数，段名后允许空白）
+	bareRe := regexp.MustCompile(`\[CQ:active\s*\]`)
 	if bareRe.MatchString(text) {
 		foundItems["active"] = []string{"true"}
 	}
@@ -195,8 +206,8 @@ func ProcessCQWakeup(text string, foundItems map[string][]string) string {
 // ark 参数值内可能含 &#44; 等转义，故整段匹配到右括号，不按逗号切分；
 // reply 仅剥离 msg_idx= 形态，[CQ:reply,id=数字] 是既有出站引用语义（由 replyRe 消费）。
 var (
-	arkCQPattern      = regexp.MustCompile(`\[CQ:ark[^\]]*\]`)
-	replyMsgIdxPattern = regexp.MustCompile(`\[CQ:reply,msg_idx=[^\]]*\]`)
+	arkCQPattern       = regexp.MustCompile(`\[CQ:ark[^\]]*\]`)
+	replyMsgIdxPattern = regexp.MustCompile(`\[CQ:reply\s*,\s*msg_idx\s*=[^\]]*\]`)
 )
 
 // ProcessCQInboundOnlyCodes 剥离出站无消费点的入站专用 CQ 码（ark / reply,msg_idx=）
@@ -220,7 +231,8 @@ func ProcessOutboundCQCodes(text, defaultGroupID string, eventID *string, apiv2 
 // 「CQ 是否显式决定过 eventID」（member add 命中写入 / member remove 显式清空为 true）。
 // 出站 new 链据此跳过 messageID=="2000" 的缓存 event_id 回填，与 legacy 时序一致。
 func ProcessOutboundCQCodesWithEventFlag(text, defaultGroupID string, eventID *string, apiv2 openapi.OpenAPI) (string, string, bool) {
-	re := regexp.MustCompile(`\[CQ:([a-z_]+),([^\]]*)\]`)
+	// 段名与逗号之间容忍空白（统一契约 §1）；键值空白由各动作的参数解析函数 trim（§2/§3）
+	re := regexp.MustCompile(`\[CQ:([a-z_]+)\s*,([^\]]*)\]`)
 	var realGroupID string
 	var eventIDSet bool
 	result := re.ReplaceAllStringFunc(text, func(match string) string {
@@ -229,7 +241,7 @@ func ProcessOutboundCQCodesWithEventFlag(text, defaultGroupID string, eventID *s
 		if idx < 0 {
 			return match // 无参数形式（如 [CQ:at]），防御性保留
 		}
-		cqType := inner[:idx]
+		cqType := strings.TrimRight(inner[:idx], " \t\r\n")
 		paramsStr := inner[idx+1:]
 		switch cqType {
 		case "member":

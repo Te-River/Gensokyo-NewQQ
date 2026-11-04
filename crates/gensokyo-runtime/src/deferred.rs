@@ -440,13 +440,15 @@ fn render_text(context: &ActionContext, message: &MessageOut) -> Result<String> 
     Ok(at_everyone::dedupe_tag(&out))
 }
 
-/// 一段不含 at 段（或含不了 at 段）的文本：走一次 CQ 解析，文本段取原文，其余码段回写等价 CQ。
+/// 一段不含 at 段（或含不了 at 段）的文本：走一次 CQ 解析，文本段取原文，其余码段透传原文。
 fn render_plain(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for segment in cqcode::parse(text) {
         match segment.kind.as_str() {
             "text" => out.push_str(segment.text_content().unwrap_or_default()),
-            _ => out.push_str(&segment.to_cq()),
+            // 非 at 段是纯透传：输出 parse 的原文切片（自产段回退规范化序列化）。
+            // 走 to_cq() 的规范化形态会改写用户「段名后/键值两侧空白」等字节（Major 修复）
+            _ => out.push_str(&segment.raw_or_cq()),
         }
     }
     out
@@ -654,7 +656,7 @@ mod tests {
     use gensokyo_storage::{EchoStore, IdMapOptions, IdMapStore};
     use tempfile::TempDir;
 
-    use super::{DeferredDeps, execute};
+    use super::{DeferredDeps, execute, render_plain};
     use crate::at_everyone::SECTION;
     use crate::media::{MAX_MEDIA_BYTES, MediaRuntime};
 
@@ -663,6 +665,19 @@ mod tests {
 
     /// @用户 目标的 32 位 OpenID（与收件人区分，验证反查走的是 idmap 而不是直通）。
     const MEMBER_OPENID: &str = "FEDCBA9876543210FEDCBA9876543210";
+
+    /// Major 回归用例：`render_plain` 透传臂输出 parse 原文切片——非 at 码段逐字节不变
+    /// （段名后/键值两侧空白、JSON 值内逗号都保持用户原样）。
+    #[test]
+    fn render_plain_passthrough_keeps_cq_bytes_verbatim() {
+        for raw in [
+            "[CQ:image , file = a b.png]",
+            "prefix[CQ:keyboard , data = {\"a\":1,2}]suffix",
+        ] {
+            assert_eq!(render_plain(raw), raw, "透传应逐字节一致: {raw}");
+        }
+        assert_eq!(render_plain("纯文本"), "纯文本");
+    }
 
     // ---- 装置 ----
 
@@ -1259,7 +1274,11 @@ mod tests {
                 .expect("卡片应发送成功");
 
             let sent = api.sent();
-            assert_eq!(sent[0].msg_type, Some(msg_type::CARD), "卡片必须是 msg_type=8");
+            assert_eq!(
+                sent[0].msg_type,
+                Some(msg_type::CARD),
+                "卡片必须是 msg_type=8"
+            );
             assert_eq!(sent[0].content, None, "卡片消息的 content 必须为空");
             let card = sent[0].card.as_ref().expect("card 必须有值");
             assert_eq!(card.card_type, "tuwen");
@@ -1320,7 +1339,11 @@ mod tests {
             .expect("markdown 与 card 同现应发送");
 
         let sent = api.sent();
-        assert_eq!(sent[0].msg_type, Some(msg_type::MARKDOWN), "markdown 胜 card");
+        assert_eq!(
+            sent[0].msg_type,
+            Some(msg_type::MARKDOWN),
+            "markdown 胜 card"
+        );
         assert!(sent[0].card.is_none(), "card 必须让位");
     }
 
@@ -1393,7 +1416,10 @@ mod tests {
             api.sent()[0].content.as_deref(),
             Some("<qqbot-at-everyone /> 开会")
         );
-        assert!(idmap.read_config(SECTION, OPENID).is_ok(), "字面标签也要计数");
+        assert!(
+            idmap.read_config(SECTION, OPENID).is_ok(),
+            "字面标签也要计数"
+        );
     }
 
     #[tokio::test]
@@ -1443,7 +1469,10 @@ mod tests {
         let (_idmap_dir, idmap) = idmap_store();
         let context = context.with_idmap(Arc::clone(&idmap));
         let media = no_media();
-        let first = text_plan(SendTarget::Group(OPENID.to_owned()), "[CQ:at, qq = all] 开会");
+        let first = text_plan(
+            SendTarget::Group(OPENID.to_owned()),
+            "[CQ:at, qq = all] 开会",
+        );
 
         execute(&context, &first, &deps(&media, None))
             .await
@@ -1454,7 +1483,10 @@ mod tests {
             "空白写法必须归一为官方标签"
         );
 
-        let second = text_plan(SendTarget::Group(OPENID.to_owned()), "[CQ:at,qq = ALL] 开会");
+        let second = text_plan(
+            SendTarget::Group(OPENID.to_owned()),
+            "[CQ:at,qq = ALL] 开会",
+        );
         let err = execute(&context, &second, &deps(&media, None))
             .await
             .expect_err("同日第二次必须拒绝");
@@ -1489,9 +1521,8 @@ mod tests {
 
     #[tokio::test]
     async fn send_failure_rolls_back_the_at_everyone_quota() {
-        let api = Arc::new(
-            FakeQqApi::default().with_send_error(Error::Network("上游挂了".to_owned())),
-        );
+        let api =
+            Arc::new(FakeQqApi::default().with_send_error(Error::Network("上游挂了".to_owned())));
         let (_dir, context) = context(Arc::clone(&api));
         let (_idmap_dir, idmap) = idmap_store();
         let context = context.with_idmap(Arc::clone(&idmap));
@@ -1501,7 +1532,10 @@ mod tests {
         let err = execute(&context, &plan, &deps(&media, None))
             .await
             .expect_err("上游失败应返回错误");
-        assert!(matches!(err, Error::Network(_)), "发送失败应映射 1500: {err}");
+        assert!(
+            matches!(err, Error::Network(_)),
+            "发送失败应映射 1500: {err}"
+        );
 
         assert!(
             idmap.read_config(SECTION, OPENID).is_err(),
@@ -1542,7 +1576,10 @@ mod tests {
                 .and_then(|markdown| markdown.content.as_deref()),
             Some("<qqbot-at-everyone /> 早安")
         );
-        assert!(idmap.read_config(SECTION, OPENID).is_ok(), "markdown 也要计数");
+        assert!(
+            idmap.read_config(SECTION, OPENID).is_ok(),
+            "markdown 也要计数"
+        );
     }
 
     #[tokio::test]
@@ -1719,7 +1756,11 @@ mod tests {
             .await
             .expect("非 at 的 CQ 码应原样放行");
 
-        assert_eq!(api.sent()[0].content.as_deref(), Some(text), "非 at 段不得被改写");
+        assert_eq!(
+            api.sent()[0].content.as_deref(),
+            Some(text),
+            "非 at 段不得被改写"
+        );
     }
 
     #[tokio::test]
@@ -1894,10 +1935,7 @@ mod tests {
             let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
             let (_dir, context) = context(Arc::clone(&api));
             let media = no_media();
-            let plan = request(
-                SendTarget::Group(OPENID.to_owned()),
-                markdown_plan(content),
-            );
+            let plan = request(SendTarget::Group(OPENID.to_owned()), markdown_plan(content));
 
             let err = execute(&context, &plan, &deps(&media, None))
                 .await
@@ -2018,10 +2056,7 @@ mod tests {
             "",
             "模板 markdown 没有正文，塞标签会产出非法载荷"
         );
-        assert_eq!(
-            super::migrate_at_everyone("# 议题", "没有标签"),
-            "# 议题"
-        );
+        assert_eq!(super::migrate_at_everyone("# 议题", "没有标签"), "# 议题");
     }
 
     #[tokio::test]

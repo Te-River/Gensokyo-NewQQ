@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"regexp"
+	"strings"
 )
 
 // ---------- 统一 CQ 码解析管道 ----------
@@ -118,14 +119,24 @@ func processCQMarkdownPipeline(text string, foundItems map[string][]string) stri
 	return text
 }
 
-// processCQCardPipeline [CQ:card,...]：参数顺序无关，JSON 编码存入
+// processCQCardPipeline [CQ:card,...]：参数顺序无关，JSON 编码存入。
+// 空白容忍（统一契约 §1/§2/§3）：参数区按逗号切分后，键 trim、值仅 trim 首尾
+// （内部空白保留，如 [CQ:card , title=my title, desc=B] 的 title 值 "my title"）。
 func processCQCardPipeline(text string, foundItems map[string][]string) string {
 	return cardPattern.ReplaceAllStringFunc(text, func(match string) string {
 		cardData := make(map[string]string)
-		kvRe := regexp.MustCompile(`(\w+)=([^,\]]+)`)
-		for _, kv := range kvRe.FindAllStringSubmatch(match, -1) {
-			if len(kv) == 3 {
-				cardData[kv[1]] = kv[2]
+		// 参数区 = 首个逗号之后、末尾 ] 之前（cardPattern 段名后可带空白）
+		if comma := strings.IndexByte(match, ','); comma >= 0 {
+			for _, part := range strings.Split(match[comma+1:len(match)-1], ",") {
+				key, value, found := strings.Cut(part, "=")
+				if !found {
+					continue
+				}
+				key = strings.TrimSpace(key)
+				if key == "" {
+					continue
+				}
+				cardData[key] = strings.TrimSpace(value)
 			}
 		}
 		if len(cardData) > 0 {

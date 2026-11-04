@@ -74,6 +74,16 @@ Gensokyo 为适配 QQ Bot API 特有能力而扩展的 CQ 码类型。
 
 ---
 
+## 参数空白容错（2026-11）
+
+全部 CQ 码类型统一容忍书写空白（Go 与 Rust 新链同口径）：
+
+- `[CQ:image , file = https://example.com/a.png]`、`[CQ:at, name=x, qq=123]`（参数间、`=` 两侧空白，任意键序）均可识别；值仅去首尾空白，**内部空格保留**（`[CQ:record,file = my voice.amr]` 的值为 `my voice.amr`）。
+- 词法切分的空白集为 ASCII `{空格, \t, \n, \f, \r}`（同正则 `\s`，不含 `\v`/全角空格）；键与值的 trim 为 Unicode 语义。
+- 未被识别的畸形段原样保留为文本；识别成功的段透传输出时保持原文字节（不做静默规范化改写）。
+
+---
+
 ## 范围说明
 
 | 标记 | 含义 |

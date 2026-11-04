@@ -9,6 +9,7 @@
 //! `Vec<(String, String)>`——与 Go `Segment.Data` 的 `map[string]string` 同构，而嵌套形态
 //! 由 `foundItems` 契约（base64 / JSON 串）承载。
 
+use std::borrow::Cow;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -29,13 +30,28 @@ pub const KIND_TEXT: &str = "text";
 ///
 /// JSON 形态为 `{"type":"at","data":{"qq":"123"}}`；`data` 里的数字/布尔值反序列化时按
 /// Go `stringify` 的语义转成字符串（QQ 侧两种写法都出现过）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Segment {
     /// 段类型（`text` / `at` / `image` …）。
     pub kind: String,
     /// 参数，保持插入（线上）顺序。
     pub params: Vec<(String, String)>,
+    /// 透传原文切片：`cqcode::parse` 命中码段时记录的**整段原始字节**（含 `[CQ:` 与收尾 `]`）。
+    /// 透传臂经 [`Segment::raw_or_cq`] 输出它，保证用户输入不被规范化改写（Major 修复）。
+    /// 协议层自产段（builder 构造 / JSON 反序列化）为 `None`，透传输出回退到规范化序列化，
+    /// 两路都不改字节。
+    pub(crate) raw: Option<String>,
 }
+
+/// 语义相等只看 `kind` + `params`：`raw` 是字节保真载体，不参与比较——
+/// 同一段码「parse 而来」与「代码构造」必须判等（码表往返与计划比对的既有口径）。
+impl PartialEq for Segment {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.params == other.params
+    }
+}
+
+impl Eq for Segment {}
 
 impl Segment {
     /// 新建一个只有类型、无参数的消息段。
@@ -44,6 +60,7 @@ impl Segment {
         Self {
             kind: kind.into(),
             params: Vec::new(),
+            raw: None,
         }
     }
 
@@ -94,7 +111,28 @@ impl Segment {
         }
     }
 
+    /// 挂上透传原文切片（仅 `cqcode::parse` / `parse_one` 内部使用，`raw` 为含括号整段字节）。
+    #[must_use]
+    pub(crate) fn with_raw(mut self, raw: &str) -> Self {
+        self.raw = Some(raw.to_owned());
+        self
+    }
+
+    /// 透传输出：parse 而来的段逐字节返回原文切片；自产段（`raw = None`）回退规范化 [`Self::to_cq`]。
+    ///
+    /// 消费点：`deferred::render_plain` 的非 at 臂、`outbound::from_segments` 的 at 臂——
+    /// 凡是**不消费参数、只把段转写回文本**的臂都必须走这里，不得走 `to_cq()`（会改写用户字节）。
+    #[must_use]
+    pub fn raw_or_cq(&self) -> Cow<'_, str> {
+        match &self.raw {
+            Some(raw) => Cow::Borrowed(raw),
+            None => Cow::Owned(self.to_cq()),
+        }
+    }
+
     /// 生成该段的 CQ 文本：文本段原样输出，其余按 `[CQ:type,k=v,...]` 输出并转义参数。
+    ///
+    /// 这是**规范化**输出（供真正消费参数后重排的场景）；透传用户输入请用 [`Self::raw_or_cq`]。
     #[must_use]
     pub fn to_cq(&self) -> String {
         if self.is_text() {
@@ -271,6 +309,8 @@ impl<'de> Deserialize<'de> for Segment {
         Ok(Self {
             kind: wire.kind,
             params: wire.data.map(|data| data.0).unwrap_or_default(),
+            // JSON 数组形态没有 CQ 原文：按自产段处理（透传输出 = 规范化序列化）
+            raw: None,
         })
     }
 }

@@ -100,6 +100,20 @@ pub fn normalize(text: &str) -> String {
     }
 }
 
+/// 统一空白契约（与 `gensokyo_protocol::cqcode` 的 CQ 解析同一集合）：空格 / 制表 `\t` /
+/// 换行 `\n` / 换页 `\f` / 回车 `\r`——即 Go 正则 `\s` = {空格, `\t`, `\n`, `\f`, `\r`}；
+/// **不含**纵向制表 `\v`，不含全角空格（U+3000）等 Unicode 空白。
+#[inline]
+fn is_cq_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\x0C' | '\r')
+}
+
+/// 去掉首部词法切分层空白（Go `\[CQ:at\s*`、`<qqbot-at-everyone\s*/>` 的口径）。
+/// 只用于切分位置；键与值的 trim 走 `str::trim`（Go `strings.TrimSpace`），见 [`at_mention_id`]。
+fn trim_cq_start(text: &str) -> &str {
+    text.trim_start_matches(is_cq_space)
+}
+
 /// 查找下一个 CQ `at` 段的起始字节下标（大小写不敏感）。
 ///
 /// `[CQ:at` 之后是 `,`（带参数）或 `]`（裸 at 段），**允许中间隔任意空白**
@@ -119,10 +133,8 @@ pub fn find_at_code(text: &str, from: usize) -> Option<usize> {
         if bytes
             .get(index..index + AT_PREFIX.len())
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case(AT_PREFIX.as_bytes()))
-            // 前缀之后允许空白：`[CQ:at ,qq=1]` / `[CQ:at ]` 也是 at 段
-            && text[index + AT_PREFIX.len()..]
-                .trim_start()
-                .starts_with([',', ']'])
+            // 前缀之后允许空白（统一空白契约，见 [`is_cq_space`]）：`[CQ:at ,qq=1]` / `[CQ:at ]` 也是 at 段
+            && trim_cq_start(&text[index + AT_PREFIX.len()..]).starts_with([',', ']'])
         {
             return Some(index);
         }
@@ -146,9 +158,9 @@ pub fn at_mention_id(code: &str) -> Option<&str> {
     {
         return None;
     }
-    // `[CQ:at` 之后先跳过空白，再只能是 `,`（带参数）或直接结束（裸 at 段）：
+    // `[CQ:at` 之后先跳过统一契约空白，再只能是 `,`（带参数）或直接结束（裸 at 段）：
     // `[CQ:atx,…]` 不是 at 段（与 find_at_code 同口径，Go 的 `\[CQ:at\s*,` 也认空白）
-    let rest = stripped[AT_PREFIX.len()..].trim_start();
+    let rest = trim_cq_start(&stripped[AT_PREFIX.len()..]);
     let params = match rest.strip_prefix(',') {
         Some(params) => params,
         None if rest.is_empty() => "",
@@ -156,6 +168,10 @@ pub fn at_mention_id(code: &str) -> Option<&str> {
     };
     params.split(',').find_map(|param| {
         let (key, value) = param.split_once('=')?;
+        // 键/值首尾 trim 用 Unicode 语义（`str::trim`），对偶 Go 按键取值路径的
+        // `strings.TrimSpace`（`handlers/message_parser.go:3130-3141` `cqCodeParam`）：
+        // `\v`、全角空格（U+3000）、NBSP 都吞。`[CQ:at` 之后与 `,` 两侧的跳空白仍是
+        // ASCII 五元集（[`trim_cq_start`]），两层各司其职
         key.trim().eq_ignore_ascii_case("qq").then(|| value.trim())
     })
 }
@@ -169,7 +185,8 @@ pub fn contains_tag(text: &str) -> bool {
     let mut from = 0;
     while let Some(found) = text[from..].find(TAG_OPEN) {
         let end = from + found + TAG_OPEN.len();
-        if text[end..].trim_start().starts_with("/>") {
+        // `/>` 前的空白用统一契约集合（Go `\s`，见 [`is_cq_space`]）
+        if trim_cq_start(&text[end..]).starts_with("/>") {
             return true;
         }
         from = end;
@@ -191,7 +208,8 @@ pub fn dedupe_tag(text: &str) -> String {
         let start = from + found;
         let open_end = start + TAG_OPEN.len();
         let rest = &text[open_end..];
-        let trimmed = rest.trim_start();
+        // `/>` 前的空白用统一契约集合（与 contains_tag 同一口径）
+        let trimmed = trim_cq_start(rest);
         if !trimmed.starts_with(TAG_CLOSE) {
             // 不是完整标签：这段前缀原样保留，继续向后找
             out.push_str(&text[from..open_end]);
@@ -218,11 +236,8 @@ fn is_everyone_code(code: &str) -> bool {
 /// 取值是否为「所有人」（大小写不敏感：`[CQ:at,qq=ALL]` 与 Go 一样算 @全员）。
 #[must_use]
 pub fn is_everyone_id(value: &str) -> bool {
-    EVERYONE_IDS
-        .iter()
-        .any(|id| value.eq_ignore_ascii_case(id))
+    EVERYONE_IDS.iter().any(|id| value.eq_ignore_ascii_case(id))
 }
-
 
 /// 当日计数记录（与 Go 侧同名字段一一对应）。
 #[derive(Debug, Serialize, Deserialize)]
@@ -251,9 +266,7 @@ impl Reservation {
         let _guard = guard.lock().unwrap_or_else(PoisonError::into_inner);
         let outcome = match &self.previous {
             Some(previous) => idmap.write_config(SECTION, &self.group, previous),
-            None => idmap
-                .delete_config(SECTION, &self.group)
-                .map(|_removed| ()),
+            None => idmap.delete_config(SECTION, &self.group).map(|_removed| ()),
         };
         if let Err(err) = outcome {
             tracing::warn!(group = %self.group, error = %err, "@全员 计数回滚失败");
@@ -399,15 +412,9 @@ mod tests {
     #[test]
     fn normalize_rewrites_both_cq_entries() {
         assert_eq!(normalize("[CQ:at,qq=all]早上好"), format!("{TAG}早上好"));
-        assert_eq!(
-            normalize("[CQ:at,qq=everyone]早安"),
-            format!("{TAG}早安")
-        );
+        assert_eq!(normalize("[CQ:at,qq=everyone]早安"), format!("{TAG}早安"));
         // 带额外参数（顺序无关）也认
-        assert_eq!(
-            normalize("[CQ:at,qq=all,name=全体]"),
-            TAG.to_owned()
-        );
+        assert_eq!(normalize("[CQ:at,qq=all,name=全体]"), TAG.to_owned());
     }
 
     #[test]
@@ -501,7 +508,11 @@ mod tests {
         assert_eq!(at_mention_id("[CQ:at,qq=all]"), Some("all"));
         assert_eq!(at_mention_id("[CQ:at]"), None);
         assert_eq!(at_mention_id("[CQ:at,foo]"), None, "裸参数不是 qq");
-        assert_eq!(at_mention_id("[CQ:at,qq=]"), Some(""), "空值与没有 qq 可区分");
+        assert_eq!(
+            at_mention_id("[CQ:at,qq=]"),
+            Some(""),
+            "空值与没有 qq 可区分"
+        );
         assert_eq!(at_mention_id("[CQ:image,file=a]"), None);
         assert_eq!(at_mention_id("[CQ:avatar]"), None, "形似的码不是 at 段");
         assert_eq!(at_mention_id("[CQ:atx,qq=1]"), None, "形似的码不是 at 段");
@@ -516,7 +527,11 @@ mod tests {
         assert_eq!(at_mention_id("[CQ:at ,qq=all]"), Some("all"));
         // 空白之后直接结束或只有不成对的参数：仍然是缺 qq
         assert_eq!(at_mention_id("[CQ:at ]"), None, "空白后面直接结束：缺 qq");
-        assert_eq!(at_mention_id("[CQ:at ,foo]"), None, "空白形态的裸参数不是 qq");
+        assert_eq!(
+            at_mention_id("[CQ:at ,foo]"),
+            None,
+            "空白形态的裸参数不是 qq"
+        );
         // 支持空白不能扩大误判面
         assert_eq!(at_mention_id("[CQ:at x]"), None);
         assert_eq!(at_mention_id("[CQ:avatar]"), None);
@@ -553,11 +568,47 @@ mod tests {
         assert_eq!(find_at_code("[CQ:atx]", 0), None);
     }
 
+    /// 空白契约用例（两层）：切分位置用 Go 正则 `\s` 的 ASCII 五元集，`\f` 计入
+    /// （空格/`\t`/`\n`/`\f`/`\r`）、`\v` 与全角空格（U+3000）不算空白不跳过；
+    /// 键/值首尾 trim 用 Unicode（Go `strings.TrimSpace`），`\v`、U+3000 一并吞。
+    #[test]
+    fn at_whitespace_contract_split_ascii_value_trim_unicode() {
+        // `\f`（换页）是空白：段名后、`,` 两侧、键值两侧统一 trim
+        assert_eq!(find_at_code("[CQ:at\u{0C} ,\u{0C}qq = 1]", 0), Some(0));
+        assert_eq!(
+            at_mention_id("[CQ:at\u{0C} ,\u{0C}qq\u{0C}=\u{0C}123\u{0C}]"),
+            Some("123")
+        );
+        // ---- 词法切分层：ASCII 五元集（对 Go `\[CQ:at\s*`）----
+        // `\v` 不是空白：段名后出现就不再是 at 段形态
+        assert_eq!(find_at_code("[CQ:at\u{0B},qq=1]", 0), None);
+        assert_eq!(at_mention_id("[CQ:at\u{0B} ,qq=1]"), None);
+        // 全角空格在切分位置不是空白：段名后出现同样不认
+        assert_eq!(find_at_code("[CQ:at\u{3000},qq=1]", 0), None);
+        // ---- 键/值 trim 层：Unicode（对 Go `cqCodeParam` 的 `strings.TrimSpace`）----
+        // 值首尾的 U+3000 被吞（Go 按键取值路径全部 TrimSpace）
+        assert_eq!(at_mention_id("[CQ:at,qq=\u{3000}1]"), Some("1"));
+        // 键两侧同理：U+3000 包裹的 `qq` 仍取到值
+        assert_eq!(
+            at_mention_id("[CQ:at,\u{3000}qq\u{3000}=\u{3000}123]"),
+            Some("123")
+        );
+        // `\v` 同属 Unicode 空白：键值两侧一并吞
+        assert_eq!(
+            at_mention_id("[CQ:at,\u{0B}qq\u{0B}=\u{0B}45\u{0B}]"),
+            Some("45")
+        );
+    }
+
     #[test]
     fn date_uses_fixed_utc_plus_eight() {
         // 2026-01-01 00:30 (+08:00) = 2025-12-31 16:30 UTC：东八区已跨日，UTC 还停在昨天
         let local_0030 = 20_453 * SECONDS_PER_DAY + 16 * 3_600 + 30 * 60;
-        assert_eq!(date_at(local_0030), "2026-01-01", "东八区 00:30 必须算新的一天");
+        assert_eq!(
+            date_at(local_0030),
+            "2026-01-01",
+            "东八区 00:30 必须算新的一天"
+        );
 
         // 2025-12-31 23:30 (+08:00) = 2025-12-31 15:30 UTC：两侧都还是 2025-12-31
         let local_2330 = 20_453 * SECONDS_PER_DAY + 15 * 3_600 + 30 * 60;

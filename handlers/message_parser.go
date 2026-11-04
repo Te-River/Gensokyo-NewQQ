@@ -49,14 +49,14 @@ var (
 	incomingAtRe = regexp.MustCompile(`<@!?([0-9A-Fa-f]+)>`)
 	// cqAnyRe 临时保护 CQ 码（AppID→BotID 替换时避免破坏码参数）
 	cqAnyRe = regexp.MustCompile(`\[CQ:[^\]]*\]`)
-	// replyNumRe 清理残留的 [CQ:reply,id=数字]
-	replyNumRe = regexp.MustCompile(`\[CQ:reply,id=\d+\]`)
-	// cqAtNumRe 匹配正文中的 [CQ:at,qq=数字]，at 与逗号之间、键名与取值两侧都容忍空白
-	// （`[CQ:at ,qq=123]`、`[CQ:at, qq = 123 ]`），并容忍 qq 之后的附加参数
-	// （`[CQ:at,qq=123,name=x]`）：捕获组只取纯数字，附加参数随整段一起被替换。
-	// Rust 侧 at_mention_id 按 key 取值、忽略其余参数，at_everyone 的 CQ 正则也早已兼容这两种空白，
-	// Go 漏掉就会把带参 / 带空白的 at 段原样发出去（审计 §8-1/G1/G2）。
-	cqAtNumRe = regexp.MustCompile(`(?i)\[CQ:at\s*,\s*qq\s*=\s*(\d+)\s*(?:,[^\]]*)?\]`)
+	// replyNumRe 清理残留的 [CQ:reply,id=数字]（统一契约 §1/§2：段名后与键值两侧容忍空白）
+	replyNumRe = regexp.MustCompile(`\[CQ:reply\s*,\s*id\s*=\s*\d+\s*\]`)
+	// cqAtSegRe 匹配正文中的任意 at 段：段名与逗号之间、键名与取值两侧都容忍空白
+	// （`[CQ:at , qq = 123 ]`，统一契约 §1/§2），并容忍 qq 出现在任意参数位置
+	// （`[CQ:at,name=x,qq=123]`，统一契约 §7：参数按逗号切分后按键查找，与 Rust 同口径）。
+	// 正则只捕获参数区，qq 由 cqCodeParam 按键取值；无参/非数字 qq（all|everyone 等）
+	// 由调用方按既有语义处理（归一或原样透传）。
+	cqAtSegRe = regexp.MustCompile(`(?i)\[CQ:at\s*((?:,[^\]]*)?)\]`)
 	// cqDigitsRe 判断 qq 取值是否为纯数字（虚拟号），用于区分 qq=all|everyone 这类别名。
 	cqDigitsRe = regexp.MustCompile(`^\d+$`)
 )
@@ -1628,9 +1628,15 @@ func transformMessageTextAt(messageText string, groupid string, userid string) s
 	messageText = replyNumRe.ReplaceAllString(messageText, "")
 
 	// 仅匹配 用户 自身的 [CQ:at,qq=UserID]：
-	// C2 修复：user_id 为外部输入，不再拼接正则（防 MustCompile panic），改精确字符串匹配
+	// C2 修复：user_id 为外部输入，不再拼接正则（防 MustCompile panic），改为正则命中 at 段后
+	// 按键取 qq 再与 userid 精确字符串比较；空白与参数顺序由统一契约容忍（§1/§2/§7）。
 	if config.GetRemoveBotAtGroup() {
-		messageText = strings.ReplaceAll(messageText, "[CQ:at,qq="+userid+"]", "")
+		messageText = cqAtSegRe.ReplaceAllStringFunc(messageText, func(m string) string {
+			if qq, ok := cqAtSegmentQQ(m); ok && qq == userid {
+				return ""
+			}
+			return m
+		})
 	}
 	// 如果内容为空且原始内容仅含 at（不含 reply），退回原始 at 文本
 	if strings.TrimSpace(messageText) == "" && strings.Contains(originalText, "[CQ:at") {
@@ -1662,21 +1668,19 @@ func transformMessageTextAtNoGroupID(messageText string) string {
 	// 去除所有[CQ:reply,id=数字] todo 更好的处理办法
 	messageText = replyNumRe.ReplaceAllString(messageText, "")
 
-	// 使用正则表达式来查找所有[CQ:at,qq=数字]的模式
-	messageText = cqAtNumRe.ReplaceAllStringFunc(messageText, func(m string) string {
-		submatches := cqAtNumRe.FindStringSubmatch(m)
-		if len(submatches) > 1 {
+	// 使用统一口径匹配所有 [CQ:at] 段：按键取 qq（任意参数位置）且为纯数字时反查 idmap
+	messageText = cqAtSegRe.ReplaceAllStringFunc(messageText, func(m string) string {
+		if qq, ok := cqAtNumericQQ(m); ok {
 			var err error
 			if config.GetIdmapPro() {
 				// 这是个魔法数 代表私聊
-				_, _, err = idmap.RetrieveRowByIDv2Pro("690426430", submatches[1])
+				_, _, err = idmap.RetrieveRowByIDv2Pro("690426430", qq)
 			} else {
-				_, err = idmap.RetrieveRowByIDv2(submatches[1])
+				_, err = idmap.RetrieveRowByIDv2(qq)
 			}
 			if err != nil {
 				mylog.Printf("Error retrieving user ID: %v", err)
 			}
-			return m
 		}
 		return m
 	})
@@ -2753,10 +2757,9 @@ func resolveAtVirtualID(virtualID string) (string, error) {
 // 反查失败（未绑定的虚拟号）返回原段：markdown 侧这类载荷已被 validateMarkdownAtMentions
 // 在解析阶段拦成 1400（G4），走到这里只可能是文本路径复用了本函数。
 func ResolveMarkdownAtMentions(content string) string {
-	return cqAtNumRe.ReplaceAllStringFunc(content, func(m string) string {
-		submatches := cqAtNumRe.FindStringSubmatch(m)
-		if len(submatches) > 1 {
-			realUserID, err := resolveAtVirtualID(submatches[1])
+	return cqAtSegRe.ReplaceAllStringFunc(content, func(m string) string {
+		if qq, ok := cqAtNumericQQ(m); ok {
+			realUserID, err := resolveAtVirtualID(qq)
 			if err != nil {
 				mylog.Printf("Error resolving virtual ID in markdown: %v", err)
 				return m
@@ -2771,15 +2774,14 @@ func ResolveMarkdownAtMentions(content string) string {
 // 优先使用缓存的用户名（@用户名），缓存失效时回退为 <@OpenID> 格式。
 // 反查失败时保留原段：文本路径是透传口径，把整段换成空串等于静默删字（G3）。
 func resolvePlainTextAtMentions(messageText string) string {
-	return cqAtNumRe.ReplaceAllStringFunc(messageText, func(m string) string {
-		submatches := cqAtNumRe.FindStringSubmatch(m)
-		if len(submatches) > 1 {
-			username := idmap.GetUserName(submatches[1])
+	return cqAtSegRe.ReplaceAllStringFunc(messageText, func(m string) string {
+		if qq, ok := cqAtNumericQQ(m); ok {
+			username := idmap.GetUserName(qq)
 			if username != "" {
 				return "@" + username + " "
 			}
 			// 用户名缓存失效，回退为 <@OpenID> 格式
-			realID, err := resolveAtVirtualID(submatches[1])
+			realID, err := resolveAtVirtualID(qq)
 			if err != nil || realID == "" {
 				mylog.Printf("Error resolving at mention %q, keep original CQ code: %v", m, err)
 				return m
@@ -3109,19 +3111,22 @@ var errMarkdownAtNoQQ = errors.New("Markdown 中的 [CQ:at] 缺少 qq 参数")
 // Rust 对同样的输入回 1400；Go 若放行，渲染层只能把 [CQ:at,qq=数字] 原样发出去（G4）。
 var errMarkdownAtUnbound = errors.New("Markdown 中的 [CQ:at] 虚拟号未绑定")
 
-// errMarkdownAtMalformed 表示 markdown 正文里的 at 段写法渲染层识别不了，如 `[CQ:at,name=x,qq=1]`：
-// qq 不在 `[CQ:at,` 之后的位置，cqAtNumRe 取不到参数，也就渲染不成 <qqbot-at-user>；
-// 校验若只按键取值就会放行，最终仍把 CQ 码原文发给用户（G2）。
-// 注：`[CQ:at ,qq=1]` 这类 at 后带空白的写法现由 cqAtNumRe 直接支持，不再落到这里。
+// errMarkdownAtMalformed 表示 markdown 正文里的 at 段写法渲染层识别不了。
+// 统一契约 §7 落地后，at 渲染层（cqAtSegRe + cqAtNumericQQ）按 key 取值、容忍参数乱序与
+// 两侧空白，`[CQ:at,name=x,qq=1]`、`[CQ:at , qq = 1 ]` 均已可渲染，不再落到这里；
+// 本分支仍可达的仅剩校验正则额外容忍、而渲染层正则不认的形态（如段名前带空白的
+// `[CQ: at,qq=1]`）——校验若只按键取值就会放行，渲染层仍把 CQ 码原文发给用户（G2）。
 var errMarkdownAtMalformed = errors.New("Markdown 中的 [CQ:at] 写法无法渲染")
 
 // markdownCQCodeRe 定位 markdown 正文里的任意 CQ 码（大小写不敏感），拆出类型与参数段。
-// 不用 cqAtNumRe：那只能匹配带 qq 数字的合法段，`[CQ:at]`（无逗号）与 `[CQ:at,foo]` 都漏。
+// 不用渲染层正则 cqAtSegRe：那只能匹配 at 段，本校验需要按类型分发。
 // 段名与参数之间容忍空白：`[CQ:at ]`、`[CQ:at ,qq=1]` 同样要能被认出，
 // 否则缺 qq 的写法既没被校验也没被渲染，属于「绕过校验」（G2）。
 var markdownCQCodeRe = regexp.MustCompile(`(?i)\[CQ:\s*([A-Za-z0-9_.-]+)\s*((?:,[^\]]*)?)\]`)
 
 // cqCodeParam 取 CQ 码参数段（形如 ",a=1,b=2"）中指定键的非空值，键名大小写不敏感。
+// 参数按逗号切分后按键查找，键允许出现在任意位置（统一契约 §7，与 Rust 按键取值一致）；
+// 键与值各自 trim 首尾空白，值内部空白保留（§2/§3）。
 func cqCodeParam(params, key string) (string, bool) {
 	for _, part := range strings.Split(params, ",") {
 		k, v, found := strings.Cut(part, "=")
@@ -3135,12 +3140,31 @@ func cqCodeParam(params, key string) (string, bool) {
 	return "", false
 }
 
+// cqAtSegmentQQ 从 cqAtSegRe 命中段提取 qq 值（任意参数位置，键值空白已 trim）。
+func cqAtSegmentQQ(match string) (string, bool) {
+	sm := cqAtSegRe.FindStringSubmatch(match)
+	if len(sm) < 2 {
+		return "", false
+	}
+	return cqCodeParam(sm[1], "qq")
+}
+
+// cqAtNumericQQ 取 at 段中纯数字的 qq（虚拟号）；无 qq 或非数字（all|everyone 等别名）返回 false。
+// 数字判定与校验（validateMarkdownAtMentions）、归一（NormalizeAtEveryone）共用本口径。
+func cqAtNumericQQ(match string) (string, bool) {
+	qq, ok := cqAtSegmentQQ(match)
+	if !ok || !cqDigitsRe.MatchString(qq) {
+		return "", false
+	}
+	return qq, true
+}
+
 // validateMarkdownAtMentions 校验 markdown 正文里每个 at 段都能被渲染层正确渲染。
 // 文本路径（非 markdown）不校验，保持原样透传；这条校验只挂在 markdown 唯一解析入口上，
 // legacy 群/私聊与 cqparse 新链因此同口径。
 // 三条判据（对齐 Rust render_markdown）：
 //  1. 必须带非空 qq 参数，否则渲染不出 <qqbot-at-user>（审计 §8-2）；
-//  2. 数字 qq 必须能被 cqAtNumRe 认出且能在 idmap 反查到真实 OpenID，
+//  2. 数字 qq（任意参数位置）必须能被渲染层（cqAtSegRe + 按键取值）认出且能在 idmap 反查到真实 OpenID，
 //     否则渲染层只会把 CQ 码原文发出去（G2/G4）；
 //  3. qq=all|everyone 在载荷入库前已被归一为 <qqbot-at-everyone />；若仍残留，有 qq 即视为合法。
 func validateMarkdownAtMentions(content string) error {
@@ -3158,8 +3182,10 @@ func validateMarkdownAtMentions(content string) error {
 		if !cqDigitsRe.MatchString(qq) {
 			continue
 		}
-		// 段形必须与渲染层同源：`[CQ:at ,qq=1]` 这类 cqAtNumRe 认不出的写法渲染不出来
-		if !cqAtNumRe.MatchString(code[0]) {
+		// 段形必须与渲染层同源：渲染层正则 cqAtSegRe 认不出的写法（如段名前带空白的
+		// `[CQ: at,qq=1]`）放行后仍会原样发出，必须在此拦下；
+		// qq 处于任意参数位置的形态已由渲染层按键取值支持（统一契约 §7）
+		if !cqAtSegRe.MatchString(code[0]) {
 			return fmt.Errorf("%w: %s", errMarkdownAtMalformed, code[0])
 		}
 		if _, err := resolveAtVirtualID(qq); err != nil {

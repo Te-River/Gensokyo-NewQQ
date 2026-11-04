@@ -332,9 +332,10 @@ func mdContentPayload(t *testing.T, content string) string {
 }
 
 // TestParseMarkdownFromMessageERejectsAtWithoutQQ markdown 正文的 at 段必须能被渲染层渲染：
-// 缺 qq 的 at 段、idmap 里查不到的数字 qq、渲染层认不出的写法（`[CQ:at,name=x,qq=1]`）都回 1400，
+// 缺 qq 的 at 段、idmap 里查不到的数字 qq、渲染层认不出的写法都回 1400，
 // 与 Rust render_markdown 同口径（审计 §8-2 / G2 / G4）。
-// at 与逗号之间的空白（`[CQ:at ,qq=1]`）已由 cqAtNumRe 支持，走正常解析而非 1400。
+// at 与逗号之间的空白（`[CQ:at ,qq=1]`）与 qq 的非首位参数位置（`[CQ:at,name=x,qq=1]`，
+// 统一契约 §7：按键取值）均已由渲染层支持，走正常解析而非 1400。
 func TestParseMarkdownFromMessageERejectsAtWithoutQQ(t *testing.T) {
 	// 数字 qq 现在要过 idmap 反查（G4）：先绑定一个虚拟号，供合法用例使用
 	boundOpenID := "u0123456789abcdef0123456789abc123"
@@ -354,8 +355,6 @@ func TestParseMarkdownFromMessageERejectsAtWithoutQQ(t *testing.T) {
 		{"qq 空白值", "[CQ:at, qq =  ] 开会", errMarkdownAtNoQQ},
 		{"小写前缀", "[cq:at] 开会", errMarkdownAtNoQQ},
 		{"中段出现", "开会 [CQ:at,foo] 了", errMarkdownAtNoQQ},
-		// G2：qq 不在 `[CQ:at,` 之后的位置，cqAtNumRe 取不到参数 → 渲染层认不出
-		{"参数顺序颠倒", "[CQ:at,name=x,qq=" + boundQQ + "] 开会", errMarkdownAtMalformed},
 		{"at 后只有空格", "[CQ:at ] 开会", errMarkdownAtNoQQ},
 		{"空白 at 无参数", "[CQ:at  ] 开会", errMarkdownAtNoQQ},
 		// G4：数字 qq 反查不到真实 OpenID，放行只会原样发出 CQ 码
@@ -380,6 +379,9 @@ func TestParseMarkdownFromMessageERejectsAtWithoutQQ(t *testing.T) {
 		{"空白容错", "[CQ:at, qq = " + boundQQ + "] 开会"},
 		{"at 后带空白再跟 qq", "[CQ:at ,qq=" + boundQQ + "] 开会"},
 		{"at 后带空白且键值带空白", "[CQ:at  , qq = " + boundQQ + " ] 开会"},
+		// 统一契约 §7：qq 允许出现在任意参数位置（按键查找，与 Rust 同口径）
+		{"参数顺序颠倒（qq 非首参）", "[CQ:at,name=x,qq=" + boundQQ + "] 开会"},
+		{"参数顺序颠倒且带空白", "[CQ:AT , name = x , QQ = " + boundQQ + " ] 开会"},
 		{"键名大写", "[CQ:AT,QQ = " + boundQQ + "] 开会"},
 		{"qq=all 若未归一仍算有 qq", "[CQ:at,qq=all] 开会"},
 		{"其他 CQ 码不受影响", "[CQ:image,file=https://x.com/p.png] 图"},

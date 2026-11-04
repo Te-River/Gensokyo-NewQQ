@@ -45,6 +45,9 @@ func ParseOneBotString(s string) (ParsedMessage, error) {
 			cqType = body[:colon]
 			paramsPart = body[colon+1:]
 		}
+		// 统一契约 §1：段名之后、`,` 或 `]` 之前允许任意空白（段名前空白不放宽，维持现状）
+		// 空白集为 ASCII 五元集 {空格, \t, \n, \f, \r}，与 legacy 正则 `\s` 及 Rust is_cq_space 同口径（G-A）
+		cqType = strings.TrimRight(cqType, " \t\r\n\f")
 
 		part := cqTypeToPart(cqType, parseCQParams(paramsPart))
 		if rp, ok := part.(ReplyPart); ok {

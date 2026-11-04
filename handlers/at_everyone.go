@@ -28,13 +28,10 @@ const (
 )
 
 var (
-	// atEveryoneCQPattern 匹配 CQ 主入口 [CQ:at,qq=all] 与宽松别名 qq=everyone（大小写不敏感），
-	// 兼容误带的附加参数（如 [CQ:at,qq=all,name=all]）。
-	// 键名与取值两侧容忍空白（`[CQ:at, qq = all]`）：Rust 侧按 key/value trim 解析，
+	// @全员 的 CQ 识别与归一统一走 cqAtSegRe + cqAtSegmentQQ（message_parser.go）：
+	// 段名后、键值两侧容忍空白，qq 允许出现在任意参数位置（统一契约 §1/§2/§7），
+	// 取值 all|everyone 大小写不敏感（既有语义不变）。Rust 侧按 key/value trim 解析，
 	// Go 若不归一就是「检测得到却不归位」的语义分叉（审计 §8-1）。
-	// at 与逗号之间同样容忍空白（`[CQ:at ,qq=all]`）：markdown 校验按 at 段识别这类写法，
-	// 但 qq=all 不是数字、cqAtNumRe 渲染不了；不归一就会原样发出 CQ 码（G2）。
-	atEveryoneCQPattern = regexp.MustCompile(`(?i)\[CQ:at\s*,\s*qq\s*=\s*(?:all|everyone)\s*(?:,[^\]]*)?\]`)
 	// atEveryoneTagPattern 匹配官方标签，兼容手写无空格的 <qqbot-at-everyone/>。
 	atEveryoneTagPattern = regexp.MustCompile(`<qqbot-at-everyone\s*/>`)
 )
@@ -49,13 +46,31 @@ var atEveryoneNow = func() time.Time { return time.Now().In(atEveryoneZone) }
 // NormalizeAtEveryone 把 [CQ:at,qq=all|everyone] 归一为官方自闭合标签；
 // 字面标签保持原样（照官方文档抄写的场景）。挂在 CQ 管道的 card 阶段之前，
 // 保证文本与 markdown 两条出站路径同源。
-// 判定与归一必须走同一正则（大小写不敏感）：早期快速路径用区分大小写的
+// qq 按 key 从参数区取值（任意参数位置、两侧空白容忍，统一契约 §7），
+// 判定与归一必须同源（大小写不敏感）：早期快速路径用区分大小写的
 // strings.Contains 预筛，[cq:at,qq=all] 会被检测到（计入额度）却不被归一（S2）。
 func NormalizeAtEveryone(text string) string {
-	if !atEveryoneCQPattern.MatchString(text) {
-		return text
+	return cqAtSegRe.ReplaceAllStringFunc(text, func(m string) string {
+		if isAtEveryoneSegment(m) {
+			return atEveryoneTag
+		}
+		return m
+	})
+}
+
+// isAtEveryoneSegment 判断一个 at 段（cqAtSegRe 命中形态）的 qq 取值是否为 all|everyone。
+func isAtEveryoneSegment(match string) bool {
+	qq, ok := cqAtSegmentQQ(match)
+	if !ok {
+		return false
 	}
-	return atEveryoneCQPattern.ReplaceAllString(text, atEveryoneTag)
+	return strings.EqualFold(qq, "all") || strings.EqualFold(qq, "everyone")
+}
+
+// containsAtEveryoneSegment 检测文本是否含 qq=all|everyone 的 at 段，
+// 与 NormalizeAtEveryone 严格同口径（S2：检测与归一不许分叉）。
+func containsAtEveryoneSegment(text string) bool {
+	return NormalizeAtEveryone(text) != text
 }
 
 // atEveryonePresent 判断本次出站是否带 @全员：文本里有标签，
@@ -84,7 +99,7 @@ func markdownContainsAtEveryone(raw string) bool {
 	if raw == "" {
 		return false
 	}
-	if atEveryoneTagPattern.MatchString(raw) || atEveryoneCQPattern.MatchString(raw) {
+	if atEveryoneTagPattern.MatchString(raw) || containsAtEveryoneSegment(raw) {
 		return true
 	}
 	decoded, err := base64.StdEncoding.DecodeString(raw)
@@ -92,7 +107,7 @@ func markdownContainsAtEveryone(raw string) bool {
 		return false
 	}
 	text := string(decoded)
-	return atEveryoneTagPattern.MatchString(text) || atEveryoneCQPattern.MatchString(text)
+	return atEveryoneTagPattern.MatchString(text) || containsAtEveryoneSegment(text)
 }
 
 // normalizeAtEveryoneInMarkdown 对单份 markdown 载荷做 @全员 归一。
@@ -103,10 +118,10 @@ func normalizeAtEveryoneInMarkdown(raw string) string {
 	if raw == "" {
 		return raw
 	}
-	// 预筛同样走大小写不敏感的正则：检测口径与归一口径必须一致（S2）
+	// 预筛同样走归一同源的 key 取值口径：检测与归一不许分叉（S2）
 	if decoded, err := base64.StdEncoding.DecodeString(raw); err == nil {
 		text := string(decoded)
-		if !atEveryoneCQPattern.MatchString(text) {
+		if !containsAtEveryoneSegment(text) {
 			return raw
 		}
 		normalized := NormalizeAtEveryone(text)
@@ -115,7 +130,7 @@ func normalizeAtEveryoneInMarkdown(raw string) string {
 		}
 		return base64.StdEncoding.EncodeToString([]byte(normalized))
 	}
-	if !atEveryoneCQPattern.MatchString(raw) {
+	if !containsAtEveryoneSegment(raw) {
 		return raw
 	}
 	return NormalizeAtEveryone(raw)

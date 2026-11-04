@@ -618,8 +618,8 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 					 if md != nil && messageText != "" {
 					  md.Content = messageText + "\n" + md.Content
 					 }
-					 // 步骤 3: 清理 messageText 中的 [CQ:markdown] 标记
-					 mdRe := regexp.MustCompile(`\[CQ:markdown,[^\]]*\]`)
+					 // 步骤 3: 清理 messageText 中的 [CQ:markdown] 标记（段名后容忍空白，统一契约 §1）
+					 mdRe := regexp.MustCompile(`\[CQ:markdown\s*,[^\]]*\]`)
 					 messageText = mdRe.ReplaceAllString(messageText, "")
 					}
 
