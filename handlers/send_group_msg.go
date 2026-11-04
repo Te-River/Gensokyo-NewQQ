@@ -619,7 +619,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 					  md.Content = messageText + "\n" + md.Content
 					 }
 					 // 步骤 3: 清理 messageText 中的 [CQ:markdown] 标记（段名后容忍空白，统一契约 §1）
-					 mdRe := regexp.MustCompile(`\[CQ:markdown\s*,[^\]]*\]`)
+					 mdRe := regexp.MustCompile(`\[CQ:\s*(?i:markdown)\s*,[^\]]*\]`)
 					 messageText = mdRe.ReplaceAllString(messageText, "")
 					}
 

@@ -1,15 +1,15 @@
 package handlers
 
-// cq_whitespace_tolerance_test.go：CQ 码统一空白契约（§1~§7）的镜像用例表，
-// 与 Rust 侧空白容错用例表逐条对应（本轮把 at 之外的全部 CQ 段类型一并收口）。
-// 口径：段名后、`,` 或 `]` 之前允许任意空白；键与 `=`、`=` 与值两侧允许空白；
-// 键 trim、值仅 trim 首尾空白、内部空白保留；qq 允许出现在任意参数位置。
-// 大小写口径维持现状：at/@全员/markdown-at 校验路径区分大小写不敏感（(?i)），
-// 其余媒体/控制码正则区分大小写，本文件同时把两侧现状钉死在断言里。
+// cq_whitespace_tolerance_test.go：CQ 码统一最大兼容契约（§1~§4）的镜像用例表，
+// 与 Rust 侧容错用例表逐条对应（本轮把全部 CQ 段类型一并收口）。
+// 口径：段名之前（`[CQ:` 后）与之后、`,` 或 `]` 之前允许任意空白；键与 `=`、
+// `=` 与值两侧允许空白；键 trim、值仅 trim 首尾空白、内部空白保留；
+// 参数按键取值（任意键序）；qq 允许出现在任意参数位置。
+// 大小写口径（统一契约 §1）：段名与参数键大小写不敏感，`[CQ:Image,File=x]` =
+// `[CQ:image,file=x]`；`[CQ:` 前缀字面仍区分大小写（小写 [cq: 维持透传）。
 
 import (
 	"encoding/base64"
-	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -59,17 +59,20 @@ func TestCQWhitespaceTolerancePipeline(t *testing.T) {
 		{"card 空白+非法组合可解析", "[CQ:card , title=A, desc=B]", "", "card", `{"desc":"B","title":"A"}`},
 		{"music 空白", "[CQ:music , type = qq, id = 123]", "", "qqmusic", "123"},
 		{"input_notify 空白", "[CQ:input_notify , type = 6 , second = 10]", "", "input_notify", `{"second":"10","type":"6"}`},
-		{"stream 空白（冒号键语法现状保持）", "[CQ:stream , type : start , qq : 123]", "", "stream", `{"qq":"123","type":"start"}`},
-		// stream 混写形态：本轮未放宽，仍只认 `type:x,qq:x` 双冒号语法；
-		// 等号混写（[CQ:stream,type=start,qq=123]）不被识别，整段保留字面。
-		{"stream 混用等号不识别（现状：冒号语法未放宽）", "[CQ:stream,type=start,qq=123]", "[CQ:stream,type=start,qq=123]", "", ""},
-		{"stream 等号+空白同样不识别", "[CQ:stream , type = start , qq = 123]", "[CQ:stream , type = start , qq = 123]", "", ""},
+		{"stream 空白（冒号键语法）", "[CQ:stream , type : start , qq : 123]", "", "stream", `{"qq":"123","type":"start"}`},
+		// stream 双语法（统一契约 §3）：等号语法与冒号语法等价，可混用。
+		{"stream 等号语法识别", "[CQ:stream,type=start,qq=123]", "", "stream", `{"qq":"123","type":"start"}`},
+		{"stream 等号+空白识别", "[CQ:stream , type = start , qq = 123]", "", "stream", `{"qq":"123","type":"start"}`},
+		{"stream 混用等号冒号", "[CQ:stream,type=start,qq:123]", "", "stream", `{"qq":"123","type":"start"}`},
 		// avatar：反查+URL 构造为离线逻辑，产物含动态 URL，见下方独立前缀断言
 		// 透传与现状口径
 		{"face 透传（现状：无解析路径）", "[CQ:face , id = 1] hi", "[CQ:face , id = 1] hi", "", ""},
 		{"file 裸值无协议（现状：legacy 字符串链保留字面）", "[CQ:file,file=my file.txt]", "[CQ:file,file=my file.txt]", "", ""},
-		{"段名大写不识别（现状：媒体码区分大小写）", "[CQ:Image , File = https://x/a.png]", "[CQ:Image , File = https://x/a.png]", "", ""},
-		{"键名大写不识别（现状：媒体码键区分大小写）", "[CQ:image , File = https://x/a.png]", "[CQ:image , File = https://x/a.png]", "", ""},
+		// 统一契约 §1/§2：段名与键名大小写不敏感（`[CQ:` 前缀字面仍区分大小写）
+		{"段名大写同样识别", "[CQ:Image , File = https://x/a.png]", "", "url_images", "x/a.png"},
+		{"键名大写同样识别", "[CQ:image , File = https://x/a.png]", "", "url_images", "x/a.png"},
+		{"段名键名全大写组合", "[CQ:RECORD , ASR = ab , FILE = https://x/a.wav]", "", "url_records", "x/a.wav"},
+		{"段名前空白同样识别", "[CQ: image , file = https://x/a.png]", "", "url_images", "x/a.png"},
 		// 畸形段（现状保持）：未闭合不吞
 		{"未闭合畸形段保留", "hi[CQ:image,file=x.png", "hi[CQ:image,file=x.png", "", ""},
 	}
@@ -156,16 +159,21 @@ func TestCQAtQQAnyPositionRender(t *testing.T) {
 	}
 }
 
-// TestCQAtMalformedStillReachable 校验正则额外容忍的「段名前带空白」形态渲染层不认，仍回 malformed。
-func TestCQAtMalformedStillReachable(t *testing.T) {
+// TestCQAtLeadSpaceNowRenderable 统一契约 §4：段名前带空白的 at 段与其余形态同等识别，
+// 校验与渲染均放行（旧 errMarkdownAtMalformed 分支已因不可达删除）。
+func TestCQAtLeadSpaceNowRenderable(t *testing.T) {
 	boundOpenID := "u0555555555555555555555555555aaaa"
 	virtual, err := idmap.StoreIDv2(boundOpenID)
 	if err != nil {
 		t.Fatalf("StoreIDv2 失败: %v", err)
 	}
-	_, _, err = parseMarkdownFromMessageE(mdContentPayload(t, "[CQ: at,qq="+strconv.FormatInt(virtual, 10)+"] 开会"))
-	if !errors.Is(err, errMarkdownAtMalformed) {
-		t.Fatalf("段名前空白形态应回 malformed, got %v", err)
+	code := "[CQ: at,qq=" + strconv.FormatInt(virtual, 10) + "]"
+	if _, _, err := parseMarkdownFromMessageE(mdContentPayload(t, code+" 开会")); err != nil {
+		t.Fatalf("段名前空白形态应通过 markdown 校验, got %v", err)
+	}
+	want := `hi <qqbot-at-user id="` + boundOpenID + `" /> 开会`
+	if got := ResolveMarkdownAtMentions("hi " + code + " 开会"); got != want {
+		t.Fatalf("段名前空白形态应正常渲染: got %q, want %q", got, want)
 	}
 }
 
@@ -209,6 +217,11 @@ func TestCQParseTokenizerWhitespaceTolerance(t *testing.T) {
 		{"face 空白（透传类别不变）", "[CQ:face , id = 1]", "face", cqparse.KindPassthrough, "id", "1"},
 		{"reply 空白", "[CQ:reply,id = 123]", "reply", cqparse.KindControl, "id", "123"},
 		{"裸码段名后空白", "[CQ:active ]", "active", cqparse.KindControl, "", ""},
+		// 统一契约 §1/§3/§4：段名大小写不敏感、段名前空白、键名小写归一、任意键序
+		{"段名大写归一小写", "[CQ:Image , File = https://x/a.png]", "image", cqparse.KindMedia, "file", "https://x/a.png"},
+		{"段名前空白同样识别", "[CQ: image,file=https://x/a.png]", "image", cqparse.KindMedia, "file", "https://x/a.png"},
+		{"键序颠倒+大小写+asr 组合", "[CQ: RECORD , ASR = ab , file = https://x/my voice.wav]", "record", cqparse.KindMedia, "file", "https://x/my voice.wav"},
+		{"stream 冒号语法大小写", "[CQ:Stream , TYPE : start , QQ : 1]", "stream", cqparse.KindContent, "qq", "1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

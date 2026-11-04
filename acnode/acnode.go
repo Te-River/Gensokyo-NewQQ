@@ -321,6 +321,21 @@ func convertToUnicodeEscape(str string) string {
 	return unicodeEscapeBuilder.String()
 }
 
+// containsCQImageBase64Exempt 判断超长文本中是否携带 base64 图片 CQ 码（修 F5）。
+// 谓词口径：整串先小写、再剔除 ASCII 五元集空白 {空格,\t,\n,\f,\r}，随后按字面
+// `[cq:image,file=base64://` 匹配——因此段名/键名大小写与键值两侧空白形态（统一
+// 契约 §1~§4）均能命中；值本体不做实体解码、不折叠（该差异不影响此字面前缀判定）。
+func containsCQImageBase64Exempt(word string) bool {
+	normalized := strings.Map(func(r rune) rune {
+		switch r {
+		case ' ', '\t', '\n', '\f', '\r':
+			return -1
+		}
+		return r
+	}, strings.ToLower(word))
+	return strings.Contains(normalized, "[cq:image,file=base64://")
+}
+
 // 改写后的函数，接受word参数，并返回处理结果
 func CheckWordIN(word string) string {
 	if word == "" {
@@ -329,8 +344,10 @@ func CheckWordIN(word string) string {
 	}
 
 	if len([]rune(word)) > 5000 {
-		if strings.Contains(word, "[CQ:image,file=base64://") {
+		if containsCQImageBase64Exempt(word) {
 			// 当word包含特定字符串时原样返回
+			// 修 F5：容忍大小写与空白（统一契约 §1~§4 形态，如 [CQ:IMAGE , file =
+			// base64://...），超限内容里携带 base64 图片码时不误拒。
 			fmt.Printf("原样返回的文本：%s", word)
 			return word
 		}

@@ -46,6 +46,9 @@ type Processors struct {
 }
 
 // cqAtCleanRe 清理正文中的 [CQ:at,qq=数字]（包级预编译，修 M7）
+// 从严豁免（修 F5）：本正则消费的是本管道自产规范形态（严格字面 [CQ:at,qq=数字]），
+// 有意不跟进统一契约 §1~§4 的大小写/空白放宽口径——自产形态无宽松变体，从严匹配
+// 避免误伤正文中的字面文本；行为维持现状不变。
 var cqAtCleanRe = regexp.MustCompile(`\[CQ:at,qq=\d+\]`)
 
 // perfSelfAtRe 性能模式下剥离 @bot 的正则（包级预编译，修 M7）

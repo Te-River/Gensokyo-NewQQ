@@ -1641,10 +1641,13 @@ mod tests {
 
     #[tokio::test]
     async fn at_everyone_with_space_before_comma_is_normalized() {
-        // `[CQ:at ,qq=all]` / `[CQ:at , qq = ALL]`：空白形态同样归一为标签并计 1 次额度
+        // `[CQ:at ,qq=all]` / `[CQ:at , qq = ALL]`：空白形态同样归一为标签并计 1 次额度；
+        // `[CQ: at,...]`（`[CQ:` 与 `at` 之间的空白）同批钉桩，防止识别层漏判再次静默丢
         for (text, expected) in [
             ("[CQ:at ,qq=all] 开会", "<qqbot-at-everyone /> 开会"),
             ("[CQ:at , qq = ALL] 开会", "<qqbot-at-everyone /> 开会"),
+            ("[CQ: at,qq=all] 开会", "<qqbot-at-everyone /> 开会"),
+            ("[CQ: at , qq = ALL] 开会", "<qqbot-at-everyone /> 开会"),
         ] {
             let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
             let (_dir, context) = context(Arc::clone(&api));
@@ -1905,20 +1908,21 @@ mod tests {
 
     #[tokio::test]
     async fn markdown_at_mention_resolution_failure_is_a_request_error() {
-        // 未装配 idmap：数字虚拟号无法反查 → 1400，不静默留 CQ 码
-        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
-        let (_dir, context) = context(Arc::clone(&api));
-        let media = no_media();
-        let plan = request(
-            SendTarget::Group(OPENID.to_owned()),
-            markdown_plan("[CQ:at,qq=123456] 你好"),
-        );
+        // 未装配 idmap：数字虚拟号无法反查 → 1400，不静默留 CQ 码。
+        // `[CQ: at,...]`（`[CQ:` 后跳空白形态）必须同样定位到：识别层漏判会让它既不 1400
+        // 也不渲染，G2 回归（静默留 CQ 码当文本发出）正是本次补钉的场景
+        for content in ["[CQ:at,qq=123456] 你好", "[CQ: at,qq=123456] 你好"] {
+            let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+            let (_dir, context) = context(Arc::clone(&api));
+            let media = no_media();
+            let plan = request(SendTarget::Group(OPENID.to_owned()), markdown_plan(content));
 
-        let err = execute(&context, &plan, &deps(&media, None))
-            .await
-            .expect_err("反查失败必须拒绝");
-        assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
-        assert!(api.sent().is_empty(), "反查失败不应发送");
+            let err = execute(&context, &plan, &deps(&media, None))
+                .await
+                .expect_err("反查失败必须拒绝");
+            assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
+            assert!(api.sent().is_empty(), "{content} 反查失败不应发送");
+        }
     }
 
     #[tokio::test]
@@ -1982,26 +1986,30 @@ mod tests {
 
     #[tokio::test]
     async fn markdown_avatar_cq_is_not_treated_as_at() {
-        // `[CQ:avatar]` 不是 at 段：不能被误判成缺 qq 而拒掉
-        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
-        let (_dir, context) = context(Arc::clone(&api));
-        let media = no_media();
-        let plan = request(
-            SendTarget::Group(OPENID.to_owned()),
-            markdown_plan("[CQ:avatar] 你好"),
-        );
+        // 形似的码不是 at 段：不能被误判成缺 qq 而拒掉。`[CQ: atx]` / `[CQ: avatar]` 等
+        // 段名前带空白/紧跟空白段名的形态同样不得命中（空白放宽不能扩大误判面）
+        for text in [
+            "[CQ:avatar] 你好",
+            "[CQ: atx] 你好",
+            "[CQ: atom,qq=1] 你好",
+        ] {
+            let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+            let (_dir, context) = context(Arc::clone(&api));
+            let media = no_media();
+            let plan = request(SendTarget::Group(OPENID.to_owned()), markdown_plan(text));
 
-        execute(&context, &plan, &deps(&media, None))
-            .await
-            .expect("非 at 的 CQ 码应原样放行");
+            execute(&context, &plan, &deps(&media, None))
+                .await
+                .expect("非 at 的 CQ 码应原样放行");
 
-        let sent = api.sent();
-        let content = sent[0]
-            .markdown
-            .as_ref()
-            .and_then(|markdown| markdown.content.as_deref())
-            .expect("markdown 必须有正文");
-        assert_eq!(content, "[CQ:avatar] 你好", "非 at 段不得被改写");
+            let sent = api.sent();
+            let content = sent[0]
+                .markdown
+                .as_ref()
+                .and_then(|markdown| markdown.content.as_deref())
+                .expect("markdown 必须有正文");
+            assert_eq!(content, text, "非 at 段不得被改写");
+        }
     }
 
     #[tokio::test]

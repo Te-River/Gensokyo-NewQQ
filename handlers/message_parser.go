@@ -49,14 +49,17 @@ var (
 	incomingAtRe = regexp.MustCompile(`<@!?([0-9A-Fa-f]+)>`)
 	// cqAnyRe 临时保护 CQ 码（AppID→BotID 替换时避免破坏码参数）
 	cqAnyRe = regexp.MustCompile(`\[CQ:[^\]]*\]`)
-	// replyNumRe 清理残留的 [CQ:reply,id=数字]（统一契约 §1/§2：段名后与键值两侧容忍空白）
-	replyNumRe = regexp.MustCompile(`\[CQ:reply\s*,\s*id\s*=\s*\d+\s*\]`)
-	// cqAtSegRe 匹配正文中的任意 at 段：段名与逗号之间、键名与取值两侧都容忍空白
-	// （`[CQ:at , qq = 123 ]`，统一契约 §1/§2），并容忍 qq 出现在任意参数位置
-	// （`[CQ:at,name=x,qq=123]`，统一契约 §7：参数按逗号切分后按键查找，与 Rust 同口径）。
+	// replyNumRe 清理残留的 [CQ:reply,id=数字]（统一契约 §1~§4：段名前（`[CQ:` 后）与
+	// 段名后、键值两侧容忍空白，段名与键名大小写不敏感（(?i:) 作用域），id 允许任意参数位置）
+	replyNumRe = regexp.MustCompile(`\[CQ:\s*(?i:reply)\s*,\s*(?:[^,\]]*?,\s*)*(?i:id)\s*=\s*\d+\s*\]`)
+	// cqAtSegRe 匹配正文中的任意 at 段：段名前（`[CQ:` 后）、段名与逗号之间、键名与取值
+	// 两侧都容忍空白（`[CQ: at , qq = 123 ]`，统一契约 §1/§2/§4），并容忍 qq 出现在任意
+	// 参数位置（`[CQ:at,name=x,qq=123]`，统一契约 §7：参数按逗号切分后按键查找，与 Rust
+	// 同口径）。at 路径大小写口径维持现状全 (?i)：前缀 [cq:/[Cq: 一并识别（S2 拍板，
+	// 检测与归一不许分叉），与其他媒体码的 (?i:) 作用域不同属既有差异。
 	// 正则只捕获参数区，qq 由 cqCodeParam 按键取值；无参/非数字 qq（all|everyone 等）
 	// 由调用方按既有语义处理（归一或原样透传）。
-	cqAtSegRe = regexp.MustCompile(`(?i)\[CQ:at\s*((?:,[^\]]*)?)\]`)
+	cqAtSegRe = regexp.MustCompile(`(?i)\[CQ:\s*at\s*((?:,[^\]]*)?)\]`)
 	// cqDigitsRe 判断 qq 取值是否为纯数字（虚拟号），用于区分 qq=all|everyone 这类别名。
 	cqDigitsRe = regexp.MustCompile(`^\d+$`)
 )
@@ -985,6 +988,9 @@ func parseMessageContentLegacy(paramsMessage callapi.ParamsContent, message call
 					avatarCQCode, _ = GetAvatarCQCode(paramsMessage.GroupID.(string), qqNumber)
 				}
 				// 从 [CQ:image,file=URL] 中提取 URL 存入 foundItems
+				// 从严豁免（修 F5）：avatarCQCode 是本机自产规范形态（严格字面
+				// [CQ:image,file=URL]），此正则有意不跟进统一契约的大小写/空白放宽口径，
+				// 行为维持现状不变。
 				if avatarCQCode != "" {
 					re := regexp.MustCompile(`\[CQ:image,file=(.+?)\]`)
 					if m := re.FindStringSubmatch(avatarCQCode); len(m) > 1 {
@@ -1350,6 +1356,9 @@ func parseMessageContentLegacy(paramsMessage callapi.ParamsContent, message call
 				avatarCQCode, _ = GetAvatarCQCode(paramsMessage.GroupID.(string), qqNumber)
 			}
 			// 从 [CQ:image,file=URL] 中提取 URL 存入 foundItems
+			// 从严豁免（修 F5）：avatarCQCode 是本机自产规范形态（严格字面
+			// [CQ:image,file=URL]），此正则有意不跟进统一契约的大小写/空白放宽口径，
+			// 行为维持现状不变。
 			if avatarCQCode != "" {
 				re := regexp.MustCompile(`\[CQ:image,file=(.+?)\]`)
 				if m := re.FindStringSubmatch(avatarCQCode); len(m) > 1 {
@@ -1639,7 +1648,8 @@ func transformMessageTextAt(messageText string, groupid string, userid string) s
 		})
 	}
 	// 如果内容为空且原始内容仅含 at（不含 reply），退回原始 at 文本
-	if strings.TrimSpace(messageText) == "" && strings.Contains(originalText, "[CQ:at") {
+	// （判定与渲染层同源 cqAtSegRe：段名前空白/大小写形态同样能触发回退，统一契约 §4）
+	if strings.TrimSpace(messageText) == "" && cqAtSegRe.MatchString(originalText) {
 		messageText = originalText
 	}
 	return messageText
@@ -1684,8 +1694,8 @@ func transformMessageTextAtNoGroupID(messageText string) string {
 		}
 		return m
 	})
-	// 如果内容为空且原始内容包含 at，退回原始 at 文本
-	if strings.TrimSpace(messageText) == "" && strings.Contains(originalText, "[CQ:at") {
+	// 如果内容为空且原始内容包含 at，退回原始 at 文本（判定与渲染层同源，统一契约 §4）
+	if strings.TrimSpace(messageText) == "" && cqAtSegRe.MatchString(originalText) {
 		messageText = originalText
 	}
 	return messageText
@@ -3111,16 +3121,9 @@ var errMarkdownAtNoQQ = errors.New("Markdown 中的 [CQ:at] 缺少 qq 参数")
 // Rust 对同样的输入回 1400；Go 若放行，渲染层只能把 [CQ:at,qq=数字] 原样发出去（G4）。
 var errMarkdownAtUnbound = errors.New("Markdown 中的 [CQ:at] 虚拟号未绑定")
 
-// errMarkdownAtMalformed 表示 markdown 正文里的 at 段写法渲染层识别不了。
-// 统一契约 §7 落地后，at 渲染层（cqAtSegRe + cqAtNumericQQ）按 key 取值、容忍参数乱序与
-// 两侧空白，`[CQ:at,name=x,qq=1]`、`[CQ:at , qq = 1 ]` 均已可渲染，不再落到这里；
-// 本分支仍可达的仅剩校验正则额外容忍、而渲染层正则不认的形态（如段名前带空白的
-// `[CQ: at,qq=1]`）——校验若只按键取值就会放行，渲染层仍把 CQ 码原文发给用户（G2）。
-var errMarkdownAtMalformed = errors.New("Markdown 中的 [CQ:at] 写法无法渲染")
-
 // markdownCQCodeRe 定位 markdown 正文里的任意 CQ 码（大小写不敏感），拆出类型与参数段。
 // 不用渲染层正则 cqAtSegRe：那只能匹配 at 段，本校验需要按类型分发。
-// 段名与参数之间容忍空白：`[CQ:at ]`、`[CQ:at ,qq=1]` 同样要能被认出，
+// 段名前（`[CQ:` 后）与段名、参数之间容忍空白：`[CQ: at]`、`[CQ:at ,qq=1]` 同样要能被认出，
 // 否则缺 qq 的写法既没被校验也没被渲染，属于「绕过校验」（G2）。
 var markdownCQCodeRe = regexp.MustCompile(`(?i)\[CQ:\s*([A-Za-z0-9_.-]+)\s*((?:,[^\]]*)?)\]`)
 
@@ -3164,8 +3167,10 @@ func cqAtNumericQQ(match string) (string, bool) {
 // legacy 群/私聊与 cqparse 新链因此同口径。
 // 三条判据（对齐 Rust render_markdown）：
 //  1. 必须带非空 qq 参数，否则渲染不出 <qqbot-at-user>（审计 §8-2）；
-//  2. 数字 qq（任意参数位置）必须能被渲染层（cqAtSegRe + 按键取值）认出且能在 idmap 反查到真实 OpenID，
-//     否则渲染层只会把 CQ 码原文发出去（G2/G4）；
+//  2. 数字 qq（任意参数位置、段名前可带空白、段名与键名大小写不敏感）必须能在 idmap
+//     反查到真实 OpenID，否则渲染层只会把 CQ 码原文发出去（G2/G4）。
+//     渲染层 cqAtSegRe 与本校验的形态口径自统一契约 §4 起完全同源（段名前空白
+//     亦被识别），不再存在「校验放行但渲染不识别」的 malformed 形态。
 //  3. qq=all|everyone 在载荷入库前已被归一为 <qqbot-at-everyone />；若仍残留，有 qq 即视为合法。
 func validateMarkdownAtMentions(content string) error {
 	if content == "" {
@@ -3181,12 +3186,6 @@ func validateMarkdownAtMentions(content string) error {
 		}
 		if !cqDigitsRe.MatchString(qq) {
 			continue
-		}
-		// 段形必须与渲染层同源：渲染层正则 cqAtSegRe 认不出的写法（如段名前带空白的
-		// `[CQ: at,qq=1]`）放行后仍会原样发出，必须在此拦下；
-		// qq 处于任意参数位置的形态已由渲染层按键取值支持（统一契约 §7）
-		if !cqAtSegRe.MatchString(code[0]) {
-			return fmt.Errorf("%w: %s", errMarkdownAtMalformed, code[0])
 		}
 		if _, err := resolveAtVirtualID(qq); err != nil {
 			return fmt.Errorf("%w: %s (%v)", errMarkdownAtUnbound, code[0], err)

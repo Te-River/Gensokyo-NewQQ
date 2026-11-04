@@ -74,11 +74,14 @@ Gensokyo 为适配 QQ Bot API 特有能力而扩展的 CQ 码类型。
 
 ---
 
-## 参数空白容错（2026-11）
+## 参数空白容错与最大兼容（2026-11）
 
-全部 CQ 码类型统一容忍书写空白（Go 与 Rust 新链同口径）：
+全部 CQ 码类型在**所有解析路径**（Go legacy / Go cqparse / Go internal 新链 / Rust 新链）统一为最大兼容并集口径（详见 `release_log/CHANGELOG_v016.md`）：
 
 - `[CQ:image , file = https://example.com/a.png]`、`[CQ:at, name=x, qq=123]`（参数间、`=` 两侧空白，任意键序）均可识别；值仅去首尾空白，**内部空格保留**（`[CQ:record,file = my voice.amr]` 的值为 `my voice.amr`）。
+- 段名与参数键**大小写不敏感**（`[CQ:Image,File=x]` 等价）；`[cq:` 前缀本身仍区分大小写，小写 `[cq:` 整码透传。
+- 段名可带前导空白（`[CQ: image,file=x]`、`[CQ: at,qq=all]`）；段名字符集为 `[A-Za-z0-9_]`（`[CQ:3d,x=1]` 按未知段处理）；含 `!`/`(`/全角空格等非法字符的段名整码按文本透传。
+- stream 支持冒号与等号双语法（`[CQ:stream,type:start,qq:1]`、`[CQ:stream,type=start,qq=1]` 及混写）；冒号语法仅 stream 段生效。
 - 词法切分的空白集为 ASCII `{空格, \t, \n, \f, \r}`（同正则 `\s`，不含 `\v`/全角空格）；键与值的 trim 为 Unicode 语义。
 - 未被识别的畸形段原样保留为文本；识别成功的段透传输出时保持原文字节（不做静默规范化改写）。
 

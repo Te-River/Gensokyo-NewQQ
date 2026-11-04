@@ -12,7 +12,7 @@
 //! 两处原本就不一致；协议层对外只保留 Go 出站口径一种。
 //!
 //! # 空白契约（两层，各自对偶同源）
-//! - **词法切分层**（段名后到 `,`/`]` 的跳空白、`,` 与 `=` 两侧跳空白、JSON 值起点判定、
+//! - **词法切分层**（段名前后到 `,`/`]` 的跳空白、`,` 与 `=` 两侧跳空白、JSON 值起点判定、
 //!   `parse_one` 整段外侧）：使用 Go 正则 `\s` 的 ASCII 集合：空格 / 制表 `\t` / 换行 `\n` /
 //!   换页 `\f` / 回车 `\r`；**不含**纵向制表 `\v`，不含全角空格（U+3000）等 Unicode 空白。
 //!   该集合唯一定义在 [`is_cq_space`]；runtime `at_everyone.rs` 的切分判定（`[CQ:at` 之后到
@@ -25,17 +25,24 @@
 //!
 //! # 解析规则
 //! - `[CQ:` 之前的普通文本不做反转义，原样成为 `text` 段（与 `parse_string.go` 一致）。
+//!   `[CQ:` 前缀本身**保持大小写敏感**（Go 正则就是字面量 `[CQ:`），放宽的只有段名与参数键。
 //! - 码体以**配对**的 `]` 结束：参数值在段首或 `=` 后以 `{` 开头时按花括号配平整段吞掉
 //!   （含 JSON 字符串内引号/转义的最小处理），JSON 里的 `,` `]` 不结束段、不收码——
 //!   与 `cqparse/tokenize.go` `scanSegments` 的配平口径一致；段名非法、花括号配平失败
 //!   或没有闭合 `]` 时整段码按文本处理。
-//! - 参数按 `,` 切分，但 `&#44;` 视为值的一部分；无 `=` 的片段再按首个 `:` 切一次
-//!   （`[CQ:stream,type:start,qq:123]`），两边都没有的裸片段丢弃。
-//! - 与 `cq_parse_mode:new`（`handlers/cqparse/tokenize.go`）有两处口径差异：那边**只**对
-//!   `stream` 认 `:`（`splitKV`），且无分隔符的裸片段会追加到前一参数的值上
-//!   （`params[lastKey] + "," + t`）；本实现按 legacy 口径丢弃裸片段（`handlers/cqcode.go`
-//!   的 `SplitN(part,"=",2)` 只认 `=`，stream 另由专用正则认 `:`），只把 `:` 放宽成通用兜底。
+//! - 参数按 `,` 切分，但 `&#44;` 视为值的一部分；`:` 分隔**只对 `stream` 段**生效（冒号语法，
+//!   `[CQ:stream,type:start,qq:123]`，对齐 Go `splitKV` 的 `action=="stream"` 判定）；
+//!   两者都没有的裸片段并入前一 key 的值、以 `,` 拼接（C3 并集口径，对齐 Go
+//!   `cqUnionParams`/`buildParams` 的 `params[lastKey] + "," + t`；无前一键或片段为空则丢弃）。
+//! - 参数切分与 `cq_parse_mode:new`（`handlers/cqparse/tokenize.go`）已完全对齐：`:` 仅
+//!   `stream` 认、裸片段并入前一键值两处都按并集口径落实现；早期的「按 legacy 口径丢弃裸片段、
+//!   `:` 放宽成通用兜底」两处差异已按 Go `cqUnionParams`/`buildParams` 修正收口。
 //! - 未知码类型原样保留为消息段（`[CQ:cardboard,xx=1]` 往返不变）。
+//! - **段名与参数键大小写不敏感**（与 Go 的最大兼容并集同口径）：`[CQ:Image,File=x]` 识别为
+//!   `image` 段，段名与参数键都归一成小写落段（`File` ≡ `file`；Go `buildParams` 就是键小写，
+//!   故码表驼峰键 `subType` 在解析/再序列化侧按 `subtype` 走）。段名前后的空白一并跳过。
+//!   **值**不参与大小写处理；`escape` 转义口径不变；透传臂（[`Segment::raw_or_cq`]）仍逐字节
+//!   吐 `parse` 命中的原文切片，用户字节不被归一改写。
 //! - parse 命中的码段携带**整段原文切片**（`Segment::raw`），透传臂用 [`Segment::raw_or_cq`]
 //!   逐字节输出；`to_cq` / [`to_cq_string`] 的规范化输出只供真正消费参数后重排的场景。
 //!
@@ -259,20 +266,25 @@ fn count_byte(bytes: &[u8], byte: u8) -> usize {
 }
 
 /// 为一个码段寻找配平的收尾 `]`（Go `cqparse/tokenize.go` 的 `tryParseCode` + `scanSegments`
-/// 同口径：段名后允许空白，参数里在 `=` 或段首后以 `{` 开头的值做花括号配平整段吞掉，
+/// 同口径：段名前后允许空白，参数里在 `=` 或段首后以 `{` 开头的值做花括号配平整段吞掉，
 /// JSON 内的 `,` `]` 不结束段/码）。
 ///
-/// 先确认段名非空 `[a-z0-9_]+`（与 [`parse_body`] 的放宽数字口径一致）且空白之后是 `,` 或
-/// `]`；校验不过或配平失败返回 `None`，由调用方（[`parse`]）决定回退策略。
+/// 先确认段名非空 `[a-zA-Z0-9_]+`（大小写都收，与 [`parse_body`] 的归一口径一致）且空白之后
+/// 是 `,` 或 `]`；校验不过或配平失败返回 `None`，由调用方（[`parse`]）决定回退策略。
 fn find_code_end(input: &str, body_start: usize) -> Option<usize> {
     let bytes = input.as_bytes();
     let mut p = body_start;
+    // 段名前的空白同样跳过（`[CQ: at,qq=1]`），集合仍是 ASCII 五元集（[`is_cq_space`]）
+    while p < bytes.len() && is_cq_space(bytes[p]) {
+        p += 1;
+    }
+    let name_start = p;
     while p < bytes.len()
-        && (bytes[p].is_ascii_lowercase() || bytes[p].is_ascii_digit() || bytes[p] == b'_')
+        && (bytes[p].is_ascii_alphabetic() || bytes[p].is_ascii_digit() || bytes[p] == b'_')
     {
         p += 1;
     }
-    if p == body_start {
+    if p == name_start {
         return None;
     }
     // 段名与 `,` / `]` 之间允许空白（统一空白契约，见模块头）
@@ -404,7 +416,7 @@ fn scan_regions(
 /// 解析单个完整 CQ 码（`[CQ:type,...]`）。
 ///
 /// # Errors
-/// 缺少 `[CQ:` / `]` 包裹，或类型不是小写字母/数字/下划线时返回 [`Error::Protocol`]。
+/// 缺少 `[CQ:` / `]` 包裹，或段名不是字母/数字/下划线（大小写都收）时返回 [`Error::Protocol`]。
 pub fn parse_one(code: &str) -> Result<Segment> {
     // 外侧空白按统一空白契约 trim（只含 5 个 ASCII 空白，见 [`is_cq_space`]/模块头）
     let trimmed = trim_ascii(code);
@@ -439,7 +451,7 @@ pub fn to_cq_string(segments: &[Segment]) -> String {
 
 /// 词法切分层的空白集合（模块头空白契约）：空格 / 制表 / 换行 / 换页 / 回车——即 Go 正则
 /// `\s` = {空格, `\t`, `\n`, `\f`, `\r`}。**不含**纵向制表 `\v`（0x0B）与全角空格（U+3000）
-/// 等任何 Unicode 空白。只用于段名后/参数间/外侧的跳空白；键与值的 trim 走 `str::trim`
+/// 等任何 Unicode 空白。只用于段名前后/参数间/外侧的跳空白；键与值的 trim 走 `str::trim`
 /// （Go `strings.TrimSpace`），见 [`push_param`]。
 #[inline]
 fn is_cq_space(c: u8) -> bool {
@@ -457,7 +469,7 @@ fn trim_ascii_end(text: &str) -> &str {
 }
 
 /// 去掉首尾词法切分层空白（集合见 [`is_cq_space`]）。
-/// 只用于**外侧/段名**这类切分位置（`parse_one` 整段外侧、`parse_body` 段名尾部）；
+/// 只用于**外侧/段名**这类切分位置（`parse_one` 整段外侧、`parse_body` 段名两侧）；
 /// 键与值的 trim 不在此列（走 `str::trim`，对偶 Go `strings.TrimSpace`）。
 fn trim_ascii(text: &str) -> &str {
     let bytes = text.as_bytes();
@@ -469,28 +481,32 @@ fn trim_ascii(text: &str) -> &str {
 }
 
 fn parse_body(body: &str) -> Option<Segment> {
-    // 段名后允许空白（`[CQ:image ,file=x]` / `[CQ:at ]`），口径与 at 段及 Go 正则 `\s*` 一致；
-    // 段名前空白与段名本身不放宽：仍只认小写字母/数字/下划线（与 Go `[a-z_]+` 同口径）
+    // 段名前后都允许空白（`[CQ:image ,file=x]` / `[CQ:at ]` / `[CQ: at,qq=1]`），口径与 at 段
+    // 及 Go 正则 `\s*` 一致；空白集合仍是 ASCII 五元集（[`is_cq_space`]）
     let (raw_kind, params_part) = match memchr_byte(body.as_bytes(), 0, b',') {
         Some(idx) => (&body[..idx], &body[idx + 1..]),
         None => (body, ""),
     };
-    let kind = trim_ascii_end(raw_kind);
-    // Go 正则是 `[a-z_]+`；这里放宽到数字，仍拒绝空类型与大写（大写会与 `[CQ:` 前缀判定打架）
+    let kind = trim_ascii(raw_kind);
+    // 段名大小写不敏感（与 Go 的最大兼容并集同口径）：ASCII 字母大小写与数字/下划线都收，
+    // 落段时统一归一为小写，下游按 kind 匹配的臂（outbound / deferred）无需感知大小写
     if kind.is_empty()
         || !kind
             .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            .all(|b| b.is_ascii_alphabetic() || b.is_ascii_digit() || b == b'_')
     {
         return None;
     }
+    let kind = kind.to_ascii_lowercase();
     let mut params = Vec::new();
-    if !scan_params(&mut params, params_part) {
+    // 冒号语法只对 stream 段生效（Go `splitKV` 的 `action=="stream"` 判定，`cqUnionParams`
+    // 的 allowColon 同源）；其余段的 `key:value` 片段按无分隔裸片段并入前一键值
+    if !scan_params(&mut params, params_part, kind == "stream") {
         // 值的 `{` 没闭合：整码按非法处理（Go `ok=false` → 文本原文），不产出被截断的参数
         return None;
     }
     Some(Segment {
-        kind: kind.to_owned(),
+        kind,
         params,
         // raw 由调用方挂载（parse / parse_one 有整段原文）；自产段保持 None，透传回退规范化
         raw: None,
@@ -499,14 +515,18 @@ fn parse_body(body: &str) -> Option<Segment> {
 
 /// 参数片段 → `(key, 未反转义的原值)`。
 ///
-/// 先按首个 `=` 切；没有 `=` 时按首个 `:` 切（`[CQ:stream,type:start,qq:123]`，
-/// `handlers/cqcode.go:41` 的 stream 正则就是这个写法）。两者都没有的裸片段丢弃。
-fn split_kv(chunk: &str) -> Option<(&str, &str)> {
+/// 先按首个 `=` 切；没有 `=` 时，**仅 stream 段**（`allow_colon`）再按首个 `:` 切一次
+/// （`[CQ:stream,type:start,qq:123]`，`handlers/cqparse/tokenize.go:197-207` 的 `splitKV`
+/// 就是 `action=="stream"` 才走冒号）。两者都没有返回 `None`，由 [`push_param`] 按裸片段并前键。
+fn split_kv(chunk: &str, allow_colon: bool) -> Option<(&str, &str)> {
     if let Some(idx) = memchr_byte(chunk.as_bytes(), 0, b'=') {
         return Some((&chunk[..idx], &chunk[idx + 1..]));
     }
+    if !allow_colon {
+        return None;
+    }
     let idx = memchr_byte(chunk.as_bytes(), 0, b':')?;
-    // 空 key 丢弃；无 `=` 的 URL 型裸值（`https://x`）会被切成 `https` + `//x`，
+    // 空 key 丢弃；stream 里无 `=` 的 URL 型裸值（`https://x`）会被切成 `https` + `//x`，
     // 这是"无分隔符"本身有歧义的代价——CQ 参数键不含 `:`，值必须显式带分隔符。
     if idx == 0 {
         return None;
@@ -521,20 +541,40 @@ fn split_kv(chunk: &str) -> Option<(&str, &str)> {
 /// 会截尾。`&#44;` 里没有裸 `,`（实体本身已是转义形态），无花括号时与 Go `splitCQParams`
 /// 逐字节一致。`parse` 路径进入这里时 `find_code_end` 已确认段尾，`]` 在本函数里只是值里的
 /// 普通字节。第二个返回值残留深度 > 0（配平失败）时本函数返回 `false`，调用方整码拒解析。
-fn scan_params(params: &mut Vec<(String, String)>, input: &str) -> bool {
-    scan_regions(input, 0, false, &mut |chunk| push_param(params, chunk)).1 == 0
+fn scan_params(params: &mut Vec<(String, String)>, input: &str, allow_colon: bool) -> bool {
+    scan_regions(input, 0, false, &mut |chunk| {
+        push_param(params, chunk, allow_colon);
+    })
+    .1
+        == 0
 }
 
-/// 单个参数片段落成参数；无 `=` 也无 `:` 的裸片段丢弃（legacy 口径）。
-fn push_param(params: &mut Vec<(String, String)>, chunk: &str) {
-    let Some((key, value)) = split_kv(chunk) else {
+/// 单个参数片段落成参数。
+///
+/// 无 `=`、（非 stream 时还）无 `:` 的裸片段**并入前一键值、以 `,` 拼接**（C3 并集口径，
+/// 对齐 Go `cqUnionParams`/`buildParams` 的 `params[lastKey] + "," + t`，`user_ids=1,2,3`
+/// 三路径等价）；无前一键、前一键为空键或片段本身为空时丢弃（Go 的 `lastKey != "" && t != ""`
+/// 守卫）。并入的片段与 `k=v` 的值同走 Unicode trim + 实体解码（`DecodeValue` 对偶）。
+fn push_param(params: &mut Vec<(String, String)>, chunk: &str, allow_colon: bool) {
+    let Some((key, value)) = split_kv(chunk, allow_colon) else {
+        let Some((last_key, last_value)) = params.last_mut() else {
+            return;
+        };
+        let tail = unescape(chunk.trim());
+        if last_key.is_empty() || tail.is_empty() {
+            return;
+        }
+        last_value.push(',');
+        last_value.push_str(&tail);
         return;
     };
     // 键全 trim；值只 trim 首尾、内部空白保留（`[CQ:file,file=my file.txt]` 值仍为
     // `my file.txt`）。键/值 trim 用 Unicode 语义（`str::trim`），与 Go 按键取值路径的
     // `strings.TrimSpace` 对偶同源（见模块头空白契约）：`\v`、全角空格（U+3000）、NBSP
-    // 都参与 trim。段名后/参数间的跳空白仍是 ASCII 五元集（[`is_cq_space`]），两层各司其职。
-    params.push((key.trim().to_owned(), unescape(value.trim())));
+    // 都参与 trim。段名前后/参数间的跳空白仍是 ASCII 五元集（[`is_cq_space`]），两层各司其职。
+    // 键大小写不敏感（并集口径，与 Go `buildParams` 的键小写一致）：trim 后统一小写存储
+    // （`File` ≡ `file`、码表驼峰键 `subType` 落为 `subtype`）；值不参与大小写处理。
+    params.push((key.trim().to_ascii_lowercase(), unescape(value.trim())));
 }
 
 /// 一个 CQ 码：`[CQ:type,key=value,...]`。
@@ -917,11 +957,12 @@ mod tests {
     }
 
     #[test]
-    fn unescaped_comma_in_value_is_split_like_go() {
-        // Go `splitCQParams`：`b.txt` 没有 `=`，被跳过；file 只到第一个裸逗号
+    fn unescaped_comma_in_value_is_merged_like_go_union() {
+        // Go `cqUnionParams`/`buildParams`：无 `=` 的裸尾段 `b.txt` 并入前一 key `file`，
+        // 以 `,` 拼接（C3 并集口径）；两侧同输入同结果，不再"一侧丢弃一侧透传"
         let segment = parse_one("[CQ:file,file=https://x.com/a,b.txt]").expect("解析失败");
-        assert_eq!(segment.get("file"), Some("https://x.com/a"));
-        assert_eq!(segment.params.len(), 1);
+        assert_eq!(segment.get("file"), Some("https://x.com/a,b.txt"));
+        assert_eq!(segment.params.len(), 1, "并入前一键，不产生新参数");
     }
 
     #[test]
@@ -940,10 +981,11 @@ mod tests {
         assert_eq!(once, "[CQ:at,qq=1,name=a&amp;b]");
         assert_eq!(to_cq_string(&parse(&once)), once, "生成应幂等");
         assert_eq!(parse(&once), parse("[CQ:at,qq=1,name=a&b]"), "语义往返一致");
-        // 裸逗号是参数分隔符（Go 语义），`b` 无 `=` 被丢弃，往返不再逐字节相等
+        // 裸逗号是参数分隔符（Go 语义），`b` 无 `=` 按并集口径并入 `name` 值（C3 口径），
+        // 规范化输出里以实体回写；raw 透传臂仍逐字节吐原文
         assert_eq!(
             to_cq_string(&parse("[CQ:at,qq=1,name=a,b]")),
-            "[CQ:at,qq=1,name=a]"
+            "[CQ:at,qq=1,name=a&#44;b]"
         );
     }
 
@@ -958,8 +1000,10 @@ mod tests {
         assert_eq!(parse("[cq:at,qq=1]"), vec![Segment::text("[cq:at,qq=1]")]);
     }
 
+    /// 冒号兜底只对 `stream` 生效（Go `splitKV` 的 `action=="stream"` 判定），裸尾段并入前键
+    /// （Go `cqUnionParams`/`buildParams` 的 C3 并集口径）——与 Go 逐形态对齐。
     #[test]
-    fn colon_params_parse_for_stream_and_generic_segments() {
+    fn colon_params_parse_for_stream_only_and_bare_segments_merge() {
         // Go `streamPattern` 就是 `type:xxx,qq:123`（handlers/cqcode.go:41）
         let segments = parse("[CQ:stream,type:start,qq:123]");
         assert_eq!(
@@ -982,16 +1026,27 @@ mod tests {
             ]
         );
 
-        // 非 stream 的无 `=` 片段同样按首个 `:` 切
+        // 非 stream 段不再认 `:`：`action:run` 是无分隔裸片段且无前一键，丢弃（Go 同）
+        assert_eq!(parse("[CQ:custom,action:run]"), vec![Segment::new("custom")]);
+        // 派发边界用例：music 的 `type:qq` 在 Go 冒号兜底之外，不识别为 `type` 键；Rust 同
         assert_eq!(
-            parse("[CQ:custom,action:run]"),
-            vec![Segment::new("custom").param("action", "run")]
+            parse("[CQ:music,type:qq,id=123]"),
+            vec![Segment::new("music").param("id", "123")]
         );
 
-        // 裸片段（既无 `=` 也无 `:`）按 legacy 口径丢弃
+        // 裸片段并入前一键值、以 `,` 拼接（C3 并集口径，与 Go 同输入同结果）
         assert_eq!(
             parse("[CQ:file,file=a.txt,b.txt]"),
-            vec![Segment::new("file").param("file", "a.txt")]
+            vec![Segment::new("file").param("file", "a.txt,b.txt")]
+        );
+        assert_eq!(
+            parse("[CQ:reply,id=1,2]"),
+            vec![Segment::new("reply").param("id", "1,2")]
+        );
+        // stream 的裸尾段同样并入前键（Go `buildParams` 对 action 无关，统一并入）
+        assert_eq!(
+            parse("[CQ:stream,qq:123,456]"),
+            vec![Segment::new("stream").param("qq", "123,456")]
         );
 
         assert_eq!(
@@ -1058,14 +1113,14 @@ mod tests {
         // 裸段名带尾部空白：识别为无参段（旧口径会整段当文本）
         assert_eq!(parse("[CQ:at ]"), vec![Segment::new("at")]);
         assert_eq!(parse("[CQ:active , ]"), vec![Segment::new("active")]);
-        // 大小写与段名前空白保持现状不放宽（与 Go `[a-z_]+` 一致）
+        // 统一契约（最大兼容并集）：段名与参数键大小写不敏感、段名前空白同样容忍
         assert_eq!(
             parse("[CQ:Image,file=x]"),
-            vec![Segment::text("[CQ:Image,file=x]")]
+            vec![Segment::new("image").param("file", "x")]
         );
         assert_eq!(
             parse("[CQ: image,file=x]"),
-            vec![Segment::text("[CQ: image,file=x]")]
+            vec![Segment::new("image").param("file", "x")]
         );
         // 畸形段保持现状：没有 `]` 一律按文本
         assert_eq!(
@@ -1082,6 +1137,82 @@ mod tests {
             to_cq_string(&parse("[CQ:image , file = my pic.png]")),
             "[CQ:image,file=my pic.png]"
         );
+    }
+
+    /// 统一契约（与 Go 同口径的最大兼容并集）形态表：段名与参数键大小写不敏感（都归一小写
+    /// 存储）、参数任意键序、段名前后空白容忍；`[CQ:` 前缀、值/转义口径与 raw 逐字节透传不动。
+    #[test]
+    fn case_insensitive_names_and_keys_accept_max_union_shapes() {
+        // 段名大写 + 键大写：段名与键都归一为小写落段（`File` ≡ `file`）
+        let segments = parse("[CQ:Image,File=x]");
+        assert_eq!(segments, vec![Segment::new("image").param("file", "x")]);
+        assert_eq!(
+            segments[0].get("file"),
+            Some("x"),
+            "键 `File` 应等价 `file`"
+        );
+        // 任意键序：按键取值不依赖 `file` 出现的位置
+        let segments = parse("[CQ:image,name=x,file=y]");
+        assert_eq!(
+            segments,
+            vec![Segment::new("image").param("name", "x").param("file", "y")]
+        );
+        assert_eq!(segments[0].get("file"), Some("y"));
+        // 段名前空白（at 路径的既有口径不回退）
+        assert_eq!(
+            parse("[CQ: at,qq=10001]"),
+            vec![Segment::new("at").param("qq", "10001")]
+        );
+        // 大小写 + 空白 + 键序三者组合
+        let combo = parse("[CQ: IMAGE , FILE = x , NAME = y ]");
+        assert_eq!(
+            combo,
+            vec![Segment::new("image").param("file", "x").param("name", "y")]
+        );
+        assert_eq!(combo[0].get("file"), Some("x"));
+        assert_eq!(combo[0].get("name"), Some("y"));
+        // 未知段名同样归一为小写（仍按未知段保留），透传臂逐字节输出原文
+        let unknown = parse("[CQ:Cardboard,XX=1]");
+        assert_eq!(unknown, vec![Segment::new("cardboard").param("xx", "1")]);
+        assert_eq!(unknown[0].raw_or_cq(), "[CQ:Cardboard,XX=1]");
+        // parse_one 同口径；规范化序列化输出小写键形态
+        let face = parse_one("[CQ:Face,ID=1]").expect("应识别");
+        assert_eq!(face, Segment::new("face").param("id", "1"));
+        assert_eq!(face.get("id"), Some("1"));
+        assert_eq!(to_cq_string(&parse("[CQ:At,QQ=1]")), "[CQ:at,qq=1]");
+        // 边界：值不参与大小写处理（`A B` 与内部空白原样保留）
+        let spaced = parse("[CQ:image,File=A B]");
+        assert_eq!(spaced, vec![Segment::new("image").param("file", "A B")]);
+        assert_eq!(spaced[0].get("file"), Some("A B"));
+        // 边界：`[CQ:` 前缀本身仍大小写敏感（Go 正则字面量），整段按文本
+        assert_eq!(
+            parse("[cq:image,file=x]"),
+            vec![Segment::text("[cq:image,file=x]")]
+        );
+        // 边界：段名前的 `\v` 不属于 ASCII 五元集，照旧按文本
+        assert_eq!(
+            parse("[CQ:\u{0B}image,file=x]"),
+            vec![Segment::text("[CQ:\u{0B}image,file=x]")]
+        );
+    }
+
+    /// R3 契约形态逐字用例：大写段名 + 切分位空白 + 键大小写 + 任意键序（`asr` 在 `file`
+    /// 前）+ 值内部空白五者组合，逐字段断言归一小写键与未改写值（Go record 正则的
+    /// `file=…(?:,asr=…)?` 并集口径同形）。
+    #[test]
+    fn record_contract_shape_case_space_order_and_asr() {
+        let segment = parse_one("[CQ:RECORD , ASR = ab , file = my voice.amr]").expect("应识别");
+        assert_eq!(segment.kind, "record", "段名归一小写");
+        assert_eq!(
+            segment.params,
+            vec![
+                ("asr".to_owned(), "ab".to_owned()),
+                ("file".to_owned(), "my voice.amr".to_owned()),
+            ],
+            "键归一小写、值内部空白保留、键序按线上顺序"
+        );
+        assert_eq!(segment.get("file"), Some("my voice.amr"));
+        assert_eq!(segment.get("asr"), Some("ab"));
     }
 
     /// Major 回归用例：透传臂输出 parse 原文切片，逐字节不改写（`render_plain` 的 `_` 臂、
@@ -1158,11 +1289,19 @@ mod tests {
         // 文本切片的字节数、以及命中段的透传原文逐字节对齐 Go
         assert_eq!(segments[0].raw_or_cq(), "[CQ:x,data={ ");
         assert_eq!(segments[1].raw_or_cq(), "[CQ:at,qq=1]");
-        // 段名非法（大写）同样只走一步重扫：后方码段不受影响
+        // 段名大小写不敏感后，`Bad` 归一为未知段名 `bad`（仍识别为段），后方码段照常识别
         assert_eq!(
             parse("[CQ:Bad,x=1][CQ:at,qq=2]"),
             vec![
-                Segment::text("[CQ:Bad,x=1]"),
+                Segment::new("bad").param("x", "1"),
+                Segment::new("at").param("qq", "2")
+            ]
+        );
+        // 段名真非法（含非法字符）时同样只走一步重扫：后方码段不受影响
+        assert_eq!(
+            parse("[CQ:Bad!,x=1][CQ:at,qq=2]"),
+            vec![
+                Segment::text("[CQ:Bad!,x=1]"),
                 Segment::new("at").param("qq", "2")
             ]
         );
@@ -1171,9 +1310,10 @@ mod tests {
     /// Go 的 atValueStart 口径：`{` 只在段首或 `=` 之后（跳空白）才算 JSON 值起点。
     #[test]
     fn brace_in_value_without_eq_stays_split_like_go() {
-        // 裸值中间的 `{` 不参与配平，仍按裸逗号切分（`b.txt` 型无分隔片段照旧丢弃）
+        // 裸值中间的 `{` 不参与配平，仍按裸逗号切分；`c.png}` 属无分隔裸片段，
+        // 按并集口径并入 `file` 值（Go `buildParams` 同结果，不再丢弃）
         let segment = parse_one("[CQ:file,file=a{b,c.png}]").expect("应解析");
-        assert_eq!(segment.get("file"), Some("a{b"));
+        assert_eq!(segment.get("file"), Some("a{b,c.png}"));
     }
 
     /// 空白契约用例（两层）：切分位置用 Go 正则 `\s` 的 ASCII 五元集（`\v`、全角空格不算
@@ -1235,13 +1375,24 @@ mod tests {
             if spec.name == "text" {
                 continue; // 文本段没有 CQ 形态，单独覆盖
             }
-            let mut segment = Segment::new(spec.name);
+            let mut wire_segment = Segment::new(spec.name);
+            let mut expected = Segment::new(spec.name);
             for (index, param) in spec.params.iter().enumerate() {
-                segment = segment.param(*param, format!("v{index}"));
+                // wire 由码表原样生成（含驼峰键 `subType`）
+                wire_segment = wire_segment.param(*param, format!("v{index}"));
+                // 新契约翻转：解析侧参数键统一小写（Go `buildParams` 同口径），期望按小写键比较
+                expected = expected.param((*param).to_ascii_lowercase(), format!("v{index}"));
             }
-            let wire = to_cq_string(std::slice::from_ref(&segment));
+            let wire = to_cq_string(std::slice::from_ref(&wire_segment));
             let back = parse(&wire);
-            assert_eq!(back, vec![segment], "码表往返失败: {}", spec.name);
+            assert_eq!(back, vec![expected], "码表往返失败: {}", spec.name);
+            // raw 保真不受键归一影响：透传臂逐字节吐 parse 命中的原文（大写键形态不改写）
+            assert_eq!(
+                back[0].raw_or_cq(),
+                wire.as_str(),
+                "码表透传原文失配: {}",
+                spec.name
+            );
         }
     }
 

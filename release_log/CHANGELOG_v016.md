@@ -78,6 +78,24 @@ Go 与 Rust 两侧的 CQ 码解析统一容忍参数空白，识别宽松书写�
 - **空白集**：词法切分层统一 ASCII `{空格,\t,\n,\f,\r}`（同 Go 正则 `\s`；`\v`/全角空格不算段名空白）；键值 trim 双侧统一 Unicode `TrimSpace` 语义
 - **不变项**：CQ 转义口径（出站仅转 `,` `]` `&`、入站认 `&#91;`）、段名/键大小写现状（at 与 markdown 路径不敏感，其余区分）、stream 冒号语法、Go 媒体正则位置锚定等既有差异均保持
 - **测试**：`go build/vet`、`go test ./...` 全绿（28 包含测）；`cargo test --workspace` 33 suites 零失败、`cargo clippy -D warnings` 零告警；双侧镜像契约用例表钉死行为
+- **注**：本条「不变项」中的大小写/键序/stream 单语法口径已被下文 2026-11-04「全路径最大兼容统一」取代喵~
+
+### CQ 码解析全路径最大兼容统一（2026-11-04）
+
+CQ 码识别层在**全部解析路径**（Go legacy 正则群、Go `cqparse` 新解析器、`internal/` 领域新链、Rust 协议层）统一为最大兼容并集口径，此前仅部分路径支持的宽松写法现四路同行为：
+
+- **大小写**：段名与参数键不敏感（`[CQ:Image,File=x]` 按 `image`/`file` 消费）；`[cq:` 前缀本身仍区分大小写，小写 `[cq:` 继续整码透传喵~
+- **任意键序**：`file`/`data`/`id`/`qq`/`msg_idx` 等目标键不再限定首位（`[CQ:image,name=x,file=http://y]` 正常识别），且**尾部附加键不再污染值**——修复了整码化改造中断遗留的坏 URL 直发与 keyboard base64 解码失败静默丢按钮问题
+- **stream 双语法**：`[CQ:stream,type:start,qq:1]`（冒号）与 `[CQ:stream,type=start,qq=1]`（等号）及混写均可识别；冒号取值语法仅对 stream 段生效，其余段的 `key:value` 形态不误当参数（Rust 同步收紧）
+- **段名前空白**：`[CQ: at,qq=all]`、`[CQ: image,file=x]` 正常识别；markdown-at 的 `errMarkdownAtMalformed` 拒绝分支随之删除，不再对可渲染形态返回 1400
+- **段名字符集**：四路统一 `[A-Za-z0-9_]`（`[CQ:3d,x=1]`、`[CQ:h2o,x=1]` 各路径同等按未知段处理）；含 `!`/`(`/全角空格等非法字符的段名整码按文本透传
+- **同口径覆盖家族**：music / reply / input_notify / active / wakeup / ark / card / 群管理动作（`[CQ:Set_Group , ACTION = ...]`）；card 的 JSON 四字段键名统一小写落地，`[CQ:card,Title=…]` 不再因键名不符回 1400
+- **前缀边界**：`[CQ:CARDIGAN,x=1]` 一类以 `card`/`ark` 起头的未知码不再被前缀匹配吞掉（整词段名判定），字面文本不再丢失
+- **Rust 链**：CQ 字符串解析期参数键归一小写（`subType`→`subtype`，再序列化输出小写键；数组/JSON 入站形态键名保持原样）；at 识别层支持 `[CQ:` 后空白（消除 `[CQ: at,qq=all]` @全员静默丢）；裸尾段并入前一键值（`[CQ:reply,id=1,2]` 与 Go `cqUnionParams` 同口径）；透传臂 raw 逐字节保真机制不变
+- **Go 新链补齐**：`internal/domain/message` 段尾查找改花括号配平状态机（`[CQ:markdown,data={"a":1]` 等畸形整码按文本，不再截断产段），case 表补 `stream`；`acnode` 超长 base64 图片豁免谓词适配宽松写法
+- **语义明确**：`[CQ:reply,id=…,msg_idx=…]` 两类键同现时整码按 `reply` 消费、`msg_idx` 随段移除（不保证双写），已有用例钉桩；同一条码建议避免同现
+- **不变项**：CQ 转义口径（出站仅转 `,` `]` `&`、入站认 `&#91;`）、golden/回归样本、值内部空格保留、未闭合与配平失败按文本透传、legacy 键值不做实体解码（`cq_parse_mode=new` 才反转义，属模式设计本意）
+- **测试**：Go 25 包含测全绿（build/vet/small 全 0）；`cargo test --workspace` 33 suites / 719 passed / 0 failed、clippy 零告警；镜像契约矩阵 `handlers/cq_union_contract_test.go`、三模式矩阵、internal 状态机用例、Rust 形态表
 
 ---
 

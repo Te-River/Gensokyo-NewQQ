@@ -46,9 +46,13 @@ pub const SECTION: &str = "at_everyone";
 /// 群聊 @全员 标签（官方文档原文）。
 pub const TAG: &str = "<qqbot-at-everyone />";
 
-/// CQ `at` 段的前缀（其后可隔空白，再是 `,` 或 `]`）；比较时大小写不敏感
-/// （Go 的 `atEveryoneCQPattern` 带 `(?i)`）。
-const AT_PREFIX: &str = "[CQ:at";
+/// CQ `at` 段的起始标记 `[CQ:`；比较时大小写不敏感（Go 的 `atEveryoneCQPattern` 带 `(?i)`）。
+/// 它与段名之间可隔词法切分层空白（`[CQ: at,qq=1]` 同样认，与 `cqcode::parse` 及 Go
+/// `cqAtSegRe` 的 `\s*` 口径一致）。
+const CQ_OPEN: &str = "[CQ:";
+
+/// CQ `at` 段的段名（大小写不敏感）；其后是 `,`（带参数）或 `]`（裸 at 段），中间允许空白。
+const AT_NAME: &str = "at";
 
 /// 官方标签的开头（`/>` 前允许任意空白，Go 的正则是 `<qqbot-at-everyone\s*/>`）。
 const TAG_OPEN: &str = "<qqbot-at-everyone";
@@ -67,9 +71,9 @@ const DAY_OFFSET_SECONDS: u64 = 8 * 3_600;
 
 /// 把 `[CQ:at,qq=all]` / `[CQ:at,qq=everyone]` 换成官方标签；其余字节原样保留。
 ///
-/// 只做字面子串替换，不重新转义，因此对 markdown 内容也是安全的。大小写与空白口径与 Go 的
-/// `(?i)\[CQ:at\s*,\s*qq\s*=\s*(?:all|everyone)\s*(?:,[^\]]*)?\]` 一致
-/// （`[cq:at,QQ=ALL]`、`[CQ:at , qq = all]` 同样归位）。
+/// 只做字面子串替换，不重新转义，因此对 markdown 内容也是安全的。大小写与空白口径与 Go
+/// 渲染层同源的 `cqAtSegRe`（`(?i)\[CQ:\s*at\s*((?:,[^\]]*)?)\]`）一致
+/// （`[cq:at,QQ=ALL]`、`[CQ:at , qq = all]`、`[CQ: at,qq=all]` 同样归位）。
 #[must_use]
 pub fn normalize(text: &str) -> String {
     let Some(first) = find_at_code(text, 0) else {
@@ -114,11 +118,29 @@ fn trim_cq_start(text: &str) -> &str {
     text.trim_start_matches(is_cq_space)
 }
 
+/// `text[index..]`（`index` 处必须是 `[`）是否为 `[CQ:<空白>at` 形态；是则返回 `at` 之后的切片。
+///
+/// `[CQ:` 与 `at` 之间、以及 `at` 之后到 `,`/`]` 之前的空白都走统一切分口径
+/// （[`trim_cq_start`]）；`at` 之后的守卫（`,`/`]`/结束）由调用方按各自形态判断。
+fn at_after_cq_open(text: &str, index: usize) -> Option<&str> {
+    let head = text.get(index..index + CQ_OPEN.len())?;
+    if !head.eq_ignore_ascii_case(CQ_OPEN) {
+        return None;
+    }
+    // `[CQ:` 之后先跳空白再比段名：`[CQ: at,qq=1]` 与 `[CQ:at,qq=1]` 同形态
+    let name = trim_cq_start(text.get(index + CQ_OPEN.len()..)?);
+    if !name.get(..AT_NAME.len())?.eq_ignore_ascii_case(AT_NAME) {
+        return None;
+    }
+    Some(&name[AT_NAME.len()..])
+}
+
 /// 查找下一个 CQ `at` 段的起始字节下标（大小写不敏感）。
 ///
-/// `[CQ:at` 之后是 `,`（带参数）或 `]`（裸 at 段），**允许中间隔任意空白**
-/// （`[CQ:at ,qq=1]`、`[CQ:at ]` 同样算 at 段，否则会漏判：markdown 里原样发出 CQ 码、
-/// 也逃过缺 `qq` 的 `1400`）；`[CQ:avatar]`、`[CQ:atx]` 这类形似的码仍不能误判
+/// `[CQ:` 与 `at` 之间可隔空白（`[CQ: at,qq=1]` 与紧凑写法同口径，`cqcode::parse` 与
+/// Go `cqAtSegRe` 都认，漏判会让 @全员 静默丢、缺 `qq` 逃过 `1400`）；`at` 之后是 `,`
+/// （带参数）或 `]`（裸 at 段），**允许中间隔任意空白**（`[CQ:at ,qq=1]`、`[CQ:at ]`
+/// 同样算 at 段）；`[CQ:avatar]`、`[CQ:atx]`、`[CQ: atx]` 这类形似的码仍不能误判
 /// （误判会把普通文本当 at 段拒成 `1400`）。
 /// **缺 `qq` 的 at 段同样算命中**——调用方要看见它才能按各自口径处理（markdown 报错、
 /// 文本透传）。
@@ -126,15 +148,13 @@ fn trim_cq_start(text: &str) -> &str {
 /// 供文本 / markdown 渲染复用：两处都只替换 at 段，其余字节必须原样保留。
 #[must_use]
 pub fn find_at_code(text: &str, from: usize) -> Option<usize> {
-    let bytes = text.as_bytes();
     let mut at = from;
     while let Some(found) = text[at..].find('[') {
         let index = at + found;
-        if bytes
-            .get(index..index + AT_PREFIX.len())
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(AT_PREFIX.as_bytes()))
-            // 前缀之后允许空白（统一空白契约，见 [`is_cq_space`]）：`[CQ:at ,qq=1]` / `[CQ:at ]` 也是 at 段
-            && trim_cq_start(&text[index + AT_PREFIX.len()..]).starts_with([',', ']'])
+        // 前缀之后允许空白（统一空白契约，见 [`is_cq_space`]）：`[CQ:at ,qq=1]` / `[CQ:at ]` /
+        // `[CQ: at,qq=1]`（`[CQ:` 与 `at` 之间）也是 at 段
+        if at_after_cq_open(text, index)
+            .is_some_and(|rest| trim_cq_start(rest).starts_with([',', ']']))
         {
             return Some(index);
         }
@@ -145,22 +165,17 @@ pub fn find_at_code(text: &str, from: usize) -> Option<usize> {
 
 /// 取 `[CQ:at,qq=…]` 里的 `qq` 值（键名大小写不敏感，值已 trim）；不是完整的 at 码返回 `None`。
 ///
-/// `at` 之后与键名、取值两侧都允许空白（`[CQ:at , qq = ALL]`），与 Go
-/// `\[CQ:at\s*,\s*qq\s*=` 同口径。
+/// `[CQ:` 与 `at` 之间、`at` 之后与键名、取值两侧都允许空白（`[CQ: at , qq = ALL]`），与 Go
+/// `\[CQ:at\s*,\s*qq\s*=` 及 `cqAtSegRe` 的段名前 `\s*` 同口径。
 /// 裸 at 段（`[CQ:at]` / `[CQ:at ]`）与缺 `qq` 的形态（`[CQ:at,foo]`）都返回 `None`，
 /// `[CQ:at,qq=]` 返回 `Some("")`：调用方据此区分「没有 qq」与「qq 为空值」。
 #[must_use]
 pub fn at_mention_id(code: &str) -> Option<&str> {
     let stripped = code.strip_suffix(']')?;
-    if !stripped
-        .get(..AT_PREFIX.len())
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(AT_PREFIX))
-    {
-        return None;
-    }
-    // `[CQ:at` 之后先跳过统一契约空白，再只能是 `,`（带参数）或直接结束（裸 at 段）：
-    // `[CQ:atx,…]` 不是 at 段（与 find_at_code 同口径，Go 的 `\[CQ:at\s*,` 也认空白）
-    let rest = trim_cq_start(&stripped[AT_PREFIX.len()..]);
+    // `[CQ:` 与 `at` 之间的空白、`at` 之后的空白都先按统一契约跳过（Go `\[CQ:\s*(?i:at)\s*,`
+    // 同口径）；随后只能是 `,`（带参数）或直接结束（裸 at 段）：
+    // `[CQ:atx,…]` / `[CQ: at x]` 不是 at 段（与 find_at_code 同口径）
+    let rest = trim_cq_start(at_after_cq_open(stripped, 0)?);
     let params = match rest.strip_prefix(',') {
         Some(params) => params,
         None if rest.is_empty() => "",
@@ -469,6 +484,11 @@ mod tests {
         // 空白形态的普通 @ 与裸 at 段不归位
         assert_eq!(normalize("[CQ:at ,qq=123]嗯"), "[CQ:at ,qq=123]嗯");
         assert_eq!(normalize("[CQ:at ]嗯"), "[CQ:at ]嗯");
+        // `[CQ:` 之后、`at` 之前的空白同样归位（与 cqcode::parse / Go cqAtSegRe 同口径）
+        assert_eq!(normalize("[CQ: at,qq=all]开会"), format!("{TAG}开会"));
+        assert_eq!(normalize("[CQ: at , qq = ALL]开会"), format!("{TAG}开会"));
+        assert_eq!(normalize("[cq: at,qq=everyone]开会"), format!("{TAG}开会"));
+        assert_eq!(normalize("[CQ: at ,qq=123]嗯"), "[CQ: at ,qq=123]嗯");
     }
 
     #[test]
@@ -535,6 +555,13 @@ mod tests {
         // 支持空白不能扩大误判面
         assert_eq!(at_mention_id("[CQ:at x]"), None);
         assert_eq!(at_mention_id("[CQ:avatar]"), None);
+        // `[CQ:` 与 `at` 之间的空白同样可跳（Go `cqAtSegRe` 段名前 `\s*`）
+        assert_eq!(at_mention_id("[CQ: at,qq=1]"), Some("1"));
+        assert_eq!(at_mention_id("[CQ: at , qq = ALL]"), Some("ALL"));
+        assert_eq!(at_mention_id("[CQ: at,foo]"), None, "段名前空白的裸参数不是 qq");
+        assert_eq!(at_mention_id("[CQ: at ]"), None, "段名前空白的裸 at 段：缺 qq");
+        assert_eq!(at_mention_id("[CQ: at x]"), None);
+        assert_eq!(at_mention_id("[CQ: atx,qq=1]"), None);
     }
 
     #[test]
@@ -566,6 +593,40 @@ mod tests {
         assert_eq!(find_at_code("[CQ:at x]", 0), None);
         assert_eq!(find_at_code("[CQ:avatar]", 0), None);
         assert_eq!(find_at_code("[CQ:atx]", 0), None);
+    }
+
+    #[test]
+    fn find_at_code_allows_whitespace_after_cq_prefix() {
+        // `[CQ:` 之后、`at` 之前可隔空白（`[CQ: at,qq=1]`）：`cqcode::parse` 与 Go `cqAtSegRe`
+        // 都认这形态。漏判的代价在渲染层：@全员 静默丢、未绑定 qq 既不 1400 也不渲染（G2 回归）
+        assert_eq!(find_at_code("[CQ: at,qq=1]", 0), Some(0));
+        assert_eq!(find_at_code("[CQ: at ,qq=all]", 0), Some(0));
+        assert_eq!(find_at_code("[CQ: at ]", 0), Some(0), "段名前空白的裸 at 段");
+        assert_eq!(find_at_code("x[CQ: at,qq=1]", 0), Some(1));
+        // 段名前空白与大小写可叠加（`[cq:` 现状保持大小写不敏感）
+        assert_eq!(find_at_code("[cq: at,qq=all]", 0), Some(0));
+        assert_eq!(find_at_code("[CQ: AT,qq=1]", 0), Some(0));
+        // 段名前空白不得扩大误判面：形似的码照旧不是 at 段
+        assert_eq!(find_at_code("[CQ: atx]", 0), None);
+        assert_eq!(find_at_code("[CQ: avatar]", 0), None);
+        assert_eq!(find_at_code("[CQ: atom,qq=1]", 0), None);
+        assert_eq!(find_at_code("[CQ: at x]", 0), None);
+        assert_eq!(find_at_code("[CQ: ]", 0), None, "跳完空白没有 at 段名");
+    }
+
+    #[test]
+    fn whitespace_after_cq_prefix_uses_ascii_split_set() {
+        // `[CQ:` 与 `at` 之间的空白同样走统一词法切分契约（ASCII 五元集）：`\f` 等跳过，
+        // `\v` 与全角空格（U+3000）不算空白不跳过（键/值 trim 层的 Unicode 语义不受影响）
+        assert_eq!(find_at_code("[CQ:\u{0C}at ,qq=1]", 0), Some(0));
+        assert_eq!(find_at_code("[CQ:\t\n\r at,qq=1]", 0), Some(0));
+        assert_eq!(find_at_code("[CQ:\u{0B}at,qq=1]", 0), None);
+        assert_eq!(find_at_code("[CQ:\u{3000}at,qq=1]", 0), None);
+        assert_eq!(
+            at_mention_id("[CQ:\u{0C}at,\u{0C}qq = 1]"),
+            Some("1"),
+            "段名前空白与 `at`/`,` 两侧空白同码并存"
+        );
     }
 
     /// 空白契约用例（两层）：切分位置用 Go 正则 `\s` 的 ASCII 五元集，`\f` 计入

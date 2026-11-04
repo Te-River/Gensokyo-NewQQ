@@ -139,14 +139,16 @@ Rust 侧 44 项硬占位（`retcode=1500`）的拆分，**28 项属未到里程�
 2. **缺 `qq` 的 at 段已统一（2026-11-01）**：契约定为「Markdown 内 `[CQ:at]` / `[CQ:at,foo]` / `[CQ:at,qq=]` → `1400`；普通文本原样透传」，Go 在 `parseMarkdownFromMessageE` 统一校验（`handlers/message_parser.go:3145-3149`），Rust 在 `render_markdown` 报错、`render_text` 透传（`crates/gensokyo-runtime/src/deferred.rs:393-428`）。
    - `qq` 非首参写法（`[CQ:at,name=x,qq=123]`）**已于 2026-11-03 统一**：Go 改按键取值（`cqAtSegRe` + `cqAtSegmentQQ`），与 Rust 同口径正常解析；不再判 malformed。
 3. **CQ 参数空白容错已全量适配（2026-11-03）**：全部 CQ 段类型双侧统一——段名后/参数间/`=` 两侧容忍空白；词法切分空白集 = ASCII `{ ,\t,\n,\f,\r}`（同 Go 正则 `\s`），键/值首尾 trim = Unicode `TrimSpace` 语义（Go `cqCodeParam`/`buildParams` 对偶）；值内部空白保留。Rust `Segment` 挂 raw 原文，透传臂逐字节保真（`deferred.rs`/`outbound.rs`）；Rust parse 采用与 Go `scanSegments` 同款花括号配平，含逗号 JSON 不截断、配平失败不吞内嵌合法码（`cursor=start+1`）。详见 `release_log/CHANGELOG_v016.md`「CQ 码空白容错全量适配」。
-   - 保留的既有结构差异（裁定不扩面）：Go legacy 媒体正则位置锚定（`file`/`data` 须首键）vs Rust 全按键取值；段名前空白形态（`[CQ: image,…]`）Go Markdown 判 malformed 1400 vs Rust 按文本透传。
-3. **Rust keyboard / music / stream / input_notify 仍回 1400**（`deferred.rs:20`、`:587-590`）：本轮只放开 markdown 与 card，其余段类型保持显式拒绝而非静默丢弃。
-4. **成员列表分页语义差异**：Go 循环拉取最多 100 页后合并返回（`handlers/get_group_member_list.go`），Rust 单页 + `next_cursor` 接力（`crates/gensokyo-actions/src/group.rs:36-39`）。同一 OneBot 调用的返回条数在两侧不同，客户端需按 `next_cursor` 自行翻页。
-5. **shadow diff 长期非空**：新链与 legacy 的 `foundItems` 键集合历史差异导致 `[outbound-shadow]` 日志几乎每次都有差异（`handlers/outbound_bridge.go:323-340`），只能当噪声参考，不能作为回归判据。
-6. **未做真实上游联调**：全部结论基于官方文档 + 本地单测（Fake 客户端），`40035010`（跨机器人引用）、`11253`（未获接口权限）等权限类错误未在真实机器人上验证。
-7. **@全员 管理员身份不本地判定**：官方要求机器人为群管理员，本地不做前置校验（`handlers/at_everyone.go:21`），上游报错原样透传。
-8. **时区注释已校正**：`crates/gensokyo-runtime/src/at_everyone.rs:30-32` 原先称 Go 用本地时区，现已改为「Go 固定 `time.FixedZone("CST", 8*3600)`」，与实现一致。
-9. **@全员 计数存储不同源**：落在各自 idmap 的 config 表 `at_everyone`（Go bbolt / Rust redb），仅共用同一存储文件时互认（`crates/gensokyo-runtime/src/at_everyone.rs:20-22`）。
+4. **CQ 码解析全路径最大兼容统一（2026-11-04）**：上条「保留的既有结构差异」两项**已全部消除**——① Go legacy 媒体/markdown/keyboard 由位置锚定正则改为整码匹配 + `cqUnionParams` 按键取值（任意键序、尾键不污染值）；② 段名前空白四路统一识别，`errMarkdownAtMalformed` 下线。同轮统一：段名/键大小写不敏感（`[cq:` 前缀仍区分）、stream 冒号/等号双语法（冒号限 stream）、段名字符集 `[A-Za-z0-9_]`、Rust 裸尾段并入前一键、internal 新链补花括号配平状态机与 stream case、`CARDIGAN` 类前缀不吞段、`acnode` base64 豁免谓词适配宽松形态。详见 CHANGELOG「CQ 码解析全路径最大兼容统一」。
+   - 记录的分层语义（非缺陷）：legacy 键值不做实体解码、`cq_parse_mode=new` 才反转义（模式设计本意）；`[CQ:reply,id=…,msg_idx=…]` 同现时整码按 reply 消费、msg_idx 随段移除（用例钉桩）。
+   - 记录项：`adapter/identity`、`adapter/state`、`config`、`echo` 四包既有测试非幂等（`-count=2` 隔离复跑必红，`-count=1` 绿），属 TEST_DEFECT 待单独立项清理，与 CQ 改动无关。
+5. **Rust keyboard / music / stream / input_notify 仍回 1400**（`deferred.rs:20`、`:587-590`）：本轮只放开 markdown 与 card，其余段类型保持显式拒绝而非静默丢弃。
+6. **成员列表分页语义差异**：Go 循环拉取最多 100 页后合并返回（`handlers/get_group_member_list.go`），Rust 单页 + `next_cursor` 接力（`crates/gensokyo-actions/src/group.rs:36-39`）。同一 OneBot 调用的返回条数在两侧不同，客户端需按 `next_cursor` 自行翻页。
+7. **shadow diff 长期非空**：新链与 legacy 的 `foundItems` 键集合历史差异导致 `[outbound-shadow]` 日志几乎每次都有差异（`handlers/outbound_bridge.go:323-340`），只能当噪声参考，不能作为回归判据。
+8. **未做真实上游联调**：全部结论基于官方文档 + 本地单测（Fake 客户端），`40035010`（跨机器人引用）、`11253`（未获接口权限）等权限类错误未在真实机器人上验证。
+9. **@全员 管理员身份不本地判定**：官方要求机器人为群管理员，本地不做前置校验（`handlers/at_everyone.go:21`），上游报错原样透传。
+10. **时区注释已校正**：`crates/gensokyo-runtime/src/at_everyone.rs:30-32` 原先称 Go 用本地时区，现已改为「Go 固定 `time.FixedZone("CST", 8*3600)`」，与实现一致。
+11. **@全员 计数存储不同源**：落在各自 idmap 的 config 表 `at_everyone`（Go bbolt / Rust redb），仅共用同一存储文件时互认（`crates/gensokyo-runtime/src/at_everyone.rs:20-22`）。
 
 ## 证据索引
 

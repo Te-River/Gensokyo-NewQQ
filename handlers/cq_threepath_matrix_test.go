@@ -292,28 +292,23 @@ func TestCQParseThreeModeMatrix_MarkdownKeyboardAdjacent(t *testing.T) {
 		t.Errorf("md/kb 非动作码不应产 pending: %v", newPend)
 	}
 
-	// --- legacy：C1 仍在（贪心吞噬：正文与 keyboard 码被并入 markdown data 载荷） ---
-	if legacyText == newText {
-		t.Errorf("legacy 模式 C1 应仍在: legacy 与 new 文本意外一致(%q)", legacyText)
+	// --- legacy：修 F1 后 C1 已消除（整码匹配 + 花括号配平感知），
+	// 相邻正文与 keyboard 码不再被吞入 markdown 载荷，产物与 new 链等价 ---
+	if legacyText != newText {
+		t.Errorf("legacy C1 修复后正文应与 new 链一致: got %q, want %q", legacyText, newText)
 	}
 	mdGot, ok := legacyItems["markdown"]
 	if !ok || len(mdGot) != 1 {
-		t.Fatalf("legacy markdown 产物现状: got %v", legacyItems["markdown"])
+		t.Fatalf("legacy markdown 产物: got %v", legacyItems["markdown"])
 	}
-	mdRaw, decErr := base64.StdEncoding.DecodeString(mdGot[0])
-	if decErr != nil || !strings.Contains(string(mdRaw), "普通文本") || !strings.Contains(string(mdRaw), "[CQ:keyboard") {
-		t.Errorf("legacy C1 应将正文与 keyboard 吞入 markdown 载荷: decoded=%q err=%v", string(mdRaw), decErr)
+	if mdGot[0] != b64MD {
+		t.Errorf("legacy markdown 载荷应为干净 JSON（不吞正文/keyboard）: got %q, want %q", mdGot[0], b64MD)
 	}
-	if _, ok := legacyItems["keyboard"]; ok {
-		t.Errorf("legacy keyboard 产物应因 C1 缺失: got %v", legacyItems["keyboard"])
-	}
+	regFound(t, legacyItems, "keyboard", `{"id":"k1"}`)
 
-	// --- shadow：diff 日志实证，且产物仍取 legacy（动作副作用只由 legacy 执行） ---
-	if !strings.Contains(shadowLog, "[cqparse-shadow]") {
-		t.Errorf("shadow 模式应产出 [cqparse-shadow] diff 日志: got %q", shadowLog)
-	}
-	if !strings.Contains(shadowLog, "文本差异") && !strings.Contains(shadowLog, "foundItems 差异") && !strings.Contains(shadowLog, "动作码差异") {
-		t.Errorf("shadow diff 日志应指明差异维度: got %q", shadowLog)
+	// --- shadow：两链产物等价后不再产出 [cqparse-shadow] diff 日志 ---
+	if strings.Contains(shadowLog, "[cqparse-shadow]") {
+		t.Errorf("C1 修复后 legacy/new 等价，shadow 不应再报 diff: got %q", shadowLog)
 	}
 	// shadow 模式的对外产物 = legacy 产物（runCQParseShadow 只读不改写）：
 	// 验证 legacy 文本与 foundItems 在 shadow 调用前后逐字节不变

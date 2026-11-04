@@ -1,9 +1,9 @@
 package message
 
-// 统一空白契约（§1~§3/§7）在新链字符串解析器上的镜像用例：
-// 段名后、`,` 或 `]` 之前允许任意空白；键与 `=` 两侧允许空白；键 trim、
-// 值仅 trim 首尾、内部空白保留；键值参数按 key 取值（顺序无关）。
-// 大小写口径维持现状：段名与键名区分大小写，本文件末组用例把现状钉死。
+// 统一最大兼容契约（§1~§4/§7）在新链字符串解析器上的镜像用例：
+// 段名前（`[CQ:` 后）与段名之后、`,` 或 `]` 之前允许任意空白；键与 `=` 两侧允许空白；
+// 键 trim、值仅 trim 首尾、内部空白保留；键值参数按 key 取值（顺序无关）；
+// 段名与键名大小写不敏感（`[CQ:` 前缀字面仍区分大小写）。
 
 import (
 	"reflect"
@@ -41,17 +41,24 @@ func TestParseOneBotStringWhitespaceTolerance(t *testing.T) {
 			[]Segment{{Type: "image", Data: map[string]string{"file": "https://example.com/a.png"}}}},
 		{"逗号后 \\f（键层现状）", "[CQ:image,\ffile=https://example.com/a.png]",
 			[]Segment{{Type: "image", Data: map[string]string{"file": "https://example.com/a.png"}}}},
-		// G-A 钉现状：\v 与全角空格不在五元集内（Go 正则 `\s` 亦不含），段名不识别回 UnknownPart。
-		{"段名后 \\v 不识别（现状）", "[CQ:image\v,file=x.png]",
-			[]Segment{{Type: "image\v", Data: map[string]string{"file": "x.png"}}}},
-		{"段名后全角空格不识别（现状）", "[CQ:image　,file=x.png]",
-			[]Segment{{Type: "image　", Data: map[string]string{"file": "x.png"}}}},
-		// 现状口径：段名/键名区分大小写（不顺手放宽）。
-		// 新链对未识别段名的现状是 UnknownPart（键值仍按键解析），legacy 字符串链才是保留字面文本。
-		{"段名大写不识别（现状）", "[CQ:Image , File = https://x/a.png]",
-			[]Segment{{Type: "Image", Data: map[string]string{"File": "https://x/a.png"}}}},
-		{"键名大写不识别（现状）", "[CQ:image , File = https://x/a.png]",
-			[]Segment{{Type: "image", Data: map[string]string{"file": ""}}}},
+		// F7 翻转：\v 与全角空格不在五元集内、也不在段名字符集 [A-Za-z0-9_] 内，
+		// 段名整词不成立 → 整码按文本透传（不再产 UnknownPart 非法段名）。
+		{"段名后 \\v 整码按文本透传", "[CQ:image\v,file=x.png]",
+			[]Segment{{Type: "text", Data: map[string]string{"text": "[CQ:image\v,file=x.png]"}}}},
+		{"段名后全角空格整码按文本透传", "[CQ:image　,file=x.png]",
+			[]Segment{{Type: "text", Data: map[string]string{"text": "[CQ:image　,file=x.png]"}}}},
+		// 统一契约 §1/§4：段名与键名大小写不敏感、段名前允许空白（`[CQ:` 前缀字面不变）。
+		// 新链对未知段名产出 UnknownPart（Type 保留原文），legacy 字符串链保留字面文本。
+		{"段名大写同样识别", "[CQ:Image , File = https://x/a.png]",
+			[]Segment{{Type: "image", Data: map[string]string{"file": "https://x/a.png"}}}},
+		{"键名大写同样识别", "[CQ:image , File = https://x/a.png]",
+			[]Segment{{Type: "image", Data: map[string]string{"file": "https://x/a.png"}}}},
+		{"段名前空白同样识别", "[CQ: image , FILE = https://x/a.png]",
+			[]Segment{{Type: "image", Data: map[string]string{"file": "https://x/a.png"}}}},
+		{"键序颠倒 RECORD+ASR", "[CQ: RECORD , ASR = ab , File = http://x/a.wav]",
+			[]Segment{{Type: "record", Data: map[string]string{"file": "http://x/a.wav"}}}},
+		{"未知段名大写键名归小写", "[CQ:face , ID = 1]",
+			[]Segment{{Type: "face", Data: map[string]string{"id": "1"}}}},
 		// 现状口径：畸形段（无 ] ）保持按文本
 		{"未闭合保持文本", "hi[CQ:image,file=x.png",
 			[]Segment{

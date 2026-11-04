@@ -1217,7 +1217,9 @@ mod tests {
 
     #[test]
     fn active_marker_survives_cq_string_round_trip() {
-        let plan = OutboundPlan::from_segments(&crate::cqcode::parse("[CQ:active,type:push]"));
+        // 统一契约后 active 段不认冒号兜底（Go `cqUnionParams` 仅 stream 管线传
+        // allowColon=true，`handlers/cqcode_pipeline.go:184`），`k=v` 是规范写法
+        let plan = OutboundPlan::from_segments(&crate::cqcode::parse("[CQ:active,type=push]"));
         let active = plan.active.as_ref().expect("应有 active");
         assert!(active.active, "[CQ:active] 出现即置存在位");
         assert_eq!(active.kind.as_deref(), Some("push"));
@@ -1230,6 +1232,19 @@ mod tests {
         let segments = plan.to_segments();
         assert_eq!(segments[0].kind, "active");
         assert_eq!(OutboundPlan::from_segments(&segments), plan);
+
+        // 新契约钉桩：非 stream 段的裸片段只在「有前一键」时并入其值，否则整段丢弃
+        // （Go `cqUnionParamsSegments` 的 `lastKey != "" && t != ""` 守卫，
+        // `handlers/cqcode.go:97-102`）。存在位仍由段名置位，不丢 `[CQ:active]` 语义。
+        for text in ["[CQ:active,type:push]", "[CQ:active,push]"] {
+            let colon = OutboundPlan::from_segments(&crate::cqcode::parse(text));
+            let active = colon.active.as_ref().expect("应有 active");
+            assert!(active.active, "{text} 出现即置存在位");
+            assert_eq!(
+                active.kind, None,
+                "{text} 首参无前置键：type:push / push 按 Go 并集口径丢弃"
+            );
+        }
     }
 
     #[test]
@@ -1349,9 +1364,10 @@ mod tests {
 
     #[test]
     fn card_payload_aggregates_kv_and_exposes_go_fields() {
-        // 冒号与 `=` 混写（Go 的 card 正则只认 `k=v`，冒号是本 crate 的兜底写法）
+        // 统一契约后 card 段同样只认 `k=v`（Go card 管线 `cqUnionParams(…, false)`，
+        // 冒号兜底仅 stream）；`=` 是规范写法
         let segments = crate::cqcode::parse(
-            "[CQ:card,title:标题,desc=描述,pic=https://x.com/p.png,url=https://x.com]",
+            "[CQ:card,title=标题,desc=描述,pic=https://x.com/p.png,url=https://x.com]",
         );
         let plan = OutboundPlan::from_segments(&segments);
 
@@ -1360,6 +1376,28 @@ mod tests {
         assert_eq!(fields.desc.as_deref(), Some("描述"));
         assert_eq!(fields.pic.as_deref(), Some("https://x.com/p.png"));
         assert_eq!(fields.url.as_deref(), Some("https://x.com"));
+
+        // 新契约钉桩：① 冒号形态首参无前置键 → 整段丢弃（Go `cqcode.go:97-102` 同）；
+        // ② `=` 之后的裸尾段并入前一键值、`,` 拼接（C3 并集，`user_ids=1,2,3` 三路径等价）
+        let colon_first = OutboundPlan::from_segments(&crate::cqcode::parse(
+            "[CQ:card,title:标题,desc=描述,pic=https://x.com/p.png,url=https://x.com]",
+        ));
+        let dropped = colon_first.card[0].fields().expect("card 应为 JSON 对象");
+        assert_eq!(dropped.title, None, "首参冒号形态不是 k=v：丢弃，同 Go");
+        assert_eq!(
+            dropped.desc.as_deref(),
+            Some("描述"),
+            "其余 k=v 聚合不受影响"
+        );
+
+        let merged =
+            OutboundPlan::from_segments(&crate::cqcode::parse("[CQ:card,title=标题,副标题]"));
+        let merged_fields = merged.card[0].fields().expect("card 应为 JSON 对象");
+        assert_eq!(
+            merged_fields.title.as_deref(),
+            Some("标题,副标题"),
+            "裸尾段并入前一键值"
+        );
 
         let items = plan.to_found_items();
         let raw: serde_json::Value =

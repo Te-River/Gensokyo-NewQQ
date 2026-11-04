@@ -325,7 +325,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 
 		// 优先发送文本信息（跳过纯 markdown 消息，由下方 foundItems 循环处理）
 		// 段名后容忍空白（统一契约 §1），与 mdPattern 提取口径一致
-		mdRe := regexp.MustCompile(`\[CQ:markdown\s*,[^\]]*\]`)
+		mdRe := regexp.MustCompile(`\[CQ:\s*(?i:markdown)\s*,[^\]]*\]`)
 		messageText = mdRe.ReplaceAllString(messageText, "")
 		if messageText != "" {
 			msgseq := echo.NextMappingSeq(messageID)

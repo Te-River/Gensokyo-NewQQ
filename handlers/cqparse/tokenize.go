@@ -2,13 +2,20 @@ package cqparse
 
 import "strings"
 
-// cqPrefix 仅识别大写 [CQ:（现状全部正则皆大写，小写维持字面泄漏——设计 §4.3）。
+// cqPrefix 仅识别大写 [CQ:（前缀字面区分大小写；`[CQ:` 之后段名大小写不敏感，
+// 小写归一在 tryParseCode 完成——统一契约 §1）。
 const cqPrefix = "[CQ:"
 
+// cqSpaceBytes ASCII 五元集 {空格, \t, \n, \f, \r}，与 legacy 正则 `\s` 及 Rust
+// is_cq_space 同口径（G-A）；全角空格与 `\v` 不算段名空白。
+const cqSpaceBytes = " \t\n\f\r"
+
 // Tokenize 将字符串消息扫描为 Token 流。
-// 规则（架构设计 §4.3 + 统一空白契约 §1/§2）：
-//  1. 仅识别大写 [CQ:，action 为 [a-z_]+，其后、`,` 或 `]` 之前允许任意空白；
-//  2. 参数区逐段扫 k=v，逗号切分；键与 `=`、`=` 与值两侧允许空白（buildParams 各自 trim）；
+// 规则（架构设计 §4.3 + 统一最大兼容契约 §1~§4）：
+//  1. 仅识别大写 [CQ:，`[CQ:` 之后允许任意空白再接段名；段名为 [A-Za-z0-9_]+（含
+//     数字、首字符不限数字）并按小写归一（Image/IMAGE = image），其后、`,` 或 `]` 之前允许任意空白；
+//  2. 参数区逐段扫 k=v，逗号切分；键与 `=`、`=` 与值两侧允许空白（buildParams 各自
+//     trim 并把键统一小写——参数键大小写不敏感、按键取值、任意键序）；
 //     无 = 的尾随段并入前一 key 的值（C3 修复）；
 //  3. 段值以 { 开头时做花括号配平扫描（允许 JSON 内含 ]/,），修 C1；
 //  4. 无闭合 ]、空 action、配平失败 → KindText（原样保留）。
@@ -49,37 +56,10 @@ func textToken(raw string) Token {
 
 // tryParseCode 尝试从 s[start:] 解析一个 [CQ:...] 码。
 // 成功返回 Token 与码结束偏移；失败（ok=false）时该位置按文本处理。
+// 词法步（段名识别 + 参数区切分）已上移到导出的 ScanCode，本函数只做 Token 装配。
 func tryParseCode(s string, start int) (Token, int, bool) {
-	p := start + len(cqPrefix)
-	aStart := p
-	for p < len(s) && (s[p] >= 'a' && s[p] <= 'z' || s[p] == '_') {
-		p++
-	}
-	action := s[aStart:p]
-	if action == "" || p >= len(s) {
-		return Token{}, 0, false
-	}
-	// 段名与 ',' 或 ']' 之间允许任意空白（统一契约 §1；键值两侧空白由 buildParams trim）
-	// 空白集为 ASCII 五元集 {空格, \t, \n, \f, \r}，与 legacy 正则 `\s` 及 Rust is_cq_space 同口径（G-A）
-	for p < len(s) && (s[p] == ' ' || s[p] == '\t' || s[p] == '\n' || s[p] == '\f' || s[p] == '\r') {
-		p++
-	}
-	if p >= len(s) {
-		return Token{}, 0, false
-	}
-	var segments []string
-	var end int
-	switch {
-	case s[p] == ']':
-		end = p + 1
-	case s[p] == ',':
-		segs, e, ok := scanSegments(s, p+1)
-		if !ok {
-			return Token{}, 0, false
-		}
-		segments = segs
-		end = e
-	default:
+	action, segments, end, ok := ScanCode(s, start)
+	if !ok {
 		return Token{}, 0, false
 	}
 	return Token{
@@ -91,6 +71,56 @@ func tryParseCode(s string, start int) (Token, int, bool) {
 	}, end, true
 }
 
+// ScanCode 从 s[start]（须为 "[CQ:" 字面起点）扫描一个完整 CQ 码，返回小写归一的
+// 段名、参数区各段原文与 `]` 之后的偏移；ok=false 时调用方按文本处理该位置。
+//
+// 判定口径与 Tokenize 完全一致（本函数即其词法步，供 legacy 正则管道复用同一状态机，
+// 统一契约 §1~§4）：
+//   - 段名前（`[CQ:` 后）与段名后、`,` 或 `]` 之前允许 ASCII 五元集空白；
+//   - 段名为 [A-Za-z0-9_]+（含数字、首字符不限数字）并小写归一；段名后必须紧跟 `,` 或 `]`——即整段段名匹配，
+//     不做前缀匹配（`[CQ:CARDIGAN,x=1]` 不会被 card 吞掉，修 F2）；
+//   - 参数区由 scanSegments 花括号配平感知，配平失败/无闭合 `]` → ok=false；
+//   - 返回的段原文**不做实体解码**（解码只在 buildParams 一侧），因此 legacy 的
+//     cqUnionParams 取值口径（不解码）与新链的 buildParams 口径（解码）各取所需。
+func ScanCode(s string, start int) (action string, segments []string, end int, ok bool) {
+	p := start + len(cqPrefix)
+	// 段名前（`[CQ:` 之后）允许任意空白（统一契约 §4；空白集为 ASCII 五元集）
+	for p < len(s) && strings.IndexByte(cqSpaceBytes, s[p]) >= 0 {
+		p++
+	}
+	aStart := p
+	// 段名字符集 [A-Za-z0-9_]（含数字、首字符不限数字），与 internal 链
+	// isCQNameByte 及 Rust find_code_end 并集口径一致（统一契约 §1）
+	for p < len(s) && (s[p] >= 'a' && s[p] <= 'z' || s[p] >= 'A' && s[p] <= 'Z' || s[p] >= '0' && s[p] <= '9' || s[p] == '_') {
+		p++
+	}
+	// 段名大小写不敏感：统一按小写归一（Image = image），Raw 保留原文
+	action = strings.ToLower(s[aStart:p])
+	if action == "" || p >= len(s) {
+		return "", nil, 0, false
+	}
+	// 段名与 ',' 或 ']' 之间允许任意空白（统一契约 §1；键值两侧空白由 buildParams trim）
+	// 空白集为 ASCII 五元集 {空格,\t,\n,\f,\r}，与 legacy 正则 `\s` 及 Rust is_cq_space 同口径（G-A）
+	for p < len(s) && strings.IndexByte(cqSpaceBytes, s[p]) >= 0 {
+		p++
+	}
+	if p >= len(s) {
+		return "", nil, 0, false
+	}
+	switch {
+	case s[p] == ']':
+		return action, nil, p + 1, true
+	case s[p] == ',':
+		segs, e, scanned := scanSegments(s, p+1)
+		if !scanned {
+			return "", nil, 0, false
+		}
+		return action, segs, e, true
+	default:
+		return "", nil, 0, false
+	}
+}
+
 // scanSegments 扫描参数区直到配对的 ']'。
 // 返回各段原始子串（含花括号配平内的逗号不切分）与 ']' 之后的位置。
 func scanSegments(s string, from int) (segments []string, end int, ok bool) {
@@ -99,8 +129,8 @@ func scanSegments(s string, from int) (segments []string, end int, ok bool) {
 	depth := 0
 	inStr := false
 	esc := false
-	segHasEq := false      // 当前段是否已出现 =（其后为值区）
-	atValueStart := true   // 段首/等号后：下一个 { 视为 JSON 值起点
+	segHasEq := false    // 当前段是否已出现 =（其后为值区）
+	atValueStart := true // 段首/等号后：下一个 { 视为 JSON 值起点
 	for q < len(s) {
 		c := s[q]
 		if depth > 0 {
@@ -143,8 +173,9 @@ func scanSegments(s string, from int) (segments []string, end int, ok bool) {
 			segStart = q + 1
 			segHasEq = false
 			atValueStart = true
-		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+		case c == ' ' || c == '\t' || c == '\n' || c == '\f' || c == '\r':
 			// 空白不重置 JSON 值起点判定：`data = {"k":1}` 与 `data={"k":1}` 同口径（统一契约 §2）
+			// 空白集为 ASCII 五元集（含 \f），与 cqSpaceBytes / legacy `\s` / Rust is_cq_space 一致（修 F4）
 		default:
 			atValueStart = false
 		}
@@ -154,16 +185,17 @@ func scanSegments(s string, from int) (segments []string, end int, ok bool) {
 }
 
 // buildParams 将参数段切片解析为已解码的 key=value map。
-// - key/value 各自 TrimSpace 后再解码实体（Q2 拍板：统一 TrimSpace）；
-// - 无 = 的尾随段并入前一 key 的值，以 , 连接（C3 修复：user_ids=1,2,3 三路径等价）；
-// - 重复 key 后者覆盖；
-// - stream 兼容冒号键语法 type:start,qq:123（m2）。
+//   - key/value 各自 TrimSpace 后解码实体（Q2 拍板：统一 TrimSpace）；
+//   - key 统一转小写（统一契约 §1：参数键大小写不敏感，Image 段的 File= 与 file= 同键；
+//     重复键后者覆盖；card 的全量参数序列化因此同为小写规范形）；
+//   - 无 = 的尾随段并入前一 key 的值，以 , 连接（C3 修复：user_ids=1,2,3 三路径等价）；
+//   - stream 兼容冒号键语法 type:start,qq:123（m2；与 = 语法可混用）。
 func buildParams(action string, segments []string) map[string]string {
 	params := make(map[string]string)
 	lastKey := ""
 	for _, seg := range segments {
 		if k, v, ok := splitKV(action, seg); ok {
-			key := strings.TrimSpace(k)
+			key := strings.ToLower(strings.TrimSpace(k))
 			if key == "" {
 				continue
 			}

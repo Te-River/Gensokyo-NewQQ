@@ -10,8 +10,9 @@ import (
 )
 
 func ProcessCQAvatar(groupID string, text string) string {
-	// 断言并获取 groupID 和 qq 号（统一契约 §1/§2：段名后与键值两侧容忍空白）
-	qqRegex := regexp.MustCompile(`\[CQ:avatar\s*,\s*qq\s*=\s*(\d+)\s*\]`)
+	// 断言并获取 groupID 和 qq 号（统一契约 §1~§4：段名前（`[CQ:` 后）与段名后、
+	// 键值两侧容忍空白，段名与键名大小写不敏感，qq 允许任意参数位置）
+	qqRegex := regexp.MustCompile(`\[CQ:\s*(?i:avatar)\s*,\s*(?:[^,\]]*?,\s*)*(?i:qq)\s*=\s*(\d+)\s*\]`)
 	qqMatches := qqRegex.FindAllStringSubmatch(text, -1)
 
 	for _, match := range qqMatches {
@@ -49,8 +50,9 @@ func ProcessCQAvatar(groupID string, text string) string {
 }
 
 func ProcessCQAvatarNoGroupID(text string) string {
-	// 断言并获取 groupID 和 qq 号（统一契约 §1/§2：段名后与键值两侧容忍空白）
-	qqRegex := regexp.MustCompile(`\[CQ:avatar\s*,\s*qq\s*=\s*(\d+)\s*\]`)
+	// 断言并获取 groupID 和 qq 号（统一契约 §1~§4：段名前（`[CQ:` 后）与段名后、
+	// 键值两侧容忍空白，段名与键名大小写不敏感，qq 允许任意参数位置）
+	qqRegex := regexp.MustCompile(`\[CQ:\s*(?i:avatar)\s*,\s*(?:[^,\]]*?,\s*)*(?i:qq)\s*=\s*(\d+)\s*\]`)
 	qqMatches := qqRegex.FindAllStringSubmatch(text, -1)
 
 	for _, match := range qqMatches {
