@@ -41,7 +41,7 @@ for msg in messages:
     await bot.send_group_msg(group_id=123456, message=msg)
 ```
 
-如需发送折叠消息，可考虑使用扩展 CQ 码 `[CQ:card]`（群聊图文卡片，msg_type=8）将内容整合为一条卡片消息。
+如需发送折叠消息，可考虑使用扩展 CQ 码 `[CQ:card]`（群聊 / 单聊图文卡片，msg_type=8，四字段必填）将内容整合为一条卡片消息。
 
 ## 注意
 

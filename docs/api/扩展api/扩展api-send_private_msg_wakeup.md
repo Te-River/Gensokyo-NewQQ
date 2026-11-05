@@ -27,7 +27,7 @@
 {
     "post_type": "notice",
     "notice_type": "c2c_wakeup_resp",
-    "user_id": 虚拟数字ID,
+    "user_id": 0,
     "real_user_id": "32位OpenID",
     "status": "success",
     "message_id": "xxx",
@@ -36,6 +36,8 @@
     "time": 1700000000
 }
 ```
+
+> 说明：`user_id` 固定为 `0`（数值字段恒置 0，防止应用端解析报错）；唤醒目标的真实身份在 `real_user_id` 中给出——发送前虚拟数字 ID 已被反查转换为 32 位 OpenID，无法转换时请求直接停止发送。
 
 ## nonebot2 示例
 

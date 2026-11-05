@@ -6,7 +6,7 @@
 
 `[CQ:active]` 用于标记出站消息为主动推送模式。当消息内容中包含此 CQ 码时，Gensokyo 会强制走主动消息通道（清空缓存的 `msg_id` 和 `event_id`），即使有可用的被动回复上下文。
 
-范围：`-`
+范围：`q群 (Group Chat)` / `私聊 (C2C)`（`send_group_msg` 与 `send_private_msg` 均识别该标记，命中即清空 `msg_id` 与 `event_id` 强制主动推送）
 
 ## 语法
 
@@ -62,11 +62,13 @@ await bot.call_api(
     message=active_msg("你好，这是一条唤醒消息"),
 )
 ```
+
+## 数组消息段格式
+
+```json
 {"type":"active","data":{"type":"<值>","sub_type":"<值>"}}
 ```
 
 ## 注意
 
-裸 `[CQ:active]` 当前不会被文本正则匹配。需要 C2C 召回消息时，使用 [`send_private_msg_wakeup`](../../api/扩展api/扩展api-send_private_msg_wakeup.md)。
-
-范围：`-`
+裸 `[CQ:active]`（段名前后可带空白）已支持文本正则匹配：识别为主动标记并从消息文本中移除。需要 C2C 召回消息（`is_wakeup`）时，使用 [`send_private_msg_wakeup`](../../api/扩展api/扩展api-send_private_msg_wakeup.md)。

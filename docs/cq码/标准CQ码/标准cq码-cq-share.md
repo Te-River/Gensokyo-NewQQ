@@ -48,4 +48,4 @@ await bot.send_group_msg(
 ## 注意
 
 - QQ Bot API 与 go-cqhttp 等第三方实现不同，不支持分享卡片功能。
-- 如需富媒体卡片效果，可考虑使用扩展 CQ 码 `[CQ:card]`（仅群聊，msg_type=8）。
+- 如需富媒体卡片效果，可考虑使用扩展 CQ 码 `[CQ:card]`（群聊 / 单聊，msg_type=8，四字段必填）。
