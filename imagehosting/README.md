@@ -11,9 +11,9 @@
 | 4 | COS 自签 | `cos.*` 字段，走本包 `cos.go` |
 | 5 | Bilibili | `bilibili.*` 字段，走本包 `bilibili.go` |
 | 6 | QQ频道 | `qq_channel.*` 字段，走本包 `qq_channel.go` |
-| 7 | ChatGLM | 免费，开箱即用，走本包 `chatglm.go` |
-| 8 | Ukaka | 免费，开箱即用，走本包 `signed.go` |
-| 9 | 星野 | 免费，开箱即用，走本包 `signed.go` |
+| 7 | ChatGLM | 免费，匿名上传可用，走本包 `chatglm.go`；⚠️ 2026-11-07 实测：返回外链 `file_url` 带约 30 分钟有效期，不适合做持久外链图床 |
+| 8 | Ukaka | ❌ 2026-11-07 实测失效：签名服务器不再返回七牛上传 token，上传被 `token not specified` 拒绝（本包 `signed.go`；历史外链 `duimianimg.loovee.com` 仍可访问） |
+| 9 | 星野 | ❌ 2026-11-07 实测失效：签名服务器给出的 OSS 预签名与 PUT 不匹配（403 SignatureDoesNotMatch）（本包 `signed.go`） |
 | 10 | Nature | 免费，密钥内置，走本包 `nature.go` |
 
 > **注意：** `oss_type` 仅控制图片上传路径；语音上传不受此选项影响（仍走本机或 1~3 云OSS）。
