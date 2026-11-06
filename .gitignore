@@ -12,8 +12,7 @@ gsk.exe
 *.upx
 gensokyo
 
-# 仅根目录的 Go 产物（不要匹配 crates/gensokyo-*）
-/gensokyo-*
+gensokyo-*
 
 # Ignore channel_temp
 channel_temp/
@@ -21,8 +20,8 @@ channel_temp/
 # Ignore log
 log/
 
-# ignore dist
-webui/dist/
+# ignore dist（占位文件例外入库：clean clone 直接可构建 Go/Rust，见下方 un-ignore）
+webui/dist/*
 
 #ignore data
 data/.vscode/
@@ -43,19 +42,21 @@ handlers/sensitive_words_out.txt
 # Build output
 release/
 
-# Rust（M0 起）
-/target
-**/*.rs.bk
-# redb 默认库文件落在 CWD（openid-map.redb / msgid-map.redb）
-*.redb
-
-# webui placeholder (auto-created by build.ps1 Ensure-WebUIDist)
-webui/dist/placeholder.html
-webui/dist/index.html
-webui/dist/css/placeholder.css
-webui/dist/fonts/placeholder.txt
-webui/dist/icons/placeholder.txt
-webui/dist/js/placeholder.js
+# webui placeholder：入库占位，clean clone 无需先跑 build.ps1 即可 go build / cargo build
+!webui/dist/placeholder.html
+!webui/dist/index.html
+!webui/dist/css/
+webui/dist/css/*
+!webui/dist/css/placeholder.css
+!webui/dist/fonts/
+webui/dist/fonts/*
+!webui/dist/fonts/placeholder.txt
+!webui/dist/icons/
+webui/dist/icons/*
+!webui/dist/icons/placeholder.txt
+!webui/dist/js/
+webui/dist/js/*
+!webui/dist/js/placeholder.js
 
 # AI editors / assistant tooling (local only)
 .zcode/
@@ -74,3 +75,6 @@ webui/dist/js/placeholder.js
 .qoder/
 .qoder-cn/
 .mcp.json
+
+# cargo build cache
+target/
