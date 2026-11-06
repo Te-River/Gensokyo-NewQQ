@@ -528,6 +528,23 @@ func SendFoundItemsGroup(ctx context.Context, groupOpenID, messageText string, f
 			}
 			delete(foundItems, imageType)
 			messageText = ""
+		} else if gm, ok := reply.(*dto.MessageToCreate); ok {
+			// 自取转传路径（短签名外链）返回的已是 msg_type=7 的完整消息：
+			// 并入文本直接发出并删除媒体键，否则媒体循环会再跑一次 generateGroupMessage，
+			// 同一张图二次远程自取 + 二次上传，且一条图文混合被拆成两条消息。
+			gm.Content = resolvePlainTextAtMentions(messageText)
+			gm.Timestamp = time.Now().Unix()
+			applyGroupReply(gm, foundItems)
+			resp, err := postGroupMessageWithEventIDFallback(ctx, apiv2, groupOpenID, gm)
+			if resp != nil && resp.Message != nil {
+				lastID = resp.Message.ID
+			}
+			pushSSMOn22009(err, groupOpenID, gm)
+			if err != nil {
+				return lastID, err
+			}
+			delete(foundItems, imageType)
+			messageText = ""
 		}
 	}
 
@@ -663,6 +680,22 @@ func SendFoundItemsPrivate(ctx context.Context, userOpenID, messageText string, 
 				MsgSeq:  msgseq,
 				MsgType: 7,
 			}
+			gm.Timestamp = time.Now().Unix()
+			applyPrivateReply(gm, foundItems["reply_msg_id"], userOpenID)
+			applyWakeup(gm, wakeup)
+			resp, err := postC2CMessageWithEventIDFallback(ctx, apiv2, userOpenID, gm)
+			if resp != nil && resp.Message != nil {
+				lastID = resp.Message.ID
+			}
+			if err != nil {
+				return lastID, err
+			}
+			delete(foundItems, imageType)
+			messageText = ""
+		} else if gm, ok := reply.(*dto.MessageToCreate); ok {
+			// 同群聊口径：自取转传返回的已是 msg_type=7 的完整消息，
+			// 并入文本发出并删除媒体键，避免媒体循环二次自取 + 二次上传、一条图文混合拆成两条。
+			gm.Content = resolvePlainTextAtMentions(messageText)
 			gm.Timestamp = time.Now().Unix()
 			applyPrivateReply(gm, foundItems["reply_msg_id"], userOpenID)
 			applyWakeup(gm, wakeup)

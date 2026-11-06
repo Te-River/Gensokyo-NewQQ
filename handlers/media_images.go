@@ -150,11 +150,24 @@ func UploadMediaImage(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.
 		return sendActionResult(client, message, err.Error(), 1400)
 	}
 
+	ctx := context.Background()
+	resp, err := mediaImageUploadFlow(ctx, apiv2, content, fileName, contentType, "upload_media_image")
+	if err != nil {
+		return sendActionResult(client, message, err.Error(), 1401)
+	}
+	return sendActionResultWithData(client, message, resp)
+}
+
+// mediaImageUploadFlow 素材管理链三步：本地 md5/sha1 → prepare → 预签名 PUT 直传 → complete，
+// 成功返回可直接写进 Markdown 的 qqbot-media:// 引用。
+// UploadMediaImage 与短签名外链自取转传（shortlived_image.go）共用本链，
+// 错误文本与原 handler 逐段一致（调用方统一以 1401 回包）。
+// source 为日志前缀（调用来源标签）：自取来源的失败不得伪装成 upload_media_image 动作失败。
+func mediaImageUploadFlow(ctx context.Context, apiv2 openapi.OpenAPI, content []byte, fileName, contentType, source string) (MediaImageUploadResponse, error) {
 	// md5 与 sha1 一律本地计算，不接受调用方传入
 	md5Hash := computeMD5(content)
 	sha1Hash := computeMediaImageSHA1(content)
 
-	ctx := context.Background()
 	prepareResp, err := apiv2.PrepareMediaImage(ctx, &dto.MediaImagePrepareRequest{
 		FileName:    fileName,
 		FileSize:    uint64(len(content)),
@@ -163,27 +176,27 @@ func UploadMediaImage(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.
 		SHA1:        sha1Hash,
 	})
 	if err != nil {
-		mylog.Printf("upload_media_image: prepare 失败: %v", err)
-		return sendActionResult(client, message, describeMediaImageError(err), 1401)
+		mylog.Printf("%s: prepare 失败: %v", source, err)
+		return MediaImageUploadResponse{}, errors.New(describeMediaImageError(err))
 	}
 	if prepareResp == nil || prepareResp.PresignedURL == "" {
-		mylog.Printf("upload_media_image: prepare 未返回 presigned_url")
-		return sendActionResult(client, message, "素材管理失败：prepare 未返回 presigned_url", 1401)
+		mylog.Printf("%s: prepare 未返回 presigned_url", source)
+		return MediaImageUploadResponse{}, errors.New("素材管理失败：prepare 未返回 presigned_url")
 	}
 
 	etag, err := putMediaImageContent(prepareResp.PresignedURL, contentType, content)
 	if err != nil {
-		mylog.Printf("upload_media_image: 直传失败: %v", err)
-		return sendActionResult(client, message, err.Error(), 1401)
+		mylog.Printf("%s: 直传失败: %v", source, err)
+		return MediaImageUploadResponse{}, err
 	}
 
 	// complete 的 md5 取 PUT 响应 ETag 去引号；COS 未回 ETag 时回退本地 md5
 	md5ForComplete := normalizeMediaImageETag(etag)
 	if md5ForComplete == "" {
-		mylog.Printf("upload_media_image: 直传响应缺少 ETag，回退本地 md5")
+		mylog.Printf("%s: 直传响应缺少 ETag，回退本地 md5", source)
 		md5ForComplete = md5Hash
 	} else if md5ForComplete != md5Hash {
-		mylog.Printf("upload_media_image: ETag(%s) 与本地 md5(%s) 不一致，complete 以 ETag 为准", md5ForComplete, md5Hash)
+		mylog.Printf("%s: ETag(%s) 与本地 md5(%s) 不一致，complete 以 ETag 为准", source, md5ForComplete, md5Hash)
 	}
 
 	completeResp, err := apiv2.CompleteMediaImage(ctx, &dto.MediaImageCompleteRequest{
@@ -191,16 +204,16 @@ func UploadMediaImage(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.
 		MD5:      md5ForComplete,
 	})
 	if err != nil {
-		mylog.Printf("upload_media_image: complete 失败: %v", err)
-		return sendActionResult(client, message, describeMediaImageError(err), 1401)
+		mylog.Printf("%s: complete 失败: %v", source, err)
+		return MediaImageUploadResponse{}, errors.New(describeMediaImageError(err))
 	}
 	if completeResp == nil {
-		mylog.Printf("upload_media_image: complete 未返回内容")
-		return sendActionResult(client, message, "素材管理失败：complete 未返回内容", 1401)
+		mylog.Printf("%s: complete 未返回内容", source)
+		return MediaImageUploadResponse{}, errors.New("素材管理失败：complete 未返回内容")
 	}
 
-	mylog.Printf("upload_media_image: 上传完成 image_id=%s ttl=%d", completeResp.ImageID, completeResp.TTL)
-	return sendActionResultWithData(client, message, MediaImageUploadResponse{
+	mylog.Printf("%s: 上传完成 image_id=%s ttl=%d", source, completeResp.ImageID, completeResp.TTL)
+	return MediaImageUploadResponse{
 		ImageID:    completeResp.ImageID,
 		URL:        completeResp.URL,
 		TTL:        completeResp.TTL,
@@ -208,7 +221,7 @@ func UploadMediaImage(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.
 		FileName:   fileName,
 		ExpiresIn:  prepareResp.ExpiresIn,
 		ExpiresAt:  completeResp.ExpiresAt,
-	})
+	}, nil
 }
 
 // GetMediaImageList 素材管理：图片列表

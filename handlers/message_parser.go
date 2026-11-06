@@ -2840,10 +2840,16 @@ func resolveMarkdownMediaReferences(content string, resolve func(path string) (s
 
 // ResolveMarkdownImages 处理 Markdown 内容中的 ![](path) 图片、[link](path) 和 HTML img 标签
 // - 本地文件路径（file:// 或绝对路径）→ 上传到 QQ CDN，替换为 CDN URL
+//   （图床回短签名外链时改走素材链，替换为 qqbot-media:// 引用）
 // - HTTP(S) URL → 直接保留
+//   （短签名域（ChatGLM 图床等）→ 自取字节走素材链替换为 qqbot-media:// 引用，失败维持原外链）
 func ResolveMarkdownImages(content string, apiv2 openapi.OpenAPI) string {
 	return resolveMarkdownMediaReferences(content, func(mediaPath string) (string, bool) {
 		if strings.HasPrefix(mediaPath, "http://") || strings.HasPrefix(mediaPath, "https://") {
+			// 短签名外链（ChatGLM 图床等）：直传给 QQ 会很快过期，自取→素材链→qqbot-media:// 引用
+			if ref, ok := selfFetchToMediaReference(apiv2, mediaPath); ok {
+				return ref, true
+			}
 			return "", false
 		}
 		if strings.HasPrefix(mediaPath, "data:") {
@@ -2873,6 +2879,13 @@ func ResolveMarkdownImages(content string, apiv2 openapi.OpenAPI) string {
 			mylog.Printf("Error uploading image for markdown: %v", err)
 			return "", false
 		}
+		// 图床回的是短签名外链（oss_type=7 等）：cdnURL 同样会在 QQ 转存时过期，
+		// 复用内存中的字节直接走素材链换 qqbot-media:// 引用；失败维持 cdnURL 原样。
+		if isShortLivedImageURL(cdnURL) {
+			if ref, ok := uploadImageBytesToMediaStore(apiv2, imageData); ok {
+				return ref, true
+			}
+		}
 		return cdnURL, true
 	})
 }
@@ -2880,9 +2893,13 @@ func ResolveMarkdownImages(content string, apiv2 openapi.OpenAPI) string {
 // keyboardMediaResolver 返回 keyboard 按钮图片的解析器：本地路径上传 CDN，
 // http(s) / data: / qqbot-media:// 原样透传（与 ResolveMarkdownImages 同口径，
 // 素材管理令牌与机器人绑定，本地无从校验也不该改写）。
+// 短签名域（ChatGLM 图床等）自取转素材引用，同 ResolveMarkdownImages 口径。
 func keyboardMediaResolver(apiv2 openapi.OpenAPI) func(string) (string, bool) {
 	return func(mediaPath string) (string, bool) {
 		if strings.HasPrefix(mediaPath, "http://") || strings.HasPrefix(mediaPath, "https://") {
+			if ref, ok := selfFetchToMediaReference(apiv2, mediaPath); ok {
+				return ref, true
+			}
 			return "", false
 		}
 		if strings.HasPrefix(mediaPath, "data:") {
@@ -2908,6 +2925,12 @@ func keyboardMediaResolver(apiv2 openapi.OpenAPI) func(string) (string, bool) {
 		if err != nil {
 			mylog.Printf("Error uploading image for keyboard: %v", err)
 			return "", false
+		}
+		// 图床回短签名外链时同 Markdown 口径：复用内存字节走素材链换 qqbot-media:// 引用。
+		if isShortLivedImageURL(cdnURL) {
+			if ref, ok := uploadImageBytesToMediaStore(apiv2, imageData); ok {
+				return ref, true
+			}
 		}
 		return cdnURL, true
 	}
