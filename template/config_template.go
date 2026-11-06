@@ -277,9 +277,9 @@ settings:
   qq_channel:                     #QQ频道图床（oss_type=6，需channel_id+token）
     channel_id: ""
     token: ""                     #Authorization值，如"QQBot xxx.yyy"
-  chatglm:                        #智谱免费图床（oss_type=7，开箱即用）
-  ukaka:                          #Ukaka免费图床（oss_type=8，开箱即用）
-  xingye:                         #星野免费图床（oss_type=9，开箱即用）
+  chatglm:                        #智谱免费图床（oss_type=7，匿名上传可用；外链约30分钟有效期，2026-11-07实测，不适合持久外链）
+  ukaka:                          #Ukaka免费图床（oss_type=8，❌2026-11-07实测失效：签名服务器不再返回上传token）
+  xingye:                         #星野免费图床（oss_type=9，❌2026-11-07实测失效：预签名与OSS不匹配403）
   nature:                         #Nature腾讯COS直传（oss_type=10，密钥内置，开箱即用）
 
 `
