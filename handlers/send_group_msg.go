@@ -3120,7 +3120,7 @@ func resolveCardPic(pic string) string {
 		return pic
 	}
 	// apiv2 仅用于签名兼容，上传后端完全由 oss_type 决定，这里无需真实实例；
-	// 走统一上传链即可获得短签名图床（ChatGLM 等）的本地公网 URL 回退。
+	// 走统一上传链即可获得稳定外链（三级：解析 302 直链 → 本地公网 URL → 原行为）。
 	url, _, _, err := images.UploadBase64ImageToServer(base64.StdEncoding.EncodeToString(data), nil)
 	if err != nil {
 		mylog.Printf("[CQ:card] 图片上传失败: %v", err)

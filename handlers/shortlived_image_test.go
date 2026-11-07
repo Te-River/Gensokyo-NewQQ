@@ -82,6 +82,14 @@ func withShortLivedUploadSeam(t *testing.T, seam *slUploadSeam) {
 	t.Cleanup(func() { markdownImageUpload = old })
 }
 
+// withShortLivedResolveSeam 覆写直链解析注入缝，用例结束后恢复。
+func withShortLivedResolveSeam(t *testing.T, resolve func(string) (string, error)) {
+	t.Helper()
+	old := resolveShortLivedURL
+	resolveShortLivedURL = resolve
+	t.Cleanup(func() { resolveShortLivedURL = old })
+}
+
 // newShortLivedUpstream 模拟 ChatGLM 外链两跳：外链 302 → OSS 预签名 → PNG 字节。
 func newShortLivedUpstream(t *testing.T) string {
 	t.Helper()
@@ -336,16 +344,67 @@ func TestUploadImageBytesToPublicURLEmptyResult(t *testing.T) {
 }
 
 // TestUploadImageBytesToPublicURLRejectsShortLivedResult 上传链仍回短签名域（例如新增 provider
-// 未纳入回退）时必须拒绝替换：不把短链当稳定外链写进 Markdown，调用方维持原 URL。
+// 未纳入直链解析）且降级路径内层解析也失败时必须拒绝替换：不把短链当稳定外链写进 Markdown。
 func TestUploadImageBytesToPublicURLRejectsShortLivedResult(t *testing.T) {
 	const shortURL = "https://t1.chatglm.cn/file/x.png?expired_at=1&sign=a"
 	seam := &slUploadSeam{wantURL: shortURL}
 	withShortLivedUploadSeam(t, seam)
+	withShortLivedResolveSeam(t, func(string) (string, error) { return "", errors.New("直链解析失败") })
 	if url, ok := uploadImageBytesToPublicURL(&slMockAPI{}, slPNG()); ok || url != "" {
-		t.Fatalf("上传链回短签名外链时必须拒绝替换: url=%q ok=%v", url, ok)
+		t.Fatalf("上传链回短签名外链且解析失败时必须拒绝替换: url=%q ok=%v", url, ok)
 	}
 	if len(seam.gotBase64) != 1 {
 		t.Fatalf("应恰好调用一次上传流程，实际 %d", len(seam.gotBase64))
+	}
+}
+
+// TestUploadImageBytesToPublicURLAdoptsResolvedDirect 上传链仍回短签名外链时，降级路径内
+// 再解析一次 302：成功则采纳直链（不再判失败）。
+func TestUploadImageBytesToPublicURLAdoptsResolvedDirect(t *testing.T) {
+	const shortURL = "https://t1.chatglm.cn/file/x.png?expired_at=1&sign=a"
+	const directURL = "https://pfiles.chatglm.cn/file/x.png?x-oss-expires=899&sign=oss"
+	seam := &slUploadSeam{wantURL: shortURL}
+	withShortLivedUploadSeam(t, seam)
+	withShortLivedResolveSeam(t, func(string) (string, error) { return directURL, nil })
+
+	if url, ok := uploadImageBytesToPublicURL(&slMockAPI{}, slPNG()); !ok || url != directURL {
+		t.Fatalf("降级路径内层解析成功应采纳直链: url=%q ok=%v", url, ok)
+	}
+	if len(seam.gotBase64) != 1 {
+		t.Fatalf("应恰好调用一次上传流程，实际 %d", len(seam.gotBase64))
+	}
+}
+
+// TestSelfFetchToStableImageURLResolvedDirect ① 直链解析成功分支：直接返回直链，
+// 不触发自取、不触达上传链（计数缝证明零网络）。
+func TestSelfFetchToStableImageURLResolvedDirect(t *testing.T) {
+	const shortURL = "https://t1.chatglm.cn/file/x.png?expired_at=1&sign=a"
+	const directURL = "https://pfiles.chatglm.cn/file/x.png?x-oss-expires=899&sign=oss"
+	var fetchCalls int
+	oldFetch := selfFetchBytes
+	selfFetchBytes = func(string) ([]byte, error) {
+		fetchCalls++
+		return nil, errors.New("解析成功分支不应自取")
+	}
+	t.Cleanup(func() { selfFetchBytes = oldFetch })
+	withShortLivedResolveSeam(t, func(raw string) (string, error) {
+		if raw != shortURL {
+			t.Errorf("解析入参应为短签名外链: %q", raw)
+		}
+		return directURL, nil
+	})
+	seam := &slUploadSeam{wantURL: "https://cdn.example.com/should-not-be-used.png"}
+	withShortLivedUploadSeam(t, seam)
+
+	got, ok := selfFetchToStableImageURL(&slMockAPI{}, shortURL)
+	if !ok || got != directURL {
+		t.Fatalf("解析成功应直接采纳直链: url=%q ok=%v", got, ok)
+	}
+	if fetchCalls != 0 {
+		t.Fatalf("解析成功后不得自取字节，实际 %d 次", fetchCalls)
+	}
+	if len(seam.gotBase64) != 0 {
+		t.Fatalf("解析成功后不得触达上传链，实际 %d 次", len(seam.gotBase64))
 	}
 }
 

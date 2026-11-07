@@ -64,4 +64,5 @@
   - **降级语义**：自取或上传任一步失败，或响应体魔数不是 png/jpeg/gif/webp → 记 warn 后维持原外链直传（不比现状差，不阻断发送）。legacy 媒体链路中自取返回的 `MessageToCreate` 由既有分支接住，图文混合仍是一条消息、一次上传。
   - 新增 `imagehosting/selffetch.go`（自取 + 域名判定 + SSRF 判据注入）与 `handlers/shortlived_image.go`（三处消费点入口，含格式嗅探与降级），回归网见 `imagehosting/selffetch_test.go`、`handlers/shortlived_image_test.go`。
   - 附注：同期实测 ukaka、星野图床同样出现外链失效，属图床侧现状，未纳入本次修复。
+- 修复 ChatGLM 短签名外链仍被直接写进出站字段的问题（QQ 不跟随短链的 302，图片不显示）：`images/upload_api.go` 在返回图床外链前先用 `imagehosting.ResolveRedirectURL` 把 302 解析为 OSS 预签名直链（只读响应头、`Range: bytes=0-0`、首跳与每一跳复检 SSRF），解析失败再回退 `oss_type=0` 的本地公网 URL；`handlers/shortlived_image.go` 的 Markdown/keyboard 消费点优先走同一条直链解析，自取转传降级路径若仍拿到短签名外链则再解析一次，成功即采纳直链、失败才拒绝替换并维持原外链；旧行为是把短链（含重新签发的新短链）直接写进 Markdown/卡片等出站字段，即"直接使用短链"的问题（2026-11-07）。
 
