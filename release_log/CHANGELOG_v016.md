@@ -101,6 +101,16 @@
 - **影响**：出站字段拿到的是 OSS 预签名直链或本地公网 URL，QQ 可正常拉取；Refactor 分支走 `qqbot-media://` 素材链上传（素材 ID 非外链），不受本修复影响
 - **测试**：`handlers/shortlived_image_test.go` 新增直链解析成功分支与降级路径内层解析采纳用例；`images/upload_api_stable_test.go` 覆盖解析成功/回退本地公网 URL
 
+### Markdown 图片改走官方素材管理 API（2026-11-07）
+
+实测即便把 ChatGLM 外链解析为 pfiles 直链、请求体里的 `&` 以原始形式发出，QQ 服务端转存仍然拉取失败。按官方文档「Markdown 消息 > 图片」改用素材管理：
+
+- **修改**：新增 `handlers/media_asset.go`，本地图片字节走 `POST /v2/media-images/prepare`（file_size/md5/sha1/content_type，≤10MB、png/jpeg/gif/webp）→ `PUT` 预签名（不带 Authorization）→ `POST /v2/media-images/complete`（md5 取 PUT 的 ETag，去引号并归一大小写），得到平台持久引用 `qqbot-media://image/v1/<token>`
+- **接线**：Markdown 本地图与短签名外链自取在 `oss_type=ChatGLM` 或上传结果仍为短链时优先走素材链；`qqbot-media://` 在后续图片解析中原样透传；失败按「素材链 → 直链解析 → 外链上传」降级，不阻断发送
+- **SDK**：`botgo` 增加素材管理 4 方法（`dto/media_image.go`、`openapi/v2/media_image.go`、v1 桩、`iface` 声明）；错误码 40035001~40035010 中文映射并保留 trace_id
+- **影响**：Markdown 图片不再依赖任何外部 URL，平台侧直接引用素材；Refactor 分支此前已实现同一链路，本次为 main/hotfix 补齐
+- **测试**：`handlers/media_asset_test.go` 覆盖 PUT body 一致性、ETag 缺失回退本地 md5、ETag 覆盖、PUT 非 2xx、>10MB 跳过；Markdown/keyboard 端到端断言产出 `qqbot-media://`
+
 ---
 
 ## 📝 工程与文档变更
