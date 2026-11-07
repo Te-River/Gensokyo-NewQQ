@@ -164,7 +164,7 @@ Rust 侧 44 项硬占位（`retcode=1500`）的拆分，**28 项属未到里程�
 
 ### 已知缺口与刻意差异（本轮新增登记）
 
-1. **wakeup 的 `c2c_wakeup_resp` notice 未接线**：Go 有 `handlers/send_private_msg_wakeup.go:349`（`NoticeType: "c2c_wakeup_resp"`），Rust 全仓 0 命中——缺的是运行时 notice 基座，非 handler 分支，**待 R4 立项**（`c6b44a2` commit 正文登记）。
+1. **wakeup 的 `c2c_wakeup_resp` notice**：~~未接线，待 R4 立项~~ **已接线（R4a `da3fe3c`）**——wakeup 终局向 `EventHub` 推 notice，JSON 逐键对齐 Go `sendWakeupNotice`（`handlers/send_private_msg_wakeup.go:343-375`）；残留备案差异：`error_msg` 为 Rust `Error::Display` 文本非 Go 原文；forward 计划带 wakeup 标记按节点各推一次（Go 无该组合，自创口径，生产规划层当前不可达）。
 2. **`get_group_list` 不回捞 uin 前缀形态**：`idmap_isolation` 开启且与 Go 共库时，Go 写入的 `"<uin>:<原始串>"` section 既非 32 位也 parse 不成数字，按反查失败整群跳过；Rust 入站链注册的是不带前缀的原串，故该形态只出现在混合部署里。刻意差异同记：**Go 留空字段行、Rust 整群跳过**（`group_admin.rs:36-44`）。
 3. **wakeup 空 `message` 收紧为 `1400`**：Go 侧无此前置校验（`handlers/send_private_msg_wakeup.go:63-70` 直接进 `parseMessageContent` → 发送路径），Rust 在参数层直接拒——与 Go 回执**方向相反**的刻意收紧（`send.rs:57`，`c6b44a2` 评审修复轮登记为刻意差异）。
 4. **合并转发保留 Go 的 `limit+1` off-by-one**：Go 循环条件 `count > limit` 且仅在形状合格的 node 上计数，上界实际是 `limit+1` 条；行为对齐优先于修它（`send.rs:562-567`）。附带口径：`failed[].index` 用原 node 序号、坏 / 空 node 计入失败清单不静默丢、500ms 间隔经 `DeferredDeps::forward_send_interval` 可注入（`deferred.rs:127-129,202-206,244-256`）。
