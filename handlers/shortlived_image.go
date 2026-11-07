@@ -7,12 +7,11 @@ package handlers
 // 修复：消费点自取字节后走既有上传链——
 //   - 富媒体 url_image/url_images → 本地字节上传链（≤5,000,000 file_data 直传，超限自动分片，
 //     复用 createAndUploadMediaMessage / createAndUploadMediaMessagePrivate，不新造上传实现）；
-//   - Markdown / keyboard 外链 → 复用 ResolveMarkdownImages 本地图片分支那条既有外链上传流程
-//     （images.UploadBase64ImageToServer），把自取到的字节当"本地字节的图"重新上传换外链。
+//   - Markdown / keyboard 外链 → 素材管理链（prepare→PUT→complete，见 media_asset.go），
+//     产出平台持久的 qqbot-media:// 引用替换原 URL；素材链不可用时才退回直链解析/既有外链上传。
 //
-// 与 Refactor 版差异：main 未接入素材管理 API（无 qqbot-media:// 链），Markdown/keyboard
-// 只能落"自取→既有外链上传流程"；oss_type=7 时 UploadBase64ImageToServer 优先把图床短签名
-// 外链解析为 302 直链，解析失败才回退本地公网 URL；降级路径内若仍拿到短链，再解析一次，
+// oss_type=7 下 UploadBase64ImageToServer 只作为素材链失败后的兜底：优先把图床短签名外链
+// 解析为 302 直链，解析失败才回退本地公网 URL；降级路径内若仍拿到短链，再解析一次，
 // 仍失败才拒绝替换并维持原外链。
 //
 // 降级语义：自取或上传任一步失败 → 记 warn、维持原 URL 直传（不比现状差），不阻断发送。
@@ -22,7 +21,6 @@ package handlers
 import (
 	"context"
 	"encoding/base64"
-	"net/http"
 	"strings"
 
 	"github.com/hoshinonyaruko/gensokyo/imagehosting"
@@ -125,83 +123,56 @@ func trySelfFetchPrivateImage(rawURL, eventid, userid, id string, msgseq int, ap
 	return mtc, true
 }
 
-// selfFetchToStableImageURL Markdown / keyboard 消费点：短签名外链优先解析 302 到最终直链
-//（OSS 预签名，约 15 分钟有效），出站只需 URL，不必下载字节再上传；解析失败再走
-//「自取字节 → 既有上传流程换外链」的降级链。未命中域名返回 ("", false)（零开销原样透传，
-// 行为与其他域一致）；命中但解析与自取转传都失败同样返回 ("", false)，由调用方维持原 URL。
+// selfFetchToStableImageURL Markdown / keyboard 消费点：短签名外链自取字节后优先走素材链，
+// 换平台持久的 qqbot-media:// 引用；素材链不可用时退回直链解析与既有外链上传换外链。
+// 未命中域名返回 ("", false)（零开销原样透传，行为与其他域一致）；命中但被 SSRF 判据拒绝、
+// 或全链失败同样返回 ("", false)，由调用方维持原 URL。
 func selfFetchToStableImageURL(apiv2 openapi.OpenAPI, mediaPath string) (string, bool) {
 	if !isShortLivedImageURL(mediaPath) {
 		return "", false
 	}
-	// ① 解析直链：QQ 不跟随短链的 302，直链则可直接拉取；比自取字节少一次下载与一次上传。
-	if directURL, err := resolveShortLivedURL(mediaPath); err == nil {
-		mylog.Printf("[shortlived] Markdown 图片短签名外链已解析为直链: %s -> %s", mediaPath, directURL)
-		return directURL, true
-	} else {
-		mylog.Printf("[shortlived] Markdown 图片直链解析失败，回退自取转传链: %v err=%v", mediaPath, err)
-	}
-	// ② 解析失败 → 自取字节后走既有上传流程换外链。
 	if selfFetchSSRFBlocked(mediaPath) {
 		mylog.Printf("[shortlived] Markdown 图片目标为私有/回环地址，拒绝自取并维持原外链: %v", mediaPath)
 		return "", false
 	}
 	data, err := selfFetchBytes(mediaPath)
 	if err != nil {
-		mylog.Printf("[shortlived] Markdown 图片自取失败，维持原外链: %v err=%v", mediaPath, err)
+		// 自取失败时先退回直链解析（只读响应头，成本低）：解析出的直链仍可交给平台直传
+		directURL, resolveErr := resolveShortLivedURL(mediaPath)
+		if resolveErr == nil {
+			mylog.Printf("[shortlived] Markdown 图片自取失败，改用直链: %v err=%v", mediaPath, err)
+			return directURL, true
+		}
+		mylog.Printf("[shortlived] Markdown 图片自取与直链解析均失败，维持原外链: %v err=%v resolveErr=%v", mediaPath, err, resolveErr)
 		return "", false
 	}
+	// ① 素材链：平台持久引用，不依赖外链能被 QQ 拉取（短签名直链同样会被平台拒绝）
+	if ref, ok := uploadImageBytesToMediaStore(apiv2, data, "shortlived"); ok {
+		return ref, true
+	}
+	// ② 兜底一：直链解析（只读响应头，成本低）
+	if directURL, err := resolveShortLivedURL(mediaPath); err == nil {
+		mylog.Printf("[shortlived] 素材链不可用，Markdown 图片改用直链: %s -> %s", mediaPath, directURL)
+		return directURL, true
+	} else {
+		mylog.Printf("[shortlived] 素材链与直链解析均不可用，回退既有外链上传: %v err=%v", mediaPath, err)
+	}
+	// ③ 兜底二：既有"上传外链"链路（含短链再解析）
 	return uploadImageBytesToPublicURL(apiv2, data)
 }
 
-// uploadImageBytesToPublicURL 内存字节走既有外链上传流程（base64 → UploadBase64ImageToServer），
-// 与 ResolveMarkdownImages 本地文件分支同一条链，产出本仓库形态的外链。
+// uploadImageBytesToPublicURL 自取字节走既有外链上传流程（Markdown / keyboard 的兜底路径）：
+// 魔数门禁 / 空外链守卫 / 短链再解析这三条规则与本地图片分支共用 uploadBytesToPublicURL，
+// 这里只固定两处差异——自取字节必须先过魔数门禁，且不做素材链升级（素材链已在上游试过）。
 // 任一步失败返回 ("", false)，调用方维持原 URL（降级语义）。
 func uploadImageBytesToPublicURL(apiv2 openapi.OpenAPI, data []byte) (string, bool) {
-	// 上传前格式嗅探：魔数不是受支持的图片格式就不进上传链（防被污染的外链回非图字节）
-	if sniffImageFormat(data) == "" {
-		mylog.Printf("[shortlived] 自取内容不是受支持的图片格式（仅 png/jpeg/gif/webp），维持原外链: size=%d", len(data))
-		return "", false
-	}
-	base64Encoded := base64.StdEncoding.EncodeToString(data)
-	cdnURL, _, _, err := markdownImageUpload(base64Encoded, apiv2)
-	if err != nil {
-		mylog.Printf("[shortlived] 自取图片走本地上传流程失败，维持原外链: size=%d err=%v", len(data), err)
-		return "", false
-	}
-	if cdnURL == "" {
-		mylog.Printf("[shortlived] 本地上传流程返回空外链，维持原外链: size=%d", len(data))
-		return "", false
-	}
-	if isShortLivedImageURL(cdnURL) {
-		// 上传链自身优先返回解析后的 302 直链，本地公网 URL 只是解析失败后的次级回退；
-		// 仍回短签名域说明该 provider 未纳入上传链的直链解析——降级路径内再解析一次，
-		// 成功就采纳直链，失败才拒绝替换（维持接近过期但可用的原外链并留痕）。
-		if directURL, err := resolveShortLivedURL(cdnURL); err == nil {
-			mylog.Printf("[shortlived] 降级路径内层直链解析成功，采纳: %s -> %s", cdnURL, directURL)
-			return directURL, true
-		} else {
-			mylog.Printf("[shortlived] 上传流程仍回短签名外链且直链解析失败，拒绝替换并维持原外链: size=%d url=%s err=%v", len(data), cdnURL, err)
-			return "", false
-		}
-	}
-	mylog.Printf("[shortlived] 图片已自取转传为外链: size=%d url=%s", len(data), cdnURL)
-	return cdnURL, true
+	return uploadBytesToPublicURL(apiv2, data, true, "")
 }
 
-// sniffImageFormat 按魔数嗅探图片格式，仅认 png/jpeg/gif/webp 四种；
+// sniffImageFormat 按魔数嗅探图片扩展名，仅认 png/jpeg/gif/webp 四种；
 // 无法识别（含 text/html 等被污染外链的响应体）返回空串，由调用方拒绝进上传链。
-// main 无 Refactor 的素材链嗅探函数（sniffMediaImageFormat 属素材链），
-// 这里以 http.DetectContentType 实现同口径的最小判定。
+// 判定表与素材链共用 sniffMediaImageFormat，避免同一张魔数表写两遍。
 func sniffImageFormat(data []byte) string {
-	switch http.DetectContentType(data) {
-	case "image/png":
-		return "png"
-	case "image/jpeg":
-		return "jpg"
-	case "image/gif":
-		return "gif"
-	case "image/webp":
-		return "webp"
-	}
-	return ""
+	_, ext := sniffMediaImageFormat(data)
+	return ext
 }
