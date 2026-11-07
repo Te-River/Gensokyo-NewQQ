@@ -30,6 +30,14 @@ var (
 	urlsMutex       sync.Mutex
 )
 
+// 图片出站上传链的注入缝（供离线单测替换，生产即各自原实现）：
+// oss_type 读取、图床上传、本地公网 URL 上传。
+var (
+	getOssType          = config.GetOssType
+	uploadProvider      = imagehosting.UploadProvider
+	localUploadBehavior = originalUploadBehavior
+)
+
 // createAndUploadMediaMessage 创建并上传媒体消息
 func CreateAndUploadMediaMessage(ctx context.Context, base64EncodedData, eventID string, fileType uint64, srvSendMsg bool, content string, groupID string, messageID string, msgseq int, apiv2 openapi.OpenAPI) (*dto.MessageToCreate, error) {
 
@@ -174,10 +182,10 @@ func UploadBase64ImageToServer(base64Image string, apiv2 openapi.OpenAPI) (strin
 
 	var picURL string
 	var err error
-	extraPicAuditingType := config.GetOssType()
+	extraPicAuditingType := getOssType()
 	switch extraPicAuditingType {
 	case config.OssTypeLocal:
-		picURL, err = originalUploadBehavior(base64Image)
+		picURL, err = localUploadBehavior(base64Image)
 	case config.OssTypeTencent:
 		picURL, err = oss.UploadAndAuditImage(base64Image) // 腾讯
 	case config.OssTypeBaidu:
@@ -187,12 +195,22 @@ func UploadBase64ImageToServer(base64Image string, apiv2 openapi.OpenAPI) (strin
 	case config.OssTypeCOS, config.OssTypeBilibili, config.OssTypeQQChannel,
 		config.OssTypeChatGLM, config.OssTypeUkaka, config.OssTypeXingye, config.OssTypeNature:
 		provider := config.GetOssTypeName(extraPicAuditingType)
-		picURL, err = imagehosting.UploadProvider(provider, imageBytes, "image.png")
+		picURL, err = uploadProvider(provider, imageBytes, "image.png")
 	default:
 		return "", 0, 0, errors.New("invalid oss_type")
 	}
 	if err != nil {
 		return "", 0, 0, err
+	}
+
+	// ChatGLM 等图床返回的是短签名外链（约 30 分钟有效），写进 Markdown/卡片等出站字段后
+	// QQ 转存失败或用户查看时已过期，图片不显示；回退到 oss_type=0 的本地公网 URL 链。
+	if imagehosting.IsShortLivedImageURL(picURL) {
+		mylog.Printf("图床 provider=%s 返回短签名外链，不能用于出站，回退本地公网 URL: %s", config.GetOssTypeName(extraPicAuditingType), picURL)
+		picURL, err = localUploadBehavior(base64Image)
+		if err != nil {
+			return "", 0, 0, fmt.Errorf("短签名外链回退本地上传失败: %w", err)
+		}
 	}
 
 	// 本地/云OSS 上传后通过 URL 获取尺寸；imagehosting 后端可直接从 bytes 获取
@@ -214,7 +232,7 @@ func UploadBase64ImageToServer(base64Image string, apiv2 openapi.OpenAPI) (strin
 // UploadBase64RecordToServer 将base64语音转换成公开URL
 // oss_type 只影响图片上传；语音仍走本地服务器或原有云 OSS（1~3）
 func UploadBase64RecordToServer(base64Record string) (string, error) {
-	extraPicAuditingType := config.GetOssType()
+	extraPicAuditingType := getOssType()
 
 	switch extraPicAuditingType {
 	case config.OssTypeTencent, config.OssTypeBaidu, config.OssTypeAliyun:

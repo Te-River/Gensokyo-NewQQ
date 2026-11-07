@@ -317,6 +317,20 @@ func TestUploadImageBytesToPublicURLEmptyResult(t *testing.T) {
 	}
 }
 
+// TestUploadImageBytesToPublicURLRejectsShortLivedResult 上传链仍回短签名域（例如新增 provider
+// 未纳入回退）时必须拒绝替换：不把短链当稳定外链写进 Markdown，调用方维持原 URL。
+func TestUploadImageBytesToPublicURLRejectsShortLivedResult(t *testing.T) {
+	const shortURL = "https://t1.chatglm.cn/file/x.png?expired_at=1&sign=a"
+	seam := &slUploadSeam{wantURL: shortURL}
+	withShortLivedUploadSeam(t, seam)
+	if url, ok := uploadImageBytesToPublicURL(&slMockAPI{}, slPNG()); ok || url != "" {
+		t.Fatalf("上传链回短签名外链时必须拒绝替换: url=%q ok=%v", url, ok)
+	}
+	if len(seam.gotBase64) != 1 {
+		t.Fatalf("应恰好调用一次上传流程，实际 %d", len(seam.gotBase64))
+	}
+}
+
 // TestSelfFetchImageURLSchemeRestore legacy foundItems 剥离 scheme 形态按消费点默认补全，
 // 带 scheme 的值原样返回（avatar 透传形态）。
 func TestSelfFetchImageURLSchemeRestore(t *testing.T) {
