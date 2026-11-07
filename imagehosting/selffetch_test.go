@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // allowAllGuard 放行全部目标：以下用例只验自取链本身的行为（两跳跟随、UA、状态码、大小上限）。
@@ -317,4 +318,147 @@ func TestSelfFetchRealMatcherTwoHopIntegration(t *testing.T) {
 // slPNGBytes 带 PNG 魔数的假图字节（离线用例的统一响应体）。
 func slPNGBytes() []byte {
 	return []byte("\x89PNG\r\n\x1a\nselffetch-offline-body")
+}
+
+// TestResolveRedirectURLTwoHopReadsHeadersOnly 短链 302 → 直链 206：返回末跳直链，
+// 且正文未被读取——末跳声明 1MB 正文却只发 1 字节并挂起 2 秒，读正文的实现会卡在
+// EOF 之前（>1.5s），只读响应头的实现立刻返回。
+func TestResolveRedirectURLTwoHopReadsHeadersOnly(t *testing.T) {
+	var signUA, ossUA, ossRange string
+
+	ossSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ossUA = r.Header.Get("User-Agent")
+		ossRange = r.Header.Get("Range")
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Content-Length", "1048576")
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write([]byte{0x89}) // Range 命中的最小响应
+		w.(http.Flusher).Flush()
+		time.Sleep(2 * time.Second) // 读正文的实现会一直等这 1MB，只读头的实现早已返回
+	}))
+	defer ossSrv.Close()
+
+	direct := ossSrv.URL + "/file/signed.png?x-oss-expires=877&sign=oss"
+	signSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		signUA = r.Header.Get("User-Agent")
+		http.Redirect(w, r, direct, http.StatusFound)
+	}))
+	defer signSrv.Close()
+
+	short := signSrv.URL + "/file/abc.png?expired_at=1730000000&sign=glm&ext=png"
+	start := time.Now()
+	got, err := ResolveRedirectURL(short, allowAllGuard)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("解析直链失败: %v", err)
+	}
+	if got != direct {
+		t.Fatalf("必须返回末跳直链: got %q want %q", got, direct)
+	}
+	if elapsed > 1500*time.Millisecond {
+		t.Fatalf("只应读响应头，实际等待了 %v（疑似读了正文）", elapsed)
+	}
+	if ossRange != "bytes=0-0" {
+		t.Errorf("末跳应带 Range: bytes=0-0（只取响应头）: %q", ossRange)
+	}
+	if !strings.HasPrefix(signUA, "Mozilla/") || !strings.HasPrefix(ossUA, "Mozilla/") {
+		t.Errorf("两跳都必须携带浏览器 UA: sign=%q oss=%q", signUA, ossUA)
+	}
+}
+
+// TestResolveRedirectURLNoRedirect 无重定向（短链直接 200）→ 按失败返回，
+// 让调用方走降级链：把同一个短链交回去没有意义。
+func TestResolveRedirectURLNoRedirect(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write(slPNGBytes())
+	}))
+	defer srv.Close()
+
+	if _, err := ResolveRedirectURL(srv.URL+"/file/a.png?sign=x", allowAllGuard); err == nil {
+		t.Fatal("无重定向必须报错")
+	} else if !strings.Contains(err.Error(), "未发生重定向") {
+		t.Fatalf("错误信息需说明无重定向: %v", err)
+	}
+}
+
+// TestResolveRedirectURLStatusError 302 末跳非 2xx（直链 500）→ 按失败返回。
+func TestResolveRedirectURLStatusError(t *testing.T) {
+	badSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer badSrv.Close()
+
+	signSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, badSrv.URL+"/file/signed.png?x-oss-expires=1", http.StatusFound)
+	}))
+	defer signSrv.Close()
+
+	if _, err := ResolveRedirectURL(signSrv.URL+"/file/a.png?sign=x", allowAllGuard); err == nil {
+		t.Fatal("末跳 HTTP 500 必须报错")
+	} else if !strings.Contains(err.Error(), "HTTP 500") {
+		t.Fatalf("错误信息需含末跳状态码: %v", err)
+	}
+}
+
+// TestResolveRedirectURLRejectsPrivateHop 302 把跳转指向被判据拒绝的主机 → 拒绝且不连上去。
+func TestResolveRedirectURLRejectsPrivateHop(t *testing.T) {
+	var hopHit int32
+	hopSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hopHit, 1)
+		w.WriteHeader(http.StatusPartialContent)
+	}))
+	defer hopSrv.Close()
+
+	// 首跳放行（127.0.0.1），重定向目标换成 localhost —— 判据按主机名拒绝，正好命中 302 那一跳。
+	target := strings.Replace(hopSrv.URL, "127.0.0.1", "localhost", 1)
+	signSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target+"/file/signed.png", http.StatusFound)
+	}))
+	defer signSrv.Close()
+
+	_, err := ResolveRedirectURL(signSrv.URL+"/file/a.png?sign=x", rejectHosts("localhost"))
+	if err == nil {
+		t.Fatal("重定向目标为私有/回环地址必须拒绝")
+	}
+	if !strings.Contains(err.Error(), "重定向目标") {
+		t.Fatalf("错误信息需说明是重定向跳被拒: %v", err)
+	}
+	if n := atomic.LoadInt32(&hopHit); n != 0 {
+		t.Fatalf("拒绝后不得连到重定向目标，实际命中 %d 次", n)
+	}
+}
+
+// TestResolveRedirectURLNilGuardRejected 缺 SSRF 判据必须拒绝，不退化成裸请求。
+func TestResolveRedirectURLNilGuardRejected(t *testing.T) {
+	if _, err := ResolveRedirectURL("https://t1.chatglm.cn/a.png", nil); err == nil {
+		t.Fatal("reject 为 nil 必须报错")
+	} else if !strings.Contains(err.Error(), "SSRF") {
+		t.Fatalf("错误信息需说明 SSRF 判据缺失: %v", err)
+	}
+}
+
+// TestResolveRedirectURLHopLimit 跳数上限 5：同址循环也必须在 5 跳内报错。
+func TestResolveRedirectURLHopLimit(t *testing.T) {
+	var hops int32
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&hops, 1)
+		if n > 64 { // 防御：判据失效时不要让测试无限跳
+			w.WriteHeader(http.StatusInsufficientStorage)
+			return
+		}
+		http.Redirect(w, r, srv.URL+"/loop?n="+strconv.Itoa(int(n)), http.StatusFound)
+	}))
+	defer srv.Close()
+
+	_, err := ResolveRedirectURL(srv.URL+"/file/a.png?sign=x", allowAllGuard)
+	if err == nil {
+		t.Fatalf("超过跳数上限必须报错（实际跳了 %d 次）", atomic.LoadInt32(&hops))
+	}
+	if !strings.Contains(err.Error(), "重定向次数超过上限") {
+		t.Fatalf("错误信息需含跳数上限: %v", err)
+	}
+	if n := atomic.LoadInt32(&hops); n > resolveMaxHops {
+		t.Fatalf("跳数必须被限制在 %d 以内，实际 %d", resolveMaxHops, n)
+	}
 }

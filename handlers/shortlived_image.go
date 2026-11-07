@@ -47,6 +47,11 @@ var (
 	// markdownImageUpload 就是 Markdown/keyboard 本地图片分支使用的既有外链上传流程，
 	// 挂成注入缝只为离线单测可替换，不新造上传实现。
 	markdownImageUpload = images.UploadBase64ImageToServer
+	// resolveShortLivedURL 短签名外链 → 302 末跳直链（只读响应头，首跳与每一跳都过
+	// isPrivateOrLoopback；复检点见 imagehosting.ResolveRedirectURL）。
+	resolveShortLivedURL = func(raw string) (string, error) {
+		return imagehosting.ResolveRedirectURL(raw, isPrivateOrLoopback)
+	}
 )
 
 // selfFetchImageURL 还原 legacy foundItems 剥离 scheme 后的完整 URL：
@@ -119,14 +124,22 @@ func trySelfFetchPrivateImage(rawURL, eventid, userid, id string, msgseq int, ap
 	return mtc, true
 }
 
-// selfFetchToStableImageURL Markdown / keyboard 消费点：短签名外链自取字节后，
-// 走本地图片那条既有上传流程重新上传换外链。未命中域名返回 ("", false)（零开销原样透传，
-// 行为与其他域一致）；命中但被 SSRF 判据拒绝、或任一步失败同样返回 ("", false)，
-// 由调用方维持原 URL。
+// selfFetchToStableImageURL Markdown / keyboard 消费点：短签名外链优先解析 302 到最终直链
+//（OSS 预签名，约 15 分钟有效），出站只需 URL，不必下载字节再上传；解析失败再走
+//「自取字节 → 既有上传流程换外链」的降级链。未命中域名返回 ("", false)（零开销原样透传，
+// 行为与其他域一致）；命中但解析与自取转传都失败同样返回 ("", false)，由调用方维持原 URL。
 func selfFetchToStableImageURL(apiv2 openapi.OpenAPI, mediaPath string) (string, bool) {
 	if !isShortLivedImageURL(mediaPath) {
 		return "", false
 	}
+	// ① 解析直链：QQ 不跟随短链的 302，直链则可直接拉取；比自取字节少一次下载与一次上传。
+	if directURL, err := resolveShortLivedURL(mediaPath); err == nil {
+		mylog.Printf("[shortlived] Markdown 图片短签名外链已解析为直链: %s -> %s", mediaPath, directURL)
+		return directURL, true
+	} else {
+		mylog.Printf("[shortlived] Markdown 图片直链解析失败，回退自取转传链: %v err=%v", mediaPath, err)
+	}
+	// ② 解析失败 → 自取字节后走既有上传流程换外链。
 	if selfFetchSSRFBlocked(mediaPath) {
 		mylog.Printf("[shortlived] Markdown 图片目标为私有/回环地址，拒绝自取并维持原外链: %v", mediaPath)
 		return "", false
