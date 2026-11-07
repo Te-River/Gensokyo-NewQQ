@@ -161,7 +161,8 @@ func UploadBase64ImageHandlerV2(rateLimiter *RateLimiter, apiv2 openapi.OpenAPI)
 
 		// 根据参数调用不同的处理逻辑
 		if base64Image != "" {
-			imageURL, width, height, err = images.UploadBase64ImageToServer(base64Image, apiv2)
+			// 外部调用方拿到的必须是稳定 URL：短签名图床（ChatGLM 等）在此回退本地公网链。
+			imageURL, width, height, err = images.UploadBase64ImageToServerStable(base64Image, apiv2)
 		} else {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "either base64Image or url is required"})
 			return
