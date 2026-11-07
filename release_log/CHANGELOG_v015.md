@@ -57,4 +57,11 @@
   - 新增回归网 `handlers/zzzz_inbound_at_order_test.go`：8 个场景（@bot+多他人 / @bot 在中间 / 仅 @bot / 反查失败他人 / convertOtherAt=false / removeAt=true·false / is_you 误标发送者 / 全量群消息），逐场景断言 string 输出与 array 段序列完全保位，并校验两路径一致。
 - 修复 legacy 模式下嵌套 `data.data.markdown` 双层包装识别失败导致 md-only 段消息发送空消息（40034030）的问题：`parseMDData` 新增 `unwrapNestedMarkdown`（gjson 安全导航），支持标准 `{"markdown":{"content":...}}`、双包装 `{"markdown":{"markdown":{...}}}`、顶层 `{"content":"..."}` 三种 JSON 形态；群聊 Markdown CQ 码字符串路径 keyboard 类型不匹配一并修复；D2 ForceVerifyImageResource 注入点不受影响。
 - 对齐官方 20260916 字段修正：`/v2/generate_url_link` 请求体字段名由 camelCase `callbackData` 改为官方文档的 `callback_data`（botgo/dto `GenerateURLLinkToCreate` json tag）；此前 callback 透传数据可能静默丢失（链接仍可生成，加好友事件 scene_param 回传断链）。响应侧 `data.url` 本就一致，未改动。注：服务端对旧 camelCase 的容忍度未实测（无法离线验证），以官方文档为权威对齐。
+- 修复 ChatGLM 图床（`oss_type=7`）图片在 QQ 不显示：图床外链带两层短签名（约 30 分钟 + 302 跳转后再叠 15 分钟），直传给 QQ 官方 API 时服务端转存拉取失败、或用户查看时签名已过期。现对 `chatglm.cn` 域（含 `t1.`、`pfiles.` 等子域，按 host 边界匹配，`evil-chatglm.cn.example.com` 这类拼接不会误判）外链改为仓库内自取转传：
+  - **富媒体**（`url_image`/`url_images`，群聊与单聊）：自取字节后走既有本地字节上传链（`images.CreateAndUploadMediaMessage`/`CreateAndUploadMediaMessagePrivate`，≤5,000,000 `file_data` 直传、超限自动分片），不再把短签名外链交给 QQ。
+  - **Markdown / keyboard** 外链：自取字节后复用本地图片那条既有上传流程（`images.UploadBase64ImageToServer`）换稳定外链；当前图床本身就是短签名域时，换到的是重新签发的新链接（原链接已更接近过期，记 warn 后仍替换）。
+  - **SSRF 防护**：入口先过 `isPrivateOrLoopback`，首跳与每一跳重定向都复检（被污染的图床域名可把 302 指向 `169.254.169.254` 等内网地址，响应字节还会被上传成可见图片）；重定向显式限 10 跳、总超时 30s、响应上限 20MB、带浏览器 UA。
+  - **降级语义**：自取或上传任一步失败，或响应体魔数不是 png/jpeg/gif/webp → 记 warn 后维持原外链直传（不比现状差，不阻断发送）。legacy 媒体链路中自取返回的 `MessageToCreate` 由既有分支接住，图文混合仍是一条消息、一次上传。
+  - 新增 `imagehosting/selffetch.go`（自取 + 域名判定 + SSRF 判据注入）与 `handlers/shortlived_image.go`（三处消费点入口，含格式嗅探与降级），回归网见 `imagehosting/selffetch_test.go`、`handlers/shortlived_image_test.go`。
+  - 附注：同期实测 ukaka、星野图床同样出现外链失效，属图床侧现状，未纳入本次修复。
 

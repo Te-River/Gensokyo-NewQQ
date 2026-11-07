@@ -1172,6 +1172,11 @@ func generateGroupMessage(id string, eventid string, foundItems map[string][]str
 		}
 		return messageToCreate
 	} else if imageURLs, ok := foundItems["url_image"]; ok && len(imageURLs) > 0 {
+		// 短签名外链（ChatGLM 等图床）：直传给 QQ 会因转存/查看时签名过期不显示，
+		// 这里自取字节走本地字节上传链（≤5,000,000 file_data 直传、超限自动分片），失败则维持原逻辑。
+		if mtc, handled := trySelfFetchGroupImage(selfFetchImageURL(imageURLs[0], "http"), eventid, groupid, id, msgseq, apiv2); handled {
+			return mtc
+		}
 		var newpiclink string
 		if config.GetUrlPicTransfer() {
 			// 从URL下载图片
@@ -1234,6 +1239,10 @@ func generateGroupMessage(id string, eventid string, foundItems map[string][]str
 			SrvSendMsg: false,
 		}
 	} else if imageURLs, ok := foundItems["url_images"]; ok && len(imageURLs) > 0 {
+		// 短签名外链（ChatGLM 等图床）：同 url_image 分支，自取字节走本地字节上传链，失败维持原逻辑。
+		if mtc, handled := trySelfFetchGroupImage(selfFetchImageURL(imageURLs[0], "https"), eventid, groupid, id, msgseq, apiv2); handled {
+			return mtc
+		}
 		var newpiclink string
 		if config.GetUrlPicTransfer() {
 			// 从URL下载图片
@@ -1891,6 +1900,11 @@ func generatePrivateMessage(id string, eventid string, foundItems map[string][]s
 		}
 		return messageToCreate
 	} else if imageURLs, ok := foundItems["url_image"]; ok && len(imageURLs) > 0 {
+		// 短签名外链（ChatGLM 等图床）：直传给 QQ 会因转存/查看时签名过期不显示，
+		// 这里自取字节走本地字节上传链（≤5,000,000 file_data 直传、超限自动分片），失败则维持原逻辑。
+		if mtc, handled := trySelfFetchPrivateImage(selfFetchImageURL(imageURLs[0], "http"), eventid, userid, id, msgseq, apiv2); handled {
+			return mtc
+		}
 		var newpiclink string
 		if config.GetUrlPicTransfer() {
 			// 从URL下载图片
@@ -1953,6 +1967,10 @@ func generatePrivateMessage(id string, eventid string, foundItems map[string][]s
 			SrvSendMsg: false,
 		}
 	} else if imageURLs, ok := foundItems["url_images"]; ok && len(imageURLs) > 0 {
+		// 短签名外链（ChatGLM 等图床）：同 url_image 分支，自取字节走本地字节上传链，失败维持原逻辑。
+		if mtc, handled := trySelfFetchPrivateImage(selfFetchImageURL(imageURLs[0], "https"), eventid, userid, id, msgseq, apiv2); handled {
+			return mtc
+		}
 		var newpiclink string
 		if config.GetUrlPicTransfer() {
 			// 从URL下载图片

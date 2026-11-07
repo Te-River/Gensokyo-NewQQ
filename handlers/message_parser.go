@@ -2613,6 +2613,10 @@ func resolveMarkdownMediaReferences(content string, resolve func(path string) (s
 func ResolveMarkdownImages(content string, apiv2 openapi.OpenAPI) string {
 	return resolveMarkdownMediaReferences(content, func(mediaPath string) (string, bool) {
 		if strings.HasPrefix(mediaPath, "http://") || strings.HasPrefix(mediaPath, "https://") {
+			// 短签名外链（ChatGLM 图床等）：直传给 QQ 会很快过期，自取字节后走本地图片那条既有上传流程
+			if stableURL, ok := selfFetchToStableImageURL(apiv2, mediaPath); ok {
+				return stableURL, true
+			}
 			return "", false
 		}
 		if strings.HasPrefix(mediaPath, "data:") {
@@ -2658,6 +2662,10 @@ func ResolveKeyboardImages(kb *keyboard.MessageKeyboard, apiv2 openapi.OpenAPI) 
 			if btn.RenderData.Label != "" {
 				btn.RenderData.Label = resolveMarkdownMediaReferences(btn.RenderData.Label, func(mediaPath string) (string, bool) {
 					if strings.HasPrefix(mediaPath, "http://") || strings.HasPrefix(mediaPath, "https://") {
+						// 短签名外链（ChatGLM 图床等）：同 Markdown 口径，自取字节后走本地图片那条既有上传流程
+						if stableURL, ok := selfFetchToStableImageURL(apiv2, mediaPath); ok {
+							return stableURL, true
+						}
 						return "", false
 					}
 					if strings.HasPrefix(mediaPath, "data:") {
@@ -2687,6 +2695,10 @@ func ResolveKeyboardImages(kb *keyboard.MessageKeyboard, apiv2 openapi.OpenAPI) 
 			if btn.RenderData.VisitedLabel != "" {
 				btn.RenderData.VisitedLabel = resolveMarkdownMediaReferences(btn.RenderData.VisitedLabel, func(mediaPath string) (string, bool) {
 					if strings.HasPrefix(mediaPath, "http://") || strings.HasPrefix(mediaPath, "https://") {
+						// 短签名外链（ChatGLM 图床等）：同 Markdown 口径，自取字节后走本地图片那条既有上传流程
+						if stableURL, ok := selfFetchToStableImageURL(apiv2, mediaPath); ok {
+							return stableURL, true
+						}
 						return "", false
 					}
 					if strings.HasPrefix(mediaPath, "data:") {
