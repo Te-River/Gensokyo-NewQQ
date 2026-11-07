@@ -2787,9 +2787,14 @@ func resolveMarkdownMediaReferences(content string, resolve func(path string) (s
 // ResolveMarkdownImages 处理 Markdown 内容中的 ![](path) 图片、[link](path) 和 HTML img 标签
 // - 本地文件路径（file:// 或绝对路径）→ 上传到 QQ CDN，替换为 CDN URL
 // - HTTP(S) URL → 直接保留
+//   （短签名域（ChatGLM 图床等）→ 自取字节后走上面那条本地上传流程换外链，失败维持原外链）
 func ResolveMarkdownImages(content string, apiv2 openapi.OpenAPI) string {
 	return resolveMarkdownMediaReferences(content, func(mediaPath string) (string, bool) {
 		if strings.HasPrefix(mediaPath, "http://") || strings.HasPrefix(mediaPath, "https://") {
+			// 短签名外链（ChatGLM 图床等）：直传给 QQ 会很快过期，自取字节后走本地图片那条既有上传流程
+			if stableURL, ok := selfFetchToStableImageURL(apiv2, mediaPath); ok {
+				return stableURL, true
+			}
 			return "", false
 		}
 		if strings.HasPrefix(mediaPath, "data:") {
@@ -2820,6 +2825,7 @@ func ResolveMarkdownImages(content string, apiv2 openapi.OpenAPI) string {
 
 // ResolveKeyboardImages 遍历 keyboard 中的所有按钮，将 render_data.label 和
 // render_data.visited_label 中的本地图片路径上传到 CDN 并替换为 URL。
+// 短签名域（ChatGLM 图床等）外链同样自取转传，口径与 ResolveMarkdownImages 一致。
 func ResolveKeyboardImages(kb *keyboard.MessageKeyboard, apiv2 openapi.OpenAPI) {
 	if kb == nil || kb.Content == nil {
 		return
@@ -2835,6 +2841,10 @@ func ResolveKeyboardImages(kb *keyboard.MessageKeyboard, apiv2 openapi.OpenAPI) 
 			if btn.RenderData.Label != "" {
 				btn.RenderData.Label = resolveMarkdownMediaReferences(btn.RenderData.Label, func(mediaPath string) (string, bool) {
 					if strings.HasPrefix(mediaPath, "http://") || strings.HasPrefix(mediaPath, "https://") {
+						// 短签名外链（ChatGLM 图床等）：同 Markdown 口径，自取字节后走本地图片那条既有上传流程
+						if stableURL, ok := selfFetchToStableImageURL(apiv2, mediaPath); ok {
+							return stableURL, true
+						}
 						return "", false
 					}
 					if strings.HasPrefix(mediaPath, "data:") {
@@ -2864,6 +2874,10 @@ func ResolveKeyboardImages(kb *keyboard.MessageKeyboard, apiv2 openapi.OpenAPI) 
 			if btn.RenderData.VisitedLabel != "" {
 				btn.RenderData.VisitedLabel = resolveMarkdownMediaReferences(btn.RenderData.VisitedLabel, func(mediaPath string) (string, bool) {
 					if strings.HasPrefix(mediaPath, "http://") || strings.HasPrefix(mediaPath, "https://") {
+						// 短签名外链（ChatGLM 图床等）：同 Markdown 口径，自取字节后走本地图片那条既有上传流程
+						if stableURL, ok := selfFetchToStableImageURL(apiv2, mediaPath); ok {
+							return stableURL, true
+						}
 						return "", false
 					}
 					if strings.HasPrefix(mediaPath, "data:") {

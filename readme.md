@@ -429,6 +429,8 @@ settings:
   # oss_type 仅控制图片上传路径；语音上传不受此选项影响（仍走本机或 1~3 云OSS）
   # 0=本机上传 1=腾讯云COS(旧t_COS_*) 2=百度云BOS 3=阿里云OSS 4=腾讯云COS自签(cos.*)
   # 5=Bilibili 6=QQ频道 7=ChatGLM 8=Ukaka 9=星野 10=Nature
+  # ⚠️ 2026-11-07 实测：8=Ukaka、9=星野 上传链路已失效（签名服务器上游凭证断链）；
+  #    7=ChatGLM 上传可用但外链带两层短签名（约30分钟/15分钟），QQ 转存拉取易失败导致图片不显示
   oss_type: 0                         # 请根据需求选择一个，同时只能启用一个
 
   #── 腾讯云配置 ──────────────────────────────────────
@@ -462,9 +464,9 @@ settings:
   qq_channel:                         # QQ频道图床（oss_type=6）
     channel_id: ""                  # 上传图片的子频道 ID
     token: ""                       # Authorization, 如 "QQBot xxx.yyy"
-  chatglm: {}                         # 智谱免费图床（oss_type=7）
-  ukaka: {}                           # Ukaka 免费图床（oss_type=8）
-  xingye: {}                          # 星野免费图床（oss_type=9）
+  chatglm: {}                         # 智谱免费图床（oss_type=7；上传可用，外链约30分钟过期，直链给 QQ 易不显示——本仓库已改为自动自取转传）
+  ukaka: {}                           # Ukaka 免费图床（oss_type=8；❌2026-11-07 实测失效：签名服务器不再返回上传 token）
+  xingye: {}                          # 星野免费图床（oss_type=9；❌2026-11-07 实测失效：预签名与 OSS 不匹配 403）
   nature: {}                          # Nature 免费图床（oss_type=10）
   ```
 
