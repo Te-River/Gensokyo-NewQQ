@@ -12,8 +12,8 @@ package handlers
 // 素材引用是平台托管的可复用引用（滑动有效期 90 天，每次被消息引用自动顺延），发送后
 // 不删除，同一张图可被多条消息复用。qqbot-media:// 只适用于 Markdown/keyboard：卡片
 // pic_url、/uploadpic、/uploadpicv2 等必须公网 URL 的路径维持既有外链上传，不走素材链。
-// 配额（单机器人 100 张）只在上传遇到 40035007 时清理：按 expires_at 升序删 20 张（最久
-// 未被引用的先删，刚被引用的图因滑动过期自动顺延沉底，无需时间保护窗），再重试一次；仍失败才降级外链。
+// 配额（单机器人 100 张）只在上传遇到 40035007 时清理：按 expires_at 升序取最旧 20 张、
+// 5 路有界并发删除（#57；最久未被引用的先删，刚被引用的图因滑动过期自动顺延沉底，无需时间保护窗），再重试一次；仍失败才降级外链。
 //
 // 本文件不注册 OneBot action：当前只有 Markdown/keyboard 图片消费点（message_parser.go、
 // shortlived_image.go）调用素材链；将来若要暴露 upload_media_image，复用 mediaImageUploadFlow 即可。
@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hoshinonyaruko/gensokyo/config"
@@ -45,6 +46,10 @@ const maxMediaImageBytes = 10 * 1000 * 1000
 // mediaQuotaPurgeCount 配额触顶（40035007）时一次清理的素材数量：一次删够余量，
 // 避免每发一张图都要再清一轮。
 const mediaQuotaPurgeCount = 20
+
+// mediaQuotaPurgeConcurrency 清理删除的有界并发路数（#57）：20 张 × 单次 ~300ms 的串行
+// 尖峰约 6 秒，5 路并发压到约 1.2 秒；再高对官方接口有触发频控的风险，够用即止。
+const mediaQuotaPurgeConcurrency = 5
 
 // mediaImageErrorCodes 官方 400350xx 错误码 → 中文可读说明（原文见素材管理页「错误码」表）
 var mediaImageErrorCodes = []struct {
@@ -374,32 +379,68 @@ func mediaImageFlowError(err error) error {
 // 保护窗；官方说明删除只影响后续新引用、已发送消息不受影响（平台已转存副本），这是删除
 // 激进度可接受的依据。返回 nil 表示至少释放了一张（成功删除、或 40035008 确认该图本就不
 // 存在——视为配额已释放，同样计入重试条件），否则返回原因（列表为空/全部删除失败，调用方直接降级）。
+// 删除为 mediaQuotaPurgeConcurrency 路有界并发（#57，消除 20 张串行删除的 ~6 秒尖峰）：
+// 候选集先从排序结果定满再并发，「删的是最久未引用的 20 张」不因调度漂移；计数与
+// 40035008 语义、deleted==0 的错误文案均与串行版逐字一致。
 func purgeMediaImages(ctx context.Context, apiv2 openapi.OpenAPI, source string) error {
 	images, err := listMediaImagesByExpiresAt(ctx, apiv2)
 	if err != nil {
 		return fmt.Errorf("拉取素材列表失败: %w", err)
 	}
-	deleted := 0
+	// 候选集 = 排序结果前 mediaQuotaPurgeCount 张非空 ImageID（先定集合、后并发）
+	candidates := make([]string, 0, mediaQuotaPurgeCount)
 	for _, img := range images {
-		if deleted >= mediaQuotaPurgeCount {
+		if len(candidates) >= mediaQuotaPurgeCount {
 			break
 		}
 		if img.ImageID == "" {
 			continue
 		}
-		if err := apiv2.DeleteMediaImage(ctx, img.ImageID); err != nil {
-			if isMediaImageErrorCode(err, 40035008) {
-				// 官方语义：image_id 本就不存在 → 配额实际已释放，计入 deleted 允许重试，
-				// 否则列表全是陈旧项时 deleted==0 会白白放弃重试、直接降级。
-				mylog.Printf("%s: 素材已不存在（40035008），视为已释放 image_id=%s", source, img.ImageID)
-				deleted++
-				continue
-			}
-			mylog.Printf("%s: 删除旧素材失败 image_id=%s: %v", source, img.ImageID, err)
-			continue
-		}
-		deleted++
+		candidates = append(candidates, img.ImageID)
 	}
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		deleted int
+	)
+	sem := make(chan struct{}, mediaQuotaPurgeConcurrency)
+	for _, id := range candidates {
+		// 信号量获取与取消双路等待：ctx 取消时派发循环与在途 worker 都能即停，不卡死
+		if ctx.Err() != nil {
+			break
+		}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		go func(imageID string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if ctx.Err() != nil { // worker 取任务前再查一次，取消后不再发起删除
+				return
+			}
+			err := apiv2.DeleteMediaImage(ctx, imageID)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				if isMediaImageErrorCode(err, 40035008) {
+					// 官方语义：image_id 本就不存在 → 配额实际已释放，计入 deleted 允许重试，
+					// 否则列表全是陈旧项时 deleted==0 会白白放弃重试、直接降级。
+					mylog.Printf("%s: 素材已不存在（40035008），视为已释放 image_id=%s", source, imageID)
+					deleted++
+					return
+				}
+				mylog.Printf("%s: 删除旧素材失败 image_id=%s: %v", source, imageID, err)
+				return
+			}
+			deleted++
+		}(id)
+	}
+	wg.Wait()
 	if deleted == 0 {
 		return errors.New("素材列表中没有可删除的素材")
 	}

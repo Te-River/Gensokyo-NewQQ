@@ -19,7 +19,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -47,6 +49,8 @@ type mediaStoreMock struct {
 	listCalls  int
 	deletedIDs []string
 
+	deleteHook  func(string) // 删除记录前调用（并发证明用例的 barrier 钩子），其余用例为 nil
+	deleteMu    sync.Mutex   // 配额清理 5 路并发（#57）后，delete 计数与记录必须加锁
 	deleteErr   error // DeleteMediaImage 的注入错误（40035008 陈旧项 / 全部删除失败用例）
 	deleteCalls int
 }
@@ -76,9 +80,41 @@ func (m *mediaStoreMock) ListMediaImages(_ context.Context, _ string) (*dto.Medi
 }
 
 func (m *mediaStoreMock) DeleteMediaImage(_ context.Context, imageID string) error {
+	if m.deleteHook != nil {
+		m.deleteHook(imageID)
+	}
+	m.deleteMu.Lock()
+	defer m.deleteMu.Unlock()
 	m.deleteCalls++
 	m.deletedIDs = append(m.deletedIDs, imageID)
 	return m.deleteErr
+}
+
+// deletedSnapshot 返回删除记录与调用次数的快照（并发写入下断言唯一入口）。
+func (m *mediaStoreMock) deletedSnapshot() (ids []string, calls int) {
+	m.deleteMu.Lock()
+	defer m.deleteMu.Unlock()
+	out := make([]string, len(m.deletedIDs))
+	copy(out, m.deletedIDs)
+	return out, m.deleteCalls
+}
+
+// assertDeletedSet 按集合语义比较删除结果（#57：并发清理后删除顺序不再有保证，
+// 「删的是哪 20 张」的排序语义由候选集先行确定保证，断言两侧排序后逐一比较）。
+func assertDeletedSet(t *testing.T, label string, got, want []string) {
+	t.Helper()
+	gotSorted := append([]string(nil), got...)
+	wantSorted := append([]string(nil), want...)
+	sort.Strings(gotSorted)
+	sort.Strings(wantSorted)
+	if len(gotSorted) != len(wantSorted) {
+		t.Fatalf("%s: 应删除 %d 张，实际 %d: %v", label, len(wantSorted), len(gotSorted), got)
+	}
+	for i := range gotSorted {
+		if gotSorted[i] != wantSorted[i] {
+			t.Fatalf("%s: 删除集合不符（第 %d 位排序后 %s ≠ %s）: got=%v want=%v", label, i+1, gotSorted[i], wantSorted[i], got, want)
+		}
+	}
 }
 
 func (m *mediaStoreMock) CompleteMediaImage(_ context.Context, req *dto.MediaImageCompleteRequest) (*dto.MediaImageCompleteResponse, error) {
@@ -365,17 +401,21 @@ func TestMediaImageUploadFlowQuotaPurgeDeletesSoonestExpiringAndRetries(t *testi
 	if mock.listCalls != 1 {
 		t.Fatalf("应拉取一次素材列表，实际 %d 次", mock.listCalls)
 	}
-	if len(mock.deletedIDs) != mediaQuotaPurgeCount {
-		t.Fatalf("应清理 %d 张旧素材，实际 %d: %v", mediaQuotaPurgeCount, len(mock.deletedIDs), mock.deletedIDs)
+	deleted, _ := mock.deletedSnapshot()
+	if len(deleted) != mediaQuotaPurgeCount {
+		t.Fatalf("应清理 %d 张旧素材，实际 %d: %v", mediaQuotaPurgeCount, len(deleted), deleted)
 	}
-	for _, id := range mock.deletedIDs {
+	for _, id := range deleted {
 		if id == "recent" {
 			t.Fatal("刚被引用（expires_at 最远）的素材不得删除")
 		}
 	}
-	if mock.deletedIDs[0] != "old-24" {
-		t.Fatalf("应从 expires_at 最旧的开始删，首个删除项 %q", mock.deletedIDs[0])
+	// 并发清理（#57）后删除顺序不再保证：断言集合恰为 expires_at 最旧的 20 张（old-05~old-24）
+	want := make([]string, 0, mediaQuotaPurgeCount)
+	for i := 5; i <= 24; i++ {
+		want = append(want, fmt.Sprintf("old-%02d", i))
 	}
+	assertDeletedSet(t, "配额清理集合", deleted, want)
 }
 
 // TestMediaImageUploadFlowQuotaPurgeAllRecentStillEvicts 回归防线：100 张全部创建于最近
@@ -409,15 +449,16 @@ func TestMediaImageUploadFlowQuotaPurgeAllRecentStillEvicts(t *testing.T) {
 	if mock.prepareCalls != 2 {
 		t.Fatalf("配额超限应重试一次 prepare，实际调用 %d 次", mock.prepareCalls)
 	}
-	if len(mock.deletedIDs) != mediaQuotaPurgeCount {
-		t.Fatalf("应清理 %d 张素材，实际 %d: %v", mediaQuotaPurgeCount, len(mock.deletedIDs), mock.deletedIDs)
+	deleted, _ := mock.deletedSnapshot()
+	if len(deleted) != mediaQuotaPurgeCount {
+		t.Fatalf("应清理 %d 张素材，实际 %d: %v", mediaQuotaPurgeCount, len(deleted), deleted)
 	}
-	// 删的必须恰是 expires_at 最旧的 20 张（evict-000~evict-019），且按升序删除
-	for i, id := range mock.deletedIDs {
-		if want := fmt.Sprintf("evict-%03d", i); id != want {
-			t.Fatalf("第 %d 个删除项应为 %s，实际 %q", i+1, want, id)
-		}
+	// 删的必须恰是 expires_at 最旧的 20 张（evict-000~evict-019）；并发下用集合语义断言
+	want := make([]string, 0, mediaQuotaPurgeCount)
+	for i := 0; i < mediaQuotaPurgeCount; i++ {
+		want = append(want, fmt.Sprintf("evict-%03d", i))
 	}
+	assertDeletedSet(t, "全近期场景清理集合", deleted, want)
 }
 
 // TestResolveLocalImageMediaQuotaPurgeSparesRecentAndFallsBack 40035007：清理删 expires_at
@@ -449,10 +490,11 @@ func TestResolveLocalImageMediaQuotaPurgeSparesRecentAndFallsBack(t *testing.T) 
 	if !ok || ref != "https://cdn.example.com/quota-purged.png" {
 		t.Fatalf("清理后仍超限应降级外链: ref=%q ok=%v", ref, ok)
 	}
-	if len(mock.deletedIDs) != mediaQuotaPurgeCount {
-		t.Fatalf("应清理 %d 张 expires_at 最旧的素材，实际 %d: %v", mediaQuotaPurgeCount, len(mock.deletedIDs), mock.deletedIDs)
+	deleted, _ := mock.deletedSnapshot()
+	if len(deleted) != mediaQuotaPurgeCount {
+		t.Fatalf("应清理 %d 张 expires_at 最旧的素材，实际 %d: %v", mediaQuotaPurgeCount, len(deleted), deleted)
 	}
-	for _, id := range mock.deletedIDs {
+	for _, id := range deleted {
 		if id == "recent" {
 			t.Fatal("刚被引用（expires_at 最远）的素材不得删除")
 		}
@@ -480,8 +522,9 @@ func TestResolveLocalImageMediaQuotaPurgeEmptyListFallsBackWithoutRetry(t *testi
 	if !ok || ref != "https://cdn.example.com/quota-empty.png" {
 		t.Fatalf("无可删除素材应降级外链: ref=%q ok=%v", ref, ok)
 	}
-	if len(mock.deletedIDs) != 0 {
-		t.Fatalf("列表为空不应删除任何素材: %v", mock.deletedIDs)
+	deleted, _ := mock.deletedSnapshot()
+	if len(deleted) != 0 {
+		t.Fatalf("列表为空不应删除任何素材: %v", deleted)
 	}
 	if mock.prepareCalls != 1 {
 		t.Fatalf("没有删到素材不应重试 prepare，实际 %d 次", mock.prepareCalls)
@@ -497,16 +540,10 @@ func TestMediaImageUploadFlowQuotaPurgeTreatsZeroExpiryAsNewest(t *testing.T) {
 	content := slPNG()
 	now := time.Now()
 
-	// 每个场景独立 mock；删除序列必须与期望逐一相等
+	// 每个场景独立 mock；删除集合必须与期望恰好相等（#57 并发清理下顺序不再保证，用集合语义）
 	assertSeq := func(label string, mock *mediaStoreMock, want []string) {
-		if len(mock.deletedIDs) != len(want) {
-			t.Fatalf("%s: 应删除 %d 张，实际 %d: %v", label, len(want), len(mock.deletedIDs), mock.deletedIDs)
-		}
-		for i, id := range mock.deletedIDs {
-			if id != want[i] {
-				t.Fatalf("%s: 第 %d 个删除项应为 %s，实际 %q", label, i+1, want[i], id)
-			}
-		}
+		deleted, _ := mock.deletedSnapshot()
+		assertDeletedSet(t, label, deleted, want)
 	}
 	wantIDs := func(prefix string, n int) []string {
 		out := make([]string, 0, n)
@@ -610,14 +647,16 @@ func TestMediaImageUploadFlowQuotaPurgeSortsAcrossPages(t *testing.T) {
 	if mock.listCalls != 2 {
 		t.Fatalf("应分页拉取 2 页列表，实际 %d 次", mock.listCalls)
 	}
-	if len(mock.deletedIDs) != mediaQuotaPurgeCount {
-		t.Fatalf("应清理 %d 张，实际 %d: %v", mediaQuotaPurgeCount, len(mock.deletedIDs), mock.deletedIDs)
+	deleted, _ := mock.deletedSnapshot()
+	if len(deleted) != mediaQuotaPurgeCount {
+		t.Fatalf("应清理 %d 张，实际 %d: %v", mediaQuotaPurgeCount, len(deleted), deleted)
 	}
-	for i, id := range mock.deletedIDs {
-		if want := fmt.Sprintf("g-%03d", i); id != want {
-			t.Fatalf("第 %d 个删除项应为 %s（全局 expires_at 升序），实际 %q", i+1, want, id)
-		}
+	// 全局 expires_at 最旧的 20 张（g-000~g-019）；并发下用集合语义断言
+	want := make([]string, 0, mediaQuotaPurgeCount)
+	for i := 0; i < mediaQuotaPurgeCount; i++ {
+		want = append(want, fmt.Sprintf("g-%03d", i))
 	}
+	assertDeletedSet(t, "跨页清理集合", deleted, want)
 }
 
 // TestMediaImageUploadFlowQuotaPurgeAllDeletesFailNoRetry 删除全部失败（非 40035008 错误）：
@@ -645,7 +684,7 @@ func TestMediaImageUploadFlowQuotaPurgeAllDeletesFailNoRetry(t *testing.T) {
 	if mock.prepareCalls != 1 {
 		t.Fatalf("没释放到素材不应重试 prepare，实际 %d 次", mock.prepareCalls)
 	}
-	if mock.deleteCalls == 0 {
+	if _, calls := mock.deletedSnapshot(); calls == 0 {
 		t.Fatal("清理应尝试过删除")
 	}
 }
@@ -678,9 +717,78 @@ func TestMediaImageUploadFlowQuotaPurgeStaleListCountsReleasedAndRetries(t *test
 	if mock.prepareCalls != 2 {
 		t.Fatalf("释放计数达标应重试一次 prepare，实际 %d 次", mock.prepareCalls)
 	}
-	if mock.deleteCalls != mediaQuotaPurgeCount {
-		t.Fatalf("计入 40035008 后应释放满 %d 张即停，实际尝试 %d 次", mediaQuotaPurgeCount, mock.deleteCalls)
+	// 并发下 40035008 仍逐项计入 deleted：候选 20 张全部尝试、全部计入 → 触发重试
+	deleted, calls := mock.deletedSnapshot()
+	if calls != mediaQuotaPurgeCount {
+		t.Fatalf("计入 40035008 后应释放满 %d 张即停，实际尝试 %d 次", mediaQuotaPurgeCount, calls)
 	}
+	want := make([]string, 0, mediaQuotaPurgeCount)
+	for i := 5; i <= 24; i++ {
+		want = append(want, fmt.Sprintf("stale-%02d", i))
+	}
+	assertDeletedSet(t, "陈旧项清理集合", deleted, want)
+}
+
+// TestMediaImageUploadFlowQuotaPurgeDeletesConcurrently 并发证明（#57）：mock delete 设
+// mediaQuotaPurgeConcurrency 路 barrier——前 5 个调用必须同时在场才放行；若实现退化为串行，
+// 第 1 个调用独自等待 2 秒兜底超时（防死锁 flake），allArrived 永不关闭，主流程在清理结束后
+// 断言失败。同时校验并发下删除集合仍是 expires_at 最旧的 20 张、刚被引用的图不沾。
+func TestMediaImageUploadFlowQuotaPurgeDeletesConcurrently(t *testing.T) {
+	content := slPNG()
+	mock, _ := newMediaStoreOK(t, content)
+	mock.prepareErrs = []error{errs.New(40035007, "image count limit exceeded")}
+
+	var (
+		bmu        sync.Mutex
+		arrived    int
+		allArrived = make(chan struct{})
+		bonce      sync.Once
+	)
+	mock.deleteHook = func(string) {
+		bmu.Lock()
+		arrived++
+		if arrived >= mediaQuotaPurgeConcurrency {
+			bonce.Do(func() { close(allArrived) })
+		}
+		bmu.Unlock()
+		select {
+		case <-allArrived: // 满 5 路同时在场，一起放行
+		case <-time.After(2 * time.Second): // 串行兜底：单独等待超时后继续，不让用例挂死
+		}
+	}
+
+	now := time.Now()
+	images := []*dto.MediaImage{{
+		ImageID:   "recent",
+		CreatedAt: now.Add(-time.Hour).Unix(),
+		ExpiresAt: now.Add(90 * 24 * time.Hour).Unix(),
+	}}
+	for i := 24; i >= 0; i-- {
+		images = append(images, &dto.MediaImage{
+			ImageID:   fmt.Sprintf("old-%02d", i),
+			CreatedAt: now.Add(-time.Duration(72-i) * time.Hour).Unix(),
+			ExpiresAt: now.Add(-time.Duration(48+i) * time.Hour).Unix(),
+		})
+	}
+	mock.listResp = &dto.MediaImageList{Images: images}
+
+	if _, err := mediaImageUploadFlow(context.Background(), mock, content, "markdown.png", "image/png", "test"); err != nil {
+		t.Fatalf("并发清理后重试应成功: %v", err)
+	}
+	select {
+	case <-allArrived:
+	default:
+		t.Fatalf("未达到 %d 路删除并发（barrier 未同时凑满），有界并发未生效", mediaQuotaPurgeConcurrency)
+	}
+	deleted, calls := mock.deletedSnapshot()
+	if calls != mediaQuotaPurgeCount {
+		t.Fatalf("候选集应恰为 %d 张全部尝试，实际 %d 次", mediaQuotaPurgeCount, calls)
+	}
+	want := make([]string, 0, mediaQuotaPurgeCount)
+	for i := 5; i <= 24; i++ {
+		want = append(want, fmt.Sprintf("old-%02d", i))
+	}
+	assertDeletedSet(t, "并发清理集合", deleted, want)
 }
 
 // TestMediaImageUploadFlowRejectsNonImageBytes 非 png/jpeg/gif/webp 字节不进素材链（防被污染的外链）。
