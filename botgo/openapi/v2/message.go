@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/go-resty/resty/v2"
 	"github.com/tidwall/gjson"
@@ -136,12 +137,17 @@ func (o *openAPIv2) PostMessageMultipart(ctx context.Context, channelID string, 
 }
 
 // 辅助函数：序列化为JSON
+// 关闭 HTML 转义：json.Marshal 默认把 &、<、> 转义成 \u0026/\u003c/\u003e，
+// 带签名的图片 URL 在日志与抓包里会显示成 \u0026 形式、难以与原文核对。
+// 关闭后仍是合法 JSON，解析语义不变。
 func toJSON(obj interface{}) string {
-	bytes, err := json.Marshal(obj)
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(obj); err != nil {
 		return ""
 	}
-	return string(bytes)
+	return strings.TrimRight(buf.String(), "\n")
 }
 
 // PatchMessage 编辑消息
