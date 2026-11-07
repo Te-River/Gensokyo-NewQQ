@@ -1,8 +1,8 @@
 // 短时效签名图床 URL 的仓库内自取
 // ChatGLM（oss_type=7）等图床返回的外链带两层短签名（约 30 分钟 + 跳转后 15 分钟），
 // 直传给 QQ 官方 API 时服务端转存拉取失败、或用户查看时签名已过期，导致图片不显示。
-// 消费点先用 IsShortLivedImageURL 判定域名，再用 FetchBytes 自取字节后走本地字节上传链，
-// 不把短签名外链交给 QQ。
+// 消费点先用 IsShortLivedImageURL 判定域名，再三级处理：ResolveRedirectURL 解析 302 直链
+// → 自取字节走本地公网 URL 上传链 → 原行为，不把短签名外链交给 QQ。
 package imagehosting
 
 import (

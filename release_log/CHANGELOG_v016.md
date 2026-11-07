@@ -92,6 +92,15 @@
 - **描述更新**：`11253` 改为官方措辞「应用无接口访问权限」
 - **双语义说明**：`10004` 在不同接口语义不同（频道/Guild vs 取 token 的"机器人不存在"），以注释说明避免混淆
 
+### ChatGLM 短签名外链在出站前解析 302 直链（2026-11-07）
+
+`oss_type=7`（ChatGLM）图床外链带两层短签名（约 30 分钟 + 302 跳转后再叠 15 分钟），旧行为把短链直接写进 Markdown/卡片等出站字段，QQ 服务端不跟随短链的 302，转存拉取失败或用户查看时签名已过期，图片不显示：
+
+- **修改**：`images/upload_api.go` 的 `UploadBase64ImageToServer` 在返回图床外链前先按 `imagehosting.IsShortLivedImageURL` 判定，命中则用 `imagehosting.ResolveRedirectURL` 解析 302 末跳直链（只读响应头、`Range: bytes=0-0`，首跳与每一跳复检 SSRF）并返回该直链；解析失败（无重定向 / 末跳非 2xx / SSRF 阻止 / 超时）回退 `oss_type=0` 的本地公网 URL 链
+- **修改**：`handlers/shortlived_image.go` 的 Markdown/keyboard 消费点优先走同一条直链解析（省一次下载与一次上传），解析失败才自取字节走既有上传流程；上传流程若仍回短签名外链，降级路径内再解析一次，成功即采纳直链、失败才拒绝替换并维持原外链（不再沿用旧逻辑"直接使用／直接替换为短链"）
+- **影响**：出站字段拿到的是 OSS 预签名直链或本地公网 URL，QQ 可正常拉取；Refactor 分支走 `qqbot-media://` 素材链上传（素材 ID 非外链），不受本修复影响
+- **测试**：`handlers/shortlived_image_test.go` 新增直链解析成功分支与降级路径内层解析采纳用例；`images/upload_api_stable_test.go` 覆盖解析成功/回退本地公网 URL
+
 ---
 
 ## 📝 工程与文档变更
