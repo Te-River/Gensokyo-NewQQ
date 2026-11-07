@@ -178,7 +178,8 @@ Write-Host "Targets : $($targets.Count) platform(s)" -ForegroundColor Gray
 $ldflags = Get-BuildLdflags
 
 Write-Host "`n[deps] Downloading dependencies..." -ForegroundColor Yellow
-go mod tidy
+# 只下载依赖到本地缓存，不改写 go.mod/go.sum（构建不需要 tidy 改写模块文件）
+go mod download
 
 Ensure-WebUIDist
 
