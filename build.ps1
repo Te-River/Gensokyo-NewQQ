@@ -1,4 +1,4 @@
-# Gensokyo build script
+﻿# Gensokyo build script
 # Single target:
 #   .\build.ps1
 #   .\build.ps1 linux amd64
@@ -147,6 +147,13 @@ function Invoke-Upx {
                 continue
             }
             if ($upxOutput) { Write-Host $upxOutput -ForegroundColor Red }
+            # 目标 exe 被运行中的进程占用时 UPX 只报 IOException/Permission denied，
+            # 与真正的压缩失败难以区分：补一段可操作的中文提示，失败语义仍由 throw 保证
+            if ($upxOutput -match 'Permission denied|Access is denied|being used by another process') {
+                Write-Host "目标文件被占用: $output" -ForegroundColor Red
+                Write-Host '  请先停止正在运行的 gensokyo 进程（或关闭占用该 exe 的程序）后重试。' -ForegroundColor Yellow
+                Write-Host '  进程自检: Get-Process gensokyo* | Select-Object Id,Path' -ForegroundColor Yellow
+            }
             throw "UPX failed: $output"
         }
         if ($upxOutput) { Write-Host $upxOutput }
