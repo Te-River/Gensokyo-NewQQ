@@ -882,7 +882,7 @@ fn timestamp_of(value: Option<&Value>) -> i64 {
     }
 }
 
-fn now_unix() -> i64 {
+pub(crate) fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| {

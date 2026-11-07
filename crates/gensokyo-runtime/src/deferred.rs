@@ -83,6 +83,17 @@
 //! `StoreCacheInMemory` 的行号双向映射），后续 `[CQ:reply,id=<虚拟号>]` 才能反查到它；
 //! 回写失败只 `warn`，不改变本次发送结果。
 //!
+//! ## wakeup 终局回推
+//!
+//! 唤醒计划（`SendRequest::wakeup`）过了收件人还原之后的终局——成功，或合成 / 上传 /
+//! 发送任一步失败——都经 [`EventHub`](crate::event_hub::EventHub) 回推一条
+//! `notice_type = c2c_wakeup_resp` 事件（对齐 Go `send_private_msg_wakeup.go` 的
+//! `sendWakeupNotice`：每个终局出口推一次，收件人还原失败的早退不推，Go 同点也不推）。
+//! 一计划一 notice：Go 的逐条消息推送口径由计划切分承担（Rust 多媒体段在合成期即
+//! `1400`，两边实际推送计数一致）。
+//! JSON 逐字段对齐 Go `WakeupResponseNotice`，见 [`publish_wakeup_notice`]；总线未装配
+//! 时静默跳过，回推不影响 API 回执。
+//!
 //! # 错误口径
 //!
 //! 请求侧问题（媒体来源 / 大小 / 类型、reply 映射缺失、不支持的段）返回 [`Error::Protocol`]
@@ -96,8 +107,9 @@ use gensokyo_actions::{
 };
 use gensokyo_core::{Error, Ob11Id, Result};
 use gensokyo_protocol::cqcode;
+use gensokyo_protocol::event::NoticeEvent;
 use gensokyo_protocol::outbound::{InputNotifyPayload, StreamKind, StreamPayload};
-use gensokyo_protocol::{MediaRef, OutboundPlan};
+use gensokyo_protocol::{Event, MediaRef, OutboundPlan};
 use gensokyo_qq::dto::message::{MessageCard, MessageCardContent};
 use gensokyo_qq::dto::{
     FileUpload, InputNotify, Markdown, Media, MessageToCreate, StreamSse, file_type, msg_type,
@@ -106,6 +118,7 @@ use gensokyo_storage::EchoStore;
 use serde_json::Value;
 
 use crate::at_everyone::{self, Reservation};
+use crate::event_hub::EventHub;
 use crate::media::MediaRuntime;
 
 /// handler 响应 `data` 里的 deferred 标记（与 `gensokyo_actions::DEFERRED_FIELD` 同值）。
@@ -124,6 +137,9 @@ pub struct DeferredDeps<'a> {
     pub media: &'a MediaRuntime,
     /// echo 存储：发送成功后回写 `message_id`，`[CQ:reply]` 反查虚拟号也走它。
     pub echo: Option<&'a EchoStore>,
+    /// 事件总线：wakeup 发送到达终局后回推 `c2c_wakeup_resp` notice（对齐 Go
+    /// `sendWakeupNotice`）。未装配时静默跳过，不报错。
+    pub hub: Option<&'a EventHub>,
     /// 合并转发逐条重发之间的间隔（Go 固定 500ms；生产走
     /// [`DEFAULT_FORWARD_SEND_INTERVAL`]，测试可注入 [`Duration::ZERO`] 免真睡，评审 ③）。
     pub forward_send_interval: Duration,
@@ -131,7 +147,9 @@ pub struct DeferredDeps<'a> {
 
 /// 执行一条 deferred 计划，返回上游消息 ID。
 ///
-/// 成功后把 `message_id` 回写 echo（见模块文档「echo 回写」）。
+/// 成功后把 `message_id` 回写 echo（见模块文档「echo 回写」）。`plan.wakeup` 的终局
+/// （成功或失败）另经 `deps.hub` 回推一条 `c2c_wakeup_resp` notice（见
+/// [`publish_wakeup_notice`]）。
 ///
 /// # Errors
 /// 收件人无法反查成 OpenID（[`ActionContext::resolve_send_target`]）、消息含不支持的媒体 /
@@ -145,6 +163,22 @@ pub async fn execute(
     deps: &DeferredDeps<'_>,
 ) -> Result<String> {
     let openid = context.resolve_send_target(&plan.target)?;
+    let result = execute_inner(context, plan, deps, openid.clone()).await;
+    // 唤醒终局回推（对齐 Go `sendWakeupNotice`）：合成 / 上传 / 发送任一步失败都推 failed；
+    // 收件人还原失败的早退不推（Go 该早退同样不推，口径一致）。
+    if plan.wakeup {
+        publish_wakeup_notice(context, deps, &openid, &result);
+    }
+    result
+}
+
+/// [`execute`] 的落体：合成 → 占 @全员 名额 → 发送 → echo 回写。
+async fn execute_inner(
+    context: &ActionContext,
+    plan: &SendRequest,
+    deps: &DeferredDeps<'_>,
+    openid: String,
+) -> Result<String> {
     // 互动召回（Go `send_private_msg_wakeup.go`）：`is_wakeup` 与 `msg_id` / `event_id` 互斥，
     // 回复目标强制不带，正文合成完统一置标记。
     let mut message = if plan.wakeup {
@@ -175,6 +209,66 @@ pub async fn execute(
     };
     record_sent_message(deps.echo, &response.id);
     Ok(response.id)
+}
+
+/// 唤醒终局回推的 `notice_type`（Go `WakeupResponseNotice.NoticeType`）。
+const C2C_WAKEUP_RESP: &str = "c2c_wakeup_resp";
+
+/// 把 wakeup 发送的终局结果回推事件总线（逐字段对齐 Go
+/// `send_private_msg_wakeup.go:sendWakeupNotice`）。
+///
+/// JSON 与 Go `WakeupResponseNotice` 逐键一致：`post_type` / `notice_type` / `user_id`
+/// （恒数字 0，防客户端 unmarshal 炸）/ `time` / `self_id` / `message_id`（成功且有真实
+/// 上游 ID 时为字符串）走 [`NoticeEvent`] 原生字段；`real_user_id` / `status` /
+/// `error_msg` 进 `extra`（flatten 后同为顶层键）。成功无 `error_msg`、失败无
+/// `message_id`，对齐 Go 的 omitempty。`self_id` 取配置 `app_id`——Go 传的是
+/// `config.GetAppID()`（不含 `use_uin` 分支）。总线未装配（`deps.hub` 为 `None`）时
+/// 静默跳过；broadcast 发布不阻塞、无订阅者也不报错，不影响 API 回执（Go 推送失败仅
+/// log 同口径）。
+fn publish_wakeup_notice(
+    context: &ActionContext,
+    deps: &DeferredDeps<'_>,
+    openid: &str,
+    result: &Result<String>,
+) {
+    let Some(hub) = deps.hub else {
+        return;
+    };
+    let mut extra = serde_json::Map::new();
+    let mut message_id = None;
+    let mut status = "success";
+    match result {
+        // 成功但上游未返回 message_id（空串）：整键消失，对齐 Go `omitempty`
+        Ok(id) if !id.is_empty() => message_id = Some(Ob11Id::str(id.clone())),
+        Ok(_) => {}
+        Err(err) => {
+            status = "failed";
+            extra.insert("error_msg".to_owned(), Value::String(err.to_string()));
+        }
+    }
+    extra.insert("real_user_id".to_owned(), Value::String(openid.to_owned()));
+    extra.insert("status".to_owned(), Value::String(status.to_owned()));
+    hub.publish(Event::Notice(NoticeEvent {
+        time: crate::inbound::now_unix(),
+        self_id: Ob11Id::num(
+            i64::try_from(context.config().snapshot().get_app_id()).unwrap_or(i64::MAX),
+        ),
+        notice_type: C2C_WAKEUP_RESP.to_owned(),
+        sub_type: None,
+        group_id: None,
+        user_id: Some(Ob11Id::num(0)),
+        operator_id: None,
+        target_id: None,
+        message_id,
+        duration: None,
+        file: None,
+        card_new: None,
+        card_old: None,
+        honor_type: None,
+        online: None,
+        client: None,
+        extra,
+    }));
 }
 
 /// 执行一条 SSE 计划（`send_private_msg_sse`），返回上游消息 ID。
@@ -935,6 +1029,7 @@ mod tests {
     use gensokyo_config::ConfigManager;
     use gensokyo_core::{Error, Ob11Id, Result};
     use gensokyo_media::{BoxFuture, FetchRequest, Fetcher, MediaTransport, TransportResponse};
+    use gensokyo_protocol::Event;
     use gensokyo_protocol::outbound::{
         CardFields, CardPayload, InputNotifyPayload, KeyboardPayload, MarkdownPayload, StreamKind,
         StreamPayload,
@@ -946,10 +1041,12 @@ mod tests {
         file_type, msg_type,
     };
     use gensokyo_storage::{EchoStore, IdMapOptions, IdMapStore};
+    use serde_json::Value;
     use tempfile::TempDir;
 
     use super::{DeferredDeps, execute, execute_forward, execute_sse, render_plain};
     use crate::at_everyone::SECTION;
+    use crate::event_hub::EventHub;
     use crate::media::{MAX_MEDIA_BYTES, MediaRuntime};
 
     /// 测试统一的 32 位 OpenID（`resolve_openid` 对 32 位直通，不需要 idmap）。
@@ -1191,10 +1288,20 @@ mod tests {
     }
 
     fn deps<'a>(media: &'a MediaRuntime, echo: Option<&'a EchoStore>) -> DeferredDeps<'a> {
+        deps_with_hub(media, echo, None)
+    }
+
+    /// 带事件总线注入的依赖（wakeup 终局回推用例）；`hub` 传 `None` 即「未装配」形态。
+    fn deps_with_hub<'a>(
+        media: &'a MediaRuntime,
+        echo: Option<&'a EchoStore>,
+        hub: Option<&'a EventHub>,
+    ) -> DeferredDeps<'a> {
         // 测试统一零间隔：合并转发用例免真睡 2×500ms（评审 ③）
         DeferredDeps {
             media,
             echo,
+            hub,
             forward_send_interval: Duration::ZERO,
         }
     }
@@ -2764,6 +2871,180 @@ mod tests {
         assert!(sent[0].is_wakeup, "应置 is_wakeup");
         assert_eq!(sent[0].msg_id, None, "召回不带 msg_id（Go 的互斥语义）");
         assert_eq!(sent[0].content.as_deref(), Some("召回正文"));
+    }
+
+    // ---- R4a：wakeup 终局 notice 回推（对齐 Go sendWakeupNotice）----
+
+    /// 把总线收到的第一条事件序列化成 JSON 供逐键断言。
+    async fn first_event_json(events: &mut tokio::sync::broadcast::Receiver<Arc<Event>>) -> Value {
+        let event = events.recv().await.expect("终局应收到一条 notice");
+        serde_json::to_value(&*event).expect("notice 应可序列化")
+    }
+
+    /// wakeup 成功：JSON 与 Go `WakeupResponseNotice` 逐键一致，且只推一次。
+    #[tokio::test]
+    async fn wakeup_success_pushes_c2c_wakeup_resp_notice_once() {
+        let api = Arc::new(FakeQqApi::default().with_send("WAKE-OK"));
+        let (_dir, context) = context_with_settings(Arc::clone(&api), "  app_id: 102001234\n");
+        let media = no_media();
+        let hub = EventHub::default();
+        let mut events = hub.subscribe();
+        let mut plan = text_plan(SendTarget::Private(OPENID.to_owned()), "召回正文");
+        plan.wakeup = true;
+
+        execute(&context, &plan, &deps_with_hub(&media, None, Some(&hub)))
+            .await
+            .expect("召回发送应成功");
+
+        let value = first_event_json(&mut events).await;
+        assert_eq!(value["post_type"], "notice");
+        assert_eq!(value["notice_type"], "c2c_wakeup_resp");
+        assert_eq!(
+            value["user_id"],
+            serde_json::json!(0),
+            "恒数字 0（Go int64）"
+        );
+        assert_eq!(value["real_user_id"], OPENID, "32 位 OpenID 字符串");
+        assert_eq!(value["status"], "success");
+        assert_eq!(value["message_id"], "WAKE-OK", "成功带真实上游 ID 字符串");
+        assert!(
+            value["time"].as_i64().is_some_and(|secs| secs > 0),
+            "time 为 unix 秒: {value}"
+        );
+        assert_eq!(value["self_id"], serde_json::json!(102_001_234_u64));
+        assert!(
+            value.get("error_msg").is_none(),
+            "成功不应带 error_msg（Go omitempty）"
+        );
+        assert!(events.try_recv().is_err(), "终局只推一次");
+    }
+
+    /// 成功但上游 `message_id` 为空串：整键消失（Go `omitempty`），status 仍 success。
+    #[tokio::test]
+    async fn wakeup_success_with_empty_message_id_omits_key() {
+        let api = Arc::new(FakeQqApi::default().with_send(""));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let hub = EventHub::default();
+        let mut events = hub.subscribe();
+        let mut plan = text_plan(SendTarget::Private(OPENID.to_owned()), "召回正文");
+        plan.wakeup = true;
+
+        execute(&context, &plan, &deps_with_hub(&media, None, Some(&hub)))
+            .await
+            .expect("空 message_id 的成功仍应返回成功");
+
+        let value = first_event_json(&mut events).await;
+        assert_eq!(value["status"], "success");
+        assert!(
+            value.get("message_id").is_none(),
+            "空 ID 应整键消失（Go omitempty）: {value}"
+        );
+        assert!(events.try_recv().is_err(), "终局只推一次");
+    }
+
+    /// wakeup 上游发送失败：推 failed，带 error_msg、不带 message_id。
+    #[tokio::test]
+    async fn wakeup_send_failure_pushes_failed_notice() {
+        let api =
+            Arc::new(FakeQqApi::default().with_send_error(Error::Network("上游挂了".to_owned())));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let hub = EventHub::default();
+        let mut events = hub.subscribe();
+        let mut plan = text_plan(SendTarget::Private(OPENID.to_owned()), "召回正文");
+        plan.wakeup = true;
+
+        execute(&context, &plan, &deps_with_hub(&media, None, Some(&hub)))
+            .await
+            .expect_err("发送失败应报错");
+
+        let value = first_event_json(&mut events).await;
+        assert_eq!(value["post_type"], "notice");
+        assert_eq!(value["notice_type"], "c2c_wakeup_resp");
+        assert_eq!(value["status"], "failed");
+        assert!(
+            value["error_msg"]
+                .as_str()
+                .is_some_and(|msg| msg.contains("上游挂了")),
+            "error_msg 为错误文本（Go err.Error()）: {value}"
+        );
+        assert!(
+            value.get("message_id").is_none(),
+            "失败不应带 message_id（Go omitempty）"
+        );
+        assert!(events.try_recv().is_err(), "终局只推一次");
+    }
+
+    /// wakeup 媒体上传失败（Go :278 出口）：同样推 failed 且只推一次。
+    #[tokio::test]
+    async fn wakeup_media_upload_failure_pushes_failed_notice() {
+        let api = Arc::new(FakeQqApi::with_upload_error(Error::Upstream {
+            code: 40034001,
+            message: "file too large".to_owned(),
+        }));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = MediaRuntime::with_transport(Arc::new(FakeTransport::new(b"PNG-BYTES")));
+        let hub = EventHub::default();
+        let mut events = hub.subscribe();
+        let mut plan = request(
+            SendTarget::Private(OPENID.to_owned()),
+            image_plan(MediaRef::Url("https://example.com/a.png".to_owned())),
+        );
+        plan.wakeup = true;
+
+        execute(&context, &plan, &deps_with_hub(&media, None, Some(&hub)))
+            .await
+            .expect_err("上传失败应报错");
+
+        let value = first_event_json(&mut events).await;
+        assert_eq!(value["notice_type"], "c2c_wakeup_resp");
+        assert_eq!(value["status"], "failed");
+        assert!(
+            value["error_msg"]
+                .as_str()
+                .is_some_and(|msg| msg.contains("file too large")),
+            "error_msg 应带上游文案: {value}"
+        );
+        assert_eq!(value["real_user_id"], OPENID);
+        assert!(value.get("message_id").is_none());
+        assert!(events.try_recv().is_err(), "终局只推一次");
+    }
+
+    /// 非 wakeup 发送零影响（回归面）：挂了 hub 也不推。
+    #[tokio::test]
+    async fn non_wakeup_send_publishes_no_notice() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let hub = EventHub::default();
+        let mut events = hub.subscribe();
+        let plan = text_plan(SendTarget::Group(OPENID.to_owned()), "普通正文");
+
+        execute(&context, &plan, &deps_with_hub(&media, None, Some(&hub)))
+            .await
+            .expect("普通发送应成功");
+
+        assert!(events.try_recv().is_err(), "非 wakeup 不应有任何推送");
+    }
+
+    /// 收件人还原失败的早退不推（Go 该路径早退也不推，口径一致）。
+    #[tokio::test]
+    async fn wakeup_target_resolution_failure_pushes_no_notice() {
+        let api = Arc::new(FakeQqApi::default());
+        let (_dir, context) = context(api);
+        let media = no_media();
+        let hub = EventHub::default();
+        let mut events = hub.subscribe();
+        // 数字虚拟号 + 未装配 idmap：还原 OpenID 必失败，终局尚未发生
+        let mut plan = text_plan(SendTarget::Private("12345".to_owned()), "召回正文");
+        plan.wakeup = true;
+
+        execute(&context, &plan, &deps_with_hub(&media, None, Some(&hub)))
+            .await
+            .expect_err("虚拟号无法反查应报错");
+
+        assert!(events.try_recv().is_err(), "还原失败早退不推 notice");
     }
 
     #[tokio::test]

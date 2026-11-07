@@ -10,7 +10,8 @@
 //!
 //! `send_*` 的 handler 只回计划（`data.deferred == true`）。分发器识别到该标记后按载荷键分派：
 //! 单条 [`gensokyo_actions::SendRequest`] → [`crate::deferred::execute`]（合成 `MessageToCreate`，
-//! 含媒体上传与 reply 还原，唤醒计划落体 `is_wakeup`）；`message_sse` 键 →
+//! 含媒体上传与 reply 还原，唤醒计划落体 `is_wakeup`，其终局再经 [`Dispatcher::with_hub`] 挂上的
+//! 总线回推 `c2c_wakeup_resp` notice，对齐 Go `sendWakeupNotice`）；`message_sse` 键 →
 //! [`crate::deferred::execute_sse`]（SSE 形态体直发 C2C 端点）；`forward` 键 →
 //! [`crate::deferred::execute_forward`]（合并转发逐条重发，成功 ID 进 `message_ids`、失败
 //! 进带**原 node 序号**的 `failed` 清单——规划层解析失败的 node 也在册，整体 retcode 恒
@@ -40,6 +41,7 @@ use gensokyo_storage::EchoStore;
 use serde_json::{Value, json};
 
 use crate::deferred::DeferredDeps;
+use crate::event_hub::EventHub;
 use crate::media::MediaRuntime;
 
 /// 请求 JSON 或参数非法。
@@ -56,6 +58,7 @@ pub struct Dispatcher {
     actions: Option<Arc<ActionContext>>,
     media: Arc<MediaRuntime>,
     echo: Option<Arc<EchoStore>>,
+    hub: Option<EventHub>,
     forward_interval: Duration,
 }
 
@@ -68,6 +71,7 @@ impl Dispatcher {
             actions: None,
             media: Arc::new(MediaRuntime::default()),
             echo: None,
+            hub: None,
             forward_interval: crate::deferred::DEFAULT_FORWARD_SEND_INTERVAL,
         }
     }
@@ -90,6 +94,14 @@ impl Dispatcher {
     #[must_use]
     pub fn with_echo(mut self, echo: Option<Arc<EchoStore>>) -> Self {
         self.echo = echo;
+        self
+    }
+
+    /// 挂上事件总线：wakeup 发送到达终局后经它回推 `c2c_wakeup_resp` notice（对齐 Go
+    /// `sendWakeupNotice`）。传 `None` 或未挂时静默跳过，发送与回执口径不变。
+    #[must_use]
+    pub fn with_hub(mut self, hub: Option<EventHub>) -> Self {
+        self.hub = hub;
         self
     }
 
@@ -176,6 +188,7 @@ impl Dispatcher {
         let deps = DeferredDeps {
             media: self.media.as_ref(),
             echo: self.echo.as_deref(),
+            hub: self.hub.as_ref(),
             forward_send_interval: self.forward_interval,
         };
         if data.get("forward").is_some() {

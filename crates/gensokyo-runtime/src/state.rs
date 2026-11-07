@@ -203,12 +203,14 @@ impl AppState {
     /// 基于当前注册表的分发器（克隆一个 `Arc`，开销可忽略）。
     ///
     /// 装配了 [`ActionContext`] 时一并挂上，deferred 计划才会被真正执行；echo 一并传递，
-    /// 发送成功的 `message_id` 才会回写到同一个存储。
+    /// 发送成功的 `message_id` 才会回写到同一个存储；hub 一并传递，wakeup 终局才会回推
+    /// `c2c_wakeup_resp` notice（对齐 Go `sendWakeupNotice`）。
     #[must_use]
     pub fn dispatcher(&self) -> Dispatcher {
         Dispatcher::new(Arc::clone(&self.registry))
             .with_actions(self.actions_arc())
             .with_media(Arc::clone(&self.media))
             .with_echo(self.echo.clone())
+            .with_hub(Some(self.hub.clone()))
     }
 }
