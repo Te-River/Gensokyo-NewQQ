@@ -260,6 +260,72 @@ fn installed_targets() -> Option<Vec<String>> {
     )
 }
 
+/// 当前实际使用的 rustup 工具链（`<channel>-<host>`，如 `1.99.1-x86_64-pc-windows-gnu`）。
+///
+/// 跳过提示必须带上它：`rust-toolchain.toml` 把默认工具链钉在 msvc 宿主上，`cargo +<gnu>`
+/// 只是临时覆盖，不带 `--toolchain` 的 `rustup target add` 会把 target 装进 msvc 工具链，
+/// 重新构建时依旧跳过。来源依次为 `RUSTUP_TOOLCHAIN`（`cargo +<tc>` / `rustup run` 注入）、
+/// `rustc -vV`、`rust-toolchain.toml` 的 channel + 本机推断。
+fn active_toolchain(root: &Path) -> Option<String> {
+    if let Ok(value) = std::env::var("RUSTUP_TOOLCHAIN") {
+        let value = value.trim();
+        if !value.is_empty() {
+            return Some(value.to_owned());
+        }
+    }
+    rustc_toolchain().or_else(|| {
+        let channel = toolchain_channel(root)?;
+        Some(format!("{channel}-{}", host_triple()?))
+    })
+}
+
+/// `rustc -vV` 的 `release:` + `host:`：既反映 `+<tc>` 覆盖，也给出真实 ABI（gnu / msvc）。
+fn rustc_toolchain() -> Option<String> {
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_owned());
+    let output = Command::new(rustc).arg("-vV").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut release = None;
+    let mut host = None;
+    for line in text.lines() {
+        if let Some(value) = line.strip_prefix("release: ") {
+            release = Some(value.trim());
+        } else if let Some(value) = line.strip_prefix("host: ") {
+            host = Some(value.trim());
+        }
+    }
+    Some(format!("{}-{}", release?, host?))
+}
+
+/// `rust-toolchain.toml` 的 `channel`（本仓为 `1.99.1`）；rustc 都跑不起来时的兜底。
+fn toolchain_channel(root: &Path) -> Option<String> {
+    let text = fs::read_to_string(root.join("rust-toolchain.toml")).ok()?;
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("channel"))?;
+    let value = line.split_once('=')?.1.trim().trim_matches('"');
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+/// 本机三元组的粗略推断（ABI 取各平台默认：Windows → msvc、Linux → gnu）。
+fn host_triple() -> Option<String> {
+    let arch = match ARCH {
+        "x86_64" | "aarch64" => ARCH,
+        "x86" => "i686",
+        _ => return None,
+    };
+    let rest = match OS {
+        "windows" => "pc-windows-msvc",
+        "linux" => "unknown-linux-gnu",
+        "macos" => "apple-darwin",
+        _ => return None,
+    };
+    Some(format!("{arch}-{rest}"))
+}
+
 /// `cargo build --release --locked`：交叉时加 `--target`，精简版加 `--no-default-features`。
 ///
 /// 只构建 bin 包——工作区还有 10 个库 crate 与 xtask 自身，全量构建没有意义。
@@ -396,6 +462,12 @@ pub fn run(args: BuildArgs) -> Result<()> {
     } else {
         None
     };
+    // 跳过提示要指明装到哪个工具链，否则会装进 rust-toolchain.toml 的默认工具链。
+    let toolchain = if matrix_mode {
+        active_toolchain(&root)
+    } else {
+        None
+    };
     let mut outputs = Vec::new();
     let mut skipped = Vec::new();
     let mut failures = Vec::new();
@@ -404,7 +476,14 @@ pub fn run(args: BuildArgs) -> Result<()> {
         if let (Some(installed), Some(triple)) = (&installed, &target.triple)
             && !installed.iter().any(|value| value == triple)
         {
-            let reason = format!("{triple} 未安装 → rustup target add {triple}");
+            let reason = match toolchain.as_deref() {
+                Some(toolchain) => {
+                    format!("{triple} 未安装 → rustup target add --toolchain {toolchain} {triple}")
+                }
+                None => format!(
+                    "{triple} 未安装 → rustup target add {triple}（请确认加到当前使用的工具链）"
+                ),
+            };
             println!("[skip] {reason}");
             skipped.push(reason);
             continue;
@@ -443,7 +522,17 @@ pub fn run(args: BuildArgs) -> Result<()> {
         bail!("{} 个构建失败: {}", failures.len(), failures.join(", "));
     }
     if outputs.is_empty() {
-        bail!("没有产出任何产物（目标全部跳过？本地 --all 请先 rustup target add）");
+        let install = toolchain.as_deref().map_or_else(
+            || "rustup target add --toolchain <当前工具链> <target>".to_owned(),
+            |toolchain| format!("rustup target add --toolchain {toolchain} <target>"),
+        );
+        bail!(
+            "没有产出任何产物（跳过 {} 个目标）\n\
+             本平台构建：.\\build.ps1（即 cargo xtask build），不需要安装任何 target\n\
+             全平台构建：按上面的 [skip] 提示逐个安装，形如 {install}\n\
+             Linux / Apple 目标还需对应的交叉链接器（Windows 宿主上通常不可行）",
+            skipped.len()
+        );
     }
     Ok(())
 }
