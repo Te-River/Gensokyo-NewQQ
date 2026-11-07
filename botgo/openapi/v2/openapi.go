@@ -83,6 +83,10 @@ func (o *openAPIv2) setupClient() {
         SetRetryCount(3).
         SetRetryWaitTime(5 * time.Second).
         SetRetryMaxWaitTime(20 * time.Second).
+        // resty 默认用 json.Marshal 序列化请求体，会把 &、<、> 转义成
+        // \u0026/\u003c/\u003e；带 OSS 签名的图片 URL 因此与原文不一致。
+        // 关闭 HTML 转义（仍是合法 JSON，解析语义不变）。
+        SetJSONEscapeHTML(false).
         SetPreRequestHook(
             func(client *resty.Client, request *http.Request) error {
                 return openapi.DoReqFilterChains(request, nil)
