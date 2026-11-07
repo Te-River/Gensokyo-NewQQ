@@ -650,6 +650,45 @@ impl IdMapStore {
         Ok(removed)
     }
 
+    /// 枚举 `"<section>:<subtype>"` 键且值等于 `value` 的全部 section（Go
+    /// `FindKeysBySubAndType`，`get_group_list` 靠它枚举已注册群）。
+    ///
+    /// 只读事务全扫 CONFIG 表；命中的键剥掉 `":<subtype>"` **后缀**得到 section
+    /// （Go 是 `strings.Split(key, ":")[0]` 取第一个冒号前段，OpenID 形态 section
+    /// 不含冒号，两种切法结果一致，剥后缀语义更稳），返回排序去重结果。
+    ///
+    /// # Errors
+    ///
+    /// redb 事务失败或 value 读取失败时返回 [`StorageError`]。
+    pub fn find_config_sections(
+        &self,
+        subtype: &str,
+        value: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        // 纯防御（现无空参调用方）：空 subtype 会让「以 :subtype 结尾」退化成全表命中，
+        // 空 value 会命中所有空值行
+        debug_assert!(
+            !subtype.is_empty() && !value.is_empty(),
+            "find_config_sections 不接受空 subtype / value"
+        );
+        let suffix = format!(":{subtype}");
+        let txn = self.identity_db.begin_read().map_err(rb)?;
+        let table = txn.open_table(CONFIG).map_err(rb)?;
+        let mut sections = Vec::new();
+        for entry in table.iter().map_err(rb)? {
+            let (key, stored) = entry.map_err(rb)?;
+            // edition 2024 let 链：后缀命中与值命中一次判完
+            if let Some(section) = key.value().strip_suffix(suffix.as_str())
+                && stored.value() == value.as_bytes()
+            {
+                sections.push(section.to_owned());
+            }
+        }
+        sections.sort();
+        sections.dedup();
+        Ok(sections)
+    }
+
     /// 从已提交状态里找下一个未被占用的 vUIN（Go `allocateVuinTx` 的前缀扫描）。
     fn next_free_vuin(&self, current: i64) -> Result<i64, StorageError> {
         let mut candidate = if current <= 0 {

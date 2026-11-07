@@ -367,6 +367,25 @@ impl Inbound {
         }
     }
 
+    /// 群事件上报形态 → idmap 注册表（`<section>:type = group`）。
+    ///
+    /// 对齐 Go `WriteConfigv2(GroupID 字符串, "type", "group")` 的注册点：section 直接取
+    /// 上报形态本身——数字形态是十进制 vuin，字符串形态是原始 OpenID。
+    /// 写失败只 warn，绝不阻断事件上报：漏注册只影响 `get_group_list` 的可见性。
+    fn register_group(&self, group_id: &Ob11Id) {
+        let Some(store) = self.idmap.as_deref() else {
+            return;
+        };
+        // Display 只输出内部值：Num → 十进制串，Str → 原串（与上报形态一致）
+        let section = group_id.to_string();
+        if section.is_empty() {
+            return;
+        }
+        if let Err(err) = store.write_config(&section, "type", "group") {
+            tracing::warn!(section = %section, error = %err, "群事件注册进 idmap 失败，不影响事件上报");
+        }
+    }
+
     /// QQ message_id → OneBot message_id（数字形态经 idmap 的 echo 映射）。
     fn message_id(&self, settings: &Settings, raw: &str) -> Ob11Id {
         if raw.is_empty() || settings.get_string_ob11() {
@@ -427,6 +446,8 @@ impl Inbound {
         };
 
         let message_id = self.message_id(settings, &payload.id);
+        let group_id = self.ob11_id(settings, &payload.group_id);
+        self.register_group(&group_id);
         Ok(Event::Message(MessageEvent {
             time: timestamp_of(payload.timestamp.as_ref()),
             self_id: Ob11Id::num(self.self_id_of(settings)),
@@ -434,7 +455,7 @@ impl Inbound {
             sub_type: Some("normal".to_owned()),
             message_id,
             user_id: self.ob11_id(settings, user_raw),
-            group_id: Some(self.ob11_id(settings, &payload.group_id)),
+            group_id: Some(group_id),
             message: MessageContent::Text(payload.content.clone()),
             raw_message: payload.content,
             font: Some(0),
@@ -505,6 +526,7 @@ impl Inbound {
         let payload = QqGroupOp::deserialize(data)?;
         let time = timestamp_of(payload.timestamp.as_ref());
         let group_id = self.ob11_id(settings, &payload.group_openid);
+        self.register_group(&group_id);
         let user_id = self.ob11_id(settings, &payload.op_member_openid);
         let extra = self.enhanced_extra(settings, &payload.op_member_openid, &payload.group_openid);
 
@@ -551,12 +573,14 @@ impl Inbound {
     ) -> Result<Vec<Event>, serde_json::Error> {
         let payload = QqGroupOp::deserialize(data)?;
         let extra = self.enhanced_extra(settings, &payload.op_member_openid, &payload.group_openid);
+        let group_id = self.ob11_id(settings, &payload.group_openid);
+        self.register_group(&group_id);
         Ok(vec![Event::Notice(NoticeEvent {
             time: timestamp_of(payload.timestamp.as_ref()),
             self_id: Ob11Id::num(self.self_id_of(settings)),
             notice_type: notice_type.to_owned(),
             sub_type: sub_type.map(str::to_owned),
-            group_id: Some(self.ob11_id(settings, &payload.group_openid)),
+            group_id: Some(group_id),
             user_id: Some(self.ob11_id(settings, &payload.op_member_openid)),
             operator_id: Some(Ob11Id::num(0)),
             target_id: None,
@@ -685,6 +709,7 @@ impl Inbound {
     ) -> Result<Vec<Event>, serde_json::Error> {
         let payload = QqGroupMember::deserialize(data)?;
         let group_id = self.ob11_id(settings, &payload.group_openid);
+        self.register_group(&group_id);
         let user_id = self.ob11_id(settings, &payload.member_openid);
 
         // Go 对这两个事件不区分 native_ob11：RealUserID/RealGroupID 只被 omitempty 省略空值。
@@ -1078,5 +1103,92 @@ mod tests {
         assert!(!auto_approved_pair(Some(&json!(false))).1);
         assert!(!auto_approved_pair(Some(&json!(null))).1);
         assert_eq!(auto_approved_pair(None), (json!(null), false));
+    }
+
+    use std::sync::Arc;
+
+    use gensokyo_config::ConfigManager;
+    use gensokyo_storage::{IdMapOptions, IdMapStore};
+
+    use super::Inbound;
+
+    /// 构造指向临时目录的 idmap 存储（同 `at_everyone` 测试的打开方式）。
+    fn test_store(dir: &std::path::Path) -> std::sync::Arc<IdMapStore> {
+        std::sync::Arc::new(
+            IdMapStore::open(
+                IdMapOptions::new(dir.join("openid-map.redb"), dir.join("msgid-map.redb"))
+                    .with_app_id("10001"),
+            )
+            .expect("打开 idmap 存储失败"),
+        )
+    }
+
+    fn group_at_payload() -> serde_json::Value {
+        json!({
+            "id": "m-1",
+            "group_id": "g0123456789abcdef0123456789abcdef",
+            "content": "hello",
+            "author": {"id": "u0123456789abcdef0123456789abcdef"}
+        })
+    }
+
+    #[test]
+    fn group_message_registers_virtual_id_section() {
+        use gensokyo_protocol::Event;
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nsettings: {}\n").expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let store = test_store(dir.path());
+        let inbound = Inbound::new(manager, Some(Arc::clone(&store)));
+
+        let events = inbound
+            .convert("GROUP_AT_MESSAGE_CREATE", Some(&group_at_payload()), None)
+            .expect("群消息应可转换");
+        let Event::Message(message) = &events[0] else {
+            panic!("GROUP_AT_MESSAGE_CREATE 应转成群消息");
+        };
+        // 数字模式：上报与注册都用虚拟号形态
+        let group_id = message.group_id.clone().expect("群消息应带 group_id");
+        assert!(group_id.as_i64().is_some(), "有 idmap 时应上报数字形态");
+        assert_eq!(
+            store
+                .read_config(&group_id.to_string(), "type")
+                .expect("群应已注册"),
+            "group"
+        );
+    }
+
+    #[test]
+    fn group_message_string_mode_registers_raw_openid() {
+        use gensokyo_protocol::Event;
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "string_ob11: true\n").expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let store = test_store(dir.path());
+        let inbound = Inbound::new(manager, Some(Arc::clone(&store)));
+
+        let events = inbound
+            .convert("GROUP_AT_MESSAGE_CREATE", Some(&group_at_payload()), None)
+            .expect("群消息应可转换");
+        let Event::Message(message) = &events[0] else {
+            panic!("GROUP_AT_MESSAGE_CREATE 应转成群消息");
+        };
+        // string 模式：注册 section 就是上报的原始 OpenID
+        assert!(
+            message
+                .group_id
+                .as_ref()
+                .is_some_and(|id| id.as_str() == Some("g0123456789abcdef0123456789abcdef"))
+        );
+        assert_eq!(
+            store
+                .read_config("g0123456789abcdef0123456789abcdef", "type")
+                .expect("群应已注册"),
+            "group"
+        );
     }
 }

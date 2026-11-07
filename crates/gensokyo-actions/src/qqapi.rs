@@ -41,7 +41,6 @@
 //! | [`QqApi::put_interaction`] | `PUT /interactions/{id}` | 真实调用（无 `/v2` 前缀） |
 //! | [`QqApi::generate_url_link`] | `POST /v2/generate_url_link` | 真实调用 |
 //! | [`QqApi::set_group_leave`] | 官方无机器人退群端点 | 未落地，`Unsupported` |
-//! | [`QqApi::get_group_list`] | 官方无「列出机器人所在群」端点 | 未落地，`Unsupported` |
 //! | [`QqApi::get_msg`] | 官方无按 message_id 查询消息端点 | 未落地，`Unsupported` |
 //! | [`QqApi::get_forward_msg`] | 官方无合并转发查询端点 | 未落地，`Unsupported` |
 //! | [`QqApi::get_friend_list`] | 官方无好友列表端点 | 未落地，`Unsupported` |
@@ -49,7 +48,7 @@
 //! | [`QqApi::send_like`] | 官方无点赞端点 | 未落地，`Unsupported` |
 //!
 //! 「未落地」的两层原因都写在各方法的文档里：要么官方 v2 根本没有这个端点（如好友列表、
-//! 点赞、退群、群列表），要么要等运行时的发送链补齐（如 SSE / `IsWakeup` / 原始直发）。
+//! 点赞、退群），要么要等运行时的发送链补齐（如 SSE / `IsWakeup` / 原始直发）。
 //!
 //! # 生产实现与测试缝隙
 //!
@@ -436,19 +435,6 @@ pub trait QqApi: Send + Sync + fmt::Debug {
         Box::pin(async {
             Err(Error::Unsupported(
                 "set_group_leave: 官方 v2 无机器人退群端点".to_owned(),
-            ))
-        })
-    }
-
-    /// 机器人所在的群列表。
-    ///
-    /// 官方没有「列出机器人所在群」的端点；Go 侧靠 idmap 枚举群虚拟号后逐群 `info` 拼装，
-    /// 而 `gensokyo-storage` 的 [`IdMapStore`] 目前没有枚举接口，因此返回
-    /// [`Error::Unsupported`]。
-    fn get_group_list(&self) -> QqFuture<'_, Vec<GroupInfo>> {
-        Box::pin(async {
-            Err(Error::Unsupported(
-                "get_group_list: 官方无群列表端点，且 idmap 暂无枚举接口".to_owned(),
             ))
         })
     }

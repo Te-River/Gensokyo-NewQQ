@@ -389,3 +389,52 @@ fn storage_error_messages_are_readable() {
     let expired: gensokyo_core::Error = StorageError::Expired("虚拟消息 ID=9".to_owned()).into();
     assert_eq!(expired.to_string(), "存储错误: 键已过期: 虚拟消息 ID=9");
 }
+
+#[test]
+fn find_config_sections_filters_value_sorts_and_dedups() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store = open(dir.path());
+
+    assert_eq!(
+        store
+            .find_config_sections("type", "group")
+            .expect("空库枚举应成功"),
+        Vec::<String>::new(),
+        "空库回空列表（Go 缺桶时回错，这里表恒存在）"
+    );
+
+    // 乱序写入：group 两个、user 一个、subtype 不同的一个
+    store.write_config("g-3", "type", "group").expect("写配置");
+    store.write_config("g-1", "type", "group").expect("写配置");
+    store.write_config("g-2", "type", "user").expect("写配置");
+    store.write_config("g-4", "memo", "group").expect("写配置");
+    // 同键覆盖写（去重语义：一个 section 只出现一次）
+    store
+        .write_config("g-3", "type", "group")
+        .expect("重复写配置");
+
+    assert_eq!(
+        store.find_config_sections("type", "group").expect("枚举"),
+        ["g-1".to_owned(), "g-3".to_owned()],
+        "同值多 section 全回，且结果排序"
+    );
+}
+
+#[test]
+fn find_config_sections_strips_suffix_not_first_colon() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store = open(dir.path());
+
+    // section 含冒号时剥后缀得到完整 section（Go 取第一个冒号前段，OpenID 形态不受影响）
+    store
+        .write_config("outer:inner", "type", "group")
+        .expect("写配置");
+    store
+        .write_config("outer", "type", "group")
+        .expect("写配置");
+
+    assert_eq!(
+        store.find_config_sections("type", "group").expect("枚举"),
+        ["outer".to_owned(), "outer:inner".to_owned()],
+    );
+}

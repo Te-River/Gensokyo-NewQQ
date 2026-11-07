@@ -4,8 +4,12 @@
 //! `group` 的测试自带一份只覆盖 M1k 六个方法的替身；这里这份面向群管理 / 消息 / 用户三组
 //! action，实现全部新方法并记录入参。
 
+use std::collections::VecDeque;
 use std::future::Future;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::{Value, json};
 
@@ -23,6 +27,7 @@ use gensokyo_qq::dto::{
     UpdateJoinApprovalStrategyResponse, UpdatePanelRequest, VersionResponse, WhitelistUsersRequest,
     WhitelistUsersResponse,
 };
+use gensokyo_storage::IdMapStore;
 
 use crate::qqapi::{
     ActionContext, FriendEntry, KickResult, MsgDetail, QqApi, QqFuture, RetractRequest,
@@ -36,8 +41,8 @@ pub(crate) enum Call {
     Kick(String, Vec<String>, bool),
     /// `set_group_leave(group_openid)`
     Leave(String),
-    /// `get_group_list()`
-    GroupList,
+    /// `get_group_info(group_openid)`
+    GroupInfo(String),
     /// `delete_msg(group_openid, user_openid, message_id)`
     DeleteMsg(Option<String>, Option<String>, String),
     /// `get_msg(message_id)`
@@ -103,7 +108,8 @@ pub(crate) struct FakeQqApi {
     calls: Mutex<Vec<Call>>,
     pub(crate) kick: Mutex<Option<Result<KickResult>>>,
     pub(crate) leave: Mutex<Option<Result<()>>>,
-    pub(crate) group_list: Mutex<Option<Result<Vec<GroupInfo>>>>,
+    /// 群信息按调用顺序出队（`get_group_list` 逐群聚合，一次调用弹一个）。
+    pub(crate) group_info: Mutex<VecDeque<Result<GroupInfo>>>,
     pub(crate) delete: Mutex<Option<Result<()>>>,
     pub(crate) msg: Mutex<Option<Result<MsgDetail>>>,
     pub(crate) forward: Mutex<Option<Result<Vec<Segment>>>>,
@@ -151,14 +157,22 @@ fn take<T>(slot: &Mutex<Option<Result<T>>>) -> Result<T> {
         .expect("测试未配置该方法的响应")
 }
 
-/// M1k 的六个真实端点：新测试用不到，明确报「未实现」而不是 panic。
+/// M1k 的其余真实端点：新测试用不到，明确报「未实现」而不是 panic。
 fn not_provided<T>(method: &str) -> Result<T> {
     Err(Error::Unsupported(format!("FakeQqApi 未提供 {method}")))
 }
 
 impl QqApi for FakeQqApi {
-    fn get_group_info(&self, _group_openid: &str) -> QqFuture<'_, GroupInfo> {
-        Box::pin(async { not_provided("get_group_info") })
+    fn get_group_info(&self, group_openid: &str) -> QqFuture<'_, GroupInfo> {
+        let group_openid = group_openid.to_owned();
+        Box::pin(async move {
+            self.record(Call::GroupInfo(group_openid));
+            self.group_info
+                .lock()
+                .expect("群信息槽锁未中毒")
+                .pop_front()
+                .expect("测试未配置该方法的响应")
+        })
     }
 
     fn get_group_member_info(
@@ -219,13 +233,6 @@ impl QqApi for FakeQqApi {
         Box::pin(async move {
             self.record(Call::Leave(group_openid));
             take(&self.leave)
-        })
-    }
-
-    fn get_group_list(&self) -> QqFuture<'_, Vec<GroupInfo>> {
-        Box::pin(async move {
-            self.record(Call::GroupList);
-            take(&self.group_list)
         })
     }
 
@@ -541,6 +548,34 @@ pub(crate) fn config() -> Arc<ConfigManager> {
 pub(crate) fn context() -> (Arc<ActionContext>, Arc<FakeQqApi>) {
     let api = Arc::new(FakeQqApi::default());
     let context = Arc::new(ActionContext::new(api.clone(), config()));
+    (context, api)
+}
+
+/// 带 idmap 的 `ActionContext` + 与它共享的替身；`string_ob11` 决定响应 ID 形态。
+///
+/// 数字模式没有可复用的共享快照（[`config`] 固定 `string_ob11: true`），
+/// 单独落一份临时文件加载，计数器保证并发测试不撞路径。
+pub(crate) fn context_with_idmap(
+    store: Arc<IdMapStore>,
+    string_ob11: bool,
+) -> (Arc<ActionContext>, Arc<FakeQqApi>) {
+    let config = if string_ob11 {
+        config()
+    } else {
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "gensokyo-actions-numeric-test-{}-{}.yml",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::write(&path, "string_ob11: false\napp_id: 102001234\n")
+            .expect("写临时 config.yml 失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载临时 config.yml 失败"));
+        let _ = std::fs::remove_file(&path);
+        manager
+    };
+    let api = Arc::new(FakeQqApi::default());
+    let context = Arc::new(ActionContext::new(api.clone(), config).with_idmap(store));
     (context, api)
 }
 
