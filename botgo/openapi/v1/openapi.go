@@ -2,6 +2,7 @@
 package v1
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -131,7 +132,7 @@ func (o *openAPI) request(ctx context.Context) *resty.Request {
 
 // respInfo 用于输出日志的时候格式化数据
 func respInfo(resp *resty.Response) string {
-	bodyJSON, _ := json.Marshal(resp.Request.Body)
+	bodyJSON, _ := marshalNoHTMLEscape(resp.Request.Body)
 	return fmt.Sprintf(
 		"[OPENAPI]%v %v, traceID:%v, status:%v, elapsed:%v req: %v, resp: %v",
 		resp.Request.Method,
@@ -142,6 +143,18 @@ func respInfo(resp *resty.Response) string {
 		string(bodyJSON),
 		string(resp.Body()),
 	)
+}
+
+// marshalNoHTMLEscape 日志用序列化：关闭 HTML 转义，避免带签名 URL 的 &
+// 被打印成 \u0026（真实请求体由 resty 的 SetJSONEscapeHTML(false) 控制）。
+func marshalNoHTMLEscape(v interface{}) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
 // reqInfo 用于请求日志格式化
