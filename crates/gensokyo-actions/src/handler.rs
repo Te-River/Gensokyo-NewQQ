@@ -1,11 +1,13 @@
 //! 文本类 action 的 [`Handler`] 适配器：只做规划，不发送。
 //!
-//! 成功响应的 `data` 是 [`SendRequest`] 的 JSON 加一个 `"deferred": true` 标记。它只是
-//! handler → runtime 的内部握手载荷：runtime 注册这些 action 后，用
-//! `serde_json::from_value::<SendRequest>(data)` 还原计划并接管真正的 QQ 调用（媒体上传 →
-//! `MessageToCreate` → 发送 → echo / 懒消息回写），最终回给 OneBot 客户端的是发送结果，
-//! **不会把计划本身直接回给客户端**。`data` 不含 `message_id` 等线上字段；反序列化时
-//! `deferred` 标记（以及其它未知字段）被忽略。
+//! 成功响应的 `data` 是 deferred 握手载荷：`"deferred": true` 加上计划 JSON。三种形状由
+//! runtime 的 `Dispatcher` 判别——`message` + `target` 是单条 [`SendRequest`]；
+//! `forward` 是逐 node 重发的 [`crate::send::ForwardRequest`]（合并转发）；
+//! `message_sse` 是 SSE 形态直发的 [`crate::send::SseRequest`]。计划只是 handler → runtime
+//! 的内部握手载荷：runtime 还原计划并接管真正的 QQ 调用（媒体上传 → `MessageToCreate` →
+//! 发送 → echo / 懒消息回写），最终回给 OneBot 客户端的是发送结果，**不会把计划本身直接回给
+//! 客户端**。`data` 不含 `message_id` 等线上字段；反序列化时 `deferred` 标记（以及其它未知
+//! 字段）被忽略。
 //!
 //! 参数缺失或非法时返回 `status = failed` + `retcode = 1400`（[`RETCODE_BAD_REQUEST`]，
 //! 与 `gensokyo_runtime::dispatcher::RETCODE_BAD_REQUEST` 同值），`echo` 原样回传。
@@ -199,8 +201,16 @@ pub(crate) fn respond_to_params(
 
 /// `SendRequest` 的 JSON + `"deferred": true`。
 fn deferred_data(planned: &SendRequest) -> Result<Value> {
+    deferred_data_of(planned)
+}
+
+/// 任意计划结构 → deferred 握手载荷（`"deferred": true` + 计划 JSON）。
+///
+/// 合并转发（`forward`）与 SSE（`message_sse`）的载荷形状与 [`SendRequest`] 不同，但握手
+/// 标记同一套；[`crate::send`] 里的键名同时是 runtime 判别形状的字段。
+pub(crate) fn deferred_data_of<T: serde::Serialize>(planned: &T) -> Result<Value> {
     let mut data = serde_json::to_value(planned)
-        .map_err(|err| Error::Protocol(format!("SendRequest 序列化失败: {err}")))?;
+        .map_err(|err| Error::Protocol(format!("deferred 计划序列化失败: {err}")))?;
     if let Value::Object(object) = &mut data {
         object.insert(DEFERRED_FIELD.to_owned(), Value::Bool(true));
     }

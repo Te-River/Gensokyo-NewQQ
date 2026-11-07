@@ -47,8 +47,9 @@
 //! | [`QqApi::get_stranger_info`] | 官方无陌生人资料端点 | 未落地，`Unsupported` |
 //! | [`QqApi::send_like`] | 官方无点赞端点 | 未落地，`Unsupported` |
 //!
-//! 「未落地」的两层原因都写在各方法的文档里：要么官方 v2 根本没有这个端点（如好友列表、
-//! 点赞、退群），要么要等运行时的发送链补齐（如 SSE / `IsWakeup` / 原始直发）。
+//! 「未落地」的原因都写在各方法的文档里：官方 v2 根本没有这个端点（如好友列表、点赞、退群、
+//! 消息查询）。SSE / `IsWakeup` / 原始直发 / 合并转发复用 [`QqApi::send_group_message`] /
+//! [`QqApi::send_c2c_message`]，由 runtime 的 deferred 发送链调用。
 //!
 //! # 生产实现与测试缝隙
 //!

@@ -15,11 +15,11 @@
 //! | `set_group_add_request` | `handlers/set_group_add_request.go` | `POST /v2/groups/{gid}/approval_join_request/{member}` | `data = null` |
 //! | `get_group_member_blacklist` | `handlers/get_group_member_blacklist.go` | `GET /v2/groups/{gid}/member_blacklist` | 黑名单分页 |
 //! | `set_group_member_blacklist` | `handlers/set_group_member_blacklist.go` | `POST /v2/groups/{gid}/member_blacklist` | `{"fail_openids": […]}` |
-//! | `send_group_forward_msg` | `handlers/send_group_forward_msg.go` | 无（Go 逐条转普通消息） | `1500` |
-//! | `send_group_msg_raw` | `handlers/send_group_msg_raw.go` | 发送链 | `1500` |
-//! | `send_private_msg_sse` | `handlers/send_private_msg_sse.go` | 发送链（SSE 流式） | `1500` |
-//! | `send_private_msg_wakeup` | `handlers/send_private_msg_wakeup.go` | 发送链（`IsWakeup`） | `1500` |
-//! | `send_private_forward_msg` | 无（go-cqhttp 扩展名） | 无 | `1500` |
+//! | `send_group_forward_msg` | `handlers/send_group_forward_msg.go` | 无（官方无折叠转发端点，逐条重发） | deferred 多计划（`forward`，runtime 逐条循环发送） |
+//! | `send_group_msg_raw` | `handlers/send_group_msg_raw.go` | 发送链（`send_group_msg` 同端点） | deferred 计划（`params.message_id` → 被动回复） |
+//! | `send_private_msg_sse` | `handlers/send_private_msg_sse.go` | `POST /v2/users/{openid}/messages`（SSE 与普通 C2C 同端点） | deferred 计划（`message_sse`） |
+//! | `send_private_msg_wakeup` | `handlers/send_private_msg_wakeup.go` | 同 C2C 端点（`is_wakeup=true`） | deferred 计划（`wakeup` 标记） |
+//! | `send_private_forward_msg` | 无（go-cqhttp 扩展名） | 无（群侧同款逐条重发，端点是 C2C 消息） | deferred 多计划（`forward`） |
 //! | `get_group_honor_info` | 无（go-cqhttp 扩展名） | 无 | `1500` |
 //! | `set_group_anonymous_ban` | 无（go-cqhttp 扩展名） | 无 | `1500` |
 //!
@@ -40,17 +40,23 @@
 //!
 //! # 仍然回 1500 的项
 //!
-//! 剩下这些需要运行时发送链的额外支持（原始 JSON 直发、SSE 流式、`IsWakeup` 主动私聊、
-//! 合并转发逐条重发），或官方根本没有对应端点（群荣誉、匿名成员禁言）：按
-//! [`crate::unsupported`] 的口径回 `1500` + 说明；参数仍照 Go 的 `callapi.ParamsContent`
-//! 校验，缺失或类型不对回 `1400`。
+//! 官方根本没有对应端点的两项（群荣誉、匿名成员禁言）：按 [`crate::unsupported`] 的口径回
+//! `1500` + 说明；参数仍照 Go 的 `callapi.ParamsContent` 校验，缺失或类型不对回 `1400`。
+//! 合并转发 / 原始直发 / SSE / `IsWakeup` 四条发送路径已接入 deferred 发送链
+//! （规划在 [`crate::send`]，执行在 runtime 的 `deferred` 模块）。
 //!
 //! # 刻意的差异（相对 Go）
 //!
 //! - **`.handle_quick_operation` 的未知 `message_type`**：Go 返回空串（客户端收不到任何回执），
 //!   这里回 `1400` + 说明，便于定位客户端的事件字段错误。
-//! - **合并转发**：Go 把 node 列表逐条转成普通消息再发送；本 crate 不做这层降级（会丢转发卡片
-//!   语义），直接 `1500`。
+//! - **合并转发**：Go 只取 node `content` 解析后的正文，媒体在「解析 → 拼回文本」的往返中
+//!   丢弃；这里保留 node 的完整出站计划（媒体走同一条 deferred 发送链），单条 node 组合非法
+//!   （如 markdown 与图片同条）只让该条进失败清单，不回滚已发送的条——失败清单按**原 node
+//!   序号**上报（坏 / 空 node 被跳过后计划下标≠node 位置），段解析失败的 node 也计入回执，
+//!   不静默消失。细节见 [`crate::send`] 模块文档。
+//! - **合并转发的空 `messages` 数组**：Go 循环零轮后照发**整体成功回执**（`retcode = 0`、
+//!   一条未发）；这里在规划层直接 `1400` 拒绝——**刻意收紧**，retcode 对客户端可见，
+//!   空转发几乎必为客户端 bug，要暴露而不是假装成功。
 //! - **`get_robot_share_link`**：Go 把链接包成一条伪造的 `share_link_generated` notice 事件推给
 //!   客户端，action 本身回 `"{}"`。本 crate 的 handler 契约只能回一个响应，因此把链接放进
 //!   `data`（`url` + 回显的 `callback_data`），不伪造事件。
@@ -73,30 +79,20 @@ use gensokyo_qq::dto::{
 };
 
 use crate::group_admin::collect_user_ids;
-use crate::handler::respond_to_params;
+use crate::handler::{deferred_data_of, respond_to_params};
 use crate::messages::resolve_message_id;
 use crate::params;
 use crate::qqapi::{ActionContext, RetractRequest};
-use crate::send::{SendRequest, plan_send_group_msg, plan_send_private_msg};
+use crate::send::{
+    SendRequest, plan_send_group_forward_msg, plan_send_group_msg, plan_send_group_msg_raw,
+    plan_send_private_forward_msg, plan_send_private_msg, plan_send_private_msg_sse,
+    plan_send_private_msg_wakeup,
+};
 use crate::unsupported::{checked_unsupported, required_add_del_op, required_object};
 use crate::util::{
     bad_request, ob11_id, ok_data, params_object, params_or_empty, resolve_group,
     resolve_identity_text, resolve_member, respond,
 };
-
-/// `send_group_forward_msg` 的说明。
-const SEND_GROUP_FORWARD_MSG: &str =
-    "send_group_forward_msg: 合并转发需要逐条重发 node，本 crate 未接线";
-/// `send_group_msg_raw` 的说明。
-const SEND_GROUP_MSG_RAW: &str = "send_group_msg_raw: 原始 JSON 直发尚未接入 deferred 发送链";
-/// `send_private_msg_sse` 的说明。
-const SEND_PRIVATE_MSG_SSE: &str = "send_private_msg_sse: SSE 流式发送尚未接入 deferred 发送链";
-/// `send_private_msg_wakeup` 的说明。
-const SEND_PRIVATE_MSG_WAKEUP: &str =
-    "send_private_msg_wakeup: IsWakeup 主动私聊尚未接入 deferred 发送链";
-/// `send_private_forward_msg` 的说明。
-const SEND_PRIVATE_FORWARD_MSG: &str =
-    "send_private_forward_msg: 合并转发需要逐条重发 node，本 crate 未接线";
 /// `get_group_honor_info` 的说明。
 const GET_GROUP_HONOR_INFO: &str = "get_group_honor_info: QQ 官方未提供群荣誉信息接口";
 /// `set_group_anonymous_ban` 的说明。
@@ -734,23 +730,21 @@ impl Handler for SetGroupMemberBlacklistHandler {
     }
 }
 
-/// `send_group_forward_msg`。
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SendGroupForwardMsgHandler;
+/// `send_group_forward_msg`：逐 node 重发为普通群消息（Go `send_group_forward_msg.go` 口径）。
+#[derive(Debug, Clone)]
+pub struct SendGroupForwardMsgHandler {
+    context: Arc<ActionContext>,
+}
 
 impl SendGroupForwardMsgHandler {
-    /// 构造（handler 无状态）。
+    /// 构造：需要 `ActionContext`（读配置 `forward_msg_limit`）。
     #[must_use]
-    pub const fn new() -> Self {
-        Self
+    pub fn new(context: Arc<ActionContext>) -> Self {
+        Self { context }
     }
 
     async fn run(&self, request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
-        checked_unsupported(
-            request,
-            SEND_GROUP_FORWARD_MSG,
-            validate_send_group_forward_msg,
-        )
+        forward_send(request, &self.context, true)
     }
 }
 
@@ -764,23 +758,21 @@ impl Handler for SendGroupForwardMsgHandler {
     }
 }
 
-/// `send_private_forward_msg`（go-cqhttp 扩展名）。
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SendPrivateForwardMsgHandler;
+/// `send_private_forward_msg`（go-cqhttp 扩展名）：群侧同款逐条重发，目标换私聊。
+#[derive(Debug, Clone)]
+pub struct SendPrivateForwardMsgHandler {
+    context: Arc<ActionContext>,
+}
 
 impl SendPrivateForwardMsgHandler {
-    /// 构造（handler 无状态）。
+    /// 构造：需要 `ActionContext`（读配置 `forward_msg_limit`）。
     #[must_use]
-    pub const fn new() -> Self {
-        Self
+    pub fn new(context: Arc<ActionContext>) -> Self {
+        Self { context }
     }
 
     async fn run(&self, request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
-        checked_unsupported(
-            request,
-            SEND_PRIVATE_FORWARD_MSG,
-            validate_send_private_forward_msg,
-        )
+        forward_send(request, &self.context, false)
     }
 }
 
@@ -794,7 +786,44 @@ impl Handler for SendPrivateForwardMsgHandler {
     }
 }
 
-/// `send_group_msg_raw`。
+/// 两个合并转发 action 的公共流程：node 校验 → 逐条重发计划 → deferred 握手。
+///
+/// `forward_msg_limit` 在规划层截断（Go 是发送循环里判断，语义一致）；真正的逐条循环发送
+/// 在 runtime 的 deferred 执行链（`execute_forward`）里做，部分失败不回滚、失败索引进回执。
+fn forward_send(
+    request: &ActionRequest<Value>,
+    context: &ActionContext,
+    to_group: bool,
+) -> Result<ActionResponse<Value>> {
+    let object = match params_or_empty(request) {
+        Ok(object) => object,
+        Err(err) => return Ok(bad_request(request, &err)),
+    };
+    let validation = if to_group {
+        validate_send_group_forward_msg(&object)
+    } else {
+        validate_send_private_forward_msg(&object)
+    };
+    if let Err(err) = validation {
+        return Ok(bad_request(request, &err));
+    }
+    let null = Value::Null;
+    let params = request.params.as_ref().unwrap_or(&null);
+    let limit = context.config().snapshot().get_forward_msg_limit();
+    let planned = if to_group {
+        plan_send_group_forward_msg(params, limit)
+    } else {
+        plan_send_private_forward_msg(params, limit)
+    };
+    match planned {
+        Ok(planned) => {
+            Ok(ActionResponse::ok(deferred_data_of(&planned)?).with_echo(request.echo.clone()))
+        }
+        Err(err) => Ok(bad_request(request, &err)),
+    }
+}
+
+/// `send_group_msg_raw`：与 `send_group_msg` 同一条发送链，`params.message_id` 转被动回复。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SendGroupMsgRawHandler;
 
@@ -806,7 +835,16 @@ impl SendGroupMsgRawHandler {
     }
 
     async fn run(&self, request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
-        checked_unsupported(request, SEND_GROUP_MSG_RAW, validate_send_group_msg_raw)
+        let object = match params_or_empty(request) {
+            Ok(object) => object,
+            Err(err) => return Ok(bad_request(request, &err)),
+        };
+        if let Err(err) = validate_send_group_msg_raw(&object) {
+            return Ok(bad_request(request, &err));
+        }
+        let null = Value::Null;
+        let params = request.params.as_ref().unwrap_or(&null);
+        respond_to_params(request, params, plan_send_group_msg_raw)
     }
 }
 
@@ -820,7 +858,7 @@ impl Handler for SendGroupMsgRawHandler {
     }
 }
 
-/// `send_private_msg_sse`。
+/// `send_private_msg_sse`：Go `InterfaceBody` 形态的消息体 → SSE 直发 C2C 端点。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SendPrivateMsgSseHandler;
 
@@ -832,7 +870,21 @@ impl SendPrivateMsgSseHandler {
     }
 
     async fn run(&self, request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
-        checked_unsupported(request, SEND_PRIVATE_MSG_SSE, validate_private_send)
+        let object = match params_or_empty(request) {
+            Ok(object) => object,
+            Err(err) => return Ok(bad_request(request, &err)),
+        };
+        if let Err(err) = validate_private_send(&object) {
+            return Ok(bad_request(request, &err));
+        }
+        let null = Value::Null;
+        let params = request.params.as_ref().unwrap_or(&null);
+        match plan_send_private_msg_sse(params) {
+            Ok(planned) => {
+                Ok(ActionResponse::ok(deferred_data_of(&planned)?).with_echo(request.echo.clone()))
+            }
+            Err(err) => Ok(bad_request(request, &err)),
+        }
     }
 }
 
@@ -846,7 +898,7 @@ impl Handler for SendPrivateMsgSseHandler {
     }
 }
 
-/// `send_private_msg_wakeup`。
+/// `send_private_msg_wakeup`：`send_private_msg` 的召回形态（`is_wakeup` 由执行链落体）。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SendPrivateMsgWakeupHandler;
 
@@ -858,7 +910,16 @@ impl SendPrivateMsgWakeupHandler {
     }
 
     async fn run(&self, request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
-        checked_unsupported(request, SEND_PRIVATE_MSG_WAKEUP, validate_private_send)
+        let object = match params_or_empty(request) {
+            Ok(object) => object,
+            Err(err) => return Ok(bad_request(request, &err)),
+        };
+        if let Err(err) = validate_private_send(&object) {
+            return Ok(bad_request(request, &err));
+        }
+        let null = Value::Null;
+        let params = request.params.as_ref().unwrap_or(&null);
+        respond_to_params(request, params, plan_send_private_msg_wakeup)
     }
 }
 
@@ -941,10 +1002,12 @@ mod tests {
         SetGroupAnonymousBanHandler, SetGroupMemberBlacklistHandler,
     };
     use crate::handler::{DEFERRED_FIELD, RETCODE_BAD_REQUEST};
+    use crate::send::SendRequest;
     use crate::testing::{
         Call, block_on, context, failed, ok_data, request, request_without_params,
     };
     use crate::util::RETCODE_UPSTREAM;
+    use gensokyo_core::Ob11Id;
     use gensokyo_protocol::Handler;
     use gensokyo_protocol::Status;
     use gensokyo_qq::dto::{
@@ -1242,45 +1305,102 @@ mod tests {
     }
 
     #[test]
-    fn forward_actions_validate_nodes() {
-        let group = SendGroupForwardMsgHandler::new();
-        assert_unsupported(
-            &group,
-            json!({"group_id": GROUP, "messages": [{"type": "node", "data": {}}]}),
-        );
-        assert_bad_request(&group, json!({"group_id": GROUP, "messages": []}));
-        assert_bad_request(&group, json!({"group_id": GROUP, "messages": "raw"}));
+    fn forward_actions_plan_node_resends() {
+        let (ctx, api) = context();
+        let group = SendGroupForwardMsgHandler::new(ctx);
+        let response = block_on(group.handle(&request(
+            "send_group_forward_msg",
+            json!({
+                "group_id": GROUP,
+                "messages": [
+                    {"data": {"content": "第一段"}},
+                    {"bogus": true},
+                ],
+            }),
+        )))
+        .expect("转发应产出 deferred 计划");
+        let data = ok_data(response);
+        assert_eq!(data[DEFERRED_FIELD], json!(true));
+        let forward = data["forward"]
+            .as_array()
+            .expect("forward 应是逐条计划数组");
+        assert_eq!(forward.len(), 1, "坏形状 node 应跳过（Go continue 口径）");
+        assert_eq!(forward[0]["node_index"], json!(0));
+        assert_eq!(forward[0]["request"]["target"], json!({"group": GROUP}));
+        assert_eq!(forward[0]["request"]["message"]["text"], json!("第一段"));
+        assert!(api.calls().is_empty(), "转发规划不应触达上游");
         assert_eq!(group.name(), "send_group_forward_msg");
 
-        let private = SendPrivateForwardMsgHandler::new();
-        assert_unsupported(
-            &private,
-            json!({"user_id": MEMBER, "messages": [{"type": "node", "data": {}}]}),
-        );
+        assert_bad_request(&group, json!({"group_id": GROUP, "messages": []}));
+        assert_bad_request(&group, json!({"group_id": GROUP, "messages": "raw"}));
+
+        let (ctx2, _api2) = context();
+        let private = SendPrivateForwardMsgHandler::new(ctx2);
         assert_bad_request(&private, json!({"user_id": MEMBER}));
         assert_eq!(private.name(), "send_private_forward_msg");
     }
 
     #[test]
-    fn direct_send_actions_are_unsupported() {
+    fn raw_wakeup_and_sse_plan_deferred_sends() {
         let raw = SendGroupMsgRawHandler::new();
-        assert_unsupported(
-            &raw,
-            json!({"group_id": GROUP, "message": {"type": "text"}}),
+        let response = block_on(raw.handle(&request(
+            "send_group_msg_raw",
+            json!({"group_id": GROUP, "message": "收到", "message_id": "REAL-7"}),
+        )))
+        .expect("raw 应产出 deferred 计划");
+        let data = ok_data(response);
+        assert_eq!(data[DEFERRED_FIELD], json!(true));
+        assert_eq!(data["target"], json!({"group": GROUP}));
+        let restored: SendRequest =
+            serde_json::from_value(data).expect("runtime 应能从载荷还原计划");
+        assert_eq!(
+            restored.message.plan.reply_msg_id,
+            Some(Ob11Id::str("REAL-7"))
         );
+        assert!(!restored.wakeup);
         assert_bad_request(&raw, json!({"group_id": GROUP}));
         assert_bad_request(&raw, json!({"message": "hi"}));
         assert_eq!(raw.name(), "send_group_msg_raw");
 
-        let sse = SendPrivateMsgSseHandler::new();
-        assert_unsupported(&sse, json!({"user_id": MEMBER, "message": "hi"}));
-        assert_bad_request(&sse, json!({"user_id": MEMBER}));
-        assert_eq!(sse.name(), "send_private_msg_sse");
-
         let wakeup = SendPrivateMsgWakeupHandler::new();
-        assert_unsupported(&wakeup, json!({"user_id": MEMBER, "message": "hi"}));
+        let response = block_on(wakeup.handle(&request(
+            "send_private_msg_wakeup",
+            json!({"user_id": MEMBER, "message": "召回"}),
+        )))
+        .expect("唤醒应产出 deferred 计划");
+        let data = ok_data(response);
+        assert_eq!(data["wakeup"], json!(true));
+        assert_eq!(data["target"], json!({"private": MEMBER}));
         assert_bad_request(&wakeup, json!({"message": "hi"}));
         assert_eq!(wakeup.name(), "send_private_msg_wakeup");
+
+        let sse = SendPrivateMsgSseHandler::new();
+        let response = block_on(sse.handle(&request(
+            "send_private_msg_sse",
+            json!({"user_id": MEMBER, "message": {"content": "第一段", "state": 1}}),
+        )))
+        .expect("SSE 应产出 deferred 计划");
+        let data = ok_data(response);
+        assert_eq!(data[DEFERRED_FIELD], json!(true));
+        assert_eq!(data["target"], json!({"private": MEMBER}));
+        assert_eq!(data["message_sse"]["msg_type"], json!(2));
+        assert_eq!(data["message_sse"]["markdown"]["content"], json!("第一段"));
+        assert_eq!(
+            data["message_sse"]["stream"],
+            json!({"state": 1, "index": 0})
+        );
+        assert_eq!(
+            data["message_sse"]["msg_seq"],
+            json!(10),
+            "Go 口径 msg_seq = index + 10"
+        );
+        // 非数字 state 回 1400（十进制字符串按本仓数字字段家规放行）；message 非对象（普通 CQ 文本）也拒
+        assert_bad_request(
+            &sse,
+            json!({"user_id": MEMBER, "message": {"content": "x", "state": "abc"}}),
+        );
+        assert_bad_request(&sse, json!({"user_id": MEMBER, "message": "hi"}));
+        assert_eq!(sse.name(), "send_private_msg_sse");
     }
 
     #[test]

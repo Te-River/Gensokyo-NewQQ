@@ -1,8 +1,9 @@
 //! deferred 计划的执行：`SendRequest` → `MessageToCreate` → QQ 上游。
 //!
 //! `gensokyo-actions` 的 `send_*` handler 只产出计划（`data.deferred == true`），本模块负责把
-//! 计划变成真实发送：[`Dispatcher`](crate::dispatcher::Dispatcher) 反序列化出
-//! [`SendRequest`] 后调用 [`execute`]——收件人还原成上游 OpenID、消息合成
+//! 计划变成真实发送：[`Dispatcher`](crate::dispatcher::Dispatcher) 识别出三种握手形状——单条
+//! [`SendRequest`]（[`execute`]）、SSE 直发 [`SseRequest`]（[`execute_sse`]）、逐条重发
+//! [`ForwardRequest`]（[`execute_forward`]）——收件人还原成上游 OpenID、消息合成
 //! [`MessageToCreate`]、再按 target 分派到
 //! [`QqApi::send_group_message`](gensokyo_actions::QqApi::send_group_message) /
 //! [`QqApi::send_c2c_message`](gensokyo_actions::QqApi::send_c2c_message)。
@@ -22,7 +23,9 @@
 //! | `stream` | `stream` + `msg_type=2` | 仅单聊；正文进 `markdown.content`，`stream.state` 取 1（start / mid）/ 10（finish），见 [`compose_stream`] |
 //! | `music` / `qqmusic` | `content` | Go 是「markdown 模板 + 键盘」，Rust 侧没有歌曲信息查询与 `music_prefix` 配置，降级成分享文案，不伪造音乐卡片 |
 //! | `unknown` / `unknown_image` / `unknown_record` | 不支持 | `1400`（请求侧段类型），不静默丢 |
-//! | `active` / `wakeup` | 忽略 | 控制型标记，不影响本条发送；主动推送 / 唤醒语义仍未接线 |
+//! | `active` / `wakeup` | 忽略 | 控制型标记，不影响本条合成；`send_private_msg_wakeup` 的
+//!   召回语义由 [`SendRequest::wakeup`] 承载，[`execute`] 置 `is_wakeup` 并强制不带回复 ID；
+//!   `[CQ:active]` 主动推送标记仍未接线（SSM / 懒消息不在本阶段） |
 //!
 //! ## 消息体三选一
 //!
@@ -86,7 +89,11 @@
 //! → `retcode 1400`；下载、上传与发送失败（[`Error::Network`] / [`Error::Upstream`]）→ `1500`。
 //! 映射在 [`crate::dispatcher`] 里完成。
 
-use gensokyo_actions::{ActionContext, MessageOut, SendRequest, SendTarget};
+use std::time::Duration;
+
+use gensokyo_actions::{
+    ActionContext, ForwardRequest, MessageOut, SendRequest, SendTarget, SseRequest,
+};
 use gensokyo_core::{Error, Ob11Id, Result};
 use gensokyo_protocol::cqcode;
 use gensokyo_protocol::outbound::{InputNotifyPayload, StreamKind, StreamPayload};
@@ -117,6 +124,9 @@ pub struct DeferredDeps<'a> {
     pub media: &'a MediaRuntime,
     /// echo 存储：发送成功后回写 `message_id`，`[CQ:reply]` 反查虚拟号也走它。
     pub echo: Option<&'a EchoStore>,
+    /// 合并转发逐条重发之间的间隔（Go 固定 500ms；生产走
+    /// [`DEFAULT_FORWARD_SEND_INTERVAL`]，测试可注入 [`Duration::ZERO`] 免真睡，评审 ③）。
+    pub forward_send_interval: Duration,
 }
 
 /// 执行一条 deferred 计划，返回上游消息 ID。
@@ -135,7 +145,18 @@ pub async fn execute(
     deps: &DeferredDeps<'_>,
 ) -> Result<String> {
     let openid = context.resolve_send_target(&plan.target)?;
-    let message = compose(context, &plan.target, &openid, &plan.message, deps).await?;
+    // 互动召回（Go `send_private_msg_wakeup.go`）：`is_wakeup` 与 `msg_id` / `event_id` 互斥，
+    // 回复目标强制不带，正文合成完统一置标记。
+    let mut message = if plan.wakeup {
+        let mut cleared = plan.message.clone();
+        cleared.plan.reply_msg_id = None;
+        compose(context, &plan.target, &openid, &cleared, deps).await?
+    } else {
+        compose(context, &plan.target, &openid, &plan.message, deps).await?
+    };
+    if plan.wakeup {
+        message.is_wakeup = true;
+    }
     // 先占当天的 @全员 名额再发送：并发两条 @全员 只有一条能占住
     let reservation = reserve_at_everyone(context, &plan.target, &openid, &message)?;
     let sent = match &plan.target {
@@ -154,6 +175,92 @@ pub async fn execute(
     };
     record_sent_message(deps.echo, &response.id);
     Ok(response.id)
+}
+
+/// 执行一条 SSE 计划（`send_private_msg_sse`），返回上游消息 ID。
+///
+/// 载荷是规划侧拼好的 `MessageSSE` 形态体（`msg_type=2` + `stream`），与普通 C2C 同端点
+/// 直发（Go `PostC2CMessageSSE` 就是 `POST /v2/users/{user_id}/messages`），不再走
+/// [`compose`]——Go 的 SSE 分支也不做 CQ 解析，正文原样进 `markdown.content`。
+///
+/// # Errors
+/// 收件人无法反查成 OpenID 或发送失败，口径同 [`execute`]。
+pub async fn execute_sse(
+    context: &ActionContext,
+    request: &SseRequest,
+    deps: &DeferredDeps<'_>,
+) -> Result<String> {
+    let openid = context.resolve_send_target(&request.target)?;
+    let response = context
+        .api()
+        .send_c2c_message(openid, request.message_sse.clone())
+        .await?;
+    record_sent_message(deps.echo, &response.id);
+    Ok(response.id)
+}
+
+/// Go `send_group_forward_msg.go:73`：逐条重发之间睡 500ms（上游速率保护）的生产默认值。
+///
+/// 实际间隔经 [`DeferredDeps::forward_send_interval`] 注入（评审 ③）：dispatcher 缺省用
+/// 这个常量，测试传 `Duration::ZERO` 免真睡。
+pub const DEFAULT_FORWARD_SEND_INTERVAL: Duration = Duration::from_millis(500);
+
+/// 一条合并转发的执行结果：成功的消息 ID 与失败清单（`index` 是**原 node 序号**，供调用方
+/// 回查具体是哪个 node 失败；计划下标与其不同——坏形状 / 空正文 node 会被跳过，评审 ①）。
+#[derive(Debug, Clone, Default)]
+pub struct ForwardOutcome {
+    /// 发送成功的上游消息 ID（按发送顺序）。
+    pub message_ids: Vec<String>,
+    /// 失败清单：已发送的不回滚，失败的逐条列出（含规划层解析失败的 node）。
+    pub failed: Vec<FailedSend>,
+}
+
+/// 一条失败的转发。
+#[derive(Debug, Clone)]
+pub struct FailedSend {
+    /// 原 node 序号（`messages` 数组下标，非计划下标）。
+    pub index: usize,
+    /// 失败原因（上游错误文本，或规划层的消息段解析错误）。
+    pub error: String,
+}
+
+/// 执行一条合并转发计划：逐 node 循环调用 [`execute`]（Go 同款「逐条重发」口径）。
+///
+/// 单条失败**不打断后续**、已发送的不回滚（Go 的 `HandleSendGroupMsg` 逐条独立处理，
+/// 整体回执恒定 ok）；相邻两次发送之间按 [`DeferredDeps::forward_send_interval`] 限速。
+/// 规划层解析失败的 node（[`ForwardRequest::parse_failed`]）也并入同一份失败清单，
+/// 回执按原 node 序号排序。
+pub async fn execute_forward(
+    context: &ActionContext,
+    request: &ForwardRequest,
+    deps: &DeferredDeps<'_>,
+) -> ForwardOutcome {
+    let mut outcome = ForwardOutcome {
+        message_ids: Vec::new(),
+        failed: request
+            .parse_failed
+            .iter()
+            .map(|item| FailedSend {
+                index: item.node_index,
+                error: item.error.clone(),
+            })
+            .collect(),
+    };
+    for (position, plan) in request.forward.iter().enumerate() {
+        if position > 0 {
+            tokio::time::sleep(deps.forward_send_interval).await;
+        }
+        match execute(context, &plan.request, deps).await {
+            Ok(message_id) => outcome.message_ids.push(message_id),
+            Err(err) => outcome.failed.push(FailedSend {
+                index: plan.node_index,
+                error: err.to_string(),
+            }),
+        }
+    }
+    // 解析失败与发送失败分两路插入：统一按原 node 序号排，回执顺序稳定
+    outcome.failed.sort_by_key(|item| item.index);
+    outcome
 }
 
 /// 消息里是否带 @全员 标签（扫 `content` 与 `markdown.content`）。
@@ -819,8 +926,12 @@ fn unsupported_segment(plan: &OutboundPlan) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
-    use gensokyo_actions::{ActionContext, MessageOut, QqApi, QqFuture, SendRequest, SendTarget};
+    use gensokyo_actions::{
+        ActionContext, ForwardParseFailure, ForwardPlan, ForwardRequest, MessageOut, QqApi,
+        QqFuture, SendRequest, SendTarget, SseRequest,
+    };
     use gensokyo_config::ConfigManager;
     use gensokyo_core::{Error, Ob11Id, Result};
     use gensokyo_media::{BoxFuture, FetchRequest, Fetcher, MediaTransport, TransportResponse};
@@ -831,12 +942,13 @@ mod tests {
     use gensokyo_protocol::{MediaRef, OutboundPlan};
     use gensokyo_qq::dto::{
         BotInGroupState, FileUpload, GroupInfo, GroupMember, GroupMemberList, InputNotify,
-        JoinRequestList, MediaResponse, MessageResponse, MessageToCreate, file_type, msg_type,
+        JoinRequestList, Markdown, MediaResponse, MessageResponse, MessageToCreate, StreamSse,
+        file_type, msg_type,
     };
     use gensokyo_storage::{EchoStore, IdMapOptions, IdMapStore};
     use tempfile::TempDir;
 
-    use super::{DeferredDeps, execute, render_plain};
+    use super::{DeferredDeps, execute, execute_forward, execute_sse, render_plain};
     use crate::at_everyone::SECTION;
     use crate::media::{MAX_MEDIA_BYTES, MediaRuntime};
 
@@ -1070,6 +1182,7 @@ mod tests {
                 plan,
                 auto_escape: false,
             },
+            wakeup: false,
         }
     }
 
@@ -1078,7 +1191,12 @@ mod tests {
     }
 
     fn deps<'a>(media: &'a MediaRuntime, echo: Option<&'a EchoStore>) -> DeferredDeps<'a> {
-        DeferredDeps { media, echo }
+        // 测试统一零间隔：合并转发用例免真睡 2×500ms（评审 ③）
+        DeferredDeps {
+            media,
+            echo,
+            forward_send_interval: Duration::ZERO,
+        }
     }
 
     /// 临时 idmap（redb + bbolt 同构的身份库），返回值里的 `TempDir` 必须一直持有。
@@ -2528,11 +2646,7 @@ mod tests {
     async fn markdown_avatar_cq_is_not_treated_as_at() {
         // 形似的码不是 at 段：不能被误判成缺 qq 而拒掉。`[CQ: atx]` / `[CQ: avatar]` 等
         // 段名前带空白/紧跟空白段名的形态同样不得命中（空白放宽不能扩大误判面）
-        for text in [
-            "[CQ:avatar] 你好",
-            "[CQ: atx] 你好",
-            "[CQ: atom,qq=1] 你好",
-        ] {
+        for text in ["[CQ:avatar] 你好", "[CQ: atx] 你好", "[CQ: atom,qq=1] 你好"] {
             let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
             let (_dir, context) = context(Arc::clone(&api));
             let media = no_media();
@@ -2620,5 +2734,137 @@ mod tests {
             .expect_err("卡片 + @全员 必须拒绝");
         assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
         assert!(api.sent().is_empty(), "冲突消息不应发送");
+    }
+
+    // ---- R3b：召回 / SSE / 合并转发的执行形状 ----
+
+    #[tokio::test]
+    async fn wakeup_plan_forces_is_wakeup_and_drops_reply() {
+        let api = Arc::new(FakeQqApi::default().with_send("WAKE-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let mut plan = request(
+            SendTarget::Private(OPENID.to_owned()),
+            OutboundPlan {
+                // 召回带回复目标：Go 强制 MsgID=""，reply 连反查都不做（互斥语义）
+                reply_msg_id: Some(Ob11Id::Num(42)),
+                ..OutboundPlan::default()
+            },
+        );
+        plan.wakeup = true;
+        plan.message.text = "召回正文".to_owned();
+
+        let id = execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("召回发送应成功");
+        assert_eq!(id, "WAKE-1");
+
+        let sent = api.sent();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].is_wakeup, "应置 is_wakeup");
+        assert_eq!(sent[0].msg_id, None, "召回不带 msg_id（Go 的互斥语义）");
+        assert_eq!(sent[0].content.as_deref(), Some("召回正文"));
+    }
+
+    #[tokio::test]
+    async fn sse_request_posts_stream_body_to_c2c() {
+        let api = Arc::new(FakeQqApi::default().with_send("SSE-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let plan = SseRequest {
+            target: SendTarget::Private(OPENID.to_owned()),
+            message_sse: MessageToCreate {
+                msg_type: Some(msg_type::MARKDOWN),
+                markdown: Some(Markdown::content("流式正文")),
+                msg_seq: Some(10),
+                stream: Some(StreamSse {
+                    state: 1,
+                    index: 0,
+                    id: None,
+                }),
+                ..MessageToCreate::default()
+            },
+        };
+
+        let id = execute_sse(&context, &plan, &deps(&media, None))
+            .await
+            .expect("SSE 应直发 C2C 端点");
+        assert_eq!(id, "SSE-1");
+
+        let sent = api.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].msg_type, Some(msg_type::MARKDOWN));
+        assert_eq!(
+            sent[0]
+                .markdown
+                .as_ref()
+                .and_then(|markdown| markdown.content.as_deref()),
+            Some("流式正文"),
+            "正文原样进 markdown.content（Go 不解析 CQ）"
+        );
+        let stream = sent[0].stream.as_ref().expect("应带 stream");
+        assert_eq!(stream.state, 1);
+        assert_eq!(
+            sent[0].msg_seq,
+            Some(10),
+            "msg_seq = index + 10 的防去重原样上送"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_loops_every_node_and_reports_failed_index() {
+        let api = Arc::new(
+            FakeQqApi::default()
+                .with_send("F-1")
+                .push_send(Err(Error::Upstream {
+                    code: 40_054_005,
+                    message: "msgseq 去重".to_owned(),
+                }))
+                .with_send("F-3"),
+        );
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let plan = ForwardRequest {
+            // node_index 与计划下标刻意不一致（模拟坏 / 空 node 被跳过，评审 ①）：
+            // 计划里是 node 0 / 1 / 4，node 3 规划层解析失败
+            forward: vec![
+                ForwardPlan {
+                    node_index: 0,
+                    request: text_plan(SendTarget::Group(OPENID.to_owned()), "第一条"),
+                },
+                ForwardPlan {
+                    node_index: 1,
+                    request: text_plan(SendTarget::Group(OPENID.to_owned()), "第二条"),
+                },
+                ForwardPlan {
+                    node_index: 4,
+                    request: text_plan(SendTarget::Group(OPENID.to_owned()), "第五条"),
+                },
+            ],
+            parse_failed: vec![ForwardParseFailure {
+                node_index: 3,
+                error: "段解析失败".to_owned(),
+            }],
+        };
+
+        let outcome = execute_forward(&context, &plan, &deps(&media, None)).await;
+
+        assert_eq!(
+            outcome.message_ids,
+            vec!["F-1".to_owned(), "F-3".to_owned()],
+            "已发送的不回滚（Go 逐条独立）"
+        );
+        // 失败清单报**原 node 序号**（发送失败 1 + 规划解析失败 3，按序合并）
+        let indices: Vec<usize> = outcome.failed.iter().map(|item| item.index).collect();
+        assert_eq!(indices, vec![1, 3]);
+        assert!(
+            outcome.failed[0].error.contains("msgseq 去重"),
+            "实际错误: {}",
+            outcome.failed[0].error
+        );
+        assert_eq!(outcome.failed[1].error, "段解析失败");
+        let sent = api.sent();
+        assert_eq!(sent.len(), 3, "三条都各打了一次上游");
+        assert_eq!(sent[2].content.as_deref(), Some("第五条"), "顺序与计划一致");
     }
 }

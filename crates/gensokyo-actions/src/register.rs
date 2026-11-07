@@ -225,7 +225,7 @@ pub fn register_all(registry: &mut Registry, context: Arc<ActionContext>) {
         ),
         (
             "send_group_forward_msg",
-            Arc::new(SendGroupForwardMsgHandler::new()),
+            Arc::new(SendGroupForwardMsgHandler::new(Arc::clone(&context))),
         ),
         ("send_group_msg", Arc::new(SendGroupHandler::new())),
         (
@@ -244,7 +244,7 @@ pub fn register_all(registry: &mut Registry, context: Arc<ActionContext>) {
         ("send_msg_async", Arc::new(SendMsgAsyncHandler::new())),
         (
             "send_private_forward_msg",
-            Arc::new(SendPrivateForwardMsgHandler::new()),
+            Arc::new(SendPrivateForwardMsgHandler::new(Arc::clone(&context))),
         ),
         ("send_private_msg", Arc::new(SendPrivateHandler::new())),
         (

@@ -14,7 +14,7 @@
 //! | [`system`] | `set_restart`、`clean_cache`、`get_cookies`、`get_csrf_token`、`get_credentials` | 运行控制 / 凭证：前两个只记审计日志并回 `{"code": 0}`（不重启、不清缓存），后三个回空凭证。 |
 //! | [`unsupported`] | `get_group_at_all_remain`、`set_group_name`、`set_group_admin`、`set_group_special_title`、`set_group_remark`、`set_qq_profile`、`get_qq_profile`、`get_group_system_msg`、`get_online_clients` | 无上游端点的 action：参数照 OneBot 契约校验后回 `1500`；`get_online_clients` 例外，逐字段照抄 Go 的本地回执 `{"clients": [], "tiny_id": 0}`。 |
 //! | [`panels`] | `create_panel`、`set_panel`、`delete_panel`、`get_panel`、`get_panel_list`、`set_panel_target`、`set_custom_menu`、`get_custom_menu`、`join_approval_strategy_*`（6 个） | 面板 / 自定义菜单 / 自动审批策略：全部走官方端点（`/v2/panels*`、`/v2/menu`、`/v2/groups/join_approval_strategy*`），参数错误 `1400` / 上游错误 `1500`。 |
-//! | [`interaction`] | `get_avatar`、`mark_msg_as_read`、`.handle_quick_operation`（+ `_async`）、`get_robot_share_link`、`put_interaction`、`delete_group_msg`、`set_group_add_request`、`get_group_member_blacklist`、`set_group_member_blacklist`、`send_group_forward_msg`、`send_private_forward_msg`、`send_group_msg_raw`、`send_private_msg_sse`、`send_private_msg_wakeup`、`get_group_honor_info`、`set_group_anonymous_ban` | 三项本地实现（头像 URL / 已读空回执 / 快速操作转 deferred 计划）；分享链接 / 互动 / 撤回 / 入群审批 / 黑名单走官方端点；合并转发 / 原始直发 / SSE / `IsWakeup` / 群荣誉 / 匿名禁言回 `1500`。 |
+//! | [`interaction`] | `get_avatar`、`mark_msg_as_read`、`.handle_quick_operation`（+ `_async`）、`get_robot_share_link`、`put_interaction`、`delete_group_msg`、`set_group_add_request`、`get_group_member_blacklist`、`set_group_member_blacklist`、`send_group_forward_msg`、`send_private_forward_msg`、`send_group_msg_raw`、`send_private_msg_sse`、`send_private_msg_wakeup`、`get_group_honor_info`、`set_group_anonymous_ban` | 三项本地实现（头像 URL / 已读空回执 / 快速操作转 deferred 计划）；分享链接 / 互动 / 撤回 / 入群审批 / 黑名单走官方端点；合并转发（逐条重发）/ 原始直发 / SSE / `IsWakeup` 产出 deferred 发送计划，由 runtime 发送链接管执行；群荣誉 / 匿名禁言回 `1500`。 |
 //! | [`capability`] | `can_send_image`、`can_send_record` | 纯本地判断，固定 `{"yes": true}`。 |
 //!
 //! # KNOWN_ACTIONS 覆盖率
@@ -58,7 +58,7 @@
 //!   其余媒体形态回 `1500`，不做静默丢弃。
 //! - **尚未接线**：`get_msg` / `get_forward_msg`（官方无查询端点）、`get_friend_list` /
 //!   `get_stranger_info` / `send_like`（官方无端点）、`set_group_leave`（官方无退群端点）、
-//!   合并转发 / 原始直发 / SSE / `IsWakeup`
+//!   群荣誉 / 匿名禁言
 //!   （[`interaction`]）——这些只做参数校验后回 `1500`，不做静默降级。`get_login_info` /
 //!   `get_status` / `get_version_info` 由 runtime 内置（[`BUILTIN_ACTIONS`]），不在本 crate。
 //!
@@ -150,7 +150,10 @@ pub use qqapi::{
 };
 pub use register::register_all;
 pub use send::{
-    MessageOut, SendRequest, SendTarget, plan_send_group_msg, plan_send_msg, plan_send_private_msg,
+    ForwardParseFailure, ForwardPlan, ForwardRequest, MessageOut, SendRequest, SendTarget,
+    SseRequest, plan_send_group_forward_msg, plan_send_group_msg, plan_send_group_msg_raw,
+    plan_send_msg, plan_send_private_forward_msg, plan_send_private_msg, plan_send_private_msg_sse,
+    plan_send_private_msg_wakeup,
 };
 pub use system::{
     CleanCacheHandler, CodeData, CookiesData, CredentialsData, CsrfTokenData, GetCookiesHandler,
@@ -460,14 +463,14 @@ mod tests {
             Arc::new(JoinApprovalStrategyWhitelistHandler::new(context.clone())),
             Arc::new(MarkMsgAsReadHandler::new()),
             Arc::new(PutInteractionHandler::new(context.clone())),
-            Arc::new(SendGroupForwardMsgHandler::new()),
+            Arc::new(SendGroupForwardMsgHandler::new(context.clone())),
             Arc::new(SendGroupHandler::new()),
             Arc::new(SendGroupAsyncHandler::new()),
             Arc::new(SendGroupMsgRawHandler::new()),
             Arc::new(SendLikeHandler::new(context.clone())),
             Arc::new(SendMsgHandler::new()),
             Arc::new(SendMsgAsyncHandler::new()),
-            Arc::new(SendPrivateForwardMsgHandler::new()),
+            Arc::new(SendPrivateForwardMsgHandler::new(context.clone())),
             Arc::new(SendPrivateHandler::new()),
             Arc::new(SendPrivateAsyncHandler::new()),
             Arc::new(SendPrivateMsgSseHandler::new()),

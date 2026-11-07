@@ -4,6 +4,7 @@
 
 mod support;
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use gensokyo_actions::{ActionContext, QqApi, QqFuture};
@@ -39,17 +40,30 @@ enum Outcome {
     Fail,
 }
 
-/// 记录发送入参、按槽位注入结果的 `QqApi` 替身。
+/// 记录发送入参、按序注入结果的 `QqApi` 替身。
+///
+/// 槽位是队列（合并转发一条计划要打多次上游）：测试按序 `push_*`，取走即消费。
 #[derive(Debug, Default)]
 struct FakeQqApi {
     sent: Mutex<Vec<Sent>>,
-    group: Mutex<Option<Outcome>>,
-    c2c: Mutex<Option<Outcome>>,
+    group: Mutex<VecDeque<Outcome>>,
+    c2c: Mutex<VecDeque<Outcome>>,
 }
 
 impl FakeQqApi {
     fn sent(&self) -> Vec<Sent> {
         self.sent.lock().expect("发送记录锁未中毒").clone()
+    }
+
+    fn push_group(&self, outcome: Outcome) {
+        self.group
+            .lock()
+            .expect("响应槽锁未中毒")
+            .push_back(outcome);
+    }
+
+    fn push_c2c(&self, outcome: Outcome) {
+        self.c2c.lock().expect("响应槽锁未中毒").push_back(outcome);
     }
 
     fn ok(&self, id: &str) -> Outcome {
@@ -60,12 +74,12 @@ impl FakeQqApi {
     }
 }
 
-/// 取走一次预置结果；未配置即 panic（「忘了准备 fixture」要立刻炸）。
-fn take(slot: &Mutex<Option<Outcome>>) -> Result<MessageResponse, Error> {
+/// 取走下一次预置结果；未配置即 panic（「忘了准备 fixture」要立刻炸）。
+fn take(slot: &Mutex<VecDeque<Outcome>>) -> Result<MessageResponse, Error> {
     match slot
         .lock()
         .expect("响应槽锁未中毒")
-        .take()
+        .pop_front()
         .expect("测试未配置发送结果")
     {
         Outcome::Ok(response) => Ok(response),
@@ -191,7 +205,7 @@ async fn registry_contains_all_actions_and_aliases() {
 #[tokio::test]
 async fn send_group_msg_sends_text_and_returns_message_id() {
     let (_dir, api, state) = state("app_id: 12345\n");
-    *api.group.lock().expect("响应槽锁未中毒") = Some(api.ok("m-1"));
+    api.push_group(api.ok("m-1"));
 
     let response = state
         .dispatcher()
@@ -222,7 +236,7 @@ async fn send_group_msg_sends_text_and_returns_message_id() {
 #[tokio::test]
 async fn at_segments_become_v2_mentions() {
     let (_dir, api, state) = state("app_id: 12345\n");
-    *api.group.lock().expect("响应槽锁未中毒") = Some(api.ok("m-2"));
+    api.push_group(api.ok("m-2"));
 
     let mention = format!("[CQ:at,qq={USER_OPENID}] hi");
     let expected = format!("<@{USER_OPENID}> hi");
@@ -249,7 +263,7 @@ async fn send_private_msg_and_send_msg_dispatch_by_target() {
     let dispatcher = state.dispatcher();
 
     // send_private_msg → C2C。
-    *api.c2c.lock().expect("响应槽锁未中毒") = Some(api.ok("c-1"));
+    api.push_c2c(api.ok("c-1"));
     let response = dispatcher
         .dispatch(&request(
             "send_private_msg",
@@ -260,7 +274,7 @@ async fn send_private_msg_and_send_msg_dispatch_by_target() {
     assert_eq!(response.retcode, 0);
 
     // send_msg(message_type=group) → 群。
-    *api.group.lock().expect("响应槽锁未中毒") = Some(api.ok("g-1"));
+    api.push_group(api.ok("g-1"));
     let response = dispatcher
         .dispatch(&request(
             "send_msg",
@@ -271,7 +285,7 @@ async fn send_private_msg_and_send_msg_dispatch_by_target() {
     assert_eq!(response.retcode, 0);
 
     // send_msg(message_type=private) → C2C。
-    *api.c2c.lock().expect("响应槽锁未中毒") = Some(api.ok("c-2"));
+    api.push_c2c(api.ok("c-2"));
     let response = dispatcher
         .dispatch(&request(
             "send_msg",
@@ -291,7 +305,7 @@ async fn send_private_msg_and_send_msg_dispatch_by_target() {
 #[tokio::test]
 async fn upstream_failure_is_1500_and_echo_kept() {
     let (_dir, api, state) = state("app_id: 12345\n");
-    *api.group.lock().expect("响应槽锁未中毒") = Some(Outcome::Fail);
+    api.push_group(Outcome::Fail);
 
     let response = state
         .dispatcher()
@@ -355,4 +369,237 @@ async fn deferred_without_action_context_is_1500() {
     assert_eq!(response.retcode, RETCODE_INTERNAL);
     assert!(response.data.is_none(), "失败响应不应带 data");
     assert!(api.sent().is_empty());
+}
+
+// ---- R3b：唤醒 / 原始直发 / SSE / 合并转发的真实端点接线 ----
+
+#[tokio::test]
+async fn wakeup_send_marks_is_wakeup_on_c2c_endpoint() {
+    let (_dir, api, state) = state("app_id: 12345\n");
+    api.push_c2c(api.ok("w-1"));
+
+    let response = state
+        .dispatcher()
+        .dispatch(&request(
+            "send_private_msg_wakeup",
+            json!({ "user_id": USER_OPENID, "message": "召回一下" }),
+            Some(json!("e-w")),
+        ))
+        .await;
+
+    assert_eq!(response.retcode, 0);
+    assert_eq!(response.echo, Some(json!("e-w")));
+    assert_eq!(response.data, Some(json!({ "message_id": "w-1" })));
+
+    let sent = api.sent();
+    match &sent[0] {
+        Sent::C2c(openid, message) => {
+            assert_eq!(openid, USER_OPENID);
+            assert!(message.is_wakeup, "召回应置 is_wakeup");
+            assert_eq!(message.msg_id, None, "主动召回不带 msg_id");
+            assert_eq!(
+                message.event_id, None,
+                "主动召回同样不带 event_id（三者互斥）"
+            );
+            assert_eq!(message.content.as_deref(), Some("召回一下"));
+        }
+        other => panic!("wakeup 应发 C2C: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn raw_send_replies_with_params_message_id() {
+    let (_dir, api, state) = state("app_id: 12345\n");
+    api.push_group(api.ok("r-1"));
+
+    let response = state
+        .dispatcher()
+        .dispatch(&request(
+            "send_group_msg_raw",
+            json!({ "group_id": OPENID, "message": "收到", "message_id": "REAL-MID-7" }),
+            None,
+        ))
+        .await;
+
+    assert_eq!(response.retcode, 0);
+    assert_eq!(response.data, Some(json!({ "message_id": "r-1" })));
+
+    let sent = api.sent();
+    match &sent[0] {
+        Sent::Group(openid, message) => {
+            assert_eq!(openid, OPENID);
+            assert_eq!(
+                message.msg_id.as_deref(),
+                Some("REAL-MID-7"),
+                "params.message_id 应成为被动回复目标（Go raw 口径）"
+            );
+            assert_eq!(message.content.as_deref(), Some("收到"));
+        }
+        other => panic!("raw 应发群消息: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn sse_send_posts_stream_body_to_c2c_endpoint() {
+    let (_dir, api, state) = state("app_id: 12345\n");
+    api.push_c2c(api.ok("s-1"));
+
+    let response = state
+        .dispatcher()
+        .dispatch(&request(
+            "send_private_msg_sse",
+            json!({
+                "user_id": USER_OPENID,
+                "message": {
+                    "content": "第一段",
+                    "state": 1,
+                    "prompt_keyboard": ["继续"],
+                    "action_button": 3,
+                    "callback_data": "cb"
+                }
+            }),
+            Some(json!("e-s")),
+        ))
+        .await;
+
+    assert_eq!(response.retcode, 0);
+    assert_eq!(response.data, Some(json!({ "message_id": "s-1" })));
+
+    let sent = api.sent();
+    match &sent[0] {
+        Sent::C2c(openid, message) => {
+            assert_eq!(
+                openid, USER_OPENID,
+                "SSE 与普通 C2C 同端点（Go PostC2CMessageSSE）"
+            );
+            assert_eq!(message.msg_type, Some(2));
+            assert_eq!(
+                message
+                    .markdown
+                    .as_ref()
+                    .and_then(|markdown| markdown.content.as_deref()),
+                Some("第一段"),
+                "正文原样进 markdown.content（Go 不解析 CQ）"
+            );
+            let stream = message.stream.as_ref().expect("SSE 应带 stream");
+            assert_eq!((stream.state, stream.index), (1, 0));
+            assert_eq!(message.msg_seq, Some(10), "Go 口径 msg_seq = index + 10");
+            assert_eq!(
+                message
+                    .extra
+                    .get("prompt_keyboard")
+                    .and_then(|value| value
+                        .pointer("/keyboard/content/rows/0/buttons/0/render_data/label")),
+                Some(&json!("继续"))
+            );
+            assert_eq!(
+                message.extra.get("action_button"),
+                Some(&json!({ "template_id": 3, "callback_data": "cb" }))
+            );
+        }
+        other => panic!("SSE 应走 C2C 端点: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn group_forward_resends_nodes_and_reports_failed_index() {
+    let (_dir, api, state) = state("  app_id: 12345\n  forward_msg_limit: 5\n");
+    api.push_group(api.ok("f-1"));
+    api.push_group(Outcome::Fail);
+    api.push_group(api.ok("f-3"));
+    // 零间隔注入（评审 ③）：转发循环不在测试里真睡
+    let dispatcher = state
+        .dispatcher()
+        .with_forward_interval(std::time::Duration::ZERO);
+
+    // node 布局刻意把坏形状放在**中间**（评审 ①）：node 2 被静默跳过后，失败清单里的
+    // 序号仍须是原 node 位置而不是计划下标；node 3 段解析失败也要入册（评审 ②）
+    let response = dispatcher
+        .dispatch(&request(
+            "send_group_forward_msg",
+            json!({
+                "group_id": OPENID,
+                "messages": [
+                    {"data": {"content": "第一条"}},
+                    {"data": {"content": "第二条"}},
+                    {"bogus": true},
+                    {"data": {"content": [123]}},
+                    {"data": {"content": [{"type": "text", "data": {"text": "第五条"}}]}}
+                ]
+            }),
+            Some(json!("e-f")),
+        ))
+        .await;
+
+    assert_eq!(
+        response.retcode, 0,
+        "部分失败不改整体 retcode（Go 回执语义）"
+    );
+    let data = response.data.expect("data");
+    assert_eq!(data["message_ids"], json!(["f-1", "f-3"]), "已发不回滚");
+    // node 1 发送失败 + node 3 段解析失败（日志：规划层 tracing::warn 打点）；
+    // node 2 坏形状按 Go 静默跳过、不入册
+    let failed = data["failed"].as_array().expect("failed 数组").clone();
+    assert_eq!(failed.len(), 2, "实际回执: {data}");
+    assert_eq!(failed[0]["index"], json!(1), "发送失败报原 node 序号");
+    assert!(
+        failed[0]["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("msgseq 去重"),
+        "失败原因要带上游文案: {data}"
+    );
+    assert_eq!(failed[1]["index"], json!(3), "解析失败也报原 node 序号");
+    assert!(
+        !failed[1]["error"].as_str().unwrap_or_default().is_empty(),
+        "解析失败要带 serde 错误文本: {data}"
+    );
+
+    let sent = api.sent();
+    assert_eq!(
+        sent.len(),
+        3,
+        "坏形状 / 解析失败 node 都不打上游，其余逐条重发"
+    );
+    match &sent[2] {
+        Sent::Group(_, message) => assert_eq!(message.content.as_deref(), Some("第五条")),
+        other => panic!("应为群消息: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn private_forward_loops_c2c_endpoint() {
+    let (_dir, api, state) = state("  app_id: 12345\n  forward_msg_limit: 5\n");
+    api.push_c2c(api.ok("p-1"));
+    api.push_c2c(api.ok("p-2"));
+    let dispatcher = state
+        .dispatcher()
+        .with_forward_interval(std::time::Duration::ZERO);
+
+    let response = dispatcher
+        .dispatch(&request(
+            "send_private_forward_msg",
+            json!({
+                "user_id": USER_OPENID,
+                "messages": [
+                    {"data": {"content": "第一条"}},
+                    {"data": {"content": "第二条"}}
+                ]
+            }),
+            None,
+        ))
+        .await;
+
+    assert_eq!(response.retcode, 0);
+    assert_eq!(
+        response.data.expect("data")["message_ids"],
+        json!(["p-1", "p-2"])
+    );
+    let sent = api.sent();
+    assert_eq!(sent.len(), 2);
+    assert!(matches!(
+        &sent[1],
+        Sent::C2c(openid, message)
+            if openid == USER_OPENID && message.content.as_deref() == Some("第二条")
+    ));
 }

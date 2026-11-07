@@ -8,10 +8,14 @@
 //!
 //! # deferred 计划
 //!
-//! `send_*` 的 handler 只回计划（`data.deferred == true`）。分发器识别到该标记后执行
-//! [`crate::deferred::execute`]：反序列化 [`gensokyo_actions::SendRequest`] → 合成
-//! `MessageToCreate`（含媒体上传与 reply 还原）→ 按 target 调上游发送 → `echo` 回写，成功时用
-//! `data = {"message_id": …}` 替换计划，**计划本身（含 `deferred` 标记）不会回给客户端**。
+//! `send_*` 的 handler 只回计划（`data.deferred == true`）。分发器识别到该标记后按载荷键分派：
+//! 单条 [`gensokyo_actions::SendRequest`] → [`crate::deferred::execute`]（合成 `MessageToCreate`，
+//! 含媒体上传与 reply 还原，唤醒计划落体 `is_wakeup`）；`message_sse` 键 →
+//! [`crate::deferred::execute_sse`]（SSE 形态体直发 C2C 端点）；`forward` 键 →
+//! [`crate::deferred::execute_forward`]（合并转发逐条重发，成功 ID 进 `message_ids`、失败
+//! 进带**原 node 序号**的 `failed` 清单——规划层解析失败的 node 也在册，整体 retcode 恒
+//! ok——Go 的回执语义）。计划本身（含 `deferred`
+//! 标记）不会回给客户端。
 //!
 //! 执行失败按错误类型分档：请求侧问题（媒体来源 / 大小 / 类型、reply 无法还原）是
 //! `retcode 1400`，其余（未装配 [`gensokyo_actions::ActionContext`]、计划损坏、下载 / 上传 /
@@ -25,9 +29,10 @@
 
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::FutureExt;
-use gensokyo_actions::{ActionContext, SendRequest};
+use gensokyo_actions::{ActionContext, ForwardRequest, SendRequest, SseRequest};
 use gensokyo_core::Error as CoreError;
 use gensokyo_protocol::Registry;
 use gensokyo_protocol::action::{ActionRequest, ActionResponse, Echo};
@@ -51,6 +56,7 @@ pub struct Dispatcher {
     actions: Option<Arc<ActionContext>>,
     media: Arc<MediaRuntime>,
     echo: Option<Arc<EchoStore>>,
+    forward_interval: Duration,
 }
 
 impl Dispatcher {
@@ -62,6 +68,7 @@ impl Dispatcher {
             actions: None,
             media: Arc::new(MediaRuntime::default()),
             echo: None,
+            forward_interval: crate::deferred::DEFAULT_FORWARD_SEND_INTERVAL,
         }
     }
 
@@ -83,6 +90,14 @@ impl Dispatcher {
     #[must_use]
     pub fn with_echo(mut self, echo: Option<Arc<EchoStore>>) -> Self {
         self.echo = echo;
+        self
+    }
+
+    /// 覆盖合并转发逐条重发的间隔（缺省 [`DEFAULT_FORWARD_SEND_INTERVAL`]，Go 的 500ms；
+    /// 测试传 `Duration::ZERO` 免真睡，评审 ③）。
+    #[must_use]
+    pub fn with_forward_interval(mut self, interval: Duration) -> Self {
+        self.forward_interval = interval;
         self
     }
 
@@ -131,9 +146,7 @@ impl Dispatcher {
             // 计划只是 handler → runtime 的内部握手载荷，不能泄漏给客户端。
             let echo = response.echo.clone();
             response = match self.run_deferred(data).await {
-                Ok(message_id) => {
-                    ActionResponse::ok(json!({ "message_id": message_id })).with_echo(echo)
-                }
+                Ok(outcome) => ActionResponse::ok(outcome).with_echo(echo),
                 Err((retcode, message)) => failure(retcode, message, echo),
             };
         }
@@ -147,29 +160,59 @@ impl Dispatcher {
 
     /// 执行 deferred 计划；失败带上该用的 `retcode`（见 [`deferred_retcode`]）。
     ///
+    /// 三种握手形状按载荷键判别：`message_sse` → [`crate::deferred::execute_sse`]、
+    /// `forward` → [`crate::deferred::execute_forward`]（合并转发逐条重发）、其余 →
+    /// [`crate::deferred::execute`] 单条。返回的 JSON 即给客户端的 `data`。
+    ///
     /// 未装配 [`ActionContext`]、计划反序列化失败都算服务端问题（`1500`）；消息侧问题由
     /// [`crate::deferred::execute`] 的 [`CoreError`] 决定。
-    async fn run_deferred(&self, data: Value) -> Result<String, (i32, String)> {
+    async fn run_deferred(&self, data: Value) -> Result<Value, (i32, String)> {
         let Some(context) = self.actions.as_ref() else {
             return Err((
                 RETCODE_INTERNAL,
                 "deferred 计划需要装配 ActionContext（QqApi）".to_owned(),
             ));
         };
-        let plan: SendRequest = serde_json::from_value(data).map_err(|err| {
-            (
-                RETCODE_INTERNAL,
-                format!("deferred 计划反序列化失败: {err}"),
-            )
-        })?;
         let deps = DeferredDeps {
             media: self.media.as_ref(),
             echo: self.echo.as_deref(),
+            forward_send_interval: self.forward_interval,
         };
-        crate::deferred::execute(context, &plan, &deps)
+        if data.get("forward").is_some() {
+            let request = serde_json::from_value::<ForwardRequest>(data).map_err(bad_plan)?;
+            let outcome = crate::deferred::execute_forward(context, &request, &deps).await;
+            // 部分失败不回滚也不改 retcode（Go 的转发回执恒 ok）：失败逐条进 `failed` 清单
+            let failed: Vec<Value> = outcome
+                .failed
+                .into_iter()
+                .map(|item| json!({ "index": item.index, "error": item.error }))
+                .collect();
+            return Ok(json!({
+                "message_ids": outcome.message_ids,
+                "failed": failed,
+            }));
+        }
+        if data.get("message_sse").is_some() {
+            let request = serde_json::from_value::<SseRequest>(data).map_err(bad_plan)?;
+            let message_id = crate::deferred::execute_sse(context, &request, &deps)
+                .await
+                .map_err(|err| (deferred_retcode(&err), err.to_string()))?;
+            return Ok(json!({ "message_id": message_id }));
+        }
+        let plan: SendRequest = serde_json::from_value(data).map_err(bad_plan)?;
+        let message_id = crate::deferred::execute(context, &plan, &deps)
             .await
-            .map_err(|err| (deferred_retcode(&err), err.to_string()))
+            .map_err(|err| (deferred_retcode(&err), err.to_string()))?;
+        Ok(json!({ "message_id": message_id }))
     }
+}
+
+/// 计划反序列化的失败形状：握手载荷坏了属于服务端问题（`1500`）。
+fn bad_plan(err: serde_json::Error) -> (i32, String) {
+    (
+        RETCODE_INTERNAL,
+        format!("deferred 计划反序列化失败: {err}"),
+    )
 }
 
 /// deferred 失败的 retcode：请求侧问题（媒体来源 / 大小 / 类型、reply 无法还原）是 `1400`，
