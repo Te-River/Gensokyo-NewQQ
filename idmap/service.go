@@ -104,6 +104,7 @@ var usernameCache sync.Map
 // StartUsernameCacheCleanup 启动定时清理过期 username 缓存（每 5min 执行一次）
 func StartUsernameCacheCleanup() {
 	go func() {
+		defer mylog.RecoverPanic("idmap.usernameCacheCleanup")
 		for {
 			time.Sleep(5 * time.Minute)
 			now := time.Now()

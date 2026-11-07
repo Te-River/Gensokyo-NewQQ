@@ -2,7 +2,6 @@ package Processor
 
 import (
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -34,7 +33,7 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 		mylog.Errorf("[idmap] 更新QQ群全量消息接收标志失败: group=%s message=%s event=GROUP_MESSAGE_CREATE error=%v", data.GroupID, data.ID, err)
 	}
 
-	if data.Author.ID == "" {
+	if data.Author == nil || data.Author.ID == "" {
 		mylog.Printf("出现ID为空未知错误.%v\n", data)
 		return nil
 	}
@@ -64,7 +63,7 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 			_, _ = idmap.StoreIDv2(data.GroupID)
 			_, _ = idmap.StoreIDv2(data.Author.ID)
 			if !config.GetHashIDValue() {
-				mylog.Fatalf("避坑日志:你开启了高级id转换,请设置hash_id为true,并且删除idmaps并重启")
+				mylog.Errorf("避坑日志:你开启了高级id转换,请设置hash_id为true,并且删除idmaps并重启")
 			}
 			idmap.SimplifiedStoreID(data.Author.ID)
 			idmap.SimplifiedStoreID(data.GroupID)
@@ -159,7 +158,8 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 			messageID64, err = idmap.StoreCachev2(data.ID)
 		}
 		if err != nil {
-			log.Fatalf("Error storing ID: %v", err)
+			mylog.Errorf("Error storing ID: %v", err)
+			return nil
 		}
 		messageID = safeMessageID(messageID64)
 		mylog.Printf("[message] group msg_id mapped: raw_msg=%s vMsg=%d", data.ID, messageID64)

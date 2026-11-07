@@ -44,7 +44,7 @@ func tryNature(data []byte, filename string) (string, error) {
 	}
 
 	ts := time.Now().Unix()
-	rand := fmt.Sprintf("%x", time.Now().UnixNano()%0x100000000)[:8]
+	rand := naturePathSuffix(time.Now().UnixNano())
 	uploadPath := fmt.Sprintf("%s/%d_%s.%s", _naturePrefix, ts, rand, ext)
 	host := fmt.Sprintf("%s.cos.%s.myqcloud.com", _natureBucket, _natureRegion)
 
@@ -79,6 +79,12 @@ func tryNature(data []byte, filename string) (string, error) {
 	}
 
 	return fmt.Sprintf("%s/%s", _natureCDN, uploadPath), nil
+}
+
+// naturePathSuffix 生成上传路径中的随机后缀，固定 8 位十六进制。
+// 用 %08x 而非 %x 取前 8 字符：低位值补零后天然 8 位，避免切片越界。
+func naturePathSuffix(nano int64) string {
+	return fmt.Sprintf("%08x", nano%0x100000000)
 }
 
 func hmacSha1N(key, data string) string {

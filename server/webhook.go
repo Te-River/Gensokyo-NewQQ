@@ -123,6 +123,7 @@ func CreateHandleValidationSafe(wh *WebhookHandler) gin.HandlerFunc {
 		default:
 			// 异步推送消息到队列
 			go func(httpBody []byte, payload Payload) {
+				defer mylog.RecoverPanic("server.webhook.enqueue")
 				webhookPayload := &WebhookPayload{
 					PlainToken: payload.D.PlainToken,
 					EventTs:    payload.D.EventTs,
@@ -198,6 +199,7 @@ func validateSignatureBody(req *http.Request, publicKey ed25519.PublicKey, body 
 func (wh *WebhookHandler) ListenAndProcessMessages() {
 	for payload := range wh.messageQueue {
 		go func(p *WebhookPayload) {
+			defer mylog.RecoverPanic("webhook.event")
 			mylog.Printf("Processing Webhook event with token: %s", redactToken(p.PlainToken))
 			// 业务逻辑处理的地方
 			payload := &dto.WSPayload{}

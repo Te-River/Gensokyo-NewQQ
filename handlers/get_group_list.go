@@ -153,7 +153,8 @@ func GetGroupList(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.Open
 	}
 
 	//fmt.Printf("getGroupList(频道): %+v\n", outputMap)
-	fmt.Printf("getGroupList(数量): %+v\n", len(outputMap["data"].([]interface{})))
+	dataList, _ := outputMap["data"].([]interface{})
+	fmt.Printf("getGroupList(数量): %+v\n", len(dataList))
 
 	err = client.SendMessage(outputMap)
 	if err != nil {

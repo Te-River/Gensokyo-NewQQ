@@ -234,13 +234,15 @@ func SendResponse(client callapi.Client, err error, message *callapi.ActionMessa
 	if groupID, ok := message.Params.GroupID.(string); ok && groupID != "" {
 		if config.GetIdmapPro() {
 			//将真实id转为int userid64
-			GroupID64, _, errr = idmap.StoreIDv2Pro(message.Params.GroupID.(string), message.Params.UserID.(string))
-			if errr != nil {
-				mylog.Errorf("Error storing ID: %v", err)
+			if userID, ok := message.Params.UserID.(string); ok {
+				GroupID64, _, errr = idmap.StoreIDv2Pro(groupID, userID)
+				if errr != nil {
+					mylog.Errorf("Error storing ID: %v", err)
+				}
 			}
 		} else {
 			// 映射str的GroupID到int
-			GroupID64, errr = idmap.StoreIDv2(message.Params.GroupID.(string))
+			GroupID64, errr = idmap.StoreIDv2(groupID)
 			if errr != nil {
 				mylog.Errorf("failed to convert GroupID64 to int: %v", err)
 			}
@@ -251,13 +253,15 @@ func SendResponse(client callapi.Client, err error, message *callapi.ActionMessa
 	if channelID, ok := message.Params.ChannelID.(string); ok && channelID != "" {
 		if config.GetIdmapPro() {
 			//将真实id转为int userid64
-			channelID64, _, errr = idmap.StoreIDv2Pro(message.Params.ChannelID.(string), message.Params.UserID.(string))
-			if errr != nil {
-				mylog.Errorf("Error storing ID: %v", err)
+			if userID, ok := message.Params.UserID.(string); ok {
+				channelID64, _, errr = idmap.StoreIDv2Pro(channelID, userID)
+				if errr != nil {
+					mylog.Errorf("Error storing ID: %v", err)
+				}
 			}
 		} else {
 			// 映射str的GroupID到int
-			channelID64, errr = idmap.StoreIDv2(message.Params.ChannelID.(string))
+			channelID64, errr = idmap.StoreIDv2(channelID)
 			if errr != nil {
 				mylog.Errorf("failed to convert GroupID64 to int: %v", err)
 			}
@@ -268,13 +272,15 @@ func SendResponse(client callapi.Client, err error, message *callapi.ActionMessa
 	if guildID, ok := message.Params.GuildID.(string); ok && guildID != "" {
 		if config.GetIdmapPro() {
 			//将真实id转为int userid64
-			guildID64, _, errr = idmap.StoreIDv2Pro(message.Params.GuildID.(string), message.Params.UserID.(string))
-			if errr != nil {
-				mylog.Errorf("Error storing ID: %v", err)
+			if userID, ok := message.Params.UserID.(string); ok {
+				guildID64, _, errr = idmap.StoreIDv2Pro(guildID, userID)
+				if errr != nil {
+					mylog.Errorf("Error storing ID: %v", err)
+				}
 			}
 		} else {
 			// 映射str的GroupID到int
-			guildID64, errr = idmap.StoreIDv2(message.Params.GuildID.(string))
+			guildID64, errr = idmap.StoreIDv2(guildID)
 			if errr != nil {
 				mylog.Errorf("failed to convert GroupID64 to int: %v", err)
 			}
@@ -848,15 +854,23 @@ func parseMessageContentLegacy(paramsMessage callapi.ParamsContent, message call
 			segmentContent := ""
 			switch segmentType {
 			case "text":
-				segmentContent, _ = segmentMap["data"].(map[string]interface{})["text"].(string)
+				dataMap, ok := segmentMap["data"].(map[string]interface{})
+				if !ok {
+					continue
+				}
+				segmentContent, _ = dataMap["text"].(string)
 				if config.GetEnableChangeWord() {
 					segmentContent = acnode.CheckWordOUT(segmentContent)
 				}
 			case "image":
-				fileContent, _ := segmentMap["data"].(map[string]interface{})["file"].(string)
+				dataMap, ok := segmentMap["data"].(map[string]interface{})
+				if !ok {
+					continue
+				}
+				fileContent, _ := dataMap["file"].(string)
 				// 兼容 url 字段（部分客户端使用 url 而非 file）
 				if fileContent == "" {
-					fileContent, _ = segmentMap["data"].(map[string]interface{})["url"].(string)
+					fileContent, _ = dataMap["url"].(string)
 				}
 
 				// 检查是否为 Base64 图片
@@ -893,10 +907,14 @@ func parseMessageContentLegacy(paramsMessage callapi.ParamsContent, message call
 				}
 
 			case "voice", "record":
-				fileContent, _ := segmentMap["data"].(map[string]interface{})["file"].(string)
+				dataMap, ok := segmentMap["data"].(map[string]interface{})
+				if !ok {
+					continue
+				}
+				fileContent, _ := dataMap["file"].(string)
 				// 兼容 url 字段（部分客户端使用 url 而非 file）
 				if fileContent == "" {
-					fileContent, _ = segmentMap["data"].(map[string]interface{})["url"].(string)
+					fileContent, _ = dataMap["url"].(string)
 				}
 
 				// 检查是否为 Base64 语音文件
@@ -932,11 +950,19 @@ func parseMessageContentLegacy(paramsMessage callapi.ParamsContent, message call
 				}
 
 			case "at":
-				qqNumber, _ := segmentMap["data"].(map[string]interface{})["qq"].(string)
+				dataMap, ok := segmentMap["data"].(map[string]interface{})
+				if !ok {
+					continue
+				}
+				qqNumber, _ := dataMap["qq"].(string)
 				messageText += "[CQ:at,qq=" + qqNumber + "]"
 
 			case "reply":
-				replyID, _ := segmentMap["data"].(map[string]interface{})["id"].(string)
+				dataMap, ok := segmentMap["data"].(map[string]interface{})
+				if !ok {
+					continue
+				}
+				replyID, _ := dataMap["id"].(string)
 				if replyID != "" {
 					foundItems["reply_msg_id"] = append(foundItems["reply_msg_id"], replyID)
 				}
@@ -963,12 +989,16 @@ func parseMessageContentLegacy(paramsMessage callapi.ParamsContent, message call
 				// [CQ:wakeup] 不在 messageText 中留痕
 
 			case "avatar":
-				qqNumber, _ := segmentMap["data"].(map[string]interface{})["qq"].(string)
+				dataMap, ok := segmentMap["data"].(map[string]interface{})
+				if !ok {
+					continue
+				}
+				qqNumber, _ := dataMap["qq"].(string)
 				var avatarCQCode string
-				if paramsMessage.GroupID == nil {
-					avatarCQCode, _ = GetAvatarCQCodeNoGroupID(qqNumber)
+				if groupID, ok := paramsMessage.GroupID.(string); ok {
+					avatarCQCode, _ = GetAvatarCQCode(groupID, qqNumber)
 				} else {
-					avatarCQCode, _ = GetAvatarCQCode(paramsMessage.GroupID.(string), qqNumber)
+					avatarCQCode, _ = GetAvatarCQCodeNoGroupID(qqNumber)
 				}
 				// 从 [CQ:image,file=URL] 中提取 URL 存入 foundItems
 				if avatarCQCode != "" {
@@ -1181,10 +1211,14 @@ func parseMessageContentLegacy(paramsMessage callapi.ParamsContent, message call
 				}
 
 			case "video":
-				fileContent, _ := segmentMap["data"].(map[string]interface{})["file"].(string)
+				dataMap, ok := segmentMap["data"].(map[string]interface{})
+				if !ok {
+					continue
+				}
+				fileContent, _ := dataMap["file"].(string)
 				// 兼容 url 字段（部分客户端使用 url 而非 file）
 				if fileContent == "" {
-					fileContent, _ = segmentMap["data"].(map[string]interface{})["url"].(string)
+					fileContent, _ = dataMap["url"].(string)
 				}
 				if strings.HasPrefix(fileContent, "http://") {
 					cleanContent := strings.TrimPrefix(fileContent, "http://")
@@ -1205,8 +1239,12 @@ func parseMessageContentLegacy(paramsMessage callapi.ParamsContent, message call
 				}
 
 			case "music":
-				musicType, _ := segmentMap["data"].(map[string]interface{})["type"].(string)
-				musicID, _ := segmentMap["data"].(map[string]interface{})["id"].(string)
+				dataMap, ok := segmentMap["data"].(map[string]interface{})
+				if !ok {
+					continue
+				}
+				musicType, _ := dataMap["type"].(string)
+				musicID, _ := dataMap["id"].(string)
 				if musicType == "qq" && musicID != "" {
 					foundItems["qqmusic"] = append(foundItems["qqmusic"], musicID)
 				}
@@ -1224,16 +1262,24 @@ func parseMessageContentLegacy(paramsMessage callapi.ParamsContent, message call
 
 		switch messageType {
 		case "text":
-			messageText, _ = message["data"].(map[string]interface{})["text"].(string)
+			dataMap, ok := message["data"].(map[string]interface{})
+			if !ok {
+				break
+			}
+			messageText, _ = dataMap["text"].(string)
 			if config.GetEnableChangeWord() {
 				messageText = acnode.CheckWordOUT(messageText)
 			}
 
 		case "image":
-			fileContent, _ := message["data"].(map[string]interface{})["file"].(string)
+			dataMap, ok := message["data"].(map[string]interface{})
+			if !ok {
+				break
+			}
+			fileContent, _ := dataMap["file"].(string)
 			// 兼容 url 字段（部分客户端使用 url 而非 file）
 			if fileContent == "" {
-				fileContent, _ = message["data"].(map[string]interface{})["url"].(string)
+				fileContent, _ = dataMap["url"].(string)
 			}
 
 			// 检查是否为 Base64 图片
@@ -1270,10 +1316,14 @@ func parseMessageContentLegacy(paramsMessage callapi.ParamsContent, message call
 			}
 
 		case "voice", "record":
-			fileContent, _ := message["data"].(map[string]interface{})["file"].(string)
+			dataMap, ok := message["data"].(map[string]interface{})
+			if !ok {
+				break
+			}
+			fileContent, _ := dataMap["file"].(string)
 			// 兼容 url 字段（部分客户端使用 url 而非 file）
 			if fileContent == "" {
-				fileContent, _ = message["data"].(map[string]interface{})["url"].(string)
+				fileContent, _ = dataMap["url"].(string)
 			}
 
 			// 检查是否为 Base64 语音文件
@@ -1309,11 +1359,19 @@ func parseMessageContentLegacy(paramsMessage callapi.ParamsContent, message call
 			}
 
 		case "at":
-			qqNumber, _ := message["data"].(map[string]interface{})["qq"].(string)
+			dataMap, ok := message["data"].(map[string]interface{})
+			if !ok {
+				break
+			}
+			qqNumber, _ := dataMap["qq"].(string)
 			messageText += "[CQ:at,qq=" + qqNumber + "]"
 
 		case "reply":
-			replyID, _ := message["data"].(map[string]interface{})["id"].(string)
+			dataMap, ok := message["data"].(map[string]interface{})
+			if !ok {
+				break
+			}
+			replyID, _ := dataMap["id"].(string)
 			if replyID != "" {
 				foundItems["reply_msg_id"] = append(foundItems["reply_msg_id"], replyID)
 			}
@@ -1328,12 +1386,16 @@ func parseMessageContentLegacy(paramsMessage callapi.ParamsContent, message call
 			// [CQ:wakeup] 不在 messageText 中留痕
 
 		case "avatar":
-			qqNumber, _ := message["data"].(map[string]interface{})["qq"].(string)
+			dataMap, ok := message["data"].(map[string]interface{})
+			if !ok {
+				break
+			}
+			qqNumber, _ := dataMap["qq"].(string)
 			var avatarCQCode string
-			if paramsMessage.GroupID == nil {
-				avatarCQCode, _ = GetAvatarCQCodeNoGroupID(qqNumber)
+			if groupID, ok := paramsMessage.GroupID.(string); ok {
+				avatarCQCode, _ = GetAvatarCQCode(groupID, qqNumber)
 			} else {
-				avatarCQCode, _ = GetAvatarCQCode(paramsMessage.GroupID.(string), qqNumber)
+				avatarCQCode, _ = GetAvatarCQCodeNoGroupID(qqNumber)
 			}
 			// 从 [CQ:image,file=URL] 中提取 URL 存入 foundItems
 			if avatarCQCode != "" {
@@ -1508,10 +1570,14 @@ func parseMessageContentLegacy(paramsMessage callapi.ParamsContent, message call
 			}
 
 		case "video":
-			fileContent, _ := message["data"].(map[string]interface{})["file"].(string)
+			dataMap, ok := message["data"].(map[string]interface{})
+			if !ok {
+				break
+			}
+			fileContent, _ := dataMap["file"].(string)
 			// 兼容 url 字段（部分客户端使用 url 而非 file）
 			if fileContent == "" {
-				fileContent, _ = message["data"].(map[string]interface{})["url"].(string)
+				fileContent, _ = dataMap["url"].(string)
 			}
 			if strings.HasPrefix(fileContent, "http://") {
 				cleanContent := strings.TrimPrefix(fileContent, "http://")
@@ -1532,8 +1598,12 @@ func parseMessageContentLegacy(paramsMessage callapi.ParamsContent, message call
 			}
 
 		case "music":
-			musicType, _ := message["data"].(map[string]interface{})["type"].(string)
-			musicID, _ := message["data"].(map[string]interface{})["id"].(string)
+			dataMap, ok := message["data"].(map[string]interface{})
+			if !ok {
+				break
+			}
+			musicType, _ := dataMap["type"].(string)
+			musicID, _ := dataMap["id"].(string)
 			if musicType == "qq" && musicID != "" {
 				foundItems["qqmusic"] = append(foundItems["qqmusic"], musicID)
 			}
@@ -1573,8 +1643,10 @@ func parseMessageContentLegacy(paramsMessage callapi.ParamsContent, message call
 		//处理at
 		messageText = transformMessageTextAtNoGroupID(messageText)
 	} else {
-		//处理at
-		messageText = transformMessageTextAt(messageText, paramsMessage.GroupID.(string), paramsMessage.UserID.(string))
+		//处理at（GroupID/UserID 均为外部输入，缺失或类型不符时按空值处理，避免断言 panic）
+		groupID, _ := paramsMessage.GroupID.(string)
+		userID, _ := paramsMessage.UserID.(string)
+		messageText = transformMessageTextAt(messageText, groupID, userID)
 	}
 
 	//最后再处理Url

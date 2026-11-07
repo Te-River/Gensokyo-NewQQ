@@ -57,6 +57,8 @@ func WsHandlerWithDependencies(api openapi.OpenAPI, apiV2 openapi.OpenAPI, p *Pr
 
 // 处理正向ws客户端的连接
 func wsHandler(api openapi.OpenAPI, apiV2 openapi.OpenAPI, p *Processor.Processors, c *gin.Context) {
+	// 连接生命周期兜底：读循环里的 panic 不能杀进程，也不能只留在 stderr
+	defer mylog.RecoverPanic("server.wsHandler")
 	// 先从请求头中尝试获取token
 	tokenFromHeader := c.Request.Header.Get("Authorization")
 	token := ""

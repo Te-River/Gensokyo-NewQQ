@@ -22,6 +22,7 @@ func init() {
 func startCleanupRoutine() {
 	cleanupTicker = time.NewTicker(30 * time.Minute)
 	go func() {
+		defer mylog.RecoverPanic("echo.cleanup")
 		for {
 			<-cleanupTicker.C
 			cleanupGlobalMaps()
@@ -461,6 +462,7 @@ func StartCleanupRoutine() {
 
 		// 启动一个协程执行清理操作
 		go func() {
+			defer mylog.RecoverPanic("echo.cleanup5m")
 			for range cleanupTicker.C {
 				fmt.Println("Starting cleanup...")
 

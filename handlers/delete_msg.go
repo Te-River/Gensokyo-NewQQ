@@ -22,21 +22,28 @@ func DeleteMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI
 	var RealMsgID string
 	var err error
 
+	// message_id 为外部输入，缺失或类型不符时无法定位消息，直接返回错误
+	msgID, ok := message.Params.MessageID.(string)
+	if !ok || msgID == "" {
+		mylog.Printf("delete_msg: message_id 缺失或类型错误，跳过撤回: %#v", message.Params.MessageID)
+		return "", fmt.Errorf("delete_msg: message_id 缺失或类型错误")
+	}
+
 	// 不是stringob才需要转换
 	if !config.GetStringOb11() {
 		// 如果从内存取
 		if config.GetMemoryMsgid() {
 			//还原msgid
-			RealMsgID, _ = echo.GetCacheIDFromMemoryByRowID(message.Params.MessageID.(string))
+			RealMsgID, _ = echo.GetCacheIDFromMemoryByRowID(msgID)
 		} else {
 			//还原msgid
-			RealMsgID, err = idmap.RetrieveRowByCachev2(message.Params.MessageID.(string))
+			RealMsgID, err = idmap.RetrieveRowByCachev2(msgID)
 			if err != nil {
 				mylog.Printf("error retrieving real RChannelID: %v", err)
 			}
 		}
 	} else {
-		RealMsgID = message.Params.MessageID.(string)
+		RealMsgID = msgID
 	}
 
 	//重新赋值

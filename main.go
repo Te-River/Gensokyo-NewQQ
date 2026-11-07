@@ -60,6 +60,16 @@ import (
 var p *Processor.Processors
 
 func main() {
+	// 提升运行时默认崩溃输出：未捕获 panic 时打印所有 goroutine 堆栈
+	mylog.InstallCrashHandler()
+	// 主 goroutine 兜底：记录堆栈后重新抛出，保留运行时默认输出与非零退出码
+	defer func() {
+		if r := recover(); r != nil {
+			mylog.RecordPanic("main", r)
+			panic(r)
+		}
+	}()
+
 	args := os.Args[1:]
 	if len(args) > 0 {
 		switch args[0] {
@@ -696,8 +706,17 @@ func main() {
 	}
 }
 
+// goEvent 在独立 goroutine 中执行事件处理：单个事件 panic 只落盘，不影响进程与其他事件。
+func goEvent(scope string, fn func()) {
+	go func() {
+		defer mylog.RecoverPanic(scope)
+		fn()
+	}()
+}
+
 func runWithTimer(eventName string, fn func()) {
 	go func() {
+		defer mylog.RecoverPanic("event." + eventName)
 		start := time.Now()
 		fn()
 		elapsed := time.Since(start)
@@ -727,7 +746,7 @@ func ErrorNotifyHandler() event.ErrorNotifyHandler {
 func InteractionHandler() event.InteractionEventHandler {
 	return func(event *dto.WSPayload, data *dto.WSInteractionData) error {
 		mylog.Printf("收到按钮回调:%v", data)
-		go p.ProcessInlineSearch(data)
+		goEvent("event.Interaction", func() { p.ProcessInlineSearch(data) })
 		return nil
 	}
 }
@@ -745,7 +764,7 @@ func GroupATMessageEventHandler() event.GroupATMessageEventHandler {
 
 		if config.GetEnableChangeWord() {
 			data.Content = acnode.CheckWordIN(data.Content)
-			if data.Author.Username != "" {
+			if data.Author != nil && data.Author.Username != "" {
 				data.Author.Username = acnode.CheckWordIN(data.Author.Username)
 			}
 		}
@@ -767,7 +786,7 @@ func C2CMessageEventHandler() event.C2CMessageEventHandler {
 
 		if config.GetEnableChangeWord() {
 			data.Content = acnode.CheckWordIN(data.Content)
-			if data.Author.Username != "" {
+			if data.Author != nil && data.Author.Username != "" {
 				data.Author.Username = acnode.CheckWordIN(data.Author.Username)
 			}
 		}
@@ -779,7 +798,7 @@ func C2CMessageEventHandler() event.C2CMessageEventHandler {
 // GroupAddRobotEventHandler 实现处理 群机器人新增 事件的回调
 func GroupAddRobotEventHandler() event.GroupAddRobotEventHandler {
 	return func(event *dto.WSPayload, data *dto.GroupAddBotEvent) error {
-		go p.ProcessGroupAddBot(data)
+		goEvent("event.GroupAddRobot", func() { p.ProcessGroupAddBot(data) })
 		return nil
 	}
 }
@@ -787,7 +806,7 @@ func GroupAddRobotEventHandler() event.GroupAddRobotEventHandler {
 // GroupDelRobotEventHandler 实现处理 群机器人删除 事件的回调
 func GroupDelRobotEventHandler() event.GroupDelRobotEventHandler {
 	return func(event *dto.WSPayload, data *dto.GroupAddBotEvent) error {
-		go p.ProcessGroupDelBot(data)
+		goEvent("event.GroupDelRobot", func() { p.ProcessGroupDelBot(data) })
 		return nil
 	}
 }
@@ -795,7 +814,7 @@ func GroupDelRobotEventHandler() event.GroupDelRobotEventHandler {
 // GroupMsgRejectHandler 实现处理 群请求关闭机器人主动推送 事件的回调
 func GroupMsgRejectHandler() event.GroupMsgRejectHandler {
 	return func(event *dto.WSPayload, data *dto.GroupMsgRejectEvent) error {
-		go p.ProcessGroupMsgReject(data)
+		goEvent("event.GroupMsgReject", func() { p.ProcessGroupMsgReject(data) })
 		return nil
 	}
 }
@@ -803,7 +822,7 @@ func GroupMsgRejectHandler() event.GroupMsgRejectHandler {
 // GroupMsgReceiveHandler 实现处理 群请求开启机器人主动推送 事件的回调
 func GroupMsgReceiveHandler() event.GroupMsgReceiveHandler {
 	return func(event *dto.WSPayload, data *dto.GroupMsgReceiveEvent) error {
-		go p.ProcessGroupMsgRecive(data)
+		goEvent("event.GroupMsgReceive", func() { p.ProcessGroupMsgRecive(data) })
 		return nil
 	}
 }
@@ -812,7 +831,7 @@ func GroupMsgReceiveHandler() event.GroupMsgReceiveHandler {
 func FriendAddEventHandler() event.FriendAddEventHandler {
 	return func(event *dto.WSPayload, data *dto.WSFriendAddData) error {
 		// data.SceneParam 即为 generate_url_link 中的 callbackData
-		go p.ProcessFriendAdd(data)
+		goEvent("event.FriendAdd", func() { p.ProcessFriendAdd(data) })
 		return nil
 	}
 }
@@ -820,7 +839,7 @@ func FriendAddEventHandler() event.FriendAddEventHandler {
 // FriendDelEventHandler 实现处理 用户删除机器人 事件的回调
 func FriendDelEventHandler() event.FriendDelEventHandler {
 	return func(event *dto.WSPayload, data *dto.WSFriendDelData) error {
-		go p.ProcessFriendDel(data)
+		goEvent("event.FriendDel", func() { p.ProcessFriendDel(data) })
 		return nil
 	}
 }
@@ -828,7 +847,7 @@ func FriendDelEventHandler() event.FriendDelEventHandler {
 // C2CMsgRejectHandler 实现处理 用户关闭机器人C2C消息推送 事件的回调
 func C2CMsgRejectHandler() event.C2CMsgRejectHandler {
 	return func(event *dto.WSPayload, data *dto.WSC2CMsgRejectData) error {
-		go p.ProcessC2CMsgReject(data)
+		goEvent("event.C2CMsgReject", func() { p.ProcessC2CMsgReject(data) })
 		return nil
 	}
 }
@@ -836,7 +855,7 @@ func C2CMsgRejectHandler() event.C2CMsgRejectHandler {
 // C2CMsgReceiveHandler 实现处理 用户开启机器人C2C消息推送 事件的回调
 func C2CMsgReceiveHandler() event.C2CMsgReceiveHandler {
 	return func(event *dto.WSPayload, data *dto.WSC2CMsgReceiveData) error {
-		go p.ProcessC2CMsgReceive(data)
+		goEvent("event.C2CMsgReceive", func() { p.ProcessC2CMsgReceive(data) })
 		return nil
 	}
 }
@@ -845,7 +864,7 @@ func C2CMsgReceiveHandler() event.C2CMsgReceiveHandler {
 func GroupMemberAddEventHandler() event.GroupMemberAddEventHandler {
 	return func(event *dto.WSPayload, data *dto.GroupMemberEvent) error {
 		data.EventID = event.ID
-		go p.ProcessGroupMember(data, "GROUP_MEMBER_ADD")
+		goEvent("event.GroupMemberAdd", func() { p.ProcessGroupMember(data, "GROUP_MEMBER_ADD") })
 		return nil
 	}
 }
@@ -853,7 +872,7 @@ func GroupMemberAddEventHandler() event.GroupMemberAddEventHandler {
 // GroupMemberRemoveEventHandler 实现处理 群成员移除 事件的回调
 func GroupMemberRemoveEventHandler() event.GroupMemberRemoveEventHandler {
 	return func(event *dto.WSPayload, data *dto.GroupMemberEvent) error {
-		go p.ProcessGroupMember(data, "GROUP_MEMBER_REMOVE")
+		goEvent("event.GroupMemberRemove", func() { p.ProcessGroupMember(data, "GROUP_MEMBER_REMOVE") })
 		return nil
 	}
 }
@@ -862,7 +881,7 @@ func GroupMemberRemoveEventHandler() event.GroupMemberRemoveEventHandler {
 func GroupJoinRequestEventHandler() event.GroupJoinRequestEventHandler {
 	return func(event *dto.WSPayload, data *dto.GroupJoinRequestEvent) error {
 		data.EventID = event.ID
-		go p.ProcessGroupJoinRequest(data)
+		goEvent("event.GroupJoinRequest", func() { p.ProcessGroupJoinRequest(data) })
 		return nil
 	}
 }
@@ -984,6 +1003,7 @@ func setupConfigWatcher(configFilePath string) {
 
 	// Start the goroutine to handle file system events.
 	go func() {
+		defer mylog.RecoverPanic("config.watcher")
 		for {
 			select {
 			case event, ok := <-watcher.Events:
@@ -1053,7 +1073,7 @@ func UnionFanout(base gin.HandlerFunc) gin.HandlerFunc {
 			}
 
 			go func(method, url string, headers http.Header, payload []byte) {
-				defer func() { _ = recover() }()
+				defer mylog.RecoverPanic("union.fanout")
 
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
@@ -1091,14 +1111,19 @@ func GroupMessageEventHandler() event.GroupMessageEventHandler {
 				break
 			}
 		}
+		// author 缺失时日志按空值记录，不伪造发送者
+		authorID := ""
+		if data.Author != nil {
+			authorID = data.Author.ID
+		}
 		if hasAtBot {
-			mylog.Printf("[GroupMessageEventHandler] 收到群消息(ID=%v, from=%v, content=%v)", data.ID, data.Author.ID, data.Content)
+			mylog.Printf("[GroupMessageEventHandler] 收到群消息(ID=%v, from=%v, content=%v)", data.ID, authorID, data.Content)
 		} else {
-			mylog.Printf("[GroupMessageEventHandler] 收到非@群消息(ID=%v, from=%v, content=%v)", data.ID, data.Author.ID, data.Content)
+			mylog.Printf("[GroupMessageEventHandler] 收到非@群消息(ID=%v, from=%v, content=%v)", data.ID, authorID, data.Content)
 		}
 		if config.GetEnableChangeWord() {
 			data.Content = acnode.CheckWordIN(data.Content)
-			if data.Author.Username != "" {
+			if data.Author != nil && data.Author.Username != "" {
 				data.Author.Username = acnode.CheckWordIN(data.Author.Username)
 			}
 		}

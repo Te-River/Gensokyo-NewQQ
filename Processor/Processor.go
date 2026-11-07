@@ -312,6 +312,7 @@ func (p *Processors) BroadcastMessageToAllFAF(message map[string]interface{}, ap
 	// 并发发送到我们作为客户端的Wsclient
 	for _, client := range p.Wsclient {
 		go func(c callapi.WebSocketServerClienter) {
+			defer mylog.RecoverPanic("processor.broadcast")
 			_ = c.SendMessage(message) // 忽略错误
 		}(client)
 	}
@@ -319,6 +320,7 @@ func (p *Processors) BroadcastMessageToAllFAF(message map[string]interface{}, ap
 	// 并发发送到我们作为服务器连接到我们的WsServerClients
 	for _, serverClient := range p.WsServerClients {
 		go func(sc callapi.WebSocketServerClienter) {
+			defer mylog.RecoverPanic("processor.broadcast")
 			_ = sc.SendMessage(message) // 忽略错误
 		}(serverClient)
 	}
@@ -339,6 +341,7 @@ func (p *Processors) BroadcastMessageToAll(message map[string]interface{}, api o
 		wg.Add(1)
 		go func(c callapi.WebSocketServerClienter) {
 			defer wg.Done()
+			defer mylog.RecoverPanic("processor.broadcastWait")
 			if err := c.SendMessage(message); err != nil {
 				errorCh <- fmt.Sprintf("error sending message via wsclient: %v", err)
 			}
@@ -350,6 +353,7 @@ func (p *Processors) BroadcastMessageToAll(message map[string]interface{}, api o
 		wg.Add(1)
 		go func(sc callapi.WebSocketServerClienter) {
 			defer wg.Done()
+			defer mylog.RecoverPanic("processor.broadcastWait")
 			if err := sc.SendMessage(message); err != nil {
 				errorCh <- fmt.Sprintf("error sending message via WsServerClient: %v", err)
 			}
@@ -440,6 +444,7 @@ func PostMessageToUrls(message map[string]interface{}) {
 		// 启动一个 goroutine
 		go func(url string) {
 			defer wg.Done() // 确保减少 WaitGroup 的计数器
+			defer mylog.RecoverPanic("processor.postUrl")
 			sendPostRequest(jsonString, url)
 		}(url)
 	}
@@ -647,6 +652,7 @@ func (p *Processors) HandleFrameworkCommand(messageText string, data interface{}
 		// 异步并发广播到群聊
 		for _, grpID := range groupIDs {
 			go func(gID string) {
+				defer mylog.RecoverPanic("processor.groupBroadcast")
 				_, _ = p.Apiv2.PostGroupMessage(context.TODO(), gID, &dto.MessageToCreate{
 					Content: broadcastMsg,
 					MsgType: 0,

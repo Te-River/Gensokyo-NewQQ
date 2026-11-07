@@ -47,7 +47,7 @@ func (p *Processors) ProcessC2CMsgReject(data *dto.WSC2CMsgRejectData) error {
 		// 当哈希碰撞 因为获取时候是用的非idmap的get函数
 		_, _ = idmap.StoreIDv2(fromuid)
 		if !config.GetHashIDValue() {
-			mylog.Fatalf("避坑日志:你开启了高级id转换,请设置hash_id为true,并且删除idmaps并重启")
+			mylog.Errorf("避坑日志:你开启了高级id转换,请设置hash_id为true,并且删除idmaps并重启")
 		}
 	} else {
 		// 映射str的userid到int
@@ -201,7 +201,7 @@ func (p *Processors) ProcessC2CMsgReceive(data *dto.WSC2CMsgReceiveData) error {
 		}
 		_, _ = idmap.StoreIDv2(fromuid)
 		if !config.GetHashIDValue() {
-			mylog.Fatalf("避坑日志:你开启了高级id转换,请设置hash_id为true,并且删除idmaps并重启")
+			mylog.Errorf("避坑日志:你开启了高级id转换,请设置hash_id为true,并且删除idmaps并重启")
 		}
 	} else {
 		userid64, err = idmap.StoreIDv2(fromuid)

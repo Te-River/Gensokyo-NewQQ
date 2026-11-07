@@ -268,6 +268,9 @@ func RegisterHandler(action string, handler HandlerFunc) {
 // 按 config.GetArchMode() 切换：new 走 action.Dispatcher；shadow 以 legacy 产物为准并 diff；
 // legacy（及默认）走原逻辑。OneBot 响应逐字节兼容。
 func CallAPIFromDict(client Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, message ActionMessage) string {
+	// 所有传输（反向ws/正向ws/http）的 action 都在此汇聚，单点兜底避免 handler panic 杀进程
+	defer mylog.RecoverPanic("callapi." + message.Action)
+
 	switch config.GetArchMode() {
 	case "new":
 		return callAPIFromDictNew(client, api, apiv2, message, false)

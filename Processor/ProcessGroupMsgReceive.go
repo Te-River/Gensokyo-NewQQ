@@ -50,7 +50,7 @@ func (p *Processors) ProcessGroupMsgRecive(data *dto.GroupMsgReceiveEvent) error
 		LongGroupID64, _ = idmap.StoreIDv2(fromgid)
 		_, _ = idmap.StoreIDv2(fromuid)
 		if !config.GetHashIDValue() {
-			mylog.Fatalf("避坑日志:你开启了高级id转换,请设置hash_id为true,并且删除idmaps并重启")
+			mylog.Errorf("避坑日志:你开启了高级id转换,请设置hash_id为true,并且删除idmaps并重启")
 		}
 	} else {
 		// 映射str的GroupID到int

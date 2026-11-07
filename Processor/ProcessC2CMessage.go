@@ -3,7 +3,6 @@ package Processor
 
 import (
 	"fmt"
-	"log"
 	"strconv"
 	"time"
 
@@ -28,7 +27,7 @@ func (p *Processors) ProcessC2CMessage(data *dto.WSC2CMessageData) error {
 	//sourece是源头频道
 	//GuildID := data.GuildID
 
-	if data.Author.ID == "" {
+	if data.Author == nil || data.Author.ID == "" {
 		mylog.Printf("出现ID为空未知错误.%v\n", data)
 		return nil
 	}
@@ -58,7 +57,7 @@ func (p *Processors) ProcessC2CMessage(data *dto.WSC2CMessageData) error {
 				//当参数不全
 				_, _ = idmap.StoreIDv2(data.Author.ID)
 				if !config.GetHashIDValue() {
-					mylog.Fatalf("避坑日志:你开启了高级id转换,请设置hash_id为true,并且删除idmaps并重启")
+					mylog.Errorf("避坑日志:你开启了高级id转换,请设置hash_id为true,并且删除idmaps并重启")
 				}
 				//补救措施
 				idmap.SimplifiedStoreID(data.Author.ID)
@@ -83,12 +82,14 @@ func (p *Processors) ProcessC2CMessage(data *dto.WSC2CMessageData) error {
 			if config.GetMemoryMsgid() {
 				messageID64, err = echo.StoreCacheInMemory(data.ID)
 				if err != nil {
-					log.Fatalf("Error storing ID: %v", err)
+					mylog.Errorf("Error storing ID: %v", err)
+					return nil
 				}
 			} else {
 				messageID64, err = idmap.StoreCachev2(data.ID)
 				if err != nil {
-					log.Fatalf("Error storing ID: %v", err)
+					mylog.Errorf("Error storing ID: %v", err)
+					return nil
 				}
 			}
 			messageID = safeMessageID(messageID64)

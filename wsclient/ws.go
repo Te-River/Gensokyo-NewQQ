@@ -87,6 +87,7 @@ func (client *WebSocketClient) Close() error {
 
 // startWriter 专用的写 Goroutine
 func (client *WebSocketClient) startWriter() {
+	defer mylog.RecoverPanic("wsclient.writeLoop")
 	for {
 		select {
 		case req := <-client.writeCh:
@@ -106,6 +107,7 @@ func (client *WebSocketClient) startWriter() {
 
 // 处理onebotv11应用端发来的信息
 func (client *WebSocketClient) handleIncomingMessages(cancel context.CancelFunc) {
+	defer mylog.RecoverPanic("wsclient.readLoop")
 	for {
 		_, msg, err := client.conn.ReadMessage()
 		if err != nil {
@@ -245,6 +247,7 @@ func (client *WebSocketClient) processFailedMessages() {
 
 // 处理信息,调用腾讯api
 func (client *WebSocketClient) recvMessage(msg []byte) {
+	defer mylog.RecoverPanic("wsclient.recvMessage")
 	var message callapi.ActionMessage
 	//mylog.Println("Received from onebotv11 server raw:", string(msg))
 	err := json.Unmarshal(msg, &message)
@@ -275,6 +278,7 @@ func TruncateMessage(message callapi.ActionMessage, maxLength int) string {
 
 // 发送心跳包
 func (client *WebSocketClient) sendHeartbeat(ctx context.Context, botID uint64, heartbeatinterval int) {
+	defer mylog.RecoverPanic("wsclient.heartbeat")
 	for {
 		select {
 		case <-ctx.Done():

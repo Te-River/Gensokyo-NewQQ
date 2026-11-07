@@ -19,6 +19,8 @@ channel_temp/
 
 # Ignore log
 log/
+# 崩溃现场落盘目录（mylog.RecoverPanic）
+logs/
 
 # ignore dist（占位文件例外入库：clean clone 直接可构建 Go/Rust，见下方 un-ignore）
 webui/dist/*
