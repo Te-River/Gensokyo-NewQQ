@@ -16,7 +16,13 @@ M0 只新建 Rust 工作区与 CI，**不改动任何 Go 代码**。
 ## M0 交付边界
 
 - 已建：workspace（10 库 crate + bin + xtask）、fmt/clippy/deny/audit 配置、`core`（error/ids/telemetry）、`config`（Settings + loader 骨架）、`protocol`（event/action/cqcode/outbound/registry 骨架）。
-- 未建（M1+）：热重载与全量配置字段、idmap/echo、四连接、action 实现、媒体管线、WebUI、MSRV 独立 job、黄金样本回放。
+- 未建（M1+）：热重载与全量配置字段、idmap/echo、四连接、媒体管线、WebUI、MSRV 独立 job、黄金样本回放。（原列于此的 **action 实现已建**，见下文「里程碑状态」；接线明细以 `reports/refactor/16-official-api-audit.md` 为准。）
+
+## 里程碑状态（截至 2026-11-08，HEAD `c6b44a2`）
+
+- **M3 `a60c4ed`（Rust 端点补齐与出站段类型放开）**：22 个 action 由 1500 占位改真实端点（面板 6 / 自定义菜单 2 / 入群自动审批策略 6 / 群黑名单 2 / 踢人 / 撤回×2 / `set_group_add_request` / `put_interaction` / `get_robot_share_link`；提交标题与 `qqapi` trait 计数口径为 20，按模块表逐项核为 22）；`HttpMethod` 补 PUT/PATCH/DELETE；`gensokyo-qq` 新增 22 个端点方法与 panel DTO；出站段放开 keyboard / input_notify / stream（music 降级文本）。验证：`cargo test --workspace` 全 suite ok、`cargo clippy --workspace --all-targets -- -D warnings` 零告警，评审 approve 无 Critical/Major。
+- **R3a `bbee6d6`（`get_group_list` 真实化）**：`IdMapStore` 新增 `find_config_sections` 只读枚举、入站 4 群事件注册 `<上报形态ID>:type=group`、handler 逐群聚合（反查 / 信息 / 正查任一失败 = 整群跳过 + warn）。刻意差异：Go 留空字段行、不回 uin 前缀形态、无逐群节流。验证口径同 M3（全 suite ok + clippy 零告警），评审 approve 无 Critical/Major。
+- **R3b `c6b44a2`（出站发送链接线）**：raw（按 Go 实际=普通链，非原生直传）/ wakeup（`is_wakeup` 与 `msg_id`/`event_id` 三字段互斥；空 message 收紧 1400；`c2c_wakeup_resp` notice 未接线=已知缺口）/ sse（`msg_type=2`、`msg_seq=index+10`，index/id 调用方显式传）/ 合并转发×2（逐条重发、保留 Go `limit+1` 边界、间隔 500ms 经 `DeferredDeps` 可注入、`failed[].index` 用原 node 序号、node 解析失败入清单不静默丢）；dispatcher deferred 载荷三分支，握手新键全部 `serde(default)` 向后兼容。验证：`cargo test --workspace` 33 suites 全绿 / 770 passed（R3b 时点口径）、clippy 零告警，评审修复轮后 approve 无 Critical/Major。
 - `gensokyo` 在 M0 只支持 `--version` / `version`；无子命令时打印提示并以退出码 2 结束（不假装启动成功）。
 - TLS 下限**接线**：`gensokyo-qq` 依赖 `rustls 0.23.46` / `webpki-root-certs 1.0.10` / `rustls-webpki 0.103.16`（provider 显式留空，M1 再选）；`cargo xtask check-tls-floors` 与 CI `tls-floors` job 断言 `Cargo.lock` 不低于下限；`deny.toml` 同时禁 `openssl`、`openssl-sys`。
 - CQ 转义口径**跟随 Go 而非规范**：出站只转 `,` `]` `&`，不转 `[`（OneBot v11 规范要求转 `[`）；入站 `unescape` 仍接受 `&#91;`。M1 勿"修正"为转 `[`，否则黄金样本整串不匹配。

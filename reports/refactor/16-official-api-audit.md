@@ -7,6 +7,7 @@
 | 复核日期 | 2026-10-31 ~ 2026-11-01 |
 | 分支 | `Refactor` |
 | 对应提交 | `d00a5ff`（`feat: 对齐 QQ 官方 2026-10 三条新能力并完成双侧全量复核`） |
+| 接线回写 | `a60c4ed`（M3）/ `bbee6d6`（R3a）/ `c6b44a2`（R3b），2026-11-07；见「R3 接线回写」节。快照本体（元信息 ~ 口径不一致 7 条）仍按 `d00a5ff` 时点陈述，不改写 |
 | 官方文档快照 | `https://bot.q.qq.com/wiki/develop/api-v2/`，变更记录页末次更新 **10/28/2026** |
 | 复核对象 | Go 现役链（`handlers/`、`botgo/`、`Processor/`）与 Rust 新链（`crates/`） |
 | 性质 | 只读复核 + 差异裁决；本文档不改代码，交叉引用已落地的实现 |
@@ -123,6 +124,8 @@
 
 Rust 侧 44 项硬占位（`retcode=1500`）的拆分，**28 项属未到里程碑，16 项属官方无端点永久占位**，两者都不是本轮要补的缺口：
 
+> **2026-11-08 订正**：本节为 `d00a5ff` 时点口径。M3（`a60c4ed`）已接线原「端点未移植」中的 22 项、R3a（`bbee6d6`）已聚合实现群列表、R3b（`c6b44a2`）已接线原「发送链未接线」5 项；现状清单以「R3 接线回写（2026-11-08）」一节为准。
+
 | 分组 | 数量 | 代表项 | 为什么不算缺口 |
 |---|---|---|---|
 | 端点未移植 | **23** | `set_group_kick`、`delete_msg`/`delete_group_msg`、`put_interaction`、`get_robot_share_link`、`set_group_add_request`、黑名单两枚、`get_qq_profile`、面板 6、菜单 2、审批策略 6 | `gensokyo-qq` 未暴露对应端点（`crates/gensokyo-actions/src/qqapi.rs`、`panels.rs`、`interaction.rs` 自述），属新链移植进度 |
@@ -133,6 +136,51 @@ Rust 侧 44 项硬占位（`retcode=1500`）的拆分，**28 项属未到里程�
 
 计数订正：`d00a5ff` 新增的三个素材管理 action 全部有真实上游，**不占**上述 44 项，且该提交未从占位集合中移除任何一项（改动文件不含 `unsupported.rs` / `panels.rs` / `group_admin.rs` / `interaction.rs`）。双链注册表因此为 Go `56` 个 action 名（复核时 53 + 3）、Rust `KNOWN_ACTIONS` 56、`IMPLEMENTED_ACTIONS` 75（72 + 3）。
 
+## R3 接线回写（2026-11-08 · `a60c4ed` / `bbee6d6` / `c6b44a2`）
+
+本节按代码现状登记接线进度，不改写上文快照（快照口径见「未到里程碑 / 永久占位」节首订正说明）。计数与形态均以 `crates/` 源码逐条核对。
+
+### 官方有端点 · 已接线
+
+| 批次 | 数量 | action（逐一核过的接线形态） | 落点 |
+|---|---|---|---|
+| M3（`a60c4ed`） | **22** | 面板 6（`create_panel` / `set_panel` / `delete_panel` / `get_panel` / `get_panel_list` / `set_panel_target` → `/v2/panels*`）+ 自定义菜单 2（`set_custom_menu` / `get_custom_menu` → PUT/GET `/v2/menu`）+ 入群自动审批策略 6（`join_approval_strategy_*` → `/v2/groups/join_approval_strategy*`）+ 群黑名单 2 + `set_group_add_request` + `delete_group_msg` + `put_interaction` + `get_robot_share_link` + `set_group_kick` + `delete_msg` | `panels.rs:5-21`、`interaction.rs:6-25`、`group_admin.rs:10`、`messages.rs:7` 模块表；判据 = a60c4ed diff 中被移除的占位调用与 8e7daa1 模块表比对（panels.rs 14 + interaction.rs 6 + 踢人 1 + 撤回 1）。提交标题口径「20 个」与 `qqapi` trait 新增 20 方法计数一致，按 action 逐项核为 22，属口径差非缺实现 |
+| R3a（`bbee6d6`） | **1** | `get_group_list`：官方无群列表端点，照 Go 口径实现——idmap `find_config_sections` 枚举 `<上报形态ID>:type=group` + 逐群 `GET /v2/groups/{gid}/info` 聚合；反查 / 信息 / 正查任一失败整群跳过并 warn | `group_admin.rs:12,36-44`、`gensokyo-storage/src/idmap/mod.rs`（`find_config_sections`）、runtime 入站 4 群事件注册点 |
+| R3b（`c6b44a2`） | **5** | `send_group_msg_raw`（按 Go 实际=普通解析链，非原生体直传）、`send_private_msg_wakeup`（同 C2C 端点置 `is_wakeup`）、`send_private_msg_sse`（`msg_type=2` + `stream{state,index,id}`）、`send_group_forward_msg` / `send_private_forward_msg`（逐条重发） | `interaction.rs:18-22`、`send.rs`（plan_*）、`runtime/src/deferred.rs`（`execute` / `execute_forward` / `execute_sse` 三分支）、`dispatcher.rs` |
+
+出站段类型随 M3 放开：`keyboard`（加性挂载，不改 `msg_type`）、`input_notify`（`msg_type=6`，仅单聊、独占整条）、`stream`（`msg_type=2` + `stream`，仅单聊）；`music` 降级为文本分享文案（Rust 侧无 QQ 音乐查询与 `music_prefix` 配置）——见 `runtime/src/deferred.rs:21-24`。`HttpMethod` 已补 PUT/PATCH/DELETE（`gensokyo-qq/src/http.rs:29-40`），`gensokyo-qq` 新增 22 个端点方法与 panel DTO。
+
+### 官方无端点 · 维持 1500 / 固定回执（现值）
+
+| 处置 | 数量 | action | 落点 |
+|---|---|---|---|
+| 参数校验后回 `1500` | **16** | `get_group_at_all_remain`、`set_group_name`、`set_group_admin`、`set_group_special_title`、`set_group_remark`、`set_qq_profile`、`get_group_system_msg`、`get_qq_profile`（`gensokyo-qq` 未暴露机器人资料端点）、`get_friend_list`、`get_stranger_info`、`send_like`、`set_group_leave`、`get_msg`、`get_forward_msg`、`get_group_honor_info`、`set_group_anonymous_ban` | `unsupported.rs:5-16`、`users.rs:7-9`、`messages.rs:8-9`、`group_admin.rs:11`、`interaction.rs:23-24` |
+| 固定 `retcode=100`（Go 同口径） | 2 实现 / 3 名 | `set_group_whole_ban`（含别名 `get_group_whole_ban`）、`set_group_card` | `group_admin.rs:8-9,18-23` |
+| Go 的本地固定回执 | **1** | `get_online_clients` → `{"clients": [], "tiny_id": 0}`（逐字段照抄 Go） | `unsupported.rs:15,30-34` |
+| OneBot 兼容固定回执 | **5** | `set_restart`、`clean_cache`（日志 + `{"code": 0}`，不真执行）、`get_cookies`、`get_csrf_token`、`get_credentials`（固定空值） | `system.rs:8-12` |
+| 本地可判定（不触上游） | 4 实现 | `get_avatar`（URL 拼接）、`mark_msg_as_read`（空回执）、`can_send_image` / `can_send_record`（固定 `yes: true`） | `interaction.rs:8-9,28-34`、`capability.rs` |
+
+`d00a5ff` 时点的 44 项硬占位中，未到里程碑的 28 项去向如下：M3 接线 22（原「端点未移植 23」中除 `get_qq_profile` 外全部落地，`set_group_kick` / `delete_msg` 在 8e7daa1 时点亦为 1500，同轮转真实）、R3b 接线 5、R3a 把 `get_group_list` 自「官方无端点 16」改判「已实现聚合」（官方本无列表端点）。维持 `1500` 的合计因此为 **16**（官方无端点 15 + 未移植 1），见下表。
+
+### 已知缺口与刻意差异（本轮新增登记）
+
+1. **wakeup 的 `c2c_wakeup_resp` notice 未接线**：Go 有 `handlers/send_private_msg_wakeup.go:349`（`NoticeType: "c2c_wakeup_resp"`），Rust 全仓 0 命中——缺的是运行时 notice 基座，非 handler 分支，**待 R4 立项**（`c6b44a2` commit 正文登记）。
+2. **`get_group_list` 不回捞 uin 前缀形态**：`idmap_isolation` 开启且与 Go 共库时，Go 写入的 `"<uin>:<原始串>"` section 既非 32 位也 parse 不成数字，按反查失败整群跳过；Rust 入站链注册的是不带前缀的原串，故该形态只出现在混合部署里。刻意差异同记：**Go 留空字段行、Rust 整群跳过**（`group_admin.rs:36-44`）。
+3. **wakeup 空 `message` 收紧为 `1400`**：Go 侧无此前置校验（`handlers/send_private_msg_wakeup.go:63-70` 直接进 `parseMessageContent` → 发送路径），Rust 在参数层直接拒——与 Go 回执**方向相反**的刻意收紧（`send.rs:57`，`c6b44a2` 评审修复轮登记为刻意差异）。
+4. **合并转发保留 Go 的 `limit+1` off-by-one**：Go 循环条件 `count > limit` 且仅在形状合格的 node 上计数，上界实际是 `limit+1` 条；行为对齐优先于修它（`send.rs:562-567`）。附带口径：`failed[].index` 用原 node 序号、坏 / 空 node 计入失败清单不静默丢、500ms 间隔经 `DeferredDeps::forward_send_interval` 可注入（`deferred.rs:127-129,202-206,244-256`）。
+5. **`forward` / `message_sse` 载荷新握手键全部 `serde(default)`**：旧载荷反序列化零破坏，有回归用例钉住（`c6b44a2` dispatcher 改动）。
+
+### 注册表计数复核（现值，动态断言）
+
+| 项 | 现值 | 判据 |
+|---|---|---|
+| `KNOWN_ACTIONS` | **56** | `registry.rs:150-207` 数组实测 56 项；`register.rs:384` 保留字面量钉值 `assert_eq!(KNOWN_ACTIONS.len(), 56)` 作全集 tripwire |
+| `IMPLEMENTED_ACTIONS` | **75** | `lib.rs:173-249` 实测 75 项；与 KNOWN 交集 50，`EXTENSION_ACTIONS` 25（`lib.rs:31-32`） |
+| 动态断言（`f2c882c`「action 数量断言改为动态」） | 在位 | `register.rs:368-379`（`IMPLEMENTED_ACTIONS.len() + ACTION_ALIASES.len()`）、`startup.rs:505`（`+3+3`）、`runtime/tests/deferred.rs:194`、`registry.rs:366`（`KNOWN_ACTIONS.len() - 1`） |
+| Go 主仓 `callapi.RegisterHandler(` 实测 | **53**（HEAD `cfeb03b`） | `git grep -h -F 'callapi.RegisterHandler(' -- handlers` 字面名去重 = 53（须 `[Console]::OutputEncoding=UTF8` 后统计：GBK 解码会把含中文注释的行吞并换行、少计 2 名）；另有 2 处 `RegisterHandler(action, …)` 在 `handlers/zzzz*_test.go` 注册测试局部名，非产品 action，不计。相对 KNOWN 缺的正是素材三枚 `upload_media_image` / `get_media_image_list` / `delete_media_image` |
+| 与 KNOWN 口径关系 | **53 + 素材 3 = 56 成立** | Refactor 工作树 `handlers/` 实测 56（`media_images.go:27-29` 注册三枚素材 action），与 KNOWN 逐项 diff 双向为空；Go 主仓当前把素材链收敛为 `media_asset.go` 内部流程、未注册 action 名（`handlers/media_asset.go:19` 注释自述「将来若要曝光 upload_media_image，复用 mediaImageUploadFlow 即可」）——属双侧部署形态差异，**注册表不改**，此处只登记口径 |
+
+
 ## 遗留风险与已知限制
 
 1. **带空格的 `[CQ:at, qq = all]` 已统一（2026-11-01）**：Go 的 `atEveryoneCQPattern` 与 `cqAtNumRe` 已改为容忍 `qq`、`=`、取值两侧空白；Rust 的 `at_mention_id` 本就对键值做 `trim`。两侧现均归一为标签并按同日额度计一次（`handlers/at_everyone.go:33`、`handlers/message_parser.go:55`、`crates/gensokyo-runtime/src/at_everyone.rs:134-148`）。
@@ -142,7 +190,7 @@ Rust 侧 44 项硬占位（`retcode=1500`）的拆分，**28 项属未到里程�
 4. **CQ 码解析全路径最大兼容统一（2026-11-04）**：上条「保留的既有结构差异」两项**已全部消除**——① Go legacy 媒体/markdown/keyboard 由位置锚定正则改为整码匹配 + `cqUnionParams` 按键取值（任意键序、尾键不污染值）；② 段名前空白四路统一识别，`errMarkdownAtMalformed` 下线。同轮统一：段名/键大小写不敏感（`[cq:` 前缀仍区分）、stream 冒号/等号双语法（冒号限 stream）、段名字符集 `[A-Za-z0-9_]`、Rust 裸尾段并入前一键、internal 新链补花括号配平状态机与 stream case、`CARDIGAN` 类前缀不吞段、`acnode` base64 豁免谓词适配宽松形态。详见 CHANGELOG「CQ 码解析全路径最大兼容统一」。
    - 记录的分层语义（非缺陷）：legacy 键值不做实体解码、`cq_parse_mode=new` 才反转义（模式设计本意）；`[CQ:reply,id=…,msg_idx=…]` 同现时整码按 reply 消费、msg_idx 随段移除（用例钉桩）。
    - 记录项：`adapter/identity`、`adapter/state`、`config`、`echo` 四包既有测试非幂等（`-count=2` 隔离复跑必红，`-count=1` 绿），属 TEST_DEFECT 待单独立项清理，与 CQ 改动无关。
-5. **Rust keyboard / music / stream / input_notify 仍回 1400**（`deferred.rs:20`、`:587-590`）：本轮只放开 markdown 与 card，其余段类型保持显式拒绝而非静默丢弃。
+5. **段类型现状（2026-11-08 更新，替代本条原「仍回 1400」表述）**：M3（`a60c4ed`）已放开 `keyboard`（加性挂载，不改 `msg_type`）、`input_notify`（`msg_type=6`，仅单聊、必须独占整条）、`stream`（`msg_type=2` + `stream`，仅单聊）；`music` 降级为文本分享文案（Rust 无 QQ 音乐查询与 `music_prefix` 配置，不伪造音乐卡片）。现状表见 `crates/gensokyo-runtime/src/deferred.rs:21-24`；markdown 与 card 的放开仍是 `d00a5ff` 本轮口径。仍与内容同条出现即 `1400` 的约束保留（不静默丢）。
 6. **成员列表分页语义差异**：Go 循环拉取最多 100 页后合并返回（`handlers/get_group_member_list.go`），Rust 单页 + `next_cursor` 接力（`crates/gensokyo-actions/src/group.rs:36-39`）。同一 OneBot 调用的返回条数在两侧不同，客户端需按 `next_cursor` 自行翻页。
 7. **shadow diff 长期非空**：新链与 legacy 的 `foundItems` 键集合历史差异导致 `[outbound-shadow]` 日志几乎每次都有差异（`handlers/outbound_bridge.go:323-340`），只能当噪声参考，不能作为回归判据。
 8. **未做真实上游联调**：全部结论基于官方文档 + 本地单测（Fake 客户端），`40035010`（跨机器人引用）、`11253`（未获接口权限）等权限类错误未在真实机器人上验证。
@@ -158,6 +206,8 @@ Rust 侧 44 项硬占位（`retcode=1500`）的拆分，**28 项属未到里程�
 | `go test ./...` | **24 包 `ok` / 0 `FAIL`**（另 19 个包无测试文件） | 本报告撰写时（2026-11-01）实测 |
 | `cargo test --workspace` | 退出码 0，**683 passed / 0 failed**（33 个 suite） | 实测口径：`rustup run 1.99.1-x86_64-pc-windows-gnu cargo test --workspace`（PATH 前置 `C:\msys64\usr\bin`）；默认 MSVC host 缺 `link.exe` 属工具链选择问题，换 GNU host 即可 |
 | `cargo clippy --workspace --all-targets -- -D warnings` | 退出码 0，**0 warning** | 同上工具链实测（2026-10-31 ~ 11-01 两轮） |
+| `cargo test --workspace`（R3 验收记录） | **33 suites / 770 passed** | M3 / R3a / R3b 合入时点的全量口径（`c6b44a2` 提交正文记 33 suites 全绿）；2026-11-08 文档回写轮只独立复跑 `cargo test -p gensokyo-runtime`（见本轮验收），全量计数以提交记录为准 |
+| KNOWN / IMPLEMENTED 计数 | 56 / 75 | `registry.rs:150-207`、`lib.rs:173-249` 逐项脚本枚举（UTF-8 解码），与 Go 主仓 53 的对照见「注册表计数复核」 |
 
 黑板原始文件（`.git/opencode-team/20261031-154523/qq-api-audit/`，**5 天 TTL**，以本报告为正式留存）：
 

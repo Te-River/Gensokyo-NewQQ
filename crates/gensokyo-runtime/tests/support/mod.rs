@@ -16,6 +16,8 @@ use tokio::net::TcpStream;
 
 /// 写一份临时 `config.yml` 并加载；返回 (配置管理器, 临时目录)。
 ///
+/// 坑（#55 移交钉桩）：`settings` 串必须**两格缩进**（`"  app_id: 12345\n"`）——本函数拼的是 `version: 1\nsettings:\n{settings}`，不缩进的顶层键落在 `settings:` 之外，加载后得到空 settings 而不报错；历史用例 `state("app_id: 12345\n")` 即此形态（依赖项一律走默认值），改成缩进会改变加载结果、属行为变更，故保留原样。
+///
 /// 临时目录必须由调用方持有——drop 之后配置文件消失，热重载会失败。
 pub fn config(settings: &str) -> (Arc<ConfigManager>, TempDir) {
     let dir = tempfile::tempdir().expect("临时目录");
