@@ -27,6 +27,13 @@ const selfFetchTimeout = 30 * time.Second
 // selfFetchMaxHops 自取的重定向跳数上限（不含首跳），与 handlers 包级 httpClient 的口径一致。
 const selfFetchMaxHops = 10
 
+// resolveMaxHops 直链解析的重定向跳数上限（不含首跳）：短签名外链的正常形态是 1 跳
+//（302 → OSS 预签名直链），5 跳足以覆盖多级 CDN 跳转，超出视为异常交给调用方降级。
+const resolveMaxHops = 5
+
+// resolveTimeout 直链解析的总超时：只取响应头、不读图片字节，10 秒远宽于正常两跳。
+const resolveTimeout = 10 * time.Second
+
 // selfFetchUA 浏览器 UA：部分图床对非浏览器 UA 拒答。
 const selfFetchUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
@@ -152,4 +159,64 @@ func FetchBytes(raw string, reject SSRFGuard) ([]byte, error) {
 		return nil, fmt.Errorf("图片自取: 响应超过大小上限 %d 字节: %s", selfFetchMaxBytes, raw)
 	}
 	return data, nil
+}
+
+// ResolveRedirectURL 把带重定向的短签名外链解析为最终直链，返回末跳地址（resp.Request.URL）。
+//
+// 只读响应头：请求带 Range: bytes=0-0（图床至多回 1 字节），拿到响应后立即 Close Body、
+// 不读任何正文——短链的 302 目标就是 OSS 预签名直链（约 15 分钟有效），出站只需要这个 URL，
+// 下载整图纯属白费内存与带宽（QQ 拉取成功后会自行转存）。
+//
+// reject 与 FetchBytes 同口径：首跳与每一跳重定向都复检，命中即拒绝——被污染的图床域名
+// 可以把跳转指向 169.254.169.254 等内网元数据地址，读侧外带同样成立，不能走裸 client。
+// reject 为 nil 视为调用方疏漏，直接报错。
+//
+// 未发生重定向（末跳地址与入参相同）按失败返回：调用方要的是能替代短链的直链，
+// 把同一个短链交回去没有意义，必须让它去走降级链。
+func ResolveRedirectURL(raw string, reject SSRFGuard) (string, error) {
+	if raw == "" {
+		return "", fmt.Errorf("图片直链解析: URL 为空")
+	}
+	if reject == nil {
+		return "", fmt.Errorf("图片直链解析: 缺少 SSRF 判定回调，拒绝发起请求")
+	}
+	raw = ensureFetchScheme(raw)
+	if reject(raw) {
+		return "", fmt.Errorf("图片直链解析: SSRF 阻止: 首跳目标为私有/回环地址: %s", raw)
+	}
+	req, err := http.NewRequest(http.MethodGet, raw, nil)
+	if err != nil {
+		return "", fmt.Errorf("图片直链解析: 创建请求失败: %w", err)
+	}
+	req.Header.Set("User-Agent", selfFetchUA)
+	req.Header.Set("Range", "bytes=0-0")
+
+	client := &http.Client{
+		Timeout: resolveTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= resolveMaxHops {
+				return fmt.Errorf("图片直链解析: 重定向次数超过上限 %d", resolveMaxHops)
+			}
+			if reject(req.URL.String()) {
+				return fmt.Errorf("图片直链解析: SSRF 阻止: 重定向目标为私有/回环地址: %s", req.URL.String())
+			}
+			return nil
+		},
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("图片直链解析: 请求失败: %w", err)
+	}
+	// 只取 resp.Request.URL，正文一个字节都不读。
+	resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return "", fmt.Errorf("图片直链解析: 末跳返回 HTTP %d: %s", resp.StatusCode, raw)
+	}
+	final := resp.Request.URL.String()
+	if final == raw {
+		return "", fmt.Errorf("图片直链解析: 未发生重定向，原链仍是短签名外链: %s", raw)
+	}
+	return final, nil
 }

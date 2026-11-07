@@ -30,9 +30,11 @@ func seamTestPNG(t *testing.T) []byte {
 
 // withImageUploadSeams 覆写 oss_type 读取、图床上传、本地公网 URL 上传三个注入缝，
 // 用例结束恢复；provider/local 传 nil 表示保留原实现。
+// 直链解析缝默认按「解析失败」处理：这些用例只关心解析失败后的回退链，
+// 需要断言解析成功的用例再用 withShortLivedResolver 覆写。
 func withImageUploadSeams(t *testing.T, ossType int, provider func(string, []byte, string) (string, error), local func(string) (string, error)) {
 	t.Helper()
-	oldOss, oldProvider, oldLocal := getOssType, uploadProvider, localUploadBehavior
+	oldOss, oldProvider, oldLocal, oldResolve := getOssType, uploadProvider, localUploadBehavior, resolveShortLivedURL
 	getOssType = func() int { return ossType }
 	if provider != nil {
 		uploadProvider = provider
@@ -40,7 +42,42 @@ func withImageUploadSeams(t *testing.T, ossType int, provider func(string, []byt
 	if local != nil {
 		localUploadBehavior = local
 	}
-	t.Cleanup(func() { getOssType, uploadProvider, localUploadBehavior = oldOss, oldProvider, oldLocal })
+	resolveShortLivedURL = func(string) (string, error) { return "", errors.New("直链解析不可用") }
+	t.Cleanup(func() {
+		getOssType, uploadProvider, localUploadBehavior, resolveShortLivedURL = oldOss, oldProvider, oldLocal, oldResolve
+	})
+}
+
+// TestUploadBase64ImageToServerChatGLMResolvesDirectLink 图床回短签名外链 →
+// 优先解析 302 为最终直链：直接返回直链（不回退本地链），尺寸仍取自字节。
+func TestUploadBase64ImageToServerChatGLMResolvesDirectLink(t *testing.T) {
+	const shortURL = "https://t1.chatglm.cn/file/x.png?expired_at=1&sign=a"
+	const directURL = "https://pfiles.chatglm.cn/chatglm4/image/x.png?x-oss-expires=877&sign=oss"
+	withImageUploadSeams(t, config.OssTypeChatGLM,
+		func(string, []byte, string) (string, error) { return shortURL, nil },
+		func(string) (string, error) {
+			t.Error("解析成功时不得回退本地公网 URL")
+			return "", nil
+		})
+	var gotRaw string
+	resolveShortLivedURL = func(raw string) (string, error) {
+		gotRaw = raw
+		return directURL, nil
+	}
+
+	got, width, height, err := UploadBase64ImageToServer(base64.StdEncoding.EncodeToString(seamTestPNG(t)), nil)
+	if err != nil {
+		t.Fatalf("解析成功不应报错: %v", err)
+	}
+	if gotRaw != shortURL {
+		t.Fatalf("应把图床返回的短链交给解析: got %q want %q", gotRaw, shortURL)
+	}
+	if got != directURL {
+		t.Fatalf("必须返回解析后的直链: got %q want %q", got, directURL)
+	}
+	if width != 2 || height != 1 {
+		t.Fatalf("尺寸应取自字节: got %dx%d", width, height)
+	}
 }
 
 // TestUploadBase64ImageToServerChatGLMFallsBackToLocalURL 图床回短签名外链 →

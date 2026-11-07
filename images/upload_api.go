@@ -31,11 +31,16 @@ var (
 )
 
 // 图片出站上传链的注入缝（供离线单测替换，生产即各自原实现）：
-// oss_type 读取、图床上传、本地公网 URL 上传。
+// oss_type 读取、图床上传、本地公网 URL 上传、短签名外链直链解析。
 var (
 	getOssType          = config.GetOssType
 	uploadProvider      = imagehosting.UploadProvider
 	localUploadBehavior = originalUploadBehavior
+	// resolveShortLivedURL 短签名外链 → 302 末跳直链（只用响应头，逐跳复检 SSRF，
+	// 复检点见 imagehosting.ResolveRedirectURL）。
+	resolveShortLivedURL = func(raw string) (string, error) {
+		return imagehosting.ResolveRedirectURL(raw, isPrivateOrLoopbackURL)
+	}
 )
 
 // createAndUploadMediaMessage 创建并上传媒体消息
@@ -116,6 +121,7 @@ func isTimeoutError(err error) bool {
 
 // uploadMedia 上传媒体并返回FileInfo
 // 使用 300s 超时 context 避免大文件上传超时；超时类错误自动重试（最多 3 次总尝试，线性退避）
+// 注意：file_data 直传上限 5MB，超过时由 handlers 侧调用点改走分片上传（见 handlers/upload_helper.go）
 func uploadMedia(ctx context.Context, groupID string, richMediaMessage *dto.RichMediaMessage, apiv2 openapi.OpenAPI) (string, error) {
 	var lastErr error
 	for attempt := 1; attempt <= maxMediaUploadAttempts; attempt++ {
@@ -144,6 +150,7 @@ func uploadMedia(ctx context.Context, groupID string, richMediaMessage *dto.Rich
 
 // uploadMediaPrivate 上传媒体并返回FileInfo
 // 使用 300s 超时 context 避免大文件上传超时；超时类错误自动重试（最多 3 次总尝试，线性退避）
+// 注意：file_data 直传上限 5MB，超过时由 handlers 侧调用点改走分片上传（见 handlers/upload_helper.go）
 func uploadMediaPrivate(ctx context.Context, UserID string, richMediaMessage *dto.RichMediaMessage, apiv2 openapi.OpenAPI) (string, error) {
 	var lastErr error
 	for attempt := 1; attempt <= maxMediaUploadAttempts; attempt++ {
@@ -202,12 +209,21 @@ func UploadBase64ImageToServer(base64Image string, apiv2 openapi.OpenAPI) (strin
 	}
 
 	// ChatGLM 等图床返回的是短签名外链（约 30 分钟有效），写进 Markdown/卡片等出站字段后
-	// QQ 转存失败或用户查看时已过期，图片不显示；回退到 oss_type=0 的本地公网 URL 链。
+	// QQ 转存失败或用户查看时已过期，图片不显示。
+	// ① 优先把短链的 302 解析成最终直链（OSS 预签名，约 15 分钟有效）：QQ 不跟随短链的 302，
+	//    但发送时刻拉取直链足够，QQ 成功后自行转存。
 	if imagehosting.IsShortLivedImageURL(picURL) {
-		mylog.Printf("图床 provider=%s 返回短签名外链，不能用于出站，回退本地公网 URL: %s", config.GetOssTypeName(extraPicAuditingType), picURL)
-		picURL, err = localUploadBehavior(base64Image)
-		if err != nil {
-			return "", 0, 0, fmt.Errorf("短签名外链回退本地上传失败: %w", err)
+		directURL, resolveErr := resolveShortLivedURL(picURL)
+		if resolveErr == nil {
+			mylog.Printf("图床 provider=%s 短签名外链已解析为直链: %s -> %s", config.GetOssTypeName(extraPicAuditingType), picURL, directURL)
+			picURL = directURL
+		} else {
+			// ② 解析失败（无重定向 / 末跳非 2xx / SSRF 阻止 / 超时）→ 回退 oss_type=0 的本地公网 URL 链。
+			mylog.Printf("图床 provider=%s 短签名外链解析直链失败，回退本地公网 URL: %s err=%v", config.GetOssTypeName(extraPicAuditingType), picURL, resolveErr)
+			picURL, err = localUploadBehavior(base64Image)
+			if err != nil {
+				return "", 0, 0, fmt.Errorf("短签名外链回退本地上传失败: %w", err)
+			}
 		}
 	}
 
@@ -396,4 +412,32 @@ func isPublicAddress(addr string) bool {
 	}
 	// If it's not a recognized IP address format, consider it a domain name (public).
 	return true
+}
+
+// isPrivateOrLoopbackURL 短签名外链直链解析的 SSRF 判据：URL 指向私有/回环/链路本地地址即拒。
+// 与 handlers.isPrivateOrLoopback 同口径（包依赖方向是 handlers → images，无法反向复用）；
+// 解析失败也按拒绝处理——宁可降级本地公网 URL，也不发无防护的请求。
+func isPrivateOrLoopbackURL(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return true
+	}
+	host := parsed.Hostname()
+	if host == "" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()
+	}
+	ips, err := net.LookupHost(host)
+	if err != nil {
+		return true
+	}
+	for _, ipStr := range ips {
+		ip := net.ParseIP(ipStr)
+		if ip != nil && (ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()) {
+			return true
+		}
+	}
+	return false
 }
