@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -800,5 +801,42 @@ func TestSelfFetchToStableImageURLSelfFetchFailureFallsBackToDirect(t *testing.T
 	}
 	if len(seam.gotBase64) != 0 {
 		t.Fatalf("直链兜底成功不得触达上传链，实际 %d 次", len(seam.gotBase64))
+	}
+}
+
+// TestListMediaImagesByExpiresAtParsesStringNumbers 端到端复刻线上形态（issue #56）：
+// 官方实发把 total/created_at/expires_at 以 JSON 字符串下发，DTO 宽容解析后
+// listMediaImagesByExpiresAt 必须正常出队并排序，不再出现「拉列表失败→清理不重试→白白降级」。
+// 解码经 json.Unmarshal → MediaImage/MediaImageList 自定义 UnmarshalJSON，
+// 与 v2 ListMediaImages 的 resty SetResult 同一入口。
+func TestListMediaImagesByExpiresAtParsesStringNumbers(t *testing.T) {
+	listJSON := `{"images":[` +
+		`{"image_id":"a","created_at":"100","expires_at":"500"},` +
+		`{"image_id":"b","created_at":"200","expires_at":"300"},` +
+		`{"image_id":"c","created_at":"300","expires_at":"0"},` +
+		`{"image_id":"d","created_at":"50","expires_at":"300"}` +
+		`],"next_cursor":"","total":"4"}`
+	var list dto.MediaImageList
+	if err := json.Unmarshal([]byte(listJSON), &list); err != nil {
+		t.Fatalf("字符串数值报文解析失败: %v", err)
+	}
+	if list.Total != 4 {
+		t.Errorf("Total = %d, want 4", list.Total)
+	}
+
+	mock := &mediaStoreMock{listResp: &list}
+	got, err := listMediaImagesByExpiresAt(context.Background(), mock)
+	if err != nil {
+		t.Fatalf("解析后的列表进入排序链失败: %v", err)
+	}
+	// 既有口径：expires_at>0 组在前、组内 expires_at 升序、并列按 created_at 升序；=0 组垫底
+	wantOrder := []string{"d", "b", "a", "c"}
+	if len(got) != len(wantOrder) {
+		t.Fatalf("len(got) = %d, want %d", len(got), len(wantOrder))
+	}
+	for i, id := range wantOrder {
+		if got[i].ImageID != id {
+			t.Errorf("第 %d 位 = %s, want %s", i, got[i].ImageID, id)
+		}
 	}
 }
