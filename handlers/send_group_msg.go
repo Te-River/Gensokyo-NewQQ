@@ -24,7 +24,6 @@ import (
 	"github.com/hoshinonyaruko/gensokyo/echo"
 	"github.com/hoshinonyaruko/gensokyo/idmap"
 	"github.com/hoshinonyaruko/gensokyo/internal/domain/identity"
-	"github.com/hoshinonyaruko/gensokyo/imagehosting"
 	"github.com/hoshinonyaruko/gensokyo/images"
 	"github.com/hoshinonyaruko/gensokyo/mdutil"
 	"github.com/hoshinonyaruko/gensokyo/messagequeue"
@@ -3109,7 +3108,7 @@ func postGroupRichMediaMessageWithRetry(apiv2 openapi.OpenAPI, groupID string, r
 
 // resolveCardPic 处理卡片消息的 pic_url：
 // - 已经是 http(s) 链接 → 直接返回
-// - 本地文件路径 → 读取后通过 OSS 图床上传，返回 CDN URL
+// - 本地文件路径 → 读取后走统一图片上传链（images.UploadBase64ImageToServer），返回 CDN URL
 // 出错时返回原值并在日志中记录
 func resolveCardPic(pic string) string {
 	if pic == "" || strings.HasPrefix(pic, "http://") || strings.HasPrefix(pic, "https://") {
@@ -3120,11 +3119,13 @@ func resolveCardPic(pic string) string {
 		mylog.Printf("[CQ:card] 读取本地图片失败: %v", err)
 		return pic
 	}
-	url, err := imagehosting.UploadBytes(data, filepath.Base(pic))
+	// apiv2 仅用于签名兼容，上传后端完全由 oss_type 决定，这里无需真实实例；
+	// 走统一上传链即可获得短签名图床（ChatGLM 等）的本地公网 URL 回退。
+	url, _, _, err := images.UploadBase64ImageToServer(base64.StdEncoding.EncodeToString(data), nil)
 	if err != nil {
-		mylog.Printf("[CQ:card] OSS 上传图片失败: %v", err)
+		mylog.Printf("[CQ:card] 图片上传失败: %v", err)
 		return pic
 	}
-	mylog.Printf("[CQ:card] 本地图片已上传至 OSS: %s", url)
+	mylog.Printf("[CQ:card] 本地图片已上传: %s", url)
 	return url
 }

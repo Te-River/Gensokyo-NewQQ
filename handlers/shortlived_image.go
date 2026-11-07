@@ -13,8 +13,8 @@ package handlers
 // 与 main 版差异：015 基线无素材管理 API（无 qqbot-media:// 链），也无 outbound_bridge 预投递，
 // Markdown/keyboard 只能落"自取→既有外链上传流程"；自取返回值在 legacy 媒体链路里由
 // *dto.MessageToCreate 既有分支接住（图文混合预投递与 sendGroupMsgKeyMap 循环），不产生二次发送。
-// 若当前 oss_type 的图床本身就是短签名域（oss_type=7 自重传），换到的是重新签发的新外链
-// （原外链已更接近过期），记 warn 后仍替换。
+// oss_type=7 时 UploadBase64ImageToServer 已把图床短签名外链回退为本地公网 URL，故这里期望
+// 拿到稳定外链（仍回短链说明回退缺失，判失败维持原外链）。
 //
 // 降级语义：自取或上传任一步失败 → 记 warn、维持原 URL 直传（不比现状差），不阻断发送。
 // SSRF 防护：入口先过 selfFetchSSRFBlocked（私有/回环即拒），FetchBytes 内首跳与
@@ -161,9 +161,11 @@ func uploadImageBytesToPublicURL(apiv2 openapi.OpenAPI, data []byte) (string, bo
 		return "", false
 	}
 	if isShortLivedImageURL(cdnURL) {
-		// 当前 oss_type 的图床本身就是短签名域：换到的是重新签发的新外链，仍比即将过期的原外链可用。
-		mylog.Printf("[shortlived] 上传流程仍回短签名外链，已替换为新签发链接: size=%d url=%s", len(data), cdnURL)
-		return cdnURL, true
+		// 不变量：UploadBase64ImageToServer 已把图床短签名外链回退为本地公网 URL。
+		// 仍回短签名域说明上传链新增了未纳入回退的 provider：拒绝替换，
+		// 维持原外链（接近过期但可用）并留痕，不把新短链当成稳定外链写进 Markdown。
+		mylog.Printf("[shortlived] 上传流程仍回短签名外链，拒绝替换并维持原外链: size=%d url=%s", len(data), cdnURL)
+		return "", false
 	}
 	mylog.Printf("[shortlived] 图片已自取转传为外链: size=%d url=%s", len(data), cdnURL)
 	return cdnURL, true
