@@ -1,8 +1,9 @@
 package handlers
 
 // 素材管理链（media-images）回归：本地图片字节 → prepare → 预签名 PUT → complete →
-// qqbot-media:// 引用；短签名 provider 跳过图床；素材链失败回退既有外链；
-// 短签名外链自取路径同样产出素材引用。全部离线（httptest 模拟预签名 PUT），不触真实网络。
+// qqbot-media:// 引用；oss_type=7 直接走素材链且图床 provider 零调用；素材链失败或
+// 40035007 配额超限回退既有外链；短签名外链自取路径同样产出素材引用。
+// 全部离线（httptest 模拟预签名 PUT），不触真实网络。
 // 约定：handlers 套件用例禁用 t.Parallel()（注入缝与 config、echo 都是包级全局态）。
 
 import (
@@ -11,6 +12,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,27 +20,53 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tencent-connect/botgo/dto"
 	"github.com/tencent-connect/botgo/errs"
 	"github.com/tencent-connect/botgo/openapi"
 )
 
-// mediaStoreMock 仅覆写素材链两步，其余方法由嵌入的 nil 接口兜底。
+// mediaStoreMock 仅覆写素材链相关方法，其余方法由嵌入的 nil 接口兜底。
 type mediaStoreMock struct {
 	openapi.OpenAPI
 
 	prepareReq   *dto.MediaImagePrepareRequest
 	prepareResp  *dto.MediaImagePrepareResponse
 	prepareErr   error
+	prepareErrs  []error // 按调用顺序消费，用于「配额超限 → 清理 → 重试成功」用例
+	prepareCalls int
+
 	completeReq  *dto.MediaImageCompleteRequest
 	completeResp *dto.MediaImageCompleteResponse
 	completeErr  error
+
+	listResp   *dto.MediaImageList
+	listCalls  int
+	deletedIDs []string
 }
 
 func (m *mediaStoreMock) PrepareMediaImage(_ context.Context, req *dto.MediaImagePrepareRequest) (*dto.MediaImagePrepareResponse, error) {
 	m.prepareReq = req
+	m.prepareCalls++
+	if len(m.prepareErrs) > 0 {
+		err := m.prepareErrs[0]
+		m.prepareErrs = m.prepareErrs[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
 	return m.prepareResp, m.prepareErr
+}
+
+func (m *mediaStoreMock) ListMediaImages(_ context.Context, _ string) (*dto.MediaImageList, error) {
+	m.listCalls++
+	return m.listResp, nil
+}
+
+func (m *mediaStoreMock) DeleteMediaImage(_ context.Context, imageID string) error {
+	m.deletedIDs = append(m.deletedIDs, imageID)
+	return nil
 }
 
 func (m *mediaStoreMock) CompleteMediaImage(_ context.Context, req *dto.MediaImageCompleteRequest) (*dto.MediaImageCompleteResponse, error) {
@@ -160,6 +188,23 @@ func TestResolveLocalImageMediaFallsBackToCDN(t *testing.T) {
 	}
 }
 
+// TestResolveLocalImageMediaQuotaExceededFallsBackToCDN oss_type=7 + 40035007（100 张上限）：
+// 素材链不重试，直接走既有外链兜底，发送不被阻断。
+func TestResolveLocalImageMediaQuotaExceededFallsBackToCDN(t *testing.T) {
+	withShortLivedOSSProvider(t, true)
+	seam := &slUploadSeam{wantURL: "https://cdn.example.com/quota-fallback.png"}
+	withShortLivedUploadSeam(t, seam)
+	mock := &mediaStoreMock{prepareErr: errs.New(40035007, "image count limit exceeded")}
+
+	ref, ok := resolveLocalImageMedia(mock, slPNG())
+	if !ok || ref != "https://cdn.example.com/quota-fallback.png" {
+		t.Fatalf("配额超限应退回外链: ref=%q ok=%v", ref, ok)
+	}
+	if len(seam.gotBase64) != 1 {
+		t.Fatalf("应恰好回退一次外链上传，实际 %d", len(seam.gotBase64))
+	}
+}
+
 // TestResolveLocalImageMediaUpgradesShortLivedCDNResult 非短签名图床但外链仍是短签名形态：
 // 用同一份字节换素材引用，不再把短链写进 markdown。
 func TestResolveLocalImageMediaUpgradesShortLivedCDNResult(t *testing.T) {
@@ -252,6 +297,95 @@ func TestMediaImageUploadFlowMapsOfficialError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "40035006") || !strings.Contains(err.Error(), "服务端内部错误") {
 		t.Fatalf("错误码应还原为中文说明: %v", err)
+	}
+}
+
+// TestMediaImageUploadFlowQuotaExceededReturnsSentinel 40035007（单机器人 100 张上限）：
+// 必须还原成可判定的配额哨兵，上传入口据此降级而不是重试。
+func TestMediaImageUploadFlowQuotaExceededReturnsSentinel(t *testing.T) {
+	mock := &mediaStoreMock{prepareErr: errs.New(40035007, "image count limit exceeded")}
+
+	_, err := mediaImageUploadFlow(context.Background(), mock, slPNG(), "markdown.png", "image/png", "test")
+	if err == nil {
+		t.Fatal("配额超限必须返回错误")
+	}
+	if !errors.Is(err, errMediaImageQuotaExceeded) {
+		t.Fatalf("40035007 应返回配额哨兵: %v", err)
+	}
+	if !strings.Contains(err.Error(), "40035007") || !strings.Contains(err.Error(), "100 张") {
+		t.Fatalf("配额错误应带官方码与中文说明: %v", err)
+	}
+}
+
+// TestMediaImageUploadFlowQuotaPurgeDeletesOldestAndRetries 40035007：
+// 拉列表 → 只删 24 小时前的旧素材（一次最多 20 张，最旧优先）→ 重试一次成功。
+func TestMediaImageUploadFlowQuotaPurgeDeletesOldestAndRetries(t *testing.T) {
+	content := slPNG()
+	mock, _ := newMediaStoreOK(t, content)
+	mock.prepareErrs = []error{errs.New(40035007, "image count limit exceeded")}
+
+	now := time.Now()
+	// 25 张旧素材（48~72 小时前创建，列表顺序故意打乱）＋ 1 张 1 小时前的新素材
+	images := []*dto.MediaImage{{ImageID: "recent", CreatedAt: now.Add(-time.Hour).Unix()}}
+	for i := 24; i >= 0; i-- {
+		images = append(images, &dto.MediaImage{
+			ImageID:   fmt.Sprintf("old-%02d", i),
+			CreatedAt: now.Add(-time.Duration(48+i) * time.Hour).Unix(),
+		})
+	}
+	mock.listResp = &dto.MediaImageList{Images: images}
+
+	ref, err := mediaImageUploadFlow(context.Background(), mock, content, "markdown.png", "image/png", "test")
+	if err != nil {
+		t.Fatalf("清理后重试应成功: %v", err)
+	}
+	if ref != "qqbot-media://image/v1/token-1" {
+		t.Fatalf("应回素材引用: %q", ref)
+	}
+	if mock.prepareCalls != 2 {
+		t.Fatalf("配额超限应重试一次 prepare，实际调用 %d 次", mock.prepareCalls)
+	}
+	if mock.listCalls != 1 {
+		t.Fatalf("应拉取一次素材列表，实际 %d 次", mock.listCalls)
+	}
+	if len(mock.deletedIDs) != mediaQuotaPurgeCount {
+		t.Fatalf("应清理 %d 张旧素材，实际 %d: %v", mediaQuotaPurgeCount, len(mock.deletedIDs), mock.deletedIDs)
+	}
+	for _, id := range mock.deletedIDs {
+		if id == "recent" {
+			t.Fatal("最近 24 小时内创建的素材不得删除")
+		}
+	}
+	if mock.deletedIDs[0] != "old-24" {
+		t.Fatalf("应从最旧开始删，首个删除项 %q", mock.deletedIDs[0])
+	}
+}
+
+// TestResolveLocalImageMediaQuotaPurgeProtectsRecentFallsBack 40035007 且列表里只有
+// 24 小时内创建的素材：一张都不删，直接降级既有外链，发送不被阻断。
+func TestResolveLocalImageMediaQuotaPurgeProtectsRecentFallsBack(t *testing.T) {
+	withShortLivedOSSProvider(t, true)
+	seam := &slUploadSeam{wantURL: "https://cdn.example.com/quota-protected.png"}
+	withShortLivedUploadSeam(t, seam)
+	mock := &mediaStoreMock{
+		prepareErr: errs.New(40035007, "image count limit exceeded"),
+		listResp: &dto.MediaImageList{Images: []*dto.MediaImage{
+			{ImageID: "recent-1", CreatedAt: time.Now().Add(-time.Hour).Unix()},
+		}},
+	}
+
+	ref, ok := resolveLocalImageMedia(mock, slPNG())
+	if !ok || ref != "https://cdn.example.com/quota-protected.png" {
+		t.Fatalf("无可清理旧素材应降级外链: ref=%q ok=%v", ref, ok)
+	}
+	if len(mock.deletedIDs) != 0 {
+		t.Fatalf("24 小时内的素材不得删除: %v", mock.deletedIDs)
+	}
+	if mock.prepareCalls != 1 {
+		t.Fatalf("没有删到素材不应重试 prepare，实际 %d 次", mock.prepareCalls)
+	}
+	if len(seam.gotBase64) != 1 {
+		t.Fatalf("应恰好回退一次外链上传，实际 %d", len(seam.gotBase64))
 	}
 }
 

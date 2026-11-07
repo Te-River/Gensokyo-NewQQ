@@ -8,7 +8,7 @@ package handlers
 //   - 富媒体 url_image/url_images → 本地字节上传链（≤5,000,000 file_data 直传，超限自动分片，
 //     复用 images.CreateAndUploadMediaMessage / CreateAndUploadMediaMessagePrivate，不新造上传实现）；
 //   - Markdown / keyboard 外链 → 素材管理链（prepare→PUT→complete，见 media_asset.go），
-//     产出平台持久的 qqbot-media:// 引用替换原 URL；素材链不可用时才退回直链解析/既有外链上传。
+//     产出平台素材引用（滑动 90 天，可复用）qqbot-media:// 替换原 URL；素材链不可用时才退回直链解析/既有外链上传。
 //
 // 与 main 版差异：015 基线无 outbound_bridge 预投递，自取返回值在 legacy 媒体链路里由
 // *dto.MessageToCreate 既有分支接住（图文混合预投递与 sendGroupMsgKeyMap 循环），不产生二次发送。
@@ -125,7 +125,7 @@ func trySelfFetchPrivateImage(rawURL, eventid, userid, id string, msgseq int, ap
 }
 
 // selfFetchToStableImageURL Markdown / keyboard 消费点：短签名外链自取字节后优先走素材链，
-// 换平台持久的 qqbot-media:// 引用；素材链不可用时退回直链解析与既有外链上传换外链。
+// 换平台素材引用（滑动 90 天，可复用）qqbot-media://；素材链不可用时退回直链解析与既有外链上传换外链。
 // 未命中域名返回 ("", false)（零开销原样透传，行为与其他域一致）；命中但被 SSRF 判据拒绝、
 // 或全链失败同样返回 ("", false)，由调用方维持原 URL。
 func selfFetchToStableImageURL(apiv2 openapi.OpenAPI, mediaPath string) (string, bool) {
@@ -147,7 +147,7 @@ func selfFetchToStableImageURL(apiv2 openapi.OpenAPI, mediaPath string) (string,
 		mylog.Printf("[shortlived] Markdown 图片自取与直链解析均失败，维持原外链: %v err=%v resolveErr=%v", mediaPath, err, resolveErr)
 		return "", false
 	}
-	// ① 素材链：平台持久引用，不依赖外链能被 QQ 拉取（短签名直链同样会被平台拒绝）
+	// ① 素材链：平台素材引用（滑动 90 天，可复用），不依赖外链能被 QQ 拉取（短签名直链同样会被平台拒绝）
 	if ref, ok := uploadImageBytesToMediaStore(apiv2, data, "shortlived"); ok {
 		return ref, true
 	}

@@ -7,6 +7,14 @@ package handlers
 // 预签名直链都会被平台拉取失败。素材管理把图片放进平台自己的素材库，Markdown 里只写
 // qqbot-media://image/v1/<token> 引用，平台直接转存，不依赖任何外网资源。
 //
+// oss_type=7（ChatGLM）即「官方素材 API 模式」：Markdown/keyboard 本地图片只走素材链，
+// 图床只在素材链失败（含 40035007 配额超限）时兜底，两条上传链不并存、不重复上传。
+// 素材引用是平台托管的可复用引用（滑动有效期 90 天，每次被消息引用自动顺延），发送后
+// 不删除，同一张图可被多条消息复用。qqbot-media:// 只适用于 Markdown/keyboard：卡片
+// pic_url、/uploadpic、/uploadpicv2 等必须公网 URL 的路径维持既有外链上传，不走素材链。
+// 配额（单机器人 100 张）只在上传遇到 40035007 时清理：按 created_at 从旧到新删 20 张、
+// 跳过最近 24 小时创建的图片，再重试一次；仍失败才降级外链。
+//
 // 本文件不注册 OneBot action：当前只有 Markdown/keyboard 图片消费点（message_parser.go、
 // shortlived_image.go）调用素材链；将来若要暴露 upload_media_image，复用 mediaImageUploadFlow 即可。
 
@@ -20,6 +28,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -32,6 +41,15 @@ import (
 
 // maxMediaImageBytes 素材管理单图上限：官方写「≤10MB」未定义进制，取十进制保守值。
 const maxMediaImageBytes = 10 * 1000 * 1000
+
+// mediaQuotaPurgeCount 配额触顶（40035007）时一次清理的素材数量：一次删够余量，
+// 避免每发一张图都要再清一轮。
+const mediaQuotaPurgeCount = 20
+
+// mediaQuotaProtectWindow 清理时保护的创建时间窗口：最近 24 小时内上传的素材不删，
+// 刚发送成功的图仍可能被引用/排查，留着更稳（官方说明删除不影响已发送消息，
+// 但引用窗口内的图没有理由冒险）。
+const mediaQuotaProtectWindow = 24 * time.Hour
 
 // mediaImageErrorCodes 官方 400350xx 错误码 → 中文可读说明（原文见素材管理页「错误码」表）
 var mediaImageErrorCodes = []struct {
@@ -48,21 +66,22 @@ var mediaImageErrorCodes = []struct {
 	{40035010, "引用链接无效，或不属于当前机器人"},
 }
 
-// ossTypeShortLivedImage 当前 oss_type 的外链是否短签名形态。ChatGLM 的外链带两层短签名
-// （约 30 分钟 + 302 跳转后 15 分钟），平台转存拉不动，这类 provider 直接跳过外链改用素材链；
-// 其余 provider 的外链稳定可用，维持既有外链上传，不额外消耗素材配额。
-// 挂成注入缝只为离线单测可替换。
+// ossTypeShortLivedImage 当前 oss_type 是否启用「官方素材 API 模式」。ChatGLM（oss_type=7）
+// 的外链带两层短签名（约 30 分钟 + 302 跳转后 15 分钟），平台转存拉不动，该模式下
+// Markdown/keyboard 本地图片直接走素材链、不再先传图床；其余 provider 的外链稳定可用，
+// 维持既有外链上传，不额外消耗素材配额。挂成注入缝只为离线单测可替换。
 var ossTypeShortLivedImage = func() bool {
 	return config.GetOssType() == config.OssTypeChatGLM
 }
 
 // resolveLocalImageMedia Markdown/keyboard 本地图片字节 → 可写进 markdown 的引用：
-//  1. 短签名图床：跳过外链，直接走素材链换 qqbot-media:// 引用；
+//  1. oss_type=7（官方素材 API 模式）：只走素材链换 qqbot-media:// 引用，不再先传 ChatGLM
+//     图床（双上传已消除）；
 //  2. 其余图床：走既有外链上传，外链本身是短签名形态时再用同一份字节换素材引用；
-//  3. 素材链失败退回外链/本地链（不阻断发送，不比现状差）。
+//  3. 素材链失败或 40035007 配额超限：退回既有外链/直链兜底，不阻断发送，不比现状差。
 //
 // 上传、空值守卫与短链处置统一落在 uploadBytesToPublicURL，本函数只负责调度
-// 「短签名 provider 先换素材引用」这一层，避免与自取路径各写一份规则后漂移。
+// 「oss_type=7 先换素材引用」这一层，避免与自取路径各写一份规则后漂移。
 func resolveLocalImageMedia(apiv2 openapi.OpenAPI, imageData []byte) (string, bool) {
 	if ossTypeShortLivedImage() {
 		if ref, ok := uploadImageBytesToMediaStore(apiv2, imageData, "markdown"); ok {
@@ -82,7 +101,7 @@ func resolveLocalImageMedia(apiv2 openapi.OpenAPI, imageData []byte) (string, bo
 //   - requireSupportedFormat=true 先按魔数嗅探，非 png/jpeg/gif/webp 直接拒绝（自取字节必须先过闸）；
 //     本地文件字节传 false——bmp 等素材链嗅探表不认的格式仍要能走通外链上传；
 //   - 空外链一律判失败，绝不回 ("", true)：否则 markdown 会被写成 `![]( )`；
-//   - 上传结果仍是短签名域时，mediaStoreSource 非空先用同一份字节换平台持久引用
+//   - 上传结果仍是短签名域时，mediaStoreSource 非空先用同一份字节换平台素材引用（滑动 90 天，可复用）
 //     （平台拒拉预签名直链，素材引用才稳），再退直链解析；都失败才拒绝替换。
 //
 // 任一步失败返回 ("", false)，调用方维持原引用（降级语义）。
@@ -120,7 +139,8 @@ func uploadBytesToPublicURL(apiv2 openapi.OpenAPI, data []byte, requireSupported
 }
 
 // uploadImageBytesToMediaStore 内存字节走素材链（prepare→PUT→complete）换 qqbot-media:// 引用。
-// source 只作文件名前缀与日志标签。任一步失败返回 ("", false)，调用方维持原引用（降级语义）。
+// source 只作文件名前缀与日志标签。任一步失败返回 ("", false)，调用方维持原引用（降级语义）；
+// 40035007（单机器人 100 张上限）单独记 warn，语义与其它失败一致——一律降级外链/直链。
 func uploadImageBytesToMediaStore(apiv2 openapi.OpenAPI, data []byte, source string) (string, bool) {
 	if apiv2 == nil {
 		mylog.Printf("[media] apiv2 未注入，跳过素材链上传: size=%d", len(data))
@@ -137,7 +157,11 @@ func uploadImageBytesToMediaStore(apiv2 openapi.OpenAPI, data []byte, source str
 	}
 	ref, err := mediaImageUploadFlow(context.TODO(), apiv2, data, source+"."+ext, contentType, source)
 	if err != nil {
-		mylog.Printf("[media] 素材链上传失败，降级原引用: %v", err)
+		if errors.Is(err, errMediaImageQuotaExceeded) {
+			mylog.Printf("[media] 素材配额超限（单机器人 100 张），本次降级直链/外链: %v", err)
+		} else {
+			mylog.Printf("[media] 素材链上传失败，降级原引用: %v", err)
+		}
 		return "", false
 	}
 	if !strings.HasPrefix(ref, "qqbot-media://") {
@@ -158,16 +182,25 @@ func mediaImageUploadFlow(ctx context.Context, apiv2 openapi.OpenAPI, content []
 	md5Hash := computeMD5(content)
 	sha1Hash := computeMediaImageSHA1(content)
 
-	prepareResp, err := apiv2.PrepareMediaImage(ctx, &dto.MediaImagePrepareRequest{
+	prepareReq := &dto.MediaImagePrepareRequest{
 		FileName:    fileName,
 		FileSize:    uint64(len(content)),
 		ContentType: contentType,
 		MD5:         md5Hash,
 		SHA1:        sha1Hash,
-	})
+	}
+	prepareResp, err := apiv2.PrepareMediaImage(ctx, prepareReq)
+	if err != nil && isMediaImageErrorCode(err, 40035007) {
+		mylog.Printf("%s: 素材配额超限，清理最旧素材后重试: %v", source, err)
+		if purgeErr := purgeMediaImages(ctx, apiv2, source); purgeErr != nil {
+			mylog.Printf("%s: 清理旧素材失败，不再重试: %v", source, purgeErr)
+		} else {
+			prepareResp, err = apiv2.PrepareMediaImage(ctx, prepareReq)
+		}
+	}
 	if err != nil {
 		mylog.Printf("%s: prepare 失败: %v", source, err)
-		return "", errors.New(describeMediaImageError(err))
+		return "", mediaImageFlowError(err)
 	}
 	if prepareResp == nil || prepareResp.PresignedURL == "" {
 		mylog.Printf("%s: prepare 未返回 presigned_url", source)
@@ -189,13 +222,22 @@ func mediaImageUploadFlow(ctx context.Context, apiv2 openapi.OpenAPI, content []
 		mylog.Printf("%s: ETag(%s) 与本地 md5(%s) 不一致，complete 以 ETag 为准", source, md5ForComplete, md5Hash)
 	}
 
-	completeResp, err := apiv2.CompleteMediaImage(ctx, &dto.MediaImageCompleteRequest{
+	completeReq := &dto.MediaImageCompleteRequest{
 		UploadID: prepareResp.UploadID,
 		MD5:      md5ForComplete,
-	})
+	}
+	completeResp, err := apiv2.CompleteMediaImage(ctx, completeReq)
+	if err != nil && isMediaImageErrorCode(err, 40035007) {
+		mylog.Printf("%s: 素材配额超限（complete），清理最旧素材后重试: %v", source, err)
+		if purgeErr := purgeMediaImages(ctx, apiv2, source); purgeErr != nil {
+			mylog.Printf("%s: 清理旧素材失败，不再重试: %v", source, purgeErr)
+		} else {
+			completeResp, err = apiv2.CompleteMediaImage(ctx, completeReq)
+		}
+	}
 	if err != nil {
 		mylog.Printf("%s: complete 失败: %v", source, err)
-		return "", errors.New(describeMediaImageError(err))
+		return "", mediaImageFlowError(err)
 	}
 	if completeResp == nil {
 		mylog.Printf("%s: complete 未返回内容", source)
@@ -303,4 +345,91 @@ func describeMediaImageError(err error) string {
 		}
 	}
 	return fmt.Sprintf("素材管理失败：%v", err)
+}
+
+// errMediaImageQuotaExceeded 素材数量触顶（40035007）：清理旧素材并重试一次后仍失败，
+// 或没有可清理的旧素材时返回；调用方据此降级外链/直链，不阻断发送。
+var errMediaImageQuotaExceeded = errors.New(
+	"素材管理失败(40035007)：图片数量超过上限（单机器人 100 张），本次降级外链/直链")
+
+// isMediaImageErrorCode 判定上游错误是否命中指定官方码（SDK 结构体码优先，错误文本兜底）。
+func isMediaImageErrorCode(err error, code int) bool {
+	if err == nil {
+		return false
+	}
+	var sdkErr *errs.Err
+	if errors.As(err, &sdkErr) && sdkErr.Code() == code {
+		return true
+	}
+	return strings.Contains(err.Error(), fmt.Sprint(code))
+}
+
+// mediaImageFlowError 素材链上游错误 → 调用方可判定的错误：
+// 40035007 包成哨兵 errMediaImageQuotaExceeded，其余保留「中文说明(官方码)」。
+func mediaImageFlowError(err error) error {
+	if isMediaImageErrorCode(err, 40035007) {
+		return fmt.Errorf("%w: %s", errMediaImageQuotaExceeded, describeMediaImageError(err))
+	}
+	return errors.New(describeMediaImageError(err))
+}
+
+// purgeMediaImages 配额触顶（40035007）时的清理：拉全量列表，按 created_at 从旧到新
+// 删除最多 mediaQuotaPurgeCount 张，跳过最近 mediaQuotaProtectWindow 内创建的图片
+// （官方说明删除不影响已发送消息，但 24 小时内的图仍在引用/排查窗口内，不删）。
+// 返回 nil 表示删掉了至少一张（可以重试上传），否则返回原因（调用方直接降级）。
+func purgeMediaImages(ctx context.Context, apiv2 openapi.OpenAPI, source string) error {
+	images, err := listMediaImagesOldestFirst(ctx, apiv2)
+	if err != nil {
+		return fmt.Errorf("拉取素材列表失败: %w", err)
+	}
+	protectAfter := time.Now().Add(-mediaQuotaProtectWindow).Unix()
+	deleted := 0
+	for _, img := range images {
+		if deleted >= mediaQuotaPurgeCount {
+			break
+		}
+		if img.ImageID == "" || img.CreatedAt >= protectAfter {
+			continue
+		}
+		if err := apiv2.DeleteMediaImage(ctx, img.ImageID); err != nil {
+			if isMediaImageErrorCode(err, 40035008) {
+				continue // 已被删除，不算失败
+			}
+			mylog.Printf("%s: 删除旧素材失败 image_id=%s: %v", source, img.ImageID, err)
+			continue
+		}
+		deleted++
+	}
+	if deleted == 0 {
+		return errors.New("没有可清理的旧素材（最近 24 小时内创建的不删）")
+	}
+	mylog.Printf("%s: 配额超限已清理 %d 张旧素材", source, deleted)
+	return nil
+}
+
+// listMediaImagesOldestFirst 分页拉取素材列表并按 created_at 升序（最旧在前）。
+// 页码上限 10 防游标异常时死循环（单机器人上限 100 张，正常几页即可拉完）。
+func listMediaImagesOldestFirst(ctx context.Context, apiv2 openapi.OpenAPI) ([]*dto.MediaImage, error) {
+	var all []*dto.MediaImage
+	cursor := ""
+	for page := 0; page < 10; page++ {
+		list, err := apiv2.ListMediaImages(ctx, cursor)
+		if err != nil {
+			return nil, err
+		}
+		if list == nil {
+			break
+		}
+		for _, img := range list.Images {
+			if img != nil {
+				all = append(all, img)
+			}
+		}
+		if list.NextCursor == "" {
+			break
+		}
+		cursor = list.NextCursor
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].CreatedAt < all[j].CreatedAt })
+	return all, nil
 }
