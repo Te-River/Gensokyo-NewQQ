@@ -12,8 +12,8 @@ package handlers
 // 素材引用是平台托管的可复用引用（滑动有效期 90 天，每次被消息引用自动顺延），发送后
 // 不删除，同一张图可被多条消息复用。qqbot-media:// 只适用于 Markdown/keyboard：卡片
 // pic_url、/uploadpic、/uploadpicv2 等必须公网 URL 的路径维持既有外链上传，不走素材链。
-// 配额（单机器人 100 张）只在上传遇到 40035007 时清理：按 created_at 从旧到新删 20 张、
-// 跳过最近 24 小时创建的图片，再重试一次；仍失败才降级外链。
+// 配额（单机器人 100 张）只在上传遇到 40035007 时清理：按 expires_at 升序删 20 张（最久
+// 未被引用的先删，刚被引用的图因滑动过期自动顺延沉底，无需时间保护窗），再重试一次；仍失败才降级外链。
 //
 // 本文件不注册 OneBot action：当前只有 Markdown/keyboard 图片消费点（message_parser.go、
 // shortlived_image.go）调用素材链；将来若要暴露 upload_media_image，复用 mediaImageUploadFlow 即可。
@@ -45,11 +45,6 @@ const maxMediaImageBytes = 10 * 1000 * 1000
 // mediaQuotaPurgeCount 配额触顶（40035007）时一次清理的素材数量：一次删够余量，
 // 避免每发一张图都要再清一轮。
 const mediaQuotaPurgeCount = 20
-
-// mediaQuotaProtectWindow 清理时保护的创建时间窗口：最近 24 小时内上传的素材不删，
-// 刚发送成功的图仍可能被引用/排查，留着更稳（官方说明删除不影响已发送消息，
-// 但引用窗口内的图没有理由冒险）。
-const mediaQuotaProtectWindow = 24 * time.Hour
 
 // mediaImageErrorCodes 官方 400350xx 错误码 → 中文可读说明（原文见素材管理页「错误码」表）
 var mediaImageErrorCodes = []struct {
@@ -191,7 +186,7 @@ func mediaImageUploadFlow(ctx context.Context, apiv2 openapi.OpenAPI, content []
 	}
 	prepareResp, err := apiv2.PrepareMediaImage(ctx, prepareReq)
 	if err != nil && isMediaImageErrorCode(err, 40035007) {
-		mylog.Printf("%s: 素材配额超限，清理最旧素材后重试: %v", source, err)
+		mylog.Printf("%s: 素材配额超限，清理最久未引用素材后重试: %v", source, err)
 		if purgeErr := purgeMediaImages(ctx, apiv2, source); purgeErr != nil {
 			mylog.Printf("%s: 清理旧素材失败，不再重试: %v", source, purgeErr)
 		} else {
@@ -228,7 +223,7 @@ func mediaImageUploadFlow(ctx context.Context, apiv2 openapi.OpenAPI, content []
 	}
 	completeResp, err := apiv2.CompleteMediaImage(ctx, completeReq)
 	if err != nil && isMediaImageErrorCode(err, 40035007) {
-		mylog.Printf("%s: 素材配额超限（complete），清理最旧素材后重试: %v", source, err)
+		mylog.Printf("%s: 素材配额超限（complete），清理最久未引用素材后重试: %v", source, err)
 		if purgeErr := purgeMediaImages(ctx, apiv2, source); purgeErr != nil {
 			mylog.Printf("%s: 清理旧素材失败，不再重试: %v", source, purgeErr)
 		} else {
@@ -373,27 +368,32 @@ func mediaImageFlowError(err error) error {
 	return errors.New(describeMediaImageError(err))
 }
 
-// purgeMediaImages 配额触顶（40035007）时的清理：拉全量列表，按 created_at 从旧到新
-// 删除最多 mediaQuotaPurgeCount 张，跳过最近 mediaQuotaProtectWindow 内创建的图片
-// （官方说明删除不影响已发送消息，但 24 小时内的图仍在引用/排查窗口内，不删）。
-// 返回 nil 表示删掉了至少一张（可以重试上传），否则返回原因（调用方直接降级）。
+// purgeMediaImages 配额触顶（40035007）时的清理：拉全量列表，按 expires_at 升序（最久未
+// 被引用的先删）删除最多 mediaQuotaPurgeCount 张。图片为滑动过期（每次被消息成功引用后
+// 顺延至 90 天），刚发送过的图 expires_at 自然沉底、不会被优先删，因此不再需要创建时间
+// 保护窗；官方说明删除只影响后续新引用、已发送消息不受影响（平台已转存副本），这是删除
+// 激进度可接受的依据。返回 nil 表示至少释放了一张（成功删除、或 40035008 确认该图本就不
+// 存在——视为配额已释放，同样计入重试条件），否则返回原因（列表为空/全部删除失败，调用方直接降级）。
 func purgeMediaImages(ctx context.Context, apiv2 openapi.OpenAPI, source string) error {
-	images, err := listMediaImagesOldestFirst(ctx, apiv2)
+	images, err := listMediaImagesByExpiresAt(ctx, apiv2)
 	if err != nil {
 		return fmt.Errorf("拉取素材列表失败: %w", err)
 	}
-	protectAfter := time.Now().Add(-mediaQuotaProtectWindow).Unix()
 	deleted := 0
 	for _, img := range images {
 		if deleted >= mediaQuotaPurgeCount {
 			break
 		}
-		if img.ImageID == "" || img.CreatedAt >= protectAfter {
+		if img.ImageID == "" {
 			continue
 		}
 		if err := apiv2.DeleteMediaImage(ctx, img.ImageID); err != nil {
 			if isMediaImageErrorCode(err, 40035008) {
-				continue // 已被删除，不算失败
+				// 官方语义：image_id 本就不存在 → 配额实际已释放，计入 deleted 允许重试，
+				// 否则列表全是陈旧项时 deleted==0 会白白放弃重试、直接降级。
+				mylog.Printf("%s: 素材已不存在（40035008），视为已释放 image_id=%s", source, img.ImageID)
+				deleted++
+				continue
 			}
 			mylog.Printf("%s: 删除旧素材失败 image_id=%s: %v", source, img.ImageID, err)
 			continue
@@ -401,15 +401,18 @@ func purgeMediaImages(ctx context.Context, apiv2 openapi.OpenAPI, source string)
 		deleted++
 	}
 	if deleted == 0 {
-		return errors.New("没有可清理的旧素材（最近 24 小时内创建的不删）")
+		return errors.New("素材列表中没有可删除的素材")
 	}
-	mylog.Printf("%s: 配额超限已清理 %d 张旧素材", source, deleted)
+	mylog.Printf("%s: 配额超限已清理 %d 张最久未引用的素材", source, deleted)
 	return nil
 }
 
-// listMediaImagesOldestFirst 分页拉取素材列表并按 created_at 升序（最旧在前）。
+// listMediaImagesByExpiresAt 分页拉取素材列表并按清理优先级升序排列：expires_at>0 的组
+// 在前，组内按 expires_at 升序（滑动过期顺延后的最小值才是「最久未被引用」信号；并列按
+// created_at 升序）；expires_at 缺失/为 0 视为「尚未被消息引用」排在整队末尾、组内按
+// created_at 升序——未引用≠最久未用，刚上传的图只有其余素材全部清掉才会轮到它。
 // 页码上限 10 防游标异常时死循环（单机器人上限 100 张，正常几页即可拉完）。
-func listMediaImagesOldestFirst(ctx context.Context, apiv2 openapi.OpenAPI) ([]*dto.MediaImage, error) {
+func listMediaImagesByExpiresAt(ctx context.Context, apiv2 openapi.OpenAPI) ([]*dto.MediaImage, error) {
 	var all []*dto.MediaImage
 	cursor := ""
 	for page := 0; page < 10; page++ {
@@ -430,6 +433,16 @@ func listMediaImagesOldestFirst(ctx context.Context, apiv2 openapi.OpenAPI) ([]*
 		}
 		cursor = list.NextCursor
 	}
-	sort.Slice(all, func(i, j int) bool { return all[i].CreatedAt < all[j].CreatedAt })
+	sort.Slice(all, func(i, j int) bool {
+		a, b := all[i], all[j]
+		// 分组键：expires_at>0（已被引用、有顺延时间戳）先清；=0（尚未被引用）垫底
+		if (a.ExpiresAt > 0) != (b.ExpiresAt > 0) {
+			return a.ExpiresAt > 0
+		}
+		if a.ExpiresAt != b.ExpiresAt {
+			return a.ExpiresAt < b.ExpiresAt
+		}
+		return a.CreatedAt < b.CreatedAt
+	})
 	return all, nil
 }
