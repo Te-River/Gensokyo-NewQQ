@@ -54,6 +54,12 @@ pub struct MessageToCreate {
     /// 消息按钮（`keyboard`），按 JSON 透传。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keyboard: Option<Value>,
+    /// 输入状态通知（`msg_type=6`，仅单聊）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_notify: Option<InputNotify>,
+    /// 流式消息分片（`message_sse` 的 `stream` 子结构，仅单聊）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<StreamSse>,
     /// 富媒体引用（`file_info`）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub media: Option<Media>,
@@ -145,8 +151,9 @@ impl MessageToCreate {
     /// 追加一个未建模字段。
     ///
     /// # 警告
-    /// 已建模字段名（`content` / `msg_type` / `markdown` / `card` / `keyboard` / `media` / `msg_id` /
-    /// `event_id` / `msg_seq` / `is_wakeup` / `message_reference`）会被忽略并记录 `warn`：
+    /// 已建模字段名（`content` / `msg_type` / `markdown` / `card` / `keyboard` / `input_notify` /
+    /// `stream` / `media` / `msg_id` / `event_id` / `msg_seq` / `is_wakeup` / `message_reference`）
+    /// 会被忽略并记录 `warn`：
     /// `extra` 走 `#[serde(flatten)]`，写入同名 key 会在 JSON 里产生重复键，服务端行为不确定。
     /// 这些字段请用对应的 builder（如 [`MessageToCreate::with_msg_id`]）设置。
     #[must_use]
@@ -180,12 +187,14 @@ impl MessageToCreate {
 }
 
 /// `MessageToCreate` 已建模的 JSON 字段名；`extra` 不允许占用这些 key（否则 flatten 出重复键）。
-const MODELLED_FIELDS: [&str; 11] = [
+const MODELLED_FIELDS: [&str; 13] = [
     "content",
     "msg_type",
     "markdown",
     "card",
     "keyboard",
+    "input_notify",
+    "stream",
     "media",
     "msg_id",
     "event_id",
@@ -193,6 +202,33 @@ const MODELLED_FIELDS: [&str; 11] = [
     "is_wakeup",
     "message_reference",
 ];
+
+/// 输入状态通知（`msg_type=6`，仅单聊）。
+///
+/// 对齐 `botgo/dto/message_create.go` 的 `InputNotify`：两个字段在 Go 侧都不带 `omitempty`，
+/// 服务端按 0 值校验，因此这里也总是序列化。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputNotify {
+    /// 状态类型（Go 缺省 1）。
+    pub input_type: i64,
+    /// 持续秒数（Go 缺省 60）。
+    pub input_second: i64,
+}
+
+/// 流式消息分片（Go `dto.MessageSSE` 里的 `stream`，即 `dto.StreamSSE`）。
+///
+/// QQ 的 SSE 消息走 `/v2/users/{user_openid}/messages`（Go `PostC2CMessageSSE` 的端点），
+/// 与普通 C2C 消息同端点、`msg_type=2`，因此直接挂在 [`MessageToCreate`] 上发出。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamSse {
+    /// 输入状态：`1` 续写、`10` 结束（Go `send_private_msg.go` 的 `InputState`）。
+    pub state: i64,
+    /// 分片序号（首片为 0，之后递增）。
+    pub index: i64,
+    /// 首片返回的 `stream_msg_id`；`omitempty`，首片不填。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+}
 
 /// Markdown 消息体。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -478,6 +514,23 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// 机器人资料页分享链接请求（`POST /v2/generate_url_link`）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GenerateUrlLinkRequest {
+    /// 添加好友时回传给开发者，最多 32 字符。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub callback_data: String,
+}
+
+/// 机器人资料页分享链接响应。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GenerateUrlLink {
+    /// 生成的分享链接。
+    pub url: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,7 +594,10 @@ mod tests {
         .with_extra("card", json!("override"));
 
         assert!(message.extra.is_empty(), "已建模字段不得落进 extra");
-        assert_eq!(message.card.as_ref().map(|card| card.card_type.as_str()), Some("tuwen"));
+        assert_eq!(
+            message.card.as_ref().map(|card| card.card_type.as_str()),
+            Some("tuwen")
+        );
     }
 
     #[test]
@@ -556,7 +612,10 @@ mod tests {
                 && value["markdown"].get("custom_template_id").is_none(),
             "模板字段已废弃，出站不得构造: {value}"
         );
-        assert!(value.get("content").is_none(), "markdown 消息只要 markdown 载荷");
+        assert!(
+            value.get("content").is_none(),
+            "markdown 消息只要 markdown 载荷"
+        );
     }
 
     #[test]
@@ -602,7 +661,10 @@ mod tests {
         });
         let value = serde_json::to_value(&card).unwrap();
 
-        assert_eq!(value, json!({"type": "tuwen", "content": {"title": "只有标题"}}));
+        assert_eq!(
+            value,
+            json!({"type": "tuwen", "content": {"title": "只有标题"}})
+        );
         // 序列化仍省略缺省键（Go omitempty），但四字段必填：发送前 validate 必须拒绝
         assert!(
             card.content.validate().is_err(),
@@ -627,7 +689,10 @@ mod tests {
 
         let mut missing_url = valid_card();
         missing_url.url = None;
-        assert!(missing_url.validate().is_err(), "缺 url 必须拒绝（旧实现放行）");
+        assert!(
+            missing_url.validate().is_err(),
+            "缺 url 必须拒绝（旧实现放行）"
+        );
 
         let mut missing_pic = valid_card();
         missing_pic.pic_url = None;
@@ -642,7 +707,10 @@ mod tests {
         for blank in ["", "   ", "\t\n"] {
             let mut content = valid_card();
             content.title = Some(blank.to_owned());
-            assert!(content.validate().is_err(), "空白 title 必须拒绝: {blank:?}");
+            assert!(
+                content.validate().is_err(),
+                "空白 title 必须拒绝: {blank:?}"
+            );
 
             let mut content = valid_card();
             content.description = Some(blank.to_owned());
@@ -683,7 +751,10 @@ mod tests {
             url: Some(format!("https://example.com/{}", "a".repeat(1024 - 20))),
             pic_url: Some(format!("https://example.com/{}", "a".repeat(1024 - 20))),
         };
-        assert_eq!(at_boundary.title.as_deref().map(|t| t.chars().count()), Some(50));
+        assert_eq!(
+            at_boundary.title.as_deref().map(|t| t.chars().count()),
+            Some(50)
+        );
         assert_eq!(at_boundary.url.as_deref().map(|u| u.len()), Some(1024));
         assert!(at_boundary.validate().is_ok(), "恰好 50/200/1024 应放行");
     }
@@ -700,7 +771,10 @@ mod tests {
 
         let mut too_long_url = valid_card();
         too_long_url.url = Some(format!("https://example.com/{}", "a".repeat(1024)));
-        assert!(too_long_url.validate().is_err(), "超过 1024 字节的 url 必须拒绝");
+        assert!(
+            too_long_url.validate().is_err(),
+            "超过 1024 字节的 url 必须拒绝"
+        );
 
         let mut too_long_pic = valid_card();
         too_long_pic.pic_url = Some(format!("https://example.com/{}", "a".repeat(1024)));
@@ -719,15 +793,25 @@ mod tests {
 
         let mut content = valid_card();
         content.url = Some(long_url);
-        assert!(content.validate().is_err(), "URL 长度按字节，超 1024 字节必须拒绝");
+        assert!(
+            content.validate().is_err(),
+            "URL 长度按字节，超 1024 字节必须拒绝"
+        );
     }
 
     #[test]
     fn card_content_requires_https_links() {
-        for url in ["http://example.com/a", "/relative/a.png", "ftp://example.com/a"] {
+        for url in [
+            "http://example.com/a",
+            "/relative/a.png",
+            "ftp://example.com/a",
+        ] {
             let mut content = valid_card();
             content.url = Some(url.to_owned());
-            assert!(content.validate().is_err(), "非 https 的 url 必须拒绝: {url}");
+            assert!(
+                content.validate().is_err(),
+                "非 https 的 url 必须拒绝: {url}"
+            );
 
             let mut content = valid_card();
             content.pic_url = Some(url.to_owned());

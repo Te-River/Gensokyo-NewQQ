@@ -7,14 +7,14 @@
 //! | [`send`] | — | 参数解析 + 出站计划构建：`params` → [`send::SendRequest`]（[`send::SendTarget`] + [`send::MessageOut`]）。`message` 支持 CQ 字符串、消息段数组与单个消息段对象，CQ 解析复用 `gensokyo_protocol` 的 [`gensokyo_protocol::MessageContent`] / [`gensokyo_protocol::OutboundPlan`]；[`send::SendRequest`] 支持序列化 → 反序列化往返，runtime 据此还原计划。 |
 //! | [`handler`] | `send_group_msg`（别名 `send_to_group`）、`send_private_msg`、`send_msg`、`send_group_msg_async`、`send_private_msg_async`、`send_msg_async` | 规划型 [`gensokyo_protocol::Handler`]：成功时返回 `"deferred": true` 的计划，**不发送**；参数缺失 / 非法返回 `retcode = 1400`。三个 `*_async` 与同步版共用同一套规划函数，响应形状逐字段一致。 |
 //! | [`group`] | `get_group_info`、`get_group_member_info`、`get_group_member_list`、`set_group_ban`（别名 `get_group_ban`）、`get_group_bot_state`、`get_group_join_request_list` | 真正调用 QQ 上游的查询 / 管理 action，经 [`qqapi::QqApi`] 抽象，成功回 `data`，参数错误 `1400` / 上游错误 `1500`。 |
-//! | [`group_admin`] | `set_group_whole_ban`（别名 `get_group_whole_ban`）、`set_group_card`、`set_group_kick`、`set_group_leave`、`get_group_list` | 群管理：前两个照 Go 口径固定回 `retcode = 100`（官方无写入路径），其余 `1500`（端点未落地）。 |
-//! | [`messages`] | `delete_msg`、`get_msg`、`get_forward_msg` | 消息撤回 / 查询；参数与 message_id 还原已实现，上游端点未落地时 `1500`。 |
+//! | [`group_admin`] | `set_group_whole_ban`（别名 `get_group_whole_ban`）、`set_group_card`、`set_group_kick`、`set_group_leave`、`get_group_list` | 群管理：前两个照 Go 口径固定回 `retcode = 100`（官方无写入路径），`set_group_kick` 走 `POST /v2/groups/{gid}/batch_remove_members`，`set_group_leave` / `get_group_list` 无官方端点回 `1500`。 |
+//! | [`messages`] | `delete_msg`、`get_msg`、`get_forward_msg` | `delete_msg` 走官方撤回端点（群 `DELETE /v2/groups/{gid}/messages/{mid}`、C2C `/v2/users/{uid}/messages/{mid}`）；`get_msg` / `get_forward_msg` 官方无端点回 `1500`。 |
 //! | [`users`] | `get_friend_list`、`get_stranger_info`、`send_like` | 用户列表 / 资料 / 点赞；同上游限制回 `1500`。 |
 //! | [`media`] | `get_image`、`get_record` | 纯本地：`file://` 归一成本地路径、其余原样回填进 `{"file": …}`；缺 `file` 回 `1400`。 |
 //! | [`system`] | `set_restart`、`clean_cache`、`get_cookies`、`get_csrf_token`、`get_credentials` | 运行控制 / 凭证：前两个只记审计日志并回 `{"code": 0}`（不重启、不清缓存），后三个回空凭证。 |
 //! | [`unsupported`] | `get_group_at_all_remain`、`set_group_name`、`set_group_admin`、`set_group_special_title`、`set_group_remark`、`set_qq_profile`、`get_qq_profile`、`get_group_system_msg`、`get_online_clients` | 无上游端点的 action：参数照 OneBot 契约校验后回 `1500`；`get_online_clients` 例外，逐字段照抄 Go 的本地回执 `{"clients": [], "tiny_id": 0}`。 |
-//! | [`panels`] | `create_panel`、`set_panel`、`delete_panel`、`get_panel`、`get_panel_list`、`set_panel_target`、`set_custom_menu`、`get_custom_menu`、`join_approval_strategy_*`（6 个） | 面板 / 自定义菜单 / 自动审批策略：`gensokyo-qq` 未移植对应 botgo 端点，参数按 Go 校验后回 `1500`。 |
-//! | [`interaction`] | `get_avatar`、`mark_msg_as_read`、`.handle_quick_operation`（+ `_async`）、`get_robot_share_link`、`put_interaction`、`delete_group_msg`、`set_group_add_request`、`get_group_member_blacklist`、`set_group_member_blacklist`、`send_group_forward_msg`、`send_private_forward_msg`、`send_group_msg_raw`、`send_private_msg_sse`、`send_private_msg_wakeup`、`get_group_honor_info`、`set_group_anonymous_ban` | 三项本地实现（头像 URL / 已读空回执 / 快速操作转 deferred 计划），其余 `1500`。 |
+//! | [`panels`] | `create_panel`、`set_panel`、`delete_panel`、`get_panel`、`get_panel_list`、`set_panel_target`、`set_custom_menu`、`get_custom_menu`、`join_approval_strategy_*`（6 个） | 面板 / 自定义菜单 / 自动审批策略：全部走官方端点（`/v2/panels*`、`/v2/menu`、`/v2/groups/join_approval_strategy*`），参数错误 `1400` / 上游错误 `1500`。 |
+//! | [`interaction`] | `get_avatar`、`mark_msg_as_read`、`.handle_quick_operation`（+ `_async`）、`get_robot_share_link`、`put_interaction`、`delete_group_msg`、`set_group_add_request`、`get_group_member_blacklist`、`set_group_member_blacklist`、`send_group_forward_msg`、`send_private_forward_msg`、`send_group_msg_raw`、`send_private_msg_sse`、`send_private_msg_wakeup`、`get_group_honor_info`、`set_group_anonymous_ban` | 三项本地实现（头像 URL / 已读空回执 / 快速操作转 deferred 计划）；分享链接 / 互动 / 撤回 / 入群审批 / 黑名单走官方端点；合并转发 / 原始直发 / SSE / `IsWakeup` / 群荣誉 / 匿名禁言回 `1500`。 |
 //! | [`capability`] | `can_send_image`、`can_send_record` | 纯本地判断，固定 `{"yes": true}`。 |
 //!
 //! # KNOWN_ACTIONS 覆盖率
@@ -56,11 +56,11 @@
 //! - **媒体上传**：`[CQ:image]` / `[CQ:record]` / `[CQ:video]` / `[CQ:file]` 的上传、图床选择
 //!   仍未接线；deferred 执行链只接受「已是上游 `file_info`」的图片（[`gensokyo_protocol::MediaRef::Unknown`]），
 //!   其余媒体形态回 `1500`，不做静默丢弃。
-//! - **`KNOWN_ACTIONS` 里端点未落地的 action**：面板 / 自定义菜单 / 自动审批策略
-//!   （[`panels`]）、互动 / 群消息撤回 / 入群申请审批 / 成员黑名单 / 合并转发 / 原始直发 /
-//!   SSE / `IsWakeup`（[`interaction`]）都只做参数校验后回 `1500`——`gensokyo-qq` 没有对应的
-//!   上游端点，运行时发送链也还没有这几条分支。`get_login_info` / `get_status` /
-//!   `get_version_info` 由 runtime 内置（[`BUILTIN_ACTIONS`]），不在本 crate。
+//! - **尚未接线**：`get_msg` / `get_forward_msg`（官方无查询端点）、`get_friend_list` /
+//!   `get_stranger_info` / `send_like`（官方无端点）、`set_group_leave` / `get_group_list`
+//!   （官方无端点，后者还缺 idmap 枚举接口）、合并转发 / 原始直发 / SSE / `IsWakeup`
+//!   （[`interaction`]）——这些只做参数校验后回 `1500`，不做静默降级。`get_login_info` /
+//!   `get_status` / `get_version_info` 由 runtime 内置（[`BUILTIN_ACTIONS`]），不在本 crate。
 //!
 //! # 与 Go 的分工
 //!
@@ -420,16 +420,16 @@ mod tests {
             Arc::new(CanSendImageHandler::new()),
             Arc::new(CanSendRecordHandler::new()),
             Arc::new(CleanCacheHandler::new()),
-            Arc::new(CreatePanelHandler::new()),
-            Arc::new(DeleteGroupMsgHandler::new()),
+            Arc::new(CreatePanelHandler::new(context.clone())),
+            Arc::new(DeleteGroupMsgHandler::new(context.clone())),
             Arc::new(DeleteMediaImageHandler::new(context.clone())),
             Arc::new(DeleteMsgHandler::new(context.clone())),
-            Arc::new(DeletePanelHandler::new()),
+            Arc::new(DeletePanelHandler::new(context.clone())),
             Arc::new(GetAvatarHandler::new(context.clone())),
             Arc::new(GetCookiesHandler::new()),
             Arc::new(GetCredentialsHandler::new()),
             Arc::new(GetCsrfTokenHandler::new()),
-            Arc::new(GetCustomMenuHandler::new()),
+            Arc::new(GetCustomMenuHandler::new(context.clone())),
             Arc::new(GetForwardMsgHandler::new(context.clone())),
             Arc::new(GetFriendListHandler::new(context.clone())),
             Arc::new(GetGroupAtAllRemainHandler::new()),
@@ -438,7 +438,7 @@ mod tests {
             Arc::new(GetGroupInfoHandler::new(context.clone())),
             Arc::new(GetGroupJoinRequestListHandler::new(context.clone())),
             Arc::new(GetGroupListHandler::new(context.clone())),
-            Arc::new(GetGroupMemberBlacklistHandler::new()),
+            Arc::new(GetGroupMemberBlacklistHandler::new(context.clone())),
             Arc::new(GetGroupMemberInfoHandler::new(context.clone())),
             Arc::new(GetGroupMemberListHandler::new(context.clone())),
             Arc::new(GetGroupSystemMsgHandler::new()),
@@ -446,20 +446,20 @@ mod tests {
             Arc::new(GetMediaImageListHandler::new(context.clone())),
             Arc::new(GetMsgHandler::new(context.clone())),
             Arc::new(GetOnlineClientsHandler::new()),
-            Arc::new(GetPanelHandler::new()),
-            Arc::new(GetPanelListHandler::new()),
+            Arc::new(GetPanelHandler::new(context.clone())),
+            Arc::new(GetPanelListHandler::new(context.clone())),
             Arc::new(GetQqProfileHandler::new()),
             Arc::new(GetRecordHandler::new()),
-            Arc::new(GetRobotShareLinkHandler::new()),
+            Arc::new(GetRobotShareLinkHandler::new(context.clone())),
             Arc::new(GetStrangerInfoHandler::new(context.clone())),
-            Arc::new(JoinApprovalStrategyCreateHandler::new()),
-            Arc::new(JoinApprovalStrategyDeleteHandler::new()),
-            Arc::new(JoinApprovalStrategyExecuteHandler::new()),
-            Arc::new(JoinApprovalStrategyListHandler::new()),
-            Arc::new(JoinApprovalStrategyUpdateHandler::new()),
-            Arc::new(JoinApprovalStrategyWhitelistHandler::new()),
+            Arc::new(JoinApprovalStrategyCreateHandler::new(context.clone())),
+            Arc::new(JoinApprovalStrategyDeleteHandler::new(context.clone())),
+            Arc::new(JoinApprovalStrategyExecuteHandler::new(context.clone())),
+            Arc::new(JoinApprovalStrategyListHandler::new(context.clone())),
+            Arc::new(JoinApprovalStrategyUpdateHandler::new(context.clone())),
+            Arc::new(JoinApprovalStrategyWhitelistHandler::new(context.clone())),
             Arc::new(MarkMsgAsReadHandler::new()),
-            Arc::new(PutInteractionHandler::new()),
+            Arc::new(PutInteractionHandler::new(context.clone())),
             Arc::new(SendGroupForwardMsgHandler::new()),
             Arc::new(SendGroupHandler::new()),
             Arc::new(SendGroupAsyncHandler::new()),
@@ -472,21 +472,21 @@ mod tests {
             Arc::new(SendPrivateAsyncHandler::new()),
             Arc::new(SendPrivateMsgSseHandler::new()),
             Arc::new(SendPrivateMsgWakeupHandler::new()),
-            Arc::new(SetCustomMenuHandler::new()),
-            Arc::new(SetGroupAddRequestHandler::new()),
+            Arc::new(SetCustomMenuHandler::new(context.clone())),
+            Arc::new(SetGroupAddRequestHandler::new(context.clone())),
             Arc::new(SetGroupAdminHandler::new()),
             Arc::new(SetGroupAnonymousBanHandler::new()),
             Arc::new(SetGroupBanHandler::new(context.clone())),
             Arc::new(SetGroupCardHandler::new()),
             Arc::new(SetGroupKickHandler::new(context.clone())),
             Arc::new(SetGroupLeaveHandler::new(context.clone())),
-            Arc::new(SetGroupMemberBlacklistHandler::new()),
+            Arc::new(SetGroupMemberBlacklistHandler::new(context.clone())),
             Arc::new(SetGroupNameHandler::new()),
             Arc::new(SetGroupRemarkHandler::new()),
             Arc::new(SetGroupSpecialTitleHandler::new()),
             Arc::new(SetGroupWholeBanHandler::new()),
-            Arc::new(SetPanelHandler::new()),
-            Arc::new(SetPanelTargetHandler::new()),
+            Arc::new(SetPanelHandler::new(context.clone())),
+            Arc::new(SetPanelTargetHandler::new(context.clone())),
             Arc::new(SetQqProfileHandler::new()),
             Arc::new(SetRestartHandler::new()),
             Arc::new(UploadMediaImageHandler::new(context.clone())),

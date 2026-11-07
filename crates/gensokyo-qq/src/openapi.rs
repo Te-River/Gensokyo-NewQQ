@@ -9,7 +9,16 @@ use std::sync::Arc;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::dto::{FileUpload, MediaResponse, MessageResponse, MessageToCreate};
+use crate::dto::{
+    ApprovalJoinRequest, BatchRemoveMembersRequest, BatchRemoveMembersResponse,
+    CreateJoinApprovalStrategyRequest, CreateJoinApprovalStrategyResponse, CreatePanelRequest,
+    CreatePanelResponse, FileUpload, GenerateUrlLink, GenerateUrlLinkRequest,
+    JoinApprovalStrategyList, MediaResponse, MemberBlacklistList, MemberBlacklistRequest,
+    MemberBlacklistResponse, MenuResponse, MessageResponse, MessageToCreate, PanelList,
+    PanelRecordDetail, PanelTargetRequest, PutMenuRequest, UpdateJoinApprovalStrategyRequest,
+    UpdateJoinApprovalStrategyResponse, UpdatePanelRequest, VersionResponse, WhitelistUsersRequest,
+    WhitelistUsersResponse,
+};
 use crate::error::{ApiError, Error, Result};
 use crate::http::{HttpMethod, HttpRequest, HttpResponse, HttpTransport, encode_path_segment};
 use crate::token::TokenManager;
@@ -127,38 +136,295 @@ impl<T: HttpTransport> OpenApiClient<T> {
         self.post_json(&path, file).await
     }
 
+    /// 指令面板列表（`GET /v2/panels`）；`cursor` 空串等同首页，`limit` 为 `None` 时不传。
+    pub async fn get_panels(
+        &self,
+        scope: &str,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<PanelList> {
+        let path = query_path(
+            "/v2/panels",
+            &[
+                ("scope", Some(scope)),
+                ("cursor", cursor),
+                ("limit", limit.map(|value| value.to_string()).as_deref()),
+            ],
+        );
+        self.get_json(&path).await
+    }
+
+    /// 创建指令面板（`POST /v2/panels`）。
+    pub async fn create_panel(&self, request: &CreatePanelRequest) -> Result<CreatePanelResponse> {
+        self.post_json("/v2/panels", request).await
+    }
+
+    /// 单个指令面板详情（`GET /v2/panels/{panel_id}`）。
+    pub async fn get_panel(&self, panel_id: &str) -> Result<PanelRecordDetail> {
+        let path = format!("/v2/panels/{}", encode_path_segment(panel_id));
+        self.get_json(&path).await
+    }
+
+    /// 更新指令面板元素与备注（`PUT /v2/panels/{panel_id}`，覆盖式）。
+    pub async fn update_panel(
+        &self,
+        panel_id: &str,
+        request: &UpdatePanelRequest,
+    ) -> Result<VersionResponse> {
+        let path = format!("/v2/panels/{}", encode_path_segment(panel_id));
+        self.send_json(HttpMethod::Put, &path, request).await
+    }
+
+    /// 删除指令面板（`DELETE /v2/panels/{panel_id}`）。
+    pub async fn delete_panel(&self, panel_id: &str) -> Result<()> {
+        let path = format!("/v2/panels/{}", encode_path_segment(panel_id));
+        self.send_empty(HttpMethod::Delete, &path).await
+    }
+
+    /// 增删指令面板关联对象（`PUT /v2/panels/{panel_id}/target`）。
+    pub async fn update_panel_target(
+        &self,
+        panel_id: &str,
+        request: &PanelTargetRequest,
+    ) -> Result<()> {
+        let path = format!("/v2/panels/{}/target", encode_path_segment(panel_id));
+        self.send_void(HttpMethod::Put, &path, request).await
+    }
+
+    /// 获取自定义菜单（`GET /v2/menu`）。
+    pub async fn get_menu(&self) -> Result<MenuResponse> {
+        self.get_json("/v2/menu").await
+    }
+
+    /// 设置自定义菜单（`PUT /v2/menu`，覆盖式）。
+    pub async fn put_menu(&self, request: &PutMenuRequest) -> Result<VersionResponse> {
+        self.send_json(HttpMethod::Put, "/v2/menu", request).await
+    }
+
+    /// 创建入群自动审批策略（`POST /v2/groups/join_approval_strategy`）。
+    pub async fn create_join_approval_strategy(
+        &self,
+        request: &CreateJoinApprovalStrategyRequest,
+    ) -> Result<CreateJoinApprovalStrategyResponse> {
+        self.post_json("/v2/groups/join_approval_strategy", request)
+            .await
+    }
+
+    /// 审批策略列表（`GET /v2/groups/join_approval_strategy`）。
+    pub async fn list_join_approval_strategy(
+        &self,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<JoinApprovalStrategyList> {
+        let path = query_path(
+            "/v2/groups/join_approval_strategy",
+            &[
+                ("cursor", cursor),
+                ("limit", limit.map(|value| value.to_string()).as_deref()),
+            ],
+        );
+        self.get_json(&path).await
+    }
+
+    /// 更新审批策略（`PATCH /v2/groups/join_approval_strategy/{strategy_id}`）。
+    pub async fn update_join_approval_strategy(
+        &self,
+        strategy_id: &str,
+        request: &UpdateJoinApprovalStrategyRequest,
+    ) -> Result<UpdateJoinApprovalStrategyResponse> {
+        let path = format!(
+            "/v2/groups/join_approval_strategy/{}",
+            encode_path_segment(strategy_id)
+        );
+        self.send_json(HttpMethod::Patch, &path, request).await
+    }
+
+    /// 生效审批策略（`POST /v2/groups/join_approval_strategy/{strategy_id}/execute`）。
+    pub async fn execute_join_approval_strategy(&self, strategy_id: &str) -> Result<()> {
+        let path = format!(
+            "/v2/groups/join_approval_strategy/{}/execute",
+            encode_path_segment(strategy_id)
+        );
+        self.send_empty(HttpMethod::Post, &path).await
+    }
+
+    /// 增删审批策略白名单（`POST .../{strategy_id}/whitelist_users`）。
+    pub async fn update_join_approval_strategy_whitelist(
+        &self,
+        strategy_id: &str,
+        request: &WhitelistUsersRequest,
+    ) -> Result<WhitelistUsersResponse> {
+        let path = format!(
+            "/v2/groups/join_approval_strategy/{}/whitelist_users",
+            encode_path_segment(strategy_id)
+        );
+        self.post_json(&path, request).await
+    }
+
+    /// 删除审批策略（`DELETE /v2/groups/join_approval_strategy/{strategy_id}`）。
+    pub async fn delete_join_approval_strategy(&self, strategy_id: &str) -> Result<()> {
+        let path = format!(
+            "/v2/groups/join_approval_strategy/{}",
+            encode_path_segment(strategy_id)
+        );
+        self.send_empty(HttpMethod::Delete, &path).await
+    }
+
+    /// 批量移出群成员（`POST /v2/groups/{group_openid}/batch_remove_members`，单批 ≤ 20）。
+    pub async fn batch_remove_members(
+        &self,
+        group_openid: &str,
+        request: &BatchRemoveMembersRequest,
+    ) -> Result<BatchRemoveMembersResponse> {
+        let path = format!(
+            "/v2/groups/{}/batch_remove_members",
+            encode_path_segment(group_openid)
+        );
+        self.post_json(&path, request).await
+    }
+
+    /// 群黑名单列表（`GET /v2/groups/{group_openid}/member_blacklist`）。
+    pub async fn member_blacklist_list(
+        &self,
+        group_openid: &str,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<MemberBlacklistList> {
+        let path = format!(
+            "/v2/groups/{}/member_blacklist",
+            encode_path_segment(group_openid)
+        );
+        let path = query_path(
+            &path,
+            &[
+                ("cursor", cursor),
+                ("limit", limit.map(|value| value.to_string()).as_deref()),
+            ],
+        );
+        self.get_json(&path).await
+    }
+
+    /// 增删群黑名单（`POST /v2/groups/{group_openid}/member_blacklist`，单批 ≤ 20）。
+    pub async fn update_member_blacklist(
+        &self,
+        group_openid: &str,
+        request: &MemberBlacklistRequest,
+    ) -> Result<MemberBlacklistResponse> {
+        let path = format!(
+            "/v2/groups/{}/member_blacklist",
+            encode_path_segment(group_openid)
+        );
+        self.post_json(&path, request).await
+    }
+
+    /// 审批入群申请（`POST /v2/groups/{group_openid}/approval_join_request/{member_openid}`）。
+    pub async fn approve_join_request(
+        &self,
+        group_openid: &str,
+        member_openid: &str,
+        request: &ApprovalJoinRequest,
+    ) -> Result<()> {
+        let path = format!(
+            "/v2/groups/{}/approval_join_request/{}",
+            encode_path_segment(group_openid),
+            encode_path_segment(member_openid)
+        );
+        self.post_json_void(&path, request).await
+    }
+
+    /// 撤回群消息（`DELETE /v2/groups/{group_openid}/messages/{message_id}`）。
+    pub async fn retract_group_message(&self, group_openid: &str, message_id: &str) -> Result<()> {
+        let path = format!(
+            "/v2/groups/{}/messages/{}",
+            encode_path_segment(group_openid),
+            encode_path_segment(message_id)
+        );
+        self.send_empty(HttpMethod::Delete, &path).await
+    }
+
+    /// 撤回 C2C 消息（`DELETE /v2/users/{user_openid}/messages/{message_id}`）。
+    pub async fn retract_c2c_message(&self, user_openid: &str, message_id: &str) -> Result<()> {
+        let path = format!(
+            "/v2/users/{}/messages/{}",
+            encode_path_segment(user_openid),
+            encode_path_segment(message_id)
+        );
+        self.send_empty(HttpMethod::Delete, &path).await
+    }
+
+    /// 回应互动事件（`PUT /interactions/{interaction_id}`，注意没有 `/v2` 前缀）。
+    ///
+    /// `code` 为 0~5：0 成功 / 1 操作失败 / 2 操作频繁 / 3 重复操作 / 4 没有权限 / 5 仅管理员。
+    pub async fn put_interaction(&self, interaction_id: &str, code: u32) -> Result<()> {
+        let path = format!("/interactions/{}", encode_path_segment(interaction_id));
+        self.send_void(HttpMethod::Put, &path, &serde_json::json!({ "code": code }))
+            .await
+    }
+
+    /// 生成机器人资料页分享链接（`POST /v2/generate_url_link`）。
+    pub async fn generate_url_link(
+        &self,
+        request: &GenerateUrlLinkRequest,
+    ) -> Result<GenerateUrlLink> {
+        self.post_json("/v2/generate_url_link", request).await
+    }
+
     /// 发起 GET 并解析 JSON 响应（群管理子集复用）。
     pub(crate) async fn get_json<R: DeserializeOwned>(&self, path: &str) -> Result<R> {
         let response = self.authorized(HttpMethod::Get, path, None).await?;
         decode_json(&response)
     }
 
-    /// 发起 POST 并解析 JSON 响应。
+    /// 发起带 JSON 体的 POST 并解析 JSON 响应。
     pub(crate) async fn post_json<B: Serialize + ?Sized, R: DeserializeOwned>(
         &self,
         path: &str,
         body: &B,
     ) -> Result<R> {
-        let response = self.post_authorized(path, body).await?;
-        decode_json(&response)
+        self.send_json(HttpMethod::Post, path, body).await
     }
 
-    /// 发起 POST 并忽略响应体（`204` / 空 body 的写接口）。
+    /// 发起带 JSON 体的 POST 并忽略响应体（`204` / 空 body 的写接口）。
     pub(crate) async fn post_json_void<B: Serialize + ?Sized>(
         &self,
         path: &str,
         body: &B,
     ) -> Result<()> {
-        self.post_authorized(path, body).await.map(|_| ())
+        self.send_void(HttpMethod::Post, path, body).await
     }
 
-    async fn post_authorized<B: Serialize + ?Sized>(
+    async fn send_json<B: Serialize + ?Sized, R: DeserializeOwned>(
         &self,
+        method: HttpMethod,
+        path: &str,
+        body: &B,
+    ) -> Result<R> {
+        let response = self.body_authorized(method, path, body).await?;
+        decode_json(&response)
+    }
+
+    async fn send_void<B: Serialize + ?Sized>(
+        &self,
+        method: HttpMethod,
+        path: &str,
+        body: &B,
+    ) -> Result<()> {
+        self.body_authorized(method, path, body).await.map(|_| ())
+    }
+
+    /// 发起无 body 的写请求（`DELETE` / 无参 `POST`）并忽略响应体。
+    async fn send_empty(&self, method: HttpMethod, path: &str) -> Result<()> {
+        self.authorized(method, path, None).await.map(|_| ())
+    }
+
+    async fn body_authorized<B: Serialize + ?Sized>(
+        &self,
+        method: HttpMethod,
         path: &str,
         body: &B,
     ) -> Result<HttpResponse> {
         let body = serde_json::to_vec(body)?;
-        self.authorized(HttpMethod::Post, path, Some(body)).await
+        self.authorized(method, path, Some(body)).await
     }
 
     /// 注入 token 与通用请求头，并把非 2xx 响应映射为 [`ApiError`]。
@@ -206,4 +472,21 @@ fn decode_json<R: DeserializeOwned>(response: &HttpResponse) -> Result<R> {
     serde_json::from_slice(&response.body).map_err(|err| {
         Error::InvalidResponse(format!("解析响应失败(status={}): {err}", response.status))
     })
+}
+
+/// 拼查询串：`None` / 空串的参数整段跳过，其余按 [`encode_path_segment`] 同规则转义。
+fn query_path(path: &str, params: &[(&str, Option<&str>)]) -> String {
+    let mut url = path.to_owned();
+    let mut separator = '?';
+    for (key, value) in params {
+        let Some(value) = value.filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        url.push(separator);
+        separator = '&';
+        url.push_str(key);
+        url.push('=');
+        url.push_str(&encode_path_segment(value));
+    }
+    url
 }

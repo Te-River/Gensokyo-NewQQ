@@ -4,12 +4,12 @@
 //!
 //! | action | Go 对应 | 上游端点 | 结果 |
 //! |--------|---------|----------|------|
-//! | `delete_msg` | `handlers/delete_msg.go` | 消息撤回端点 | 未在 `gensokyo-qq` 落地 → `1500` |
+//! | `delete_msg` | `handlers/delete_msg.go` | 群 `DELETE /v2/groups/{gid}/messages/{mid}`、C2C `DELETE /v2/users/{uid}/messages/{mid}` | 真实调用 |
 //! | `get_msg` | 无（Go 未注册） | 官方无按 message_id 查询端点 | `1500` |
 //! | `get_forward_msg` | 无（Go 未注册） | 官方无合并转发查询端点 | `1500` |
 //!
-//! 三个 action 的**参数翻译与 ID 还原**已经完整实现，缺的只是上游端点：`gensokyo-qq` 的公开
-//! 方法补齐后，handler 不用改。
+//! `delete_msg` 的**参数翻译与 ID 还原**已完整实现并接到上游；`get_msg` / `get_forward_msg`
+//! 只有参数翻译，缺官方端点。
 //!
 //! # message_id 口径（对齐 Go `DeleteMsg`）
 //!
@@ -194,7 +194,7 @@ impl Handler for GetForwardMsgHandler {
 /// 请求里的 `message_id` → 上游真实消息 ID。
 ///
 /// `string_ob11` 为真时原样透传；否则按 idmap 虚拟号还原（Go `RetrieveRowByCachev2` 语义）。
-fn resolve_message_id(context: &ActionContext, requested: &str) -> Result<String> {
+pub(crate) fn resolve_message_id(context: &ActionContext, requested: &str) -> Result<String> {
     if context.string_ob11() {
         return Ok(requested.to_owned());
     }

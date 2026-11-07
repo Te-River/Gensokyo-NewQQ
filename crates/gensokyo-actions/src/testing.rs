@@ -14,8 +14,14 @@ use gensokyo_core::{Error, Result};
 use gensokyo_protocol::action::{ActionRequest, ActionResponse};
 use gensokyo_protocol::{Segment, Status};
 use gensokyo_qq::dto::{
-    BotInGroupState, GroupInfo, GroupMember, GroupMemberList, JoinRequestList, MessageResponse,
-    MessageToCreate,
+    ApprovalJoinRequest, BotInGroupState, CreateJoinApprovalStrategyRequest,
+    CreateJoinApprovalStrategyResponse, CreatePanelRequest, CreatePanelResponse, GenerateUrlLink,
+    GenerateUrlLinkRequest, GroupInfo, GroupMember, GroupMemberList, JoinApprovalStrategyList,
+    JoinRequestList, MemberBlacklistList, MemberBlacklistRequest, MemberBlacklistResponse,
+    MenuResponse, MessageResponse, MessageToCreate, PanelList, PanelRecordDetail,
+    PanelTargetRequest, PutMenuRequest, UpdateJoinApprovalStrategyRequest,
+    UpdateJoinApprovalStrategyResponse, UpdatePanelRequest, VersionResponse, WhitelistUsersRequest,
+    WhitelistUsersResponse,
 };
 
 use crate::qqapi::{
@@ -48,6 +54,44 @@ pub(crate) enum Call {
     SendGroup(String, MessageToCreate),
     /// `send_c2c_message(user_openid, msg)`
     SendC2c(String, MessageToCreate),
+    /// `create_panel(request)`
+    PanelCreate(CreatePanelRequest),
+    /// `get_panels(scope, cursor, limit)`
+    PanelList(String, Option<String>, Option<u32>),
+    /// `get_panel(panel_id)`
+    PanelGet(String),
+    /// `update_panel(panel_id, request)`
+    PanelUpdate(String, UpdatePanelRequest),
+    /// `delete_panel(panel_id)`
+    PanelDelete(String),
+    /// `update_panel_target(panel_id, request)`
+    PanelTarget(String, PanelTargetRequest),
+    /// `get_menu()`
+    MenuGet,
+    /// `put_menu(request)`
+    MenuPut(PutMenuRequest),
+    /// `create_join_approval_strategy(request)`
+    StrategyCreate(CreateJoinApprovalStrategyRequest),
+    /// `list_join_approval_strategy(cursor, limit)`
+    StrategyList(Option<String>, Option<u32>),
+    /// `update_join_approval_strategy(strategy_id, request)`
+    StrategyUpdate(String, UpdateJoinApprovalStrategyRequest),
+    /// `execute_join_approval_strategy(strategy_id)`
+    StrategyExecute(String),
+    /// `update_join_approval_strategy_whitelist(strategy_id, request)`
+    StrategyWhitelist(String, WhitelistUsersRequest),
+    /// `delete_join_approval_strategy(strategy_id)`
+    StrategyDelete(String),
+    /// `member_blacklist_list(group_openid, cursor, limit)`
+    BlacklistList(String, Option<String>, Option<u32>),
+    /// `update_member_blacklist(group_openid, request)`
+    BlacklistUpdate(String, MemberBlacklistRequest),
+    /// `approve_join_request(group_openid, member_openid, request)`
+    JoinApproval(String, String, ApprovalJoinRequest),
+    /// `put_interaction(interaction_id, code)`
+    Interaction(String, u32),
+    /// `generate_url_link(request)`
+    ShareLink(GenerateUrlLinkRequest),
 }
 
 /// 记录入参、按槽位注入结果的 `QqApi` 替身。
@@ -68,6 +112,25 @@ pub(crate) struct FakeQqApi {
     pub(crate) like: Mutex<Option<Result<()>>>,
     pub(crate) group_send: Mutex<Option<Result<MessageResponse>>>,
     pub(crate) c2c_send: Mutex<Option<Result<MessageResponse>>>,
+    pub(crate) panel_create: Mutex<Option<Result<CreatePanelResponse>>>,
+    pub(crate) panel_list: Mutex<Option<Result<PanelList>>>,
+    pub(crate) panel_get: Mutex<Option<Result<PanelRecordDetail>>>,
+    pub(crate) panel_update: Mutex<Option<Result<VersionResponse>>>,
+    pub(crate) panel_delete: Mutex<Option<Result<()>>>,
+    pub(crate) panel_target: Mutex<Option<Result<()>>>,
+    pub(crate) menu_get: Mutex<Option<Result<MenuResponse>>>,
+    pub(crate) menu_put: Mutex<Option<Result<VersionResponse>>>,
+    pub(crate) strategy_create: Mutex<Option<Result<CreateJoinApprovalStrategyResponse>>>,
+    pub(crate) strategy_list: Mutex<Option<Result<JoinApprovalStrategyList>>>,
+    pub(crate) strategy_update: Mutex<Option<Result<UpdateJoinApprovalStrategyResponse>>>,
+    pub(crate) strategy_execute: Mutex<Option<Result<()>>>,
+    pub(crate) strategy_whitelist: Mutex<Option<Result<WhitelistUsersResponse>>>,
+    pub(crate) strategy_delete: Mutex<Option<Result<()>>>,
+    pub(crate) blacklist_list: Mutex<Option<Result<MemberBlacklistList>>>,
+    pub(crate) blacklist_update: Mutex<Option<Result<MemberBlacklistResponse>>>,
+    pub(crate) join_approval: Mutex<Option<Result<()>>>,
+    pub(crate) interaction: Mutex<Option<Result<()>>>,
+    pub(crate) share_link: Mutex<Option<Result<GenerateUrlLink>>>,
 }
 
 impl FakeQqApi {
@@ -235,6 +298,208 @@ impl QqApi for FakeQqApi {
         Box::pin(async move {
             self.record(Call::SendC2c(user_openid, msg));
             take(&self.c2c_send)
+        })
+    }
+
+    fn get_panels(
+        &self,
+        scope: &str,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> QqFuture<'_, PanelList> {
+        let scope = scope.to_owned();
+        let cursor = cursor.map(str::to_owned);
+        Box::pin(async move {
+            self.record(Call::PanelList(scope, cursor, limit));
+            take(&self.panel_list)
+        })
+    }
+
+    fn create_panel(&self, request: &CreatePanelRequest) -> QqFuture<'_, CreatePanelResponse> {
+        let request = request.clone();
+        Box::pin(async move {
+            self.record(Call::PanelCreate(request));
+            take(&self.panel_create)
+        })
+    }
+
+    fn get_panel(&self, panel_id: &str) -> QqFuture<'_, PanelRecordDetail> {
+        let panel_id = panel_id.to_owned();
+        Box::pin(async move {
+            self.record(Call::PanelGet(panel_id));
+            take(&self.panel_get)
+        })
+    }
+
+    fn update_panel(
+        &self,
+        panel_id: &str,
+        request: &UpdatePanelRequest,
+    ) -> QqFuture<'_, VersionResponse> {
+        let panel_id = panel_id.to_owned();
+        let request = request.clone();
+        Box::pin(async move {
+            self.record(Call::PanelUpdate(panel_id, request));
+            take(&self.panel_update)
+        })
+    }
+
+    fn delete_panel(&self, panel_id: &str) -> QqFuture<'_, ()> {
+        let panel_id = panel_id.to_owned();
+        Box::pin(async move {
+            self.record(Call::PanelDelete(panel_id));
+            take(&self.panel_delete)
+        })
+    }
+
+    fn update_panel_target(
+        &self,
+        panel_id: &str,
+        request: &PanelTargetRequest,
+    ) -> QqFuture<'_, ()> {
+        let panel_id = panel_id.to_owned();
+        let request = request.clone();
+        Box::pin(async move {
+            self.record(Call::PanelTarget(panel_id, request));
+            take(&self.panel_target)
+        })
+    }
+
+    fn get_menu(&self) -> QqFuture<'_, MenuResponse> {
+        Box::pin(async move {
+            self.record(Call::MenuGet);
+            take(&self.menu_get)
+        })
+    }
+
+    fn put_menu(&self, request: &PutMenuRequest) -> QqFuture<'_, VersionResponse> {
+        let request = request.clone();
+        Box::pin(async move {
+            self.record(Call::MenuPut(request));
+            take(&self.menu_put)
+        })
+    }
+
+    fn create_join_approval_strategy(
+        &self,
+        request: &CreateJoinApprovalStrategyRequest,
+    ) -> QqFuture<'_, CreateJoinApprovalStrategyResponse> {
+        let request = request.clone();
+        Box::pin(async move {
+            self.record(Call::StrategyCreate(request));
+            take(&self.strategy_create)
+        })
+    }
+
+    fn list_join_approval_strategy(
+        &self,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> QqFuture<'_, JoinApprovalStrategyList> {
+        let cursor = cursor.map(str::to_owned);
+        Box::pin(async move {
+            self.record(Call::StrategyList(cursor, limit));
+            take(&self.strategy_list)
+        })
+    }
+
+    fn update_join_approval_strategy(
+        &self,
+        strategy_id: &str,
+        request: &UpdateJoinApprovalStrategyRequest,
+    ) -> QqFuture<'_, UpdateJoinApprovalStrategyResponse> {
+        let strategy_id = strategy_id.to_owned();
+        let request = request.clone();
+        Box::pin(async move {
+            self.record(Call::StrategyUpdate(strategy_id, request));
+            take(&self.strategy_update)
+        })
+    }
+
+    fn execute_join_approval_strategy(&self, strategy_id: &str) -> QqFuture<'_, ()> {
+        let strategy_id = strategy_id.to_owned();
+        Box::pin(async move {
+            self.record(Call::StrategyExecute(strategy_id));
+            take(&self.strategy_execute)
+        })
+    }
+
+    fn update_join_approval_strategy_whitelist(
+        &self,
+        strategy_id: &str,
+        request: &WhitelistUsersRequest,
+    ) -> QqFuture<'_, WhitelistUsersResponse> {
+        let strategy_id = strategy_id.to_owned();
+        let request = request.clone();
+        Box::pin(async move {
+            self.record(Call::StrategyWhitelist(strategy_id, request));
+            take(&self.strategy_whitelist)
+        })
+    }
+
+    fn delete_join_approval_strategy(&self, strategy_id: &str) -> QqFuture<'_, ()> {
+        let strategy_id = strategy_id.to_owned();
+        Box::pin(async move {
+            self.record(Call::StrategyDelete(strategy_id));
+            take(&self.strategy_delete)
+        })
+    }
+
+    fn member_blacklist_list(
+        &self,
+        group_openid: &str,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> QqFuture<'_, MemberBlacklistList> {
+        let group_openid = group_openid.to_owned();
+        let cursor = cursor.map(str::to_owned);
+        Box::pin(async move {
+            self.record(Call::BlacklistList(group_openid, cursor, limit));
+            take(&self.blacklist_list)
+        })
+    }
+
+    fn update_member_blacklist(
+        &self,
+        group_openid: &str,
+        request: &MemberBlacklistRequest,
+    ) -> QqFuture<'_, MemberBlacklistResponse> {
+        let group_openid = group_openid.to_owned();
+        let request = request.clone();
+        Box::pin(async move {
+            self.record(Call::BlacklistUpdate(group_openid, request));
+            take(&self.blacklist_update)
+        })
+    }
+
+    fn approve_join_request(
+        &self,
+        group_openid: &str,
+        member_openid: &str,
+        request: &ApprovalJoinRequest,
+    ) -> QqFuture<'_, ()> {
+        let group_openid = group_openid.to_owned();
+        let member_openid = member_openid.to_owned();
+        let request = request.clone();
+        Box::pin(async move {
+            self.record(Call::JoinApproval(group_openid, member_openid, request));
+            take(&self.join_approval)
+        })
+    }
+
+    fn put_interaction(&self, interaction_id: &str, code: u32) -> QqFuture<'_, ()> {
+        let interaction_id = interaction_id.to_owned();
+        Box::pin(async move {
+            self.record(Call::Interaction(interaction_id, code));
+            take(&self.interaction)
+        })
+    }
+
+    fn generate_url_link(&self, request: &GenerateUrlLinkRequest) -> QqFuture<'_, GenerateUrlLink> {
+        let request = request.clone();
+        Box::pin(async move {
+            self.record(Call::ShareLink(request));
+            take(&self.share_link)
         })
     }
 }

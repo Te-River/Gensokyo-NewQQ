@@ -178,3 +178,19 @@ pub(crate) fn bad_request(request: &ActionRequest<Value>, err: &Error) -> Action
 pub(crate) fn upstream_error(request: &ActionRequest<Value>, err: &Error) -> ActionResponse<Value> {
     failed(request, RETCODE_UPSTREAM, &err.to_string())
 }
+
+/// 把一段业务逻辑的 `Result` 收口成响应：参数错误（[`Error::Protocol`]）→ `1400`，
+/// 其余（上游 / 传输层）→ `1500`。
+///
+/// 面板 / 菜单 / 审批策略 / 交互 / 黑名单这些「一次上游调用 + 参数翻译」的 handler 共用，
+/// 免得每处再写一遍 `match` 分叉。
+pub(crate) fn respond(
+    request: &ActionRequest<Value>,
+    result: Result<ActionResponse<Value>>,
+) -> Result<ActionResponse<Value>> {
+    Ok(match result {
+        Ok(response) => response,
+        Err(Error::Protocol(message)) => bad_request(request, &Error::Protocol(message)),
+        Err(err) => upstream_error(request, &err),
+    })
+}

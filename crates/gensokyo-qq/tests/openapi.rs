@@ -4,6 +4,11 @@ mod support;
 
 use std::sync::Arc;
 
+use gensokyo_qq::dto::{
+    ApprovalJoinRequest, BatchRemoveMembersRequest, CreatePanelRequest, GenerateUrlLinkRequest,
+    MemberBlacklistRequest, Menu, Panel, PutMenuRequest, UpdateJoinApprovalStrategyRequest,
+    UpdatePanelRequest,
+};
 use gensokyo_qq::{Error, FileUpload, HttpMethod, MessageToCreate, file_type};
 use serde_json::{Value, json};
 use support::{FakeTransport, ManualClock, ok_json, test_client, token_response};
@@ -260,4 +265,217 @@ async fn rejects_file_with_both_url_and_data() {
     let error = client.upload_group_file("G", &file).await.unwrap_err();
     assert!(matches!(error, Error::InvalidMessage(_)), "{error:?}");
     assert_eq!(transport.request_count(), 0);
+}
+
+#[tokio::test]
+async fn panel_crud_uses_the_official_methods_and_paths() {
+    let (transport, _clock, client) = setup();
+    transport.push_response(token_response("tok", 7200));
+    transport.push_response(ok_json(r#"{"panel_id":"p1"}"#));
+
+    let created = client
+        .create_panel(&CreatePanelRequest {
+            scope: "group".to_owned(),
+            group_openids: vec!["G1".to_owned()],
+            ..CreatePanelRequest::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(created.panel_id, "p1");
+    let request = &transport.requests()[1];
+    assert_eq!(request.method, HttpMethod::Post);
+    assert_eq!(request.url, "https://api.bot.qq.com/v2/panels");
+    assert_eq!(
+        body_of(request),
+        json!({"scope": "group", "group_openids": ["G1"], "panel": {"items": []}})
+    );
+
+    transport.push_response(ok_json(r#"{"version":2}"#));
+    let updated = client
+        .update_panel(
+            "p1",
+            &UpdatePanelRequest {
+                panel: Panel::default(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.version, 2);
+    let request = &transport.requests()[2];
+    assert_eq!(request.method, HttpMethod::Put);
+    assert_eq!(request.url, "https://api.bot.qq.com/v2/panels/p1");
+
+    transport.push_response(ok_json("{}"));
+    client.delete_panel("p1").await.unwrap();
+    let request = &transport.requests()[3];
+    assert_eq!(request.method, HttpMethod::Delete);
+    assert_eq!(request.url, "https://api.bot.qq.com/v2/panels/p1");
+}
+
+#[tokio::test]
+async fn panel_list_and_menu_use_query_and_put() {
+    let (transport, _clock, client) = setup();
+    transport.push_response(token_response("tok", 7200));
+    transport.push_response(ok_json(r#"{"records":[],"next_cursor":"","is_end":true}"#));
+
+    let list = client
+        .get_panels("group", Some("c1"), Some(20))
+        .await
+        .unwrap();
+    assert!(list.is_end);
+    assert_eq!(
+        transport.requests()[1].url,
+        "https://api.bot.qq.com/v2/panels?scope=group&cursor=c1&limit=20"
+    );
+
+    transport.push_response(ok_json(r#"{"version":9}"#));
+    client
+        .put_menu(&PutMenuRequest {
+            menu: Menu::default(),
+        })
+        .await
+        .unwrap();
+    let request = &transport.requests()[2];
+    assert_eq!(request.method, HttpMethod::Put);
+    assert_eq!(request.url, "https://api.bot.qq.com/v2/menu");
+    assert_eq!(body_of(request), json!({"menu": {"items": []}}));
+}
+
+#[tokio::test]
+async fn strategy_update_uses_patch() {
+    let (transport, _clock, client) = setup();
+    transport.push_response(token_response("tok", 7200));
+    transport.push_response(ok_json(r#"{"is_enable":"off"}"#));
+
+    client
+        .update_join_approval_strategy(
+            "s1",
+            &UpdateJoinApprovalStrategyRequest {
+                is_enable: "off".to_owned(),
+                ..UpdateJoinApprovalStrategyRequest::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let request = &transport.requests()[1];
+    assert_eq!(request.method, HttpMethod::Patch);
+    assert_eq!(
+        request.url,
+        "https://api.bot.qq.com/v2/groups/join_approval_strategy/s1"
+    );
+    assert_eq!(body_of(request), json!({"is_enable": "off"}));
+}
+
+#[tokio::test]
+async fn retract_blacklist_and_approval_hit_group_endpoints() {
+    let (transport, _clock, client) = setup();
+    transport.push_response(token_response("tok", 7200));
+
+    transport.push_response(ok_json("{}"));
+    client.retract_group_message("G1", "m1").await.unwrap();
+    let request = &transport.requests()[1];
+    assert_eq!(request.method, HttpMethod::Delete);
+    assert_eq!(
+        request.url,
+        "https://api.bot.qq.com/v2/groups/G1/messages/m1"
+    );
+
+    transport.push_response(ok_json(r#"{"fail_openids":[]}"#));
+    client
+        .update_member_blacklist(
+            "G1",
+            &MemberBlacklistRequest {
+                op: "add".to_owned(),
+                member_openids: vec!["m1".to_owned()],
+            },
+        )
+        .await
+        .unwrap();
+    let request = &transport.requests()[2];
+    assert_eq!(request.method, HttpMethod::Post);
+    assert_eq!(
+        request.url,
+        "https://api.bot.qq.com/v2/groups/G1/member_blacklist"
+    );
+    assert_eq!(
+        body_of(request),
+        json!({"op": "add", "member_openids": ["m1"]})
+    );
+
+    transport.push_response(ok_json("{}"));
+    client
+        .approve_join_request(
+            "G1",
+            "M1",
+            &ApprovalJoinRequest {
+                op: "approve".to_owned(),
+                join_request_id: "f1".to_owned(),
+                ..ApprovalJoinRequest::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        transport.requests()[3].url,
+        "https://api.bot.qq.com/v2/groups/G1/approval_join_request/M1"
+    );
+}
+
+#[tokio::test]
+async fn interaction_skips_the_v2_prefix_and_share_link_posts() {
+    let (transport, _clock, client) = setup();
+    transport.push_response(token_response("tok", 7200));
+
+    transport.push_response(ok_json("{}"));
+    client.put_interaction("i1", 2).await.unwrap();
+    let request = &transport.requests()[1];
+    assert_eq!(request.method, HttpMethod::Put);
+    assert_eq!(request.url, "https://api.bot.qq.com/interactions/i1");
+    assert_eq!(body_of(request), json!({"code": 2}));
+
+    transport.push_response(ok_json(r#"{"url":"https://example.com/s"}"#));
+    let link = client
+        .generate_url_link(&GenerateUrlLinkRequest {
+            callback_data: "c1".to_owned(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(link.url, "https://example.com/s");
+    let request = &transport.requests()[2];
+    assert_eq!(request.method, HttpMethod::Post);
+    assert_eq!(request.url, "https://api.bot.qq.com/v2/generate_url_link");
+    assert_eq!(body_of(request), json!({"callback_data": "c1"}));
+}
+
+#[tokio::test]
+async fn batch_remove_members_posts_member_openids() {
+    let (transport, _clock, client) = setup();
+    transport.push_response(token_response("tok", 7200));
+    transport.push_response(ok_json(
+        r#"{"remove_members_result":"success","add_to_member_blacklist_fail_openids":[]}"#,
+    ));
+
+    let response = client
+        .batch_remove_members(
+            "G1",
+            &BatchRemoveMembersRequest {
+                member_openids: vec!["m1".to_owned()],
+                add_to_member_blacklist: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.remove_members_result, "success");
+
+    let request = &transport.requests()[1];
+    assert_eq!(request.method, HttpMethod::Post);
+    assert_eq!(
+        request.url,
+        "https://api.bot.qq.com/v2/groups/G1/batch_remove_members"
+    );
+    assert_eq!(
+        body_of(request),
+        json!({"member_openids": ["m1"], "add_to_member_blacklist": true})
+    );
 }

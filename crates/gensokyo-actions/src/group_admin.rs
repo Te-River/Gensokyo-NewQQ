@@ -7,9 +7,9 @@
 //! |--------|---------|----------|------|
 //! | `set_group_whole_ban`（别名 `get_group_whole_ban`） | `handlers/set_group_whole_ban.go` | 官方无全员禁言写入口 | 固定 `retcode = 100` |
 //! | `set_group_card` | `handlers/set_group_card.go` | 官方无设置群名片接口 | 固定 `retcode = 100` |
-//! | `set_group_kick` | `handlers/set_group_kick.go` | `batch_remove_members` | 端点未在 `gensokyo-qq` 落地 → `1500` |
+//! | `set_group_kick` | `handlers/set_group_kick.go` | `POST /v2/groups/{gid}/batch_remove_members` | 真实调用 |
 //! | `set_group_leave` | 无（Go 未注册） | 官方无机器人退群端点 | `1500` |
-//! | `get_group_list` | `handlers/get_group_list.go` | 官方无群列表端点 | `1500` |
+//! | `get_group_list` | `handlers/get_group_list.go` | 官方无群列表端点 | `1500`（idmap 无枚举接口） |
 //!
 //! `get_group_ban` 不在这里：它和 Go 一样是 `set_group_ban` 的旧 action 名，别名表
 //! （[`gensokyo_protocol::registry::ACTION_ALIASES`]）直接指向
@@ -332,7 +332,7 @@ impl Handler for GetGroupListHandler {
 }
 
 /// 合并 `user_id` + `user_ids`：去重保序，截断到官方单批上限。
-fn collect_user_ids(object: &Map<String, Value>) -> Result<Vec<String>> {
+pub(crate) fn collect_user_ids(object: &Map<String, Value>) -> Result<Vec<String>> {
     let mut collected = Vec::new();
     if let Some(single) = params::optional_text(object, "user_id")? {
         collected.push(single);

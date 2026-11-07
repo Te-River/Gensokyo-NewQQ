@@ -274,6 +274,223 @@ pub struct GroupMemberList {
     pub next_cursor: String,
 }
 
+/// 入群自动审批策略（`/v2/groups/join_approval_strategy*`）。
+///
+/// 以下结构体覆盖 Go `GroupAPI` 的审批策略 / 黑名单 / 批量移出 / 审批申请四组端点，
+/// 字段与 `botgo/dto/group.go`、`group_member.go` 一一对应；请求侧的 `omitempty`
+/// 落成 `skip_serializing_if`，响应侧一律 `#[serde(default)]` 容忍官方加字段。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JoinApprovalStrategy {
+    /// 策略 ID。
+    pub strategy_id: String,
+    /// 生效群 OpenID。
+    pub group_openids: Vec<String>,
+    /// 生效群号。
+    pub group_ids: Vec<u64>,
+    /// 白名单人数。
+    pub whitelist_user_count: u64,
+    /// `on` / `off`。
+    pub is_enable: String,
+    /// 失效时间（RFC3339）。
+    pub expire_at: String,
+    /// 创建时间（RFC3339）。
+    pub created_at: String,
+    /// 更新时间（RFC3339）。
+    pub updated_at: String,
+    /// 备注。
+    pub remark: String,
+}
+
+/// 审批策略列表（`next_cursor` 空串表示末页）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JoinApprovalStrategyList {
+    /// 策略列表。
+    pub strategies: Vec<JoinApprovalStrategy>,
+    /// 下一页游标。
+    pub next_cursor: String,
+}
+
+/// 创建审批策略请求（`POST /v2/groups/join_approval_strategy`）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CreateJoinApprovalStrategyRequest {
+    /// 生效群 OpenID。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub group_openids: Vec<String>,
+    /// 生效群号。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub group_ids: Vec<u64>,
+    /// `on` / `off`（缺省官方按 `on` 处理）。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub is_enable: String,
+    /// 失效时间（RFC3339；缺省一年后）。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub expire_at: String,
+    /// 备注（≤ 255 字符）。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub remark: String,
+}
+
+/// 创建审批策略响应。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CreateJoinApprovalStrategyResponse {
+    /// 策略 ID。
+    pub strategy_id: String,
+    /// `on` / `off`。
+    pub is_enable: String,
+    /// 失效时间（RFC3339）。
+    pub expire_at: String,
+}
+
+/// 审批策略的群增删动作（`op` 为 `add` / `del`）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GroupAction {
+    /// `add` / `del`。
+    pub op: String,
+    /// 群 OpenID。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub group_openids: Vec<String>,
+    /// 群号。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub group_ids: Vec<u64>,
+}
+
+/// 更新审批策略请求（`PATCH /v2/groups/join_approval_strategy/{strategy_id}`）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateJoinApprovalStrategyRequest {
+    /// `on` / `off`。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub is_enable: String,
+    /// 失效时间（RFC3339）。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub expire_at: String,
+    /// 群增删动作。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_action: Option<GroupAction>,
+    /// 备注。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub remark: String,
+}
+
+/// 更新审批策略响应。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateJoinApprovalStrategyResponse {
+    /// `on` / `off`。
+    pub is_enable: String,
+    /// 失效时间（RFC3339）。
+    pub expire_at: String,
+}
+
+/// 审批策略白名单请求（`POST .../{strategy_id}/whitelist_users`）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WhitelistUsersRequest {
+    /// `add` / `del`。
+    pub op: String,
+    /// 白名单用户 ID。
+    pub whitelist_users: Vec<String>,
+}
+
+/// 审批策略白名单响应。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WhitelistUsersResponse {
+    /// 策略 ID。
+    pub strategy_id: String,
+    /// 白名单人数。
+    pub whitelist_user_count: u64,
+    /// 更新时间（RFC3339）。
+    pub updated_at: String,
+}
+
+/// 入群申请审批请求（`POST /v2/groups/{group_id}/approval_join_request/{member_openid}`）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ApprovalJoinRequest {
+    /// `approve` / `decline`。
+    pub op: String,
+    /// 申请 ID（`flag`）。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub join_request_id: String,
+    /// 拒绝理由。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub reject_reason: String,
+    /// 是否同时拉黑。
+    #[serde(skip_serializing_if = "is_false")]
+    pub add_to_member_blacklist: bool,
+}
+
+/// 批量移出成员请求（`POST /v2/groups/{group_id}/batch_remove_members`，单批 ≤ 20）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BatchRemoveMembersRequest {
+    /// 待移出的成员 OpenID。
+    pub member_openids: Vec<String>,
+    /// 是否同时拉黑。
+    #[serde(skip_serializing_if = "is_false")]
+    pub add_to_member_blacklist: bool,
+}
+
+/// 批量移出响应。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BatchRemoveMembersResponse {
+    /// `success` 表示全部成功。
+    pub remove_members_result: String,
+    /// 拉黑失败的成员 OpenID。
+    pub add_to_member_blacklist_fail_openids: Vec<String>,
+}
+
+/// 群黑名单增删请求（`POST /v2/groups/{group_id}/member_blacklist`，单批 ≤ 20）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemberBlacklistRequest {
+    /// `add` / `del`。
+    pub op: String,
+    /// 成员 OpenID。
+    pub member_openids: Vec<String>,
+}
+
+/// 群黑名单增删响应。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemberBlacklistResponse {
+    /// 处理失败的成员 OpenID。
+    pub fail_openids: Vec<String>,
+}
+
+/// 黑名单用户。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BlacklistUser {
+    /// union_openid。
+    pub union_openid: String,
+    /// 成员 OpenID。
+    pub member_openid: String,
+    /// 昵称。
+    pub username: String,
+    /// 拉黑时间（RFC3339）。
+    pub banned_at: String,
+    /// 是否机器人。
+    pub bot: bool,
+}
+
+/// 群黑名单列表（`next_cursor` 空串表示末页）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemberBlacklistList {
+    /// 黑名单用户。
+    pub users: Vec<BlacklistUser>,
+    /// 下一页游标。
+    pub next_cursor: String,
+}
+
 /// 把 JSON 字符串或数字反序列化为字符串（`apply_at` 历史形态兼容）。
 fn string_or_number<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
@@ -288,4 +505,9 @@ where
             "期望字符串或数字，收到 {other}"
         ))),
     }
+}
+
+/// `bool` 是否为 `false`（`omitempty` 语义）。
+fn is_false(value: &bool) -> bool {
+    !*value
 }

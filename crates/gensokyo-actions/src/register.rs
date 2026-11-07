@@ -80,8 +80,14 @@ pub fn register_all(registry: &mut Registry, context: Arc<ActionContext>) {
         ("can_send_image", Arc::new(CanSendImageHandler::new())),
         ("can_send_record", Arc::new(CanSendRecordHandler::new())),
         ("clean_cache", Arc::new(CleanCacheHandler::new())),
-        ("create_panel", Arc::new(CreatePanelHandler::new())),
-        ("delete_group_msg", Arc::new(DeleteGroupMsgHandler::new())),
+        (
+            "create_panel",
+            Arc::new(CreatePanelHandler::new(Arc::clone(&context))),
+        ),
+        (
+            "delete_group_msg",
+            Arc::new(DeleteGroupMsgHandler::new(Arc::clone(&context))),
+        ),
         (
             "delete_media_image",
             Arc::new(DeleteMediaImageHandler::new(Arc::clone(&context))),
@@ -90,7 +96,10 @@ pub fn register_all(registry: &mut Registry, context: Arc<ActionContext>) {
             "delete_msg",
             Arc::new(DeleteMsgHandler::new(Arc::clone(&context))),
         ),
-        ("delete_panel", Arc::new(DeletePanelHandler::new())),
+        (
+            "delete_panel",
+            Arc::new(DeletePanelHandler::new(Arc::clone(&context))),
+        ),
         (
             "get_avatar",
             Arc::new(GetAvatarHandler::new(Arc::clone(&context))),
@@ -98,7 +107,10 @@ pub fn register_all(registry: &mut Registry, context: Arc<ActionContext>) {
         ("get_cookies", Arc::new(GetCookiesHandler::new())),
         ("get_credentials", Arc::new(GetCredentialsHandler::new())),
         ("get_csrf_token", Arc::new(GetCsrfTokenHandler::new())),
-        ("get_custom_menu", Arc::new(GetCustomMenuHandler::new())),
+        (
+            "get_custom_menu",
+            Arc::new(GetCustomMenuHandler::new(Arc::clone(&context))),
+        ),
         (
             "get_forward_msg",
             Arc::new(GetForwardMsgHandler::new(Arc::clone(&context))),
@@ -133,7 +145,7 @@ pub fn register_all(registry: &mut Registry, context: Arc<ActionContext>) {
         ),
         (
             "get_group_member_blacklist",
-            Arc::new(GetGroupMemberBlacklistHandler::new()),
+            Arc::new(GetGroupMemberBlacklistHandler::new(Arc::clone(&context))),
         ),
         (
             "get_group_member_info",
@@ -160,13 +172,19 @@ pub fn register_all(registry: &mut Registry, context: Arc<ActionContext>) {
             "get_online_clients",
             Arc::new(GetOnlineClientsHandler::new()),
         ),
-        ("get_panel", Arc::new(GetPanelHandler::new())),
-        ("get_panel_list", Arc::new(GetPanelListHandler::new())),
+        (
+            "get_panel",
+            Arc::new(GetPanelHandler::new(Arc::clone(&context))),
+        ),
+        (
+            "get_panel_list",
+            Arc::new(GetPanelListHandler::new(Arc::clone(&context))),
+        ),
         ("get_qq_profile", Arc::new(GetQqProfileHandler::new())),
         ("get_record", Arc::new(GetRecordHandler::new())),
         (
             "get_robot_share_link",
-            Arc::new(GetRobotShareLinkHandler::new()),
+            Arc::new(GetRobotShareLinkHandler::new(Arc::clone(&context))),
         ),
         (
             "get_stranger_info",
@@ -174,30 +192,37 @@ pub fn register_all(registry: &mut Registry, context: Arc<ActionContext>) {
         ),
         (
             "join_approval_strategy_create",
-            Arc::new(JoinApprovalStrategyCreateHandler::new()),
+            Arc::new(JoinApprovalStrategyCreateHandler::new(Arc::clone(&context))),
         ),
         (
             "join_approval_strategy_delete",
-            Arc::new(JoinApprovalStrategyDeleteHandler::new()),
+            Arc::new(JoinApprovalStrategyDeleteHandler::new(Arc::clone(&context))),
         ),
         (
             "join_approval_strategy_execute",
-            Arc::new(JoinApprovalStrategyExecuteHandler::new()),
+            Arc::new(JoinApprovalStrategyExecuteHandler::new(Arc::clone(
+                &context,
+            ))),
         ),
         (
             "join_approval_strategy_list",
-            Arc::new(JoinApprovalStrategyListHandler::new()),
+            Arc::new(JoinApprovalStrategyListHandler::new(Arc::clone(&context))),
         ),
         (
             "join_approval_strategy_update",
-            Arc::new(JoinApprovalStrategyUpdateHandler::new()),
+            Arc::new(JoinApprovalStrategyUpdateHandler::new(Arc::clone(&context))),
         ),
         (
             "join_approval_strategy_whitelist",
-            Arc::new(JoinApprovalStrategyWhitelistHandler::new()),
+            Arc::new(JoinApprovalStrategyWhitelistHandler::new(Arc::clone(
+                &context,
+            ))),
         ),
         ("mark_msg_as_read", Arc::new(MarkMsgAsReadHandler::new())),
-        ("put_interaction", Arc::new(PutInteractionHandler::new())),
+        (
+            "put_interaction",
+            Arc::new(PutInteractionHandler::new(Arc::clone(&context))),
+        ),
         (
             "send_group_forward_msg",
             Arc::new(SendGroupForwardMsgHandler::new()),
@@ -234,10 +259,13 @@ pub fn register_all(registry: &mut Registry, context: Arc<ActionContext>) {
             "send_private_msg_wakeup",
             Arc::new(SendPrivateMsgWakeupHandler::new()),
         ),
-        ("set_custom_menu", Arc::new(SetCustomMenuHandler::new())),
+        (
+            "set_custom_menu",
+            Arc::new(SetCustomMenuHandler::new(Arc::clone(&context))),
+        ),
         (
             "set_group_add_request",
-            Arc::new(SetGroupAddRequestHandler::new()),
+            Arc::new(SetGroupAddRequestHandler::new(Arc::clone(&context))),
         ),
         ("set_group_admin", Arc::new(SetGroupAdminHandler::new())),
         (
@@ -259,7 +287,7 @@ pub fn register_all(registry: &mut Registry, context: Arc<ActionContext>) {
         ),
         (
             "set_group_member_blacklist",
-            Arc::new(SetGroupMemberBlacklistHandler::new()),
+            Arc::new(SetGroupMemberBlacklistHandler::new(Arc::clone(&context))),
         ),
         ("set_group_name", Arc::new(SetGroupNameHandler::new())),
         ("set_group_remark", Arc::new(SetGroupRemarkHandler::new())),
@@ -271,8 +299,14 @@ pub fn register_all(registry: &mut Registry, context: Arc<ActionContext>) {
             "set_group_whole_ban",
             Arc::new(SetGroupWholeBanHandler::new()),
         ),
-        ("set_panel", Arc::new(SetPanelHandler::new())),
-        ("set_panel_target", Arc::new(SetPanelTargetHandler::new())),
+        (
+            "set_panel",
+            Arc::new(SetPanelHandler::new(Arc::clone(&context))),
+        ),
+        (
+            "set_panel_target",
+            Arc::new(SetPanelTargetHandler::new(Arc::clone(&context))),
+        ),
         ("set_qq_profile", Arc::new(SetQqProfileHandler::new())),
         ("set_restart", Arc::new(SetRestartHandler::new())),
         (

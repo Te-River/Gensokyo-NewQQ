@@ -14,6 +14,9 @@ gensokyo
 
 gensokyo-*
 
+# 「gensokyo-*」会连带忽略 Rust workspace 的 crates/gensokyo-* 目录，源码必须例外入库
+!crates/gensokyo-*/
+
 # Ignore channel_temp
 channel_temp/
 

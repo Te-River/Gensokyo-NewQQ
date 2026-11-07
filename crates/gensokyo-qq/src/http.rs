@@ -24,13 +24,19 @@ pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// [`ReqwestTransport::from_client`] 换用自定义 `reqwest::Client`。
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// HTTP 方法（本 crate 只用到 GET / POST）。
+/// HTTP 方法（面板 / 菜单 / 审批策略 / 撤回会用到 GET / POST / PUT / PATCH / DELETE）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HttpMethod {
     /// GET。
     Get,
     /// POST。
     Post,
+    /// PUT。
+    Put,
+    /// PATCH。
+    Patch,
+    /// DELETE。
+    Delete,
 }
 
 impl HttpMethod {
@@ -40,6 +46,9 @@ impl HttpMethod {
         match self {
             Self::Get => "GET",
             Self::Post => "POST",
+            Self::Put => "PUT",
+            Self::Patch => "PATCH",
+            Self::Delete => "DELETE",
         }
     }
 }
@@ -254,6 +263,9 @@ impl HttpTransport for ReqwestTransport {
             let method = match req.method {
                 HttpMethod::Get => reqwest::Method::GET,
                 HttpMethod::Post => reqwest::Method::POST,
+                HttpMethod::Put => reqwest::Method::PUT,
+                HttpMethod::Patch => reqwest::Method::PATCH,
+                HttpMethod::Delete => reqwest::Method::DELETE,
             };
             let mut builder = client.request(method, &req.url);
             for (name, value) in &req.headers {

@@ -31,10 +31,17 @@
 //! | [`QqApi::complete_media_image`] | `POST /v2/media-images/complete` | 真实调用（素材管理） |
 //! | [`QqApi::list_media_images`] | `GET /v2/media-images?cursor=` | 真实调用（素材管理） |
 //! | [`QqApi::delete_media_image`] | `DELETE /v2/media-images/{id}/delete` | 真实调用（素材管理） |
-//! | [`QqApi::set_group_kick`] | `batch_remove_members` | 未落地，`Unsupported` |
+//! | [`QqApi::set_group_kick`] | `POST /v2/groups/{gid}/batch_remove_members` | 真实调用 |
+//! | [`QqApi::delete_msg`] | `DELETE /v2/groups/{gid}/messages/{mid}`、`DELETE /v2/users/{uid}/messages/{mid}` | 真实调用 |
+//! | [`QqApi::get_panels`] / [`QqApi::create_panel`] / [`QqApi::get_panel`] / [`QqApi::update_panel`] / [`QqApi::delete_panel`] / [`QqApi::update_panel_target`] | `/v2/panels*` | 真实调用 |
+//! | [`QqApi::get_menu`] / [`QqApi::put_menu`] | `/v2/menu` | 真实调用 |
+//! | [`QqApi::create_join_approval_strategy`] 等 6 个 | `/v2/groups/join_approval_strategy*` | 真实调用 |
+//! | [`QqApi::member_blacklist_list`] / [`QqApi::update_member_blacklist`] | `/v2/groups/{gid}/member_blacklist` | 真实调用 |
+//! | [`QqApi::approve_join_request`] | `POST /v2/groups/{gid}/approval_join_request/{member}` | 真实调用 |
+//! | [`QqApi::put_interaction`] | `PUT /interactions/{id}` | 真实调用（无 `/v2` 前缀） |
+//! | [`QqApi::generate_url_link`] | `POST /v2/generate_url_link` | 真实调用 |
 //! | [`QqApi::set_group_leave`] | 官方无机器人退群端点 | 未落地，`Unsupported` |
 //! | [`QqApi::get_group_list`] | 官方无「列出机器人所在群」端点 | 未落地，`Unsupported` |
-//! | [`QqApi::delete_msg`] | 消息撤回端点 | 未落地，`Unsupported` |
 //! | [`QqApi::get_msg`] | 官方无按 message_id 查询消息端点 | 未落地，`Unsupported` |
 //! | [`QqApi::get_forward_msg`] | 官方无合并转发查询端点 | 未落地，`Unsupported` |
 //! | [`QqApi::get_friend_list`] | 官方无好友列表端点 | 未落地，`Unsupported` |
@@ -42,9 +49,7 @@
 //! | [`QqApi::send_like`] | 官方无点赞端点 | 未落地，`Unsupported` |
 //!
 //! 「未落地」的两层原因都写在各方法的文档里：要么官方 v2 根本没有这个端点（如好友列表、
-//! 点赞、退群），要么端点存在但 `gensokyo-qq` 还没把公开方法补齐（如 `batch_remove_members`、
-//! 消息撤回）——后者的路径已在本 trait 上留好，`gensokyo-qq` 落地后只需在
-//! `OpenApiClient` 的 impl 里补一个转发，handler 不用改。
+//! 点赞、退群、群列表），要么要等运行时的发送链补齐（如 SSE / `IsWakeup` / 原始直发）。
 //!
 //! # 生产实现与测试缝隙
 //!
@@ -65,8 +70,14 @@ use gensokyo_qq::dto::media_image::{
     MediaImagePrepareRequest, MediaImagePrepareResponse,
 };
 use gensokyo_qq::dto::{
-    FileUpload, MediaResponse, MemberMuteState, MessageResponse, MessageToCreate,
-    RestrictChatSetting,
+    ApprovalJoinRequest, BatchRemoveMembersRequest, CreateJoinApprovalStrategyRequest,
+    CreateJoinApprovalStrategyResponse, CreatePanelRequest, CreatePanelResponse, FileUpload,
+    GenerateUrlLink, GenerateUrlLinkRequest, JoinApprovalStrategyList, MediaResponse,
+    MemberBlacklistList, MemberBlacklistRequest, MemberBlacklistResponse, MemberMuteState,
+    MenuResponse, MessageResponse, MessageToCreate, PanelList, PanelRecordDetail,
+    PanelTargetRequest, PutMenuRequest, RestrictChatSetting, UpdateJoinApprovalStrategyRequest,
+    UpdateJoinApprovalStrategyResponse, UpdatePanelRequest, VersionResponse, WhitelistUsersRequest,
+    WhitelistUsersResponse,
 };
 use gensokyo_qq::{
     BotInGroupState, GroupInfo, GroupMember, GroupMemberList, HttpTransport, JoinRequestList,
@@ -80,6 +91,13 @@ use crate::util;
 
 /// [`QqApi`] 的异步返回，形态与 [`gensokyo_protocol::HandlerFuture`] 一致。
 pub type QqFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
+
+/// 默认实现的统一拒绝：`gensokyo-qq` 已支持该端点，但替身（测试 / 只跑查询的部署）不必实现。
+fn unsupported<T>(feature: &str) -> Result<T> {
+    Err(Error::Unsupported(format!(
+        "{feature}端点未在当前 QqApi 实现中提供"
+    )))
+}
 
 /// [`gensokyo_qq::Error`] → 统一错误：业务错误保留 code，其余归到传输层。
 pub(crate) fn qq_error(err: gensokyo_qq::Error) -> Error {
@@ -255,10 +273,149 @@ pub trait QqApi: Send + Sync + fmt::Debug {
         })
     }
 
-    /// 批量移出群成员（单批 ≤ 20，`add_blacklist` 同时拉黑）。
+    /// 指令面板列表（`GET /v2/panels`）；`cursor` 为空串等同首页。
     ///
-    /// 官方端点 `batch_remove_members` 尚未在 `gensokyo-qq` 暴露公开方法，默认实现返回
-    /// [`Error::Unsupported`]。
+    /// 默认实现返回 [`Error::Unsupported`]：只跑查询类 action 的替身不必实现面板管理。
+    fn get_panels(
+        &self,
+        _scope: &str,
+        _cursor: Option<&str>,
+        _limit: Option<u32>,
+    ) -> QqFuture<'_, PanelList> {
+        Box::pin(async { unsupported("指令面板") })
+    }
+
+    /// 创建指令面板（`POST /v2/panels`）。
+    fn create_panel(&self, _request: &CreatePanelRequest) -> QqFuture<'_, CreatePanelResponse> {
+        Box::pin(async { unsupported("指令面板") })
+    }
+
+    /// 单个指令面板详情（`GET /v2/panels/{panel_id}`）。
+    fn get_panel(&self, _panel_id: &str) -> QqFuture<'_, PanelRecordDetail> {
+        Box::pin(async { unsupported("指令面板") })
+    }
+
+    /// 更新指令面板（`PUT /v2/panels/{panel_id}`，覆盖元素与备注）。
+    fn update_panel(
+        &self,
+        _panel_id: &str,
+        _request: &UpdatePanelRequest,
+    ) -> QqFuture<'_, VersionResponse> {
+        Box::pin(async { unsupported("指令面板") })
+    }
+
+    /// 删除指令面板（`DELETE /v2/panels/{panel_id}`）。
+    fn delete_panel(&self, _panel_id: &str) -> QqFuture<'_, ()> {
+        Box::pin(async { unsupported("指令面板") })
+    }
+
+    /// 增删指令面板关联对象（`PUT /v2/panels/{panel_id}/target`）。
+    fn update_panel_target(
+        &self,
+        _panel_id: &str,
+        _request: &PanelTargetRequest,
+    ) -> QqFuture<'_, ()> {
+        Box::pin(async { unsupported("指令面板") })
+    }
+
+    /// 获取自定义菜单（`GET /v2/menu`）。
+    fn get_menu(&self) -> QqFuture<'_, MenuResponse> {
+        Box::pin(async { unsupported("自定义菜单") })
+    }
+
+    /// 设置自定义菜单（`PUT /v2/menu`，覆盖式）。
+    fn put_menu(&self, _request: &PutMenuRequest) -> QqFuture<'_, VersionResponse> {
+        Box::pin(async { unsupported("自定义菜单") })
+    }
+
+    /// 创建入群自动审批策略（`POST /v2/groups/join_approval_strategy`）。
+    fn create_join_approval_strategy(
+        &self,
+        _request: &CreateJoinApprovalStrategyRequest,
+    ) -> QqFuture<'_, CreateJoinApprovalStrategyResponse> {
+        Box::pin(async { unsupported("自动审批策略") })
+    }
+
+    /// 审批策略列表（`GET /v2/groups/join_approval_strategy`）。
+    fn list_join_approval_strategy(
+        &self,
+        _cursor: Option<&str>,
+        _limit: Option<u32>,
+    ) -> QqFuture<'_, JoinApprovalStrategyList> {
+        Box::pin(async { unsupported("自动审批策略") })
+    }
+
+    /// 更新审批策略（`PATCH /v2/groups/join_approval_strategy/{strategy_id}`）。
+    fn update_join_approval_strategy(
+        &self,
+        _strategy_id: &str,
+        _request: &UpdateJoinApprovalStrategyRequest,
+    ) -> QqFuture<'_, UpdateJoinApprovalStrategyResponse> {
+        Box::pin(async { unsupported("自动审批策略") })
+    }
+
+    /// 生效审批策略（`POST .../{strategy_id}/execute`）。
+    fn execute_join_approval_strategy(&self, _strategy_id: &str) -> QqFuture<'_, ()> {
+        Box::pin(async { unsupported("自动审批策略") })
+    }
+
+    /// 增删审批策略白名单（`POST .../{strategy_id}/whitelist_users`）。
+    fn update_join_approval_strategy_whitelist(
+        &self,
+        _strategy_id: &str,
+        _request: &WhitelistUsersRequest,
+    ) -> QqFuture<'_, WhitelistUsersResponse> {
+        Box::pin(async { unsupported("自动审批策略") })
+    }
+
+    /// 删除审批策略（`DELETE .../{strategy_id}`）。
+    fn delete_join_approval_strategy(&self, _strategy_id: &str) -> QqFuture<'_, ()> {
+        Box::pin(async { unsupported("自动审批策略") })
+    }
+
+    /// 群黑名单列表（`GET /v2/groups/{gid}/member_blacklist`）。
+    fn member_blacklist_list(
+        &self,
+        _group_openid: &str,
+        _cursor: Option<&str>,
+        _limit: Option<u32>,
+    ) -> QqFuture<'_, MemberBlacklistList> {
+        Box::pin(async { unsupported("群黑名单") })
+    }
+
+    /// 增删群黑名单（`POST /v2/groups/{gid}/member_blacklist`，单批 ≤ 20）。
+    fn update_member_blacklist(
+        &self,
+        _group_openid: &str,
+        _request: &MemberBlacklistRequest,
+    ) -> QqFuture<'_, MemberBlacklistResponse> {
+        Box::pin(async { unsupported("群黑名单") })
+    }
+
+    /// 审批入群申请（`POST /v2/groups/{gid}/approval_join_request/{member_openid}`）。
+    fn approve_join_request(
+        &self,
+        _group_openid: &str,
+        _member_openid: &str,
+        _request: &ApprovalJoinRequest,
+    ) -> QqFuture<'_, ()> {
+        Box::pin(async { unsupported("入群审批") })
+    }
+
+    /// 回应互动事件（`PUT /interactions/{interaction_id}`，`code` 为 0~5）。
+    fn put_interaction(&self, _interaction_id: &str, _code: u32) -> QqFuture<'_, ()> {
+        Box::pin(async { unsupported("互动事件") })
+    }
+
+    /// 生成机器人资料页分享链接（`POST /v2/generate_url_link`）。
+    fn generate_url_link(
+        &self,
+        _request: &GenerateUrlLinkRequest,
+    ) -> QqFuture<'_, GenerateUrlLink> {
+        Box::pin(async { unsupported("资料页分享链接") })
+    }
+
+    /// 批量移出群成员（单批 ≤ 20，`add_blacklist` 同时拉黑）。
     fn set_group_kick(
         &self,
         _group_openid: &str,
@@ -556,6 +713,270 @@ impl<T: HttpTransport> QqApi for OpenApiClient<T> {
             OpenApiClient::delete_media_image(self, &image_id)
                 .await
                 .map_err(qq_error)
+        })
+    }
+
+    fn get_panels(
+        &self,
+        scope: &str,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> QqFuture<'_, PanelList> {
+        let scope = scope.to_owned();
+        let cursor = cursor.map(str::to_owned);
+        Box::pin(async move {
+            OpenApiClient::get_panels(self, &scope, cursor.as_deref(), limit)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn create_panel(&self, request: &CreatePanelRequest) -> QqFuture<'_, CreatePanelResponse> {
+        let request = request.clone();
+        Box::pin(async move {
+            OpenApiClient::create_panel(self, &request)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn get_panel(&self, panel_id: &str) -> QqFuture<'_, PanelRecordDetail> {
+        let panel_id = panel_id.to_owned();
+        Box::pin(async move {
+            OpenApiClient::get_panel(self, &panel_id)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn update_panel(
+        &self,
+        panel_id: &str,
+        request: &UpdatePanelRequest,
+    ) -> QqFuture<'_, VersionResponse> {
+        let panel_id = panel_id.to_owned();
+        let request = request.clone();
+        Box::pin(async move {
+            OpenApiClient::update_panel(self, &panel_id, &request)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn delete_panel(&self, panel_id: &str) -> QqFuture<'_, ()> {
+        let panel_id = panel_id.to_owned();
+        Box::pin(async move {
+            OpenApiClient::delete_panel(self, &panel_id)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn update_panel_target(
+        &self,
+        panel_id: &str,
+        request: &PanelTargetRequest,
+    ) -> QqFuture<'_, ()> {
+        let panel_id = panel_id.to_owned();
+        let request = request.clone();
+        Box::pin(async move {
+            OpenApiClient::update_panel_target(self, &panel_id, &request)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn get_menu(&self) -> QqFuture<'_, MenuResponse> {
+        Box::pin(async move { OpenApiClient::get_menu(self).await.map_err(qq_error) })
+    }
+
+    fn put_menu(&self, request: &PutMenuRequest) -> QqFuture<'_, VersionResponse> {
+        let request = request.clone();
+        Box::pin(async move {
+            OpenApiClient::put_menu(self, &request)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn create_join_approval_strategy(
+        &self,
+        request: &CreateJoinApprovalStrategyRequest,
+    ) -> QqFuture<'_, CreateJoinApprovalStrategyResponse> {
+        let request = request.clone();
+        Box::pin(async move {
+            OpenApiClient::create_join_approval_strategy(self, &request)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn list_join_approval_strategy(
+        &self,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> QqFuture<'_, JoinApprovalStrategyList> {
+        let cursor = cursor.map(str::to_owned);
+        Box::pin(async move {
+            OpenApiClient::list_join_approval_strategy(self, cursor.as_deref(), limit)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn update_join_approval_strategy(
+        &self,
+        strategy_id: &str,
+        request: &UpdateJoinApprovalStrategyRequest,
+    ) -> QqFuture<'_, UpdateJoinApprovalStrategyResponse> {
+        let strategy_id = strategy_id.to_owned();
+        let request = request.clone();
+        Box::pin(async move {
+            OpenApiClient::update_join_approval_strategy(self, &strategy_id, &request)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn execute_join_approval_strategy(&self, strategy_id: &str) -> QqFuture<'_, ()> {
+        let strategy_id = strategy_id.to_owned();
+        Box::pin(async move {
+            OpenApiClient::execute_join_approval_strategy(self, &strategy_id)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn update_join_approval_strategy_whitelist(
+        &self,
+        strategy_id: &str,
+        request: &WhitelistUsersRequest,
+    ) -> QqFuture<'_, WhitelistUsersResponse> {
+        let strategy_id = strategy_id.to_owned();
+        let request = request.clone();
+        Box::pin(async move {
+            OpenApiClient::update_join_approval_strategy_whitelist(self, &strategy_id, &request)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn delete_join_approval_strategy(&self, strategy_id: &str) -> QqFuture<'_, ()> {
+        let strategy_id = strategy_id.to_owned();
+        Box::pin(async move {
+            OpenApiClient::delete_join_approval_strategy(self, &strategy_id)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn member_blacklist_list(
+        &self,
+        group_openid: &str,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> QqFuture<'_, MemberBlacklistList> {
+        let group_openid = group_openid.to_owned();
+        let cursor = cursor.map(str::to_owned);
+        Box::pin(async move {
+            OpenApiClient::member_blacklist_list(self, &group_openid, cursor.as_deref(), limit)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn update_member_blacklist(
+        &self,
+        group_openid: &str,
+        request: &MemberBlacklistRequest,
+    ) -> QqFuture<'_, MemberBlacklistResponse> {
+        let group_openid = group_openid.to_owned();
+        let request = request.clone();
+        Box::pin(async move {
+            OpenApiClient::update_member_blacklist(self, &group_openid, &request)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn approve_join_request(
+        &self,
+        group_openid: &str,
+        member_openid: &str,
+        request: &ApprovalJoinRequest,
+    ) -> QqFuture<'_, ()> {
+        let group_openid = group_openid.to_owned();
+        let member_openid = member_openid.to_owned();
+        let request = request.clone();
+        Box::pin(async move {
+            OpenApiClient::approve_join_request(self, &group_openid, &member_openid, &request)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn put_interaction(&self, interaction_id: &str, code: u32) -> QqFuture<'_, ()> {
+        let interaction_id = interaction_id.to_owned();
+        Box::pin(async move {
+            OpenApiClient::put_interaction(self, &interaction_id, code)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn generate_url_link(&self, request: &GenerateUrlLinkRequest) -> QqFuture<'_, GenerateUrlLink> {
+        let request = request.clone();
+        Box::pin(async move {
+            OpenApiClient::generate_url_link(self, &request)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn set_group_kick(
+        &self,
+        group_openid: &str,
+        member_openids: &[String],
+        add_blacklist: bool,
+    ) -> QqFuture<'_, KickResult> {
+        let group_openid = group_openid.to_owned();
+        let request = BatchRemoveMembersRequest {
+            member_openids: member_openids.to_vec(),
+            add_to_member_blacklist: add_blacklist,
+        };
+        Box::pin(async move {
+            let response = OpenApiClient::batch_remove_members(self, &group_openid, &request)
+                .await
+                .map_err(qq_error)?;
+            Ok(KickResult {
+                remove_members_result: response.remove_members_result,
+                add_to_member_blacklist_fail_openids: response.add_to_member_blacklist_fail_openids,
+            })
+        })
+    }
+
+    fn delete_msg(&self, target: RetractRequest) -> QqFuture<'_, ()> {
+        let RetractRequest {
+            group_openid,
+            user_openid,
+            message_id,
+        } = target;
+        Box::pin(async move {
+            match (group_openid, user_openid) {
+                (Some(group_openid), _) => {
+                    OpenApiClient::retract_group_message(self, &group_openid, &message_id)
+                        .await
+                        .map_err(qq_error)
+                }
+                (None, Some(user_openid)) => {
+                    OpenApiClient::retract_c2c_message(self, &user_openid, &message_id)
+                        .await
+                        .map_err(qq_error)
+                }
+                (None, None) => Err(Error::Protocol(
+                    "delete_msg 需要 group_id 或 user_id".to_owned(),
+                )),
+            }
         })
     }
 }

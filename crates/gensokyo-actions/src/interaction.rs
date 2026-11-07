@@ -9,12 +9,12 @@
 //! | `mark_msg_as_read` | `handlers/mark_msg_as_read.go` | 无（官方无已读上报接口） | 本地空实现：`retcode = 0` + `data = null` |
 //! | `.handle_quick_operation` | `handlers/handle_quick_operation.go` | 无（复用发送链） | deferred 计划（`send_group_msg` / `send_private_msg`） |
 //! | `.handle_quick_operation_async` | `handlers/handle_quick_operation_async.go` | 同上 | 同上 |
-//! | `get_robot_share_link` | `handlers/get_robot_share_link.go` | `GenerateURLLink` | `1500` |
-//! | `put_interaction` | `handlers/put_interaction.go` | `PutInteraction` | `1500` |
-//! | `delete_group_msg` | `handlers/delete_group_msg.go` | `RetractGroupMessage` | `1500` |
-//! | `set_group_add_request` | `handlers/set_group_add_request.go` | 入群申请审批 | `1500` |
-//! | `get_group_member_blacklist` | `handlers/get_group_member_blacklist.go` | `MemberBlacklistList` | `1500` |
-//! | `set_group_member_blacklist` | `handlers/set_group_member_blacklist.go` | `UpdateMemberBlacklist` | `1500` |
+//! | `get_robot_share_link` | `handlers/get_robot_share_link.go` | `POST /v2/generate_url_link` | `{"url": …, "callback_data": …}` |
+//! | `put_interaction` | `handlers/put_interaction.go` | `PUT /interactions/{interaction_id}` | `data = null` |
+//! | `delete_group_msg` | `handlers/delete_group_msg.go` | `DELETE /v2/groups/{gid}/messages/{mid}` | `data = null` |
+//! | `set_group_add_request` | `handlers/set_group_add_request.go` | `POST /v2/groups/{gid}/approval_join_request/{member}` | `data = null` |
+//! | `get_group_member_blacklist` | `handlers/get_group_member_blacklist.go` | `GET /v2/groups/{gid}/member_blacklist` | 黑名单分页 |
+//! | `set_group_member_blacklist` | `handlers/set_group_member_blacklist.go` | `POST /v2/groups/{gid}/member_blacklist` | `{"fail_openids": […]}` |
 //! | `send_group_forward_msg` | `handlers/send_group_forward_msg.go` | 无（Go 逐条转普通消息） | `1500` |
 //! | `send_group_msg_raw` | `handlers/send_group_msg_raw.go` | 发送链 | `1500` |
 //! | `send_private_msg_sse` | `handlers/send_private_msg_sse.go` | 发送链（SSE 流式） | `1500` |
@@ -38,13 +38,12 @@
 //!   计划（[`crate::send::plan_send_group_msg`] / [`crate::send::plan_send_private_msg`]），
 //!   响应形状与同步发送 action 一致，真正的发送仍由 runtime 接管。
 //!
-//! # 其余项为什么是 1500
+//! # 仍然回 1500 的项
 //!
-//! 这些 action 在 Go 里走 botgo 的互动 / 撤回群消息 / 入群申请审批 / 成员黑名单端点，或需要
-//! 运行时发送链的额外支持（原始 JSON 直发、SSE 流式、`IsWakeup` 主动私聊、合并转发逐条重发）。
-//! `gensokyo-qq` 只移植了群信息、成员、禁言、入群申请列表这几组端点（见
-//! [`crate::qqapi::QqApi`]），因此按 [`crate::unsupported`] 的口径回 `1500` + 说明；参数仍照 Go
-//! 的 `callapi.ParamsContent` 校验，缺失或类型不对回 `1400`。
+//! 剩下这些需要运行时发送链的额外支持（原始 JSON 直发、SSE 流式、`IsWakeup` 主动私聊、
+//! 合并转发逐条重发），或官方根本没有对应端点（群荣誉、匿名成员禁言）：按
+//! [`crate::unsupported`] 的口径回 `1500` + 说明；参数仍照 Go 的 `callapi.ParamsContent`
+//! 校验，缺失或类型不对回 `1400`。
 //!
 //! # 刻意的差异（相对 Go）
 //!
@@ -52,6 +51,14 @@
 //!   这里回 `1400` + 说明，便于定位客户端的事件字段错误。
 //! - **合并转发**：Go 把 node 列表逐条转成普通消息再发送；本 crate 不做这层降级（会丢转发卡片
 //!   语义），直接 `1500`。
+//! - **`get_robot_share_link`**：Go 把链接包成一条伪造的 `share_link_generated` notice 事件推给
+//!   客户端，action 本身回 `"{}"`。本 crate 的 handler 契约只能回一个响应，因此把链接放进
+//!   `data`（`url` + 回显的 `callback_data`），不伪造事件。
+//! - **`put_interaction`**：Go 从 `echo`（字符串）取 interaction_id、从顶层 `post_type` 取结果码；
+//!   本 crate 的 `ActionRequest` 没有 `post_type` 字段，因此改读 `params.interaction_id`
+//!   （缺省回退 `echo`）与 `params.code`。
+//! - **黑名单 / 审批的 ID 反查**：Go 逐个反查、失败跳过该条；这里任一反查失败整体回 `1400`，
+//!   与 [`crate::group_admin`] 的 `set_group_kick` 同口径——`add` 少一个成员比多一个更安全。
 
 use std::sync::Arc;
 
@@ -61,31 +68,22 @@ use serde_json::{Map, Value, json};
 use gensokyo_core::{Error, Ob11Id, Result};
 use gensokyo_protocol::action::{ActionRequest, ActionResponse};
 use gensokyo_protocol::{Handler, HandlerFuture};
+use gensokyo_qq::dto::{
+    ApprovalJoinRequest, GenerateUrlLinkRequest, MemberBlacklistList, MemberBlacklistRequest,
+};
 
+use crate::group_admin::collect_user_ids;
 use crate::handler::respond_to_params;
+use crate::messages::resolve_message_id;
 use crate::params;
-use crate::qqapi::ActionContext;
+use crate::qqapi::{ActionContext, RetractRequest};
 use crate::send::{SendRequest, plan_send_group_msg, plan_send_private_msg};
 use crate::unsupported::{checked_unsupported, required_add_del_op, required_object};
 use crate::util::{
-    bad_request, ob11_id, ok_data, params_object, params_or_empty, resolve_identity_text,
+    bad_request, ob11_id, ok_data, params_object, params_or_empty, resolve_group,
+    resolve_identity_text, resolve_member, respond,
 };
 
-/// `get_robot_share_link` 的说明。
-const GET_ROBOT_SHARE_LINK: &str =
-    "get_robot_share_link: gensokyo-qq 尚未暴露官方 v2 GenerateURLLink 端点";
-/// `put_interaction` 的说明。
-const PUT_INTERACTION: &str = "put_interaction: gensokyo-qq 尚未暴露官方 v2 互动端点";
-/// `delete_group_msg` 的说明。
-const DELETE_GROUP_MSG: &str = "delete_group_msg: gensokyo-qq 尚未暴露官方 v2 群消息撤回端点";
-/// `set_group_add_request` 的说明。
-const SET_GROUP_ADD_REQUEST: &str = "set_group_add_request: gensokyo-qq 尚未暴露入群申请审批端点";
-/// `get_group_member_blacklist` 的说明。
-const GET_GROUP_MEMBER_BLACKLIST: &str =
-    "get_group_member_blacklist: gensokyo-qq 尚未暴露成员黑名单端点";
-/// `set_group_member_blacklist` 的说明。
-const SET_GROUP_MEMBER_BLACKLIST: &str =
-    "set_group_member_blacklist: gensokyo-qq 尚未暴露成员黑名单端点";
 /// `send_group_forward_msg` 的说明。
 const SEND_GROUP_FORWARD_MSG: &str =
     "send_group_forward_msg: 合并转发需要逐条重发 node，本 crate 未接线";
@@ -145,58 +143,38 @@ fn either_group_or_user(object: &Map<String, Value>) -> Result<()> {
     Ok(())
 }
 
-/// `get_robot_share_link`：`callback_data` 只校验类型（Go 允许缺省）。
-fn validate_robot_share_link(object: &Map<String, Value>) -> Result<()> {
-    params::optional_text(object, "callback_data")?;
-    Ok(())
-}
+/// 群黑名单默认单页条数（官方单页上限）。
+const DEFAULT_BLACKLIST_PAGE: u32 = 100;
 
-/// `put_interaction`：Go 直接读 `context` / `operation` 两个对象。
-fn validate_put_interaction(object: &Map<String, Value>) -> Result<()> {
-    required_object(object, "context")?;
-    required_object(object, "operation")?;
-    Ok(())
-}
-
-/// `delete_group_msg`：`group_id` + `message_id` 必填。
-fn validate_delete_group_msg(object: &Map<String, Value>) -> Result<()> {
-    params::required_id(object, "group_id")?;
-    params::required_id(object, "message_id")?;
-    params::id_text(object, "user_id")?;
-    Ok(())
-}
-
-/// `set_group_add_request`：`group_id` + `user_id` 必填，其余字段只校验类型。
-fn validate_set_group_add_request(object: &Map<String, Value>) -> Result<()> {
-    params::required_id(object, "group_id")?;
-    params::required_id(object, "user_id")?;
-    params::optional_bool(object, "approve")?;
-    params::optional_text(object, "flag")?;
-    params::optional_text(object, "reason")?;
-    params::optional_bool(object, "add_to_member_blacklist")?;
-    Ok(())
-}
-
-/// `get_group_member_blacklist`：`group_id` 必填 + 分页参数校验类型。
-fn validate_get_group_member_blacklist(object: &Map<String, Value>) -> Result<()> {
-    params::required_id(object, "group_id")?;
-    params::optional_text(object, "cursor")?;
-    params::optional_u32(object, "limit")?;
-    Ok(())
-}
-
-/// `set_group_member_blacklist`：`group_id` + `op` + 至少一个成员 ID。
-fn validate_set_group_member_blacklist(object: &Map<String, Value>) -> Result<()> {
-    params::required_id(object, "group_id")?;
-    required_add_del_op(object)?;
-    let user = params::id_text(object, "user_id")?;
-    let users = params::id_list(object, "user_ids")?;
-    if user.is_none() && users.is_empty() {
-        return Err(Error::Protocol(
-            "user_id 与 user_ids 至少要有一个".to_owned(),
-        ));
+/// 互动事件的 ID：`params.interaction_id` 优先，缺省回退 `echo`（Go 只读 echo）。
+fn interaction_id(request: &ActionRequest<Value>, object: &Map<String, Value>) -> Result<String> {
+    if let Some(id) = params::optional_text(object, "interaction_id")? {
+        return Ok(id);
     }
-    Ok(())
+    match request.echo.as_ref() {
+        Some(Value::String(id)) if !id.is_empty() => Ok(id.clone()),
+        Some(Value::Number(id)) => Ok(id.to_string()),
+        _ => Err(Error::Protocol(
+            "put_interaction 需要 interaction_id（params.interaction_id 或 echo）".to_owned(),
+        )),
+    }
+}
+
+/// 互动结果码：`params.code`（0~5），兼容 Go 顶层 `post_type` 的文本形态。
+fn interaction_code(object: &Map<String, Value>) -> Result<u32> {
+    let code = match params::optional_u32(object, "code")? {
+        Some(code) => code,
+        None => match params::optional_text(object, "post_type")? {
+            Some(text) => text
+                .parse::<u32>()
+                .map_err(|_| Error::Protocol(format!("post_type 必须是 0~5 的数字: {text}")))?,
+            None => 0,
+        },
+    };
+    if code > 5 {
+        return Err(Error::Protocol(format!("code 只支持 0~5: {code}")));
+    }
+    Ok(code)
 }
 
 /// `send_group_forward_msg`：`group_id` + 非空 `messages`。
@@ -414,18 +392,39 @@ impl Handler for QuickOperationAsyncHandler {
 }
 
 /// `get_robot_share_link`。
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GetRobotShareLinkHandler;
+#[derive(Debug, Clone)]
+pub struct GetRobotShareLinkHandler {
+    context: Arc<ActionContext>,
+}
 
 impl GetRobotShareLinkHandler {
-    /// 构造（handler 无状态）。
+    /// 构造。
     #[must_use]
-    pub const fn new() -> Self {
-        Self
+    pub fn new(context: Arc<ActionContext>) -> Self {
+        Self { context }
     }
 
     async fn run(&self, request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
-        checked_unsupported(request, GET_ROBOT_SHARE_LINK, validate_robot_share_link)
+        let result = self.execute(request).await;
+        respond(request, result)
+    }
+
+    async fn execute(&self, request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
+        let object = params_or_empty(request)?;
+        let callback_data =
+            params::optional_text(object.as_ref(), "callback_data")?.unwrap_or_default();
+        let link = self
+            .context
+            .api()
+            .generate_url_link(&GenerateUrlLinkRequest {
+                callback_data: callback_data.clone(),
+            })
+            .await?;
+        // Go 把链接包成伪造 notice 事件推送；handler 只能回响应，因此放进 data
+        ok_data(
+            request,
+            &json!({ "url": link.url, "callback_data": callback_data }),
+        )
     }
 }
 
@@ -440,18 +439,33 @@ impl Handler for GetRobotShareLinkHandler {
 }
 
 /// `put_interaction`。
-#[derive(Debug, Clone, Copy, Default)]
-pub struct PutInteractionHandler;
+#[derive(Debug, Clone)]
+pub struct PutInteractionHandler {
+    context: Arc<ActionContext>,
+}
 
 impl PutInteractionHandler {
-    /// 构造（handler 无状态）。
+    /// 构造。
     #[must_use]
-    pub const fn new() -> Self {
-        Self
+    pub fn new(context: Arc<ActionContext>) -> Self {
+        Self { context }
     }
 
     async fn run(&self, request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
-        checked_unsupported(request, PUT_INTERACTION, validate_put_interaction)
+        let result = self.execute(request).await;
+        respond(request, result)
+    }
+
+    async fn execute(&self, request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
+        let object = params_or_empty(request)?;
+        let object = object.as_ref();
+        let interaction_id = interaction_id(request, object)?;
+        let code = interaction_code(object)?;
+        self.context
+            .api()
+            .put_interaction(&interaction_id, code)
+            .await?;
+        ok_data(request, &Value::Null)
     }
 }
 
@@ -466,18 +480,39 @@ impl Handler for PutInteractionHandler {
 }
 
 /// `delete_group_msg`。
-#[derive(Debug, Clone, Copy, Default)]
-pub struct DeleteGroupMsgHandler;
+#[derive(Debug, Clone)]
+pub struct DeleteGroupMsgHandler {
+    context: Arc<ActionContext>,
+}
 
 impl DeleteGroupMsgHandler {
-    /// 构造（handler 无状态）。
+    /// 构造。
     #[must_use]
-    pub const fn new() -> Self {
-        Self
+    pub fn new(context: Arc<ActionContext>) -> Self {
+        Self { context }
     }
 
     async fn run(&self, request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
-        checked_unsupported(request, DELETE_GROUP_MSG, validate_delete_group_msg)
+        let result = self.execute(request).await;
+        respond(request, result)
+    }
+
+    async fn execute(&self, request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
+        let object = params_object(request)?;
+        let group = resolve_group(&self.context, object)?;
+        // `user_id` 只做类型校验：Go 用它区分「撤回自己发的消息」，群撤回路径不看它
+        params::id_text(object, "user_id")?;
+        let requested = params::required_id(object, "message_id")?;
+        let message_id = resolve_message_id(&self.context, &requested)?;
+        self.context
+            .api()
+            .delete_msg(RetractRequest {
+                group_openid: Some(group.openid),
+                user_openid: None,
+                message_id,
+            })
+            .await?;
+        ok_data(request, &Value::Null)
     }
 }
 
@@ -492,22 +527,41 @@ impl Handler for DeleteGroupMsgHandler {
 }
 
 /// `set_group_add_request`。
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SetGroupAddRequestHandler;
+#[derive(Debug, Clone)]
+pub struct SetGroupAddRequestHandler {
+    context: Arc<ActionContext>,
+}
 
 impl SetGroupAddRequestHandler {
-    /// 构造（handler 无状态）。
+    /// 构造。
     #[must_use]
-    pub const fn new() -> Self {
-        Self
+    pub fn new(context: Arc<ActionContext>) -> Self {
+        Self { context }
     }
 
     async fn run(&self, request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
-        checked_unsupported(
-            request,
-            SET_GROUP_ADD_REQUEST,
-            validate_set_group_add_request,
-        )
+        let result = self.execute(request).await;
+        respond(request, result)
+    }
+
+    async fn execute(&self, request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
+        let object = params_object(request)?;
+        let group = resolve_group(&self.context, object)?;
+        let member = resolve_member(&self.context, object)?;
+        // Go 的 `approve` 缺省为 true；`flag` 是入群申请列表里的申请 ID
+        let approve = params::optional_bool(object, "approve")?.unwrap_or(true);
+        let body = ApprovalJoinRequest {
+            op: if approve { "approve" } else { "decline" }.to_owned(),
+            join_request_id: params::optional_text(object, "flag")?.unwrap_or_default(),
+            reject_reason: params::optional_text(object, "reason")?.unwrap_or_default(),
+            add_to_member_blacklist: params::optional_bool(object, "add_to_member_blacklist")?
+                .unwrap_or(false),
+        };
+        self.context
+            .api()
+            .approve_join_request(&group.openid, &member.openid, &body)
+            .await?;
+        ok_data(request, &Value::Null)
     }
 }
 
@@ -522,22 +576,91 @@ impl Handler for SetGroupAddRequestHandler {
 }
 
 /// `get_group_member_blacklist`。
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GetGroupMemberBlacklistHandler;
+#[derive(Debug, Clone)]
+pub struct GetGroupMemberBlacklistHandler {
+    context: Arc<ActionContext>,
+}
 
 impl GetGroupMemberBlacklistHandler {
-    /// 构造（handler 无状态）。
+    /// 构造。
     #[must_use]
-    pub const fn new() -> Self {
-        Self
+    pub fn new(context: Arc<ActionContext>) -> Self {
+        Self { context }
     }
 
     async fn run(&self, request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
-        checked_unsupported(
-            request,
-            GET_GROUP_MEMBER_BLACKLIST,
-            validate_get_group_member_blacklist,
-        )
+        let result = self.execute(request).await;
+        respond(request, result)
+    }
+
+    async fn execute(&self, request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
+        let object = params_object(request)?;
+        let group = resolve_group(&self.context, object)?;
+        let cursor = params::optional_text(object, "cursor")?;
+        let limit = match params::optional_u32(object, "limit")? {
+            None | Some(0) => DEFAULT_BLACKLIST_PAGE,
+            Some(limit) => limit,
+        };
+        let list: MemberBlacklistList = self
+            .context
+            .api()
+            .member_blacklist_list(&group.openid, cursor.as_deref(), Some(limit))
+            .await?;
+        let data = blacklist_data(&self.context, list);
+        ok_data(request, &data)
+    }
+}
+
+/// 黑名单条目（`user_id` 是虚拟号，与入站上报口径一致，可直接回传增删接口）。
+#[derive(Debug, Clone, Serialize)]
+struct BlacklistEntry {
+    /// 成员虚拟号（未装配 idmap 时跳过该条）。
+    user_id: Ob11Id,
+    /// union_openid。
+    union_openid: String,
+    /// member_openid。
+    member_openid: String,
+    /// 昵称。
+    username: String,
+    /// 拉黑时间（RFC3339）。
+    banned_at: String,
+    /// 是否机器人。
+    bot: bool,
+}
+
+/// 黑名单响应：`user_id` 换成虚拟号，反查失败跳过（对齐 Go）。
+#[derive(Debug, Clone, Serialize)]
+struct BlacklistData {
+    /// 黑名单条目。
+    users: Vec<BlacklistEntry>,
+    /// 下一页游标。
+    next_cursor: String,
+}
+
+/// 上游黑名单 → 响应（`member_openid` → 虚拟号）。
+fn blacklist_data(context: &ActionContext, list: MemberBlacklistList) -> BlacklistData {
+    let string_mode = context.string_ob11();
+    let idmap = context.idmap();
+    let users = list
+        .users
+        .into_iter()
+        .filter_map(|user| {
+            let virtual_id = idmap
+                .and_then(|store| store.retrieve_virtual_value(&user.member_openid).ok())
+                .map(|(_, vuin)| ob11_id(&vuin.to_string(), string_mode))?;
+            Some(BlacklistEntry {
+                user_id: virtual_id,
+                union_openid: user.union_openid,
+                member_openid: user.member_openid,
+                username: user.username,
+                banned_at: user.banned_at,
+                bot: user.bot,
+            })
+        })
+        .collect();
+    BlacklistData {
+        users,
+        next_cursor: list.next_cursor,
     }
 }
 
@@ -552,22 +675,52 @@ impl Handler for GetGroupMemberBlacklistHandler {
 }
 
 /// `set_group_member_blacklist`。
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SetGroupMemberBlacklistHandler;
+#[derive(Debug, Clone)]
+pub struct SetGroupMemberBlacklistHandler {
+    context: Arc<ActionContext>,
+}
 
 impl SetGroupMemberBlacklistHandler {
-    /// 构造（handler 无状态）。
+    /// 构造。
     #[must_use]
-    pub const fn new() -> Self {
-        Self
+    pub fn new(context: Arc<ActionContext>) -> Self {
+        Self { context }
     }
 
     async fn run(&self, request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
-        checked_unsupported(
-            request,
-            SET_GROUP_MEMBER_BLACKLIST,
-            validate_set_group_member_blacklist,
-        )
+        let result = self.execute(request).await;
+        respond(request, result)
+    }
+
+    async fn execute(&self, request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
+        let object = params_object(request)?;
+        let group = resolve_group(&self.context, object)?;
+        required_add_del_op(object)?;
+        let virtual_ids = collect_user_ids(object)?;
+        if virtual_ids.is_empty() {
+            return Err(Error::Protocol(
+                "user_id 与 user_ids 至少要有一个".to_owned(),
+            ));
+        }
+        let mut member_openids = Vec::with_capacity(virtual_ids.len());
+        for virtual_id in &virtual_ids {
+            member_openids.push(
+                resolve_identity_text(&self.context, "user_id", virtual_id, "member_openid")?
+                    .openid,
+            );
+        }
+        let response = self
+            .context
+            .api()
+            .update_member_blacklist(
+                &group.openid,
+                &MemberBlacklistRequest {
+                    op: params::optional_text(object, "op")?.unwrap_or_default(),
+                    member_openids,
+                },
+            )
+            .await?;
+        ok_data(request, &response)
     }
 }
 
@@ -788,10 +941,16 @@ mod tests {
         SetGroupAnonymousBanHandler, SetGroupMemberBlacklistHandler,
     };
     use crate::handler::{DEFERRED_FIELD, RETCODE_BAD_REQUEST};
-    use crate::testing::{block_on, context, failed, ok_data, request, request_without_params};
+    use crate::testing::{
+        Call, block_on, context, failed, ok_data, request, request_without_params,
+    };
     use crate::util::RETCODE_UPSTREAM;
     use gensokyo_protocol::Handler;
     use gensokyo_protocol::Status;
+    use gensokyo_qq::dto::{
+        ApprovalJoinRequest, GenerateUrlLink, GenerateUrlLinkRequest, MemberBlacklistList,
+        MemberBlacklistRequest, MemberBlacklistResponse,
+    };
 
     const GROUP: &str = "0123456789abcdef0123456789abcdef";
     const MEMBER: &str = "fedcba9876543210fedcba9876543210";
@@ -898,56 +1057,181 @@ mod tests {
     }
 
     #[test]
-    fn share_link_and_interaction_are_unsupported() {
-        let share = GetRobotShareLinkHandler::new();
-        assert_unsupported(&share, json!({"callback_data": "c1"}));
-        assert_unsupported(&share, json!({}));
-        assert_bad_request(&share, json!({"callback_data": ["c1"]}));
-        assert_eq!(share.name(), "get_robot_share_link");
+    fn share_link_forwards_callback_data_and_returns_url() {
+        let (ctx, api) = context();
+        *api.share_link.lock().unwrap() = Some(Ok(GenerateUrlLink {
+            url: "https://example.com/link".to_owned(),
+        }));
+        let handler = GetRobotShareLinkHandler::new(ctx);
 
-        let interaction = PutInteractionHandler::new();
-        assert_unsupported(
-            &interaction,
-            json!({"context": {"message_id": "1"}, "operation": {"reply": "hi"}}),
+        let response = block_on(handler.handle(&request(
+            "get_robot_share_link",
+            json!({"callback_data": "c1"}),
+        )))
+        .expect("生成分享链接不应失败");
+        let data = ok_data(response);
+        assert_eq!(data["url"], json!("https://example.com/link"));
+        assert_eq!(data["callback_data"], json!("c1"));
+        assert_eq!(
+            api.calls(),
+            vec![Call::ShareLink(GenerateUrlLinkRequest {
+                callback_data: "c1".to_owned(),
+            })]
         );
-        assert_bad_request(&interaction, json!({"context": {}}));
-        assert_eq!(interaction.name(), "put_interaction");
+        assert_bad_request(&handler, json!({"callback_data": ["c1"]}));
+        assert_eq!(handler.name(), "get_robot_share_link");
     }
 
     #[test]
-    fn group_message_and_join_request_actions_are_unsupported() {
-        let delete = DeleteGroupMsgHandler::new();
-        assert_unsupported(&delete, json!({"group_id": GROUP, "message_id": "msg-1"}));
-        assert_bad_request(&delete, json!({"group_id": GROUP}));
-        assert_eq!(delete.name(), "delete_group_msg");
+    fn put_interaction_uses_echo_id_and_result_code() {
+        let (ctx, api) = context();
+        *api.interaction.lock().unwrap() = Some(Ok(()));
+        let handler = PutInteractionHandler::new(ctx);
 
-        let approve = SetGroupAddRequestHandler::new();
-        assert_unsupported(
-            &approve,
-            json!({"group_id": GROUP, "user_id": MEMBER, "approve": true, "reason": "欢迎"}),
+        let response = block_on(handler.handle(&request(
+            "put_interaction",
+            json!({"interaction_id": "inter-1", "code": 3}),
+        )))
+        .expect("回应互动不应失败");
+        assert_eq!(ok_data(response), Value::Null);
+        assert_eq!(
+            api.calls(),
+            vec![Call::Interaction("inter-1".to_owned(), 3)]
         );
-        assert_bad_request(&approve, json!({"group_id": GROUP}));
+
+        // Go 口径：echo 就是 interaction_id，params 缺省时回退它
+        let mut by_echo = request("put_interaction", json!({}));
+        by_echo.echo = Some(json!("inter-2"));
+        *api.interaction.lock().unwrap() = Some(Ok(()));
+        let response = block_on(handler.handle(&by_echo)).expect("echo 也应可作 interaction_id");
+        assert_eq!(response.echo, Some(json!("inter-2")));
+        assert_eq!(
+            api.calls(),
+            vec![
+                Call::Interaction("inter-1".to_owned(), 3),
+                Call::Interaction("inter-2".to_owned(), 0),
+            ]
+        );
+
+        let mut no_echo = request("put_interaction", json!({"code": 1}));
+        no_echo.echo = None;
+        let missing =
+            block_on(handler.handle(&no_echo)).expect("缺 interaction_id 也应是 Ok(失败响应)");
+        assert_eq!(missing.status, Status::Failed);
+        assert_eq!(missing.retcode, RETCODE_BAD_REQUEST);
+        assert_bad_request(&handler, json!({"interaction_id": "i2", "code": 9}));
+        assert_eq!(handler.name(), "put_interaction");
+    }
+
+    #[test]
+    fn delete_group_msg_retracts_through_the_group_endpoint() {
+        let (ctx, api) = context();
+        *api.delete.lock().unwrap() = Some(Ok(()));
+        let handler = DeleteGroupMsgHandler::new(ctx);
+
+        let response = block_on(handler.handle(&request(
+            "delete_group_msg",
+            json!({"group_id": GROUP, "message_id": "msg-1"}),
+        )))
+        .expect("撤回群消息不应失败");
+        assert_eq!(ok_data(response), Value::Null);
+        assert_eq!(
+            api.calls(),
+            vec![Call::DeleteMsg(
+                Some(GROUP.to_owned()),
+                None,
+                "msg-1".to_owned()
+            )]
+        );
+        assert_bad_request(&handler, json!({"group_id": GROUP}));
+        assert_eq!(handler.name(), "delete_group_msg");
+    }
+
+    #[test]
+    fn set_group_add_request_maps_approve_to_op() {
+        let (ctx, api) = context();
+        *api.join_approval.lock().unwrap() = Some(Ok(()));
+        let handler = SetGroupAddRequestHandler::new(ctx);
+
+        let response = block_on(handler.handle(&request(
+            "set_group_add_request",
+            json!({
+                "group_id": GROUP,
+                "user_id": MEMBER,
+                "approve": false,
+                "flag": "f1",
+                "reason": "满员",
+                "add_to_member_blacklist": true,
+            }),
+        )))
+        .expect("审批入群申请不应失败");
+        assert_eq!(ok_data(response), Value::Null);
+        assert_eq!(
+            api.calls(),
+            vec![Call::JoinApproval(
+                GROUP.to_owned(),
+                MEMBER.to_owned(),
+                ApprovalJoinRequest {
+                    op: "decline".to_owned(),
+                    join_request_id: "f1".to_owned(),
+                    reject_reason: "满员".to_owned(),
+                    add_to_member_blacklist: true,
+                }
+            )]
+        );
+        assert_bad_request(&handler, json!({"group_id": GROUP}));
         assert_bad_request(
-            &approve,
+            &handler,
             json!({"group_id": GROUP, "user_id": MEMBER, "approve": "yes"}),
         );
-        assert_eq!(approve.name(), "set_group_add_request");
+        assert_eq!(handler.name(), "set_group_add_request");
     }
 
     #[test]
-    fn blacklist_actions_are_unsupported() {
-        let get = GetGroupMemberBlacklistHandler::new();
-        assert_unsupported(
-            &get,
-            json!({"group_id": GROUP, "cursor": "c1", "limit": 10}),
+    fn blacklist_actions_forward_paging_and_batches() {
+        let (ctx, api) = context();
+        *api.blacklist_list.lock().unwrap() = Some(Ok(MemberBlacklistList {
+            users: Vec::new(),
+            next_cursor: "n1".to_owned(),
+        }));
+        let get = GetGroupMemberBlacklistHandler::new(ctx);
+
+        let response = block_on(get.handle(&request(
+            "get_group_member_blacklist",
+            json!({"group_id": GROUP}),
+        )))
+        .expect("查询黑名单不应失败");
+        let data = ok_data(response);
+        assert_eq!(data["next_cursor"], json!("n1"));
+        assert_eq!(data["users"], json!([]));
+        assert_eq!(
+            api.calls(),
+            vec![Call::BlacklistList(GROUP.to_owned(), None, Some(100))]
         );
         assert_bad_request(&get, json!({}));
         assert_eq!(get.name(), "get_group_member_blacklist");
 
-        let set = SetGroupMemberBlacklistHandler::new();
-        assert_unsupported(
-            &set,
+        let (ctx, api) = context();
+        *api.blacklist_update.lock().unwrap() = Some(Ok(MemberBlacklistResponse {
+            fail_openids: Vec::new(),
+        }));
+        let set = SetGroupMemberBlacklistHandler::new(ctx);
+
+        let response = block_on(set.handle(&request(
+            "set_group_member_blacklist",
             json!({"group_id": GROUP, "op": "add", "user_ids": [MEMBER]}),
+        )))
+        .expect("增删黑名单不应失败");
+        assert_eq!(ok_data(response)["fail_openids"], json!([]));
+        assert_eq!(
+            api.calls(),
+            vec![Call::BlacklistUpdate(
+                GROUP.to_owned(),
+                MemberBlacklistRequest {
+                    op: "add".to_owned(),
+                    member_openids: vec![MEMBER.to_owned()],
+                }
+            )]
         );
         assert_bad_request(&set, json!({"group_id": GROUP, "op": "add"}));
         assert_bad_request(

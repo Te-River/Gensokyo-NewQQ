@@ -57,9 +57,9 @@ pub mod openapi;
 pub mod token;
 
 pub use dto::{
-    BotInGroupState, FileUpload, GroupInfo, GroupMember, GroupMemberList, JoinRequest,
-    JoinRequestList, Markdown, MediaResponse, MessageResponse, MessageToCreate,
-    RestrictChatSetting, file_type, msg_type,
+    BotInGroupState, FileUpload, GroupInfo, GroupMember, GroupMemberList, InputNotify, JoinRequest,
+    JoinRequestList, Markdown, MediaResponse, MessageResponse, MessageToCreate, RestrictChatSetting,
+    StreamSse, file_type, msg_type,
 };
 pub use error::{ApiError, Error, Result};
 pub use http::{

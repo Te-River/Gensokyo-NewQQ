@@ -17,7 +17,11 @@
 //! | `card` | `card` + `msg_type=8` | 群聊与单聊同构；`{type:"tuwen", content:{title,description,url,pic_url}}`，四字段校验见 [`compose_card`] |
 //! | 图片 / 语音 / 视频 / 文件 | `media` + `msg_type=7` | 见下节「媒体」 |
 //! | `[CQ:reply]` | `msg_id` | 虚拟号先经 idmap / echo 还原成真实消息 ID；还原失败 `1400`，不静默丢 |
-//! | `keyboard` / `music` / `stream` / `input_notify` / `unknown` / `unknown_image` / `unknown_record` | 不支持 | `1400`（请求侧段类型），不静默丢 |
+//! | `keyboard` | `keyboard` | 与 text / markdown / card 同发，不改变 `msg_type`（Go `applyGroupMarkdownKeyboard` 口径）；`data` 必须是 JSON 对象，否则 `1400` |
+//! | `input_notify` | `input_notify` + `msg_type=6` | 仅单聊；不承载正文 / 媒体，与其它内容同条出现 `1400` |
+//! | `stream` | `stream` + `msg_type=2` | 仅单聊；正文进 `markdown.content`，`stream.state` 取 1（start / mid）/ 10（finish），见 [`compose_stream`] |
+//! | `music` / `qqmusic` | `content` | Go 是「markdown 模板 + 键盘」，Rust 侧没有歌曲信息查询与 `music_prefix` 配置，降级成分享文案，不伪造音乐卡片 |
+//! | `unknown` / `unknown_image` / `unknown_record` | 不支持 | `1400`（请求侧段类型），不静默丢 |
 //! | `active` / `wakeup` | 忽略 | 控制型标记，不影响本条发送；主动推送 / 唤醒语义仍未接线 |
 //!
 //! ## 消息体三选一
@@ -26,6 +30,11 @@
 //! markdown > card > media 取更高优先级的那个，media 与 markdown / card 同现直接 `1400`
 //! （否则必须静默丢段）。markdown 与 card 同现时 card 不参与校验（避免一张坏卡片拦住
 //! 合法的 markdown），与 Go 的「markdown 胜 card」一致。
+//!
+//! `keyboard` 是加性字段，不参与上面的优先级：文本 / markdown / card 谁胜出都照样挂上去。
+//! `input_notify`（`msg_type=6`）与 `stream`（`msg_type=2` + `stream`）则**独占**整条消息：
+//! 它们带不了正文 / 媒体，与其它内容同条出现一律 `1400`，而不是丢掉另一部分。
+//! `music` 降级成正文，与 markdown / card 同条出现同样 `1400`（正文会让位，分享文案会丢）。
 //!
 //! ## @全员 与 @用户
 //!
@@ -80,9 +89,12 @@
 use gensokyo_actions::{ActionContext, MessageOut, SendRequest, SendTarget};
 use gensokyo_core::{Error, Ob11Id, Result};
 use gensokyo_protocol::cqcode;
+use gensokyo_protocol::outbound::{InputNotifyPayload, StreamKind, StreamPayload};
 use gensokyo_protocol::{MediaRef, OutboundPlan};
 use gensokyo_qq::dto::message::{MessageCard, MessageCardContent};
-use gensokyo_qq::dto::{FileUpload, Markdown, Media, MessageToCreate, file_type, msg_type};
+use gensokyo_qq::dto::{
+    FileUpload, InputNotify, Markdown, Media, MessageToCreate, StreamSse, file_type, msg_type,
+};
 use gensokyo_storage::EchoStore;
 use serde_json::Value;
 
@@ -204,14 +216,14 @@ fn record_sent_message(echo: Option<&EchoStore>, message_id: &str) {
     }
 }
 
-/// 把一条待发送消息合成 [`MessageToCreate`]（文本 + reply + 单个 media）。
+/// 把一条待发送消息合成 [`MessageToCreate`]（文本 + reply + 单个 media + 键盘 / 输入状态 / 流式）。
 ///
 /// `openid` 由调用方从 `target` 还原：媒体上传要按群 / C2C 选端点，两者都要它。
 ///
 /// # Errors
-/// markdown 正文里的 `[CQ:at]` 缺 `qq`、markdown 里的 `at` 虚拟号无法反查、reply 无法还原，
-/// 或消息含本阶段
-/// 不支持的段。
+/// markdown 正文里的 `[CQ:at]` 缺 `qq`、markdown 里的 `at` 虚拟号无法反查、reply 无法还原、
+/// 单聊专属段（`input_notify` / `stream`）出现在群聊、它们与其它内容同条出现，或消息含本阶段
+/// 仍不支持的段。
 pub async fn compose(
     context: &ActionContext,
     target: &SendTarget,
@@ -235,17 +247,26 @@ pub async fn compose(
     }
 
     let mut out = MessageToCreate::default();
-    let rendered = render_text(context, message)?;
     // Go：`[CQ:reply]` → `msg_id`（被动回复）。事件 ID 不在计划里，不必与 `event_id` 互斥。
     if let Some(reply) = &message.plan.reply_msg_id {
         out.msg_id = Some(resolve_reply(context, deps.echo, reply)?);
     }
 
+    // 单聊专属段独占整条消息：msg_type=6 / 流式都带不了正文与媒体
+    if let Some(notify) = &message.plan.input_notify {
+        return compose_input_notify(target, &message.plan, notify, message, out.msg_id);
+    }
+    if let Some(stream) = &message.plan.stream {
+        return compose_stream(context, target, &message.plan, stream, message, out.msg_id);
+    }
+
+    let rendered = music_fallback_text(&message.plan, render_text(context, message)?)?;
     if let Some(markdown) = compose_markdown(context, &message.plan, &rendered)? {
         // markdown 胜 card，文本让位：msg_type=2 只认 markdown.content
         out.content = None;
         out.msg_type = Some(msg_type::MARKDOWN);
         out.markdown = Some(markdown);
+        out.keyboard = compose_keyboard(&message.plan)?;
         return Ok(out);
     }
     if let Some(card) = compose_card(&message.plan, &rendered)? {
@@ -253,11 +274,13 @@ pub async fn compose(
         out.content = None;
         out.msg_type = Some(msg_type::CARD);
         out.card = Some(card);
+        out.keyboard = compose_keyboard(&message.plan)?;
         return Ok(out);
     }
     if !rendered.is_empty() {
         out.content = Some(rendered);
     }
+    out.keyboard = compose_keyboard(&message.plan)?;
     if let Some(media) = compose_media(context, target, openid, &message.plan, deps).await? {
         out.media = Some(media);
         out.msg_type = Some(msg_type::RICH_MEDIA);
@@ -385,6 +408,162 @@ fn compose_card(plan: &OutboundPlan, rendered_text: &str) -> Result<Option<Messa
         .validate()
         .map_err(|err| Error::Protocol(format!("卡片字段非法（retcode 1400）: {err}")))?;
     Ok(Some(MessageCard::tuwen(content)))
+}
+
+/// 输入状态通知的缺省持续秒数（Go `sendInputNotify` 里的 `inputSecond = 60`）。
+const INPUT_NOTIFY_DEFAULT_SECONDS: i64 = 60;
+
+/// 流式消息 `stream.state`：续写（`start` / `mid`）。
+const STREAM_STATE_CONTINUE: i64 = 1;
+
+/// 流式消息 `stream.state`：结束（`finish`）。
+const STREAM_STATE_FINISH: i64 = 10;
+
+/// `[CQ:keyboard,data=…]` → `keyboard` 字段（与 text / markdown / card 同条发送）。
+///
+/// Go `applyGroupMarkdownKeyboard` 只在 markdown 之外单独挂键盘时赋值，且不动 `msg_type`：
+/// 键盘是加性字段，不参与 msg_type 的优先级。`foundItems["keyboard"]` 已是 JSON 串
+/// （协议层把对象 / `base64://` 归一成 JSON），多份只发第一份（与 markdown / card 同口径）。
+/// 非 JSON / 非对象一律 `1400`：Go 那边是静默不挂键盘，Rust 侧不吞用户配置。
+fn compose_keyboard(plan: &OutboundPlan) -> Result<Option<Value>> {
+    let Some(payload) = plan.keyboard.first() else {
+        return Ok(None);
+    };
+    let value: Value = serde_json::from_str(&payload.raw)
+        .map_err(|error| Error::Protocol(format!("keyboard 载荷不是合法 JSON: {error}")))?;
+    if !value.is_object() {
+        return Err(Error::Protocol("keyboard 载荷不是 JSON 对象".to_owned()));
+    }
+    Ok(Some(value))
+}
+
+/// `[CQ:input_notify]` → `msg_type=6` + `input_notify`（仅单聊）。
+///
+/// 官方只有 C2C 支持输入状态，群聊一律 `1400`。`msg_type` 只能取一个值，正文 / 媒体 /
+/// markdown / 卡片 / 键盘都带不进去：同时出现直接 `1400`，而不是清空正文静默丢弃
+/// （Go 是先发通知再发正文两条消息，deferred 一次计划只发一条）。
+fn compose_input_notify(
+    target: &SendTarget,
+    plan: &OutboundPlan,
+    notify: &InputNotifyPayload,
+    message: &MessageOut,
+    msg_id: Option<String>,
+) -> Result<MessageToCreate> {
+    if matches!(target, SendTarget::Group(_)) {
+        return Err(Error::Protocol(
+            "[CQ:input_notify] 只有单聊支持（官方 msg_type=6 仅 C2C）".to_owned(),
+        ));
+    }
+    if !message.text.trim().is_empty()
+        || !plan.markdown.is_empty()
+        || !plan.card.is_empty()
+        || !plan.keyboard.is_empty()
+        || has_media(plan)
+    {
+        return Err(Error::Protocol(
+            "[CQ:input_notify] 必须单独成条：msg_type=6 不承载正文 / 媒体 / markdown / 卡片 / 键盘"
+                .to_owned(),
+        ));
+    }
+    Ok(MessageToCreate {
+        msg_type: Some(msg_type::INPUT_NOTIFY),
+        input_notify: Some(InputNotify {
+            input_type: notify.kind,
+            input_second: notify.second.unwrap_or(INPUT_NOTIFY_DEFAULT_SECONDS),
+        }),
+        msg_id,
+        ..MessageToCreate::default()
+    })
+}
+
+/// `[CQ:stream]` → `msg_type=2` + `stream`（仅单聊的流式消息，Go `MessageSSE` 口径）。
+///
+/// Go 的 SSE 分支（`handlers/send_private_msg_sse.go`）把正文塞进 `markdown.content`、
+/// 阶段写进 `stream.state`：`start` / `mid` 是 1（续写），`finish` 是 10（结束）。
+/// `mid` / `finish` 必须带 `id`（首片返回的 `stream_msg_id`）：缺了服务端无从续写，
+/// 这里直接 `1400`，而不是发一条会被丢掉的分片。群聊官方不支持流式，`1400`。
+fn compose_stream(
+    context: &ActionContext,
+    target: &SendTarget,
+    plan: &OutboundPlan,
+    stream: &StreamPayload,
+    message: &MessageOut,
+    msg_id: Option<String>,
+) -> Result<MessageToCreate> {
+    if matches!(target, SendTarget::Group(_)) {
+        return Err(Error::Protocol(
+            "[CQ:stream] 只有单聊支持流式消息".to_owned(),
+        ));
+    }
+    if !plan.markdown.is_empty()
+        || !plan.card.is_empty()
+        || !plan.keyboard.is_empty()
+        || has_media(plan)
+    {
+        return Err(Error::Protocol(
+            "[CQ:stream] 不能与 markdown / 卡片 / 键盘 / 媒体同条发送（流式消息自带正文与 msg_type=2）"
+                .to_owned(),
+        ));
+    }
+    let state = match &stream.kind {
+        StreamKind::Start | StreamKind::Mid => STREAM_STATE_CONTINUE,
+        StreamKind::Finish => STREAM_STATE_FINISH,
+        StreamKind::Other(kind) => {
+            return Err(Error::Protocol(format!(
+                "[CQ:stream] 未知阶段 {kind}（只支持 start / mid / finish）"
+            )));
+        }
+    };
+    if !matches!(stream.kind, StreamKind::Start) && stream.id.is_none() {
+        return Err(Error::Protocol(
+            "[CQ:stream] mid / finish 必须带 id（首片返回的 stream_msg_id）".to_owned(),
+        ));
+    }
+
+    let mut out = MessageToCreate {
+        msg_type: Some(msg_type::MARKDOWN),
+        msg_id,
+        ..MessageToCreate::default()
+    };
+    if !message.text.trim().is_empty() {
+        // 流式正文走 markdown 通道：`[CQ:at]` 要转成 `<qqbot-at-user>` 才渲染
+        let content = if message.auto_escape {
+            message.text.clone()
+        } else {
+            render_markdown(context, &message.text)?
+        };
+        out.markdown = Some(Markdown::content(content));
+    }
+    out.stream = Some(StreamSse {
+        state,
+        index: stream.index.unwrap_or(0),
+        id: stream.id.clone(),
+    });
+    Ok(out)
+}
+
+/// `[CQ:music]` / `qqmusic` → 正文分享文案（Go「markdown 模板 + 键盘」的降级形态）。
+///
+/// Go 会去 QQ 音乐查曲目，再拼模板 markdown 与「立刻播放 / 我也要点歌」键盘；Rust 侧既没有
+/// 歌曲信息查询，也没有 `music_prefix` 配置，凭空拼键盘等于伪造卡片，因此只降级成一行文案，
+/// 并保留曲目 id 不丢信息。只取第一首（与 Go `foundItems["qqmusic"][0]` 同口径）。
+/// 与 markdown / card 同条出现 `1400`：那两条路径会让正文让位，分享文案会被静默丢掉。
+fn music_fallback_text(plan: &OutboundPlan, rendered: String) -> Result<String> {
+    let Some(id) = plan.qqmusic.first() else {
+        return Ok(rendered);
+    };
+    if !plan.markdown.is_empty() || !plan.card.is_empty() {
+        return Err(Error::Protocol(
+            "[CQ:music] 不能与 markdown / card 同条发送：分享文案走正文，markdown / 卡片会让正文让位"
+                .to_owned(),
+        ));
+    }
+    let share = format!("分享一首 QQ 音乐：{id}");
+    Ok(if rendered.is_empty() {
+        share
+    } else {
+        format!("{rendered}\n{share}")
+    })
 }
 
 /// 文本主体 → v2 `content`：`[CQ:at,qq=…]` 转 `<@openid>`，`qq=all` / `everyone` 转 @全员标签，
@@ -622,13 +801,11 @@ async fn compose_media(
     }))
 }
 
-/// 本阶段不支持的消息段；返回第一个命中的段名。
+/// 本阶段仍不支持的消息段；返回第一个命中的段名。
+///
+/// `keyboard` / `music` / `stream` / `input_notify` 已按 Go 口径落地，不再走这里。
 fn unsupported_segment(plan: &OutboundPlan) -> Option<&'static str> {
-    let candidates: [(&'static str, bool); 7] = [
-        ("keyboard", !plan.keyboard.is_empty()),
-        ("music", !plan.qqmusic.is_empty()),
-        ("stream", plan.stream.is_some()),
-        ("input_notify", plan.input_notify.is_some()),
+    let candidates: [(&'static str, bool); 3] = [
         ("unknown", !plan.extra.is_empty()),
         ("unknown_image", !plan.unknown_images.is_empty()),
         ("unknown_record", !plan.unknown_records.is_empty()),
@@ -647,11 +824,14 @@ mod tests {
     use gensokyo_config::ConfigManager;
     use gensokyo_core::{Error, Ob11Id, Result};
     use gensokyo_media::{BoxFuture, FetchRequest, Fetcher, MediaTransport, TransportResponse};
-    use gensokyo_protocol::outbound::{CardFields, CardPayload, MarkdownPayload};
+    use gensokyo_protocol::outbound::{
+        CardFields, CardPayload, InputNotifyPayload, KeyboardPayload, MarkdownPayload, StreamKind,
+        StreamPayload,
+    };
     use gensokyo_protocol::{MediaRef, OutboundPlan};
     use gensokyo_qq::dto::{
-        BotInGroupState, FileUpload, GroupInfo, GroupMember, GroupMemberList, JoinRequestList,
-        MediaResponse, MessageResponse, MessageToCreate, file_type, msg_type,
+        BotInGroupState, FileUpload, GroupInfo, GroupMember, GroupMemberList, InputNotify,
+        JoinRequestList, MediaResponse, MessageResponse, MessageToCreate, file_type, msg_type,
     };
     use gensokyo_storage::{EchoStore, IdMapOptions, IdMapStore};
     use tempfile::TempDir;
@@ -1231,6 +1411,366 @@ mod tests {
         // 出站 JSON 只有 content：模板字段已废弃，不构造也不透传
         let value = serde_json::to_value(&sent[0]).expect("序列化失败");
         assert_eq!(value["markdown"], serde_json::json!({"content": "# 标题"}));
+    }
+
+    // ---- keyboard ----
+
+    fn keyboard_plan(raw: &str) -> OutboundPlan {
+        OutboundPlan {
+            keyboard: vec![KeyboardPayload {
+                raw: raw.to_owned(),
+            }],
+            ..OutboundPlan::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn keyboard_is_attached_without_changing_msg_type() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let mut plan = group_request(keyboard_plan(r#"{"content":{"rows":[]}}"#));
+        plan.message.text = "带按钮的文本".to_owned();
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("键盘 + 文本应发送成功");
+
+        let sent = api.sent();
+        assert_eq!(sent[0].content.as_deref(), Some("带按钮的文本"));
+        assert_eq!(sent[0].msg_type, None, "键盘不改变 msg_type（Go 同口径）");
+        assert_eq!(
+            sent[0].keyboard,
+            Some(serde_json::json!({"content": {"rows": []}}))
+        );
+    }
+
+    #[tokio::test]
+    async fn keyboard_rides_along_with_markdown() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let plan = group_request(OutboundPlan {
+            markdown: vec![
+                MarkdownPayload::from_json(r##"{"content":"# 标题"}"##).expect("markdown 载荷"),
+            ],
+            keyboard: vec![KeyboardPayload {
+                raw: r#"{"id":"tpl_1"}"#.to_owned(),
+            }],
+            ..OutboundPlan::default()
+        });
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("markdown + 键盘应发送成功");
+
+        let sent = api.sent();
+        assert_eq!(sent[0].msg_type, Some(msg_type::MARKDOWN));
+        assert_eq!(
+            sent[0]
+                .markdown
+                .as_ref()
+                .and_then(|markdown| markdown.content.as_deref()),
+            Some("# 标题")
+        );
+        assert_eq!(
+            sent[0].keyboard,
+            Some(serde_json::json!({"id": "tpl_1"})),
+            "键盘必须与 markdown 同条挂上"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_keyboard_payload_is_a_request_error() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let plan = group_request(keyboard_plan("not-json"));
+
+        let err = execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect_err("非法 keyboard 载荷必须报错");
+
+        assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
+        assert!(api.sent().is_empty(), "非法键盘不应发送");
+    }
+
+    // ---- input_notify ----
+
+    fn input_notify_plan(target: SendTarget, second: Option<i64>) -> SendRequest {
+        request(
+            target,
+            OutboundPlan {
+                input_notify: Some(InputNotifyPayload { kind: 1, second }),
+                ..OutboundPlan::default()
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn input_notify_private_sends_msg_type_six() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let plan = input_notify_plan(SendTarget::Private(OPENID.to_owned()), None);
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("单聊输入状态应发送成功");
+
+        let sent = api.sent();
+        assert_eq!(sent[0].msg_type, Some(msg_type::INPUT_NOTIFY));
+        assert_eq!(
+            sent[0].input_notify,
+            Some(InputNotify {
+                input_type: 1,
+                input_second: 60,
+            }),
+            "second 缺省 60（Go 同口径）"
+        );
+        let value = serde_json::to_value(&sent[0]).expect("序列化失败");
+        assert_eq!(
+            value["input_notify"],
+            serde_json::json!({"input_type": 1, "input_second": 60})
+        );
+    }
+
+    #[tokio::test]
+    async fn input_notify_keeps_explicit_seconds() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let plan = input_notify_plan(SendTarget::Private(OPENID.to_owned()), Some(5));
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("单聊输入状态应发送成功");
+
+        assert_eq!(
+            api.sent()[0].input_notify,
+            Some(InputNotify {
+                input_type: 1,
+                input_second: 5,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn input_notify_in_group_is_a_request_error() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let plan = input_notify_plan(SendTarget::Group(OPENID.to_owned()), None);
+
+        let err = execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect_err("群聊输入状态必须报错");
+
+        assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
+        assert!(api.sent().is_empty(), "群聊输入状态不应发送");
+    }
+
+    #[tokio::test]
+    async fn input_notify_with_text_is_a_request_error() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let mut plan = input_notify_plan(SendTarget::Private(OPENID.to_owned()), None);
+        plan.message.text = "正文".to_owned();
+
+        let err = execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect_err("输入状态与正文同条必须报错");
+
+        assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
+        assert!(api.sent().is_empty(), "混用不应发送");
+    }
+
+    // ---- stream ----
+
+    fn stream_plan(
+        target: SendTarget,
+        kind: StreamKind,
+        id: Option<&str>,
+        index: Option<i64>,
+    ) -> SendRequest {
+        request(
+            target,
+            OutboundPlan {
+                stream: Some(StreamPayload {
+                    kind,
+                    qq: Ob11Id::str(OPENID),
+                    id: id.map(str::to_owned),
+                    index,
+                    seq: None,
+                }),
+                ..OutboundPlan::default()
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn stream_start_sends_markdown_with_state_one() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let mut plan = stream_plan(
+            SendTarget::Private(OPENID.to_owned()),
+            StreamKind::Start,
+            None,
+            None,
+        );
+        plan.message.text = "你好".to_owned();
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("单聊流式首片应发送成功");
+
+        let sent = api.sent();
+        assert_eq!(sent[0].msg_type, Some(msg_type::MARKDOWN));
+        assert_eq!(
+            sent[0]
+                .markdown
+                .as_ref()
+                .and_then(|markdown| markdown.content.as_deref()),
+            Some("你好"),
+            "正文进 markdown.content（Go MessageSSE 口径）"
+        );
+        let stream = sent[0].stream.as_ref().expect("应带 stream");
+        assert_eq!(stream.state, 1);
+        assert_eq!(stream.index, 0);
+        assert_eq!(stream.id, None);
+    }
+
+    #[tokio::test]
+    async fn stream_finish_sends_state_ten_with_stream_id() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let plan = stream_plan(
+            SendTarget::Private(OPENID.to_owned()),
+            StreamKind::Finish,
+            Some("STREAM-1"),
+            Some(2),
+        );
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("单聊流式终片应发送成功");
+
+        let sent = api.sent();
+        assert_eq!(sent[0].markdown, None, "没有正文时不出 markdown 字段");
+        let stream = sent[0].stream.as_ref().expect("应带 stream");
+        assert_eq!(stream.state, 10, "finish 的 state 是 10");
+        assert_eq!(stream.index, 2);
+        assert_eq!(stream.id.as_deref(), Some("STREAM-1"));
+    }
+
+    #[tokio::test]
+    async fn stream_mid_without_id_is_a_request_error() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let plan = stream_plan(
+            SendTarget::Private(OPENID.to_owned()),
+            StreamKind::Mid,
+            None,
+            Some(1),
+        );
+
+        let err = execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect_err("续片缺 stream_msg_id 必须报错");
+
+        assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
+        assert!(api.sent().is_empty(), "缺 id 不应发送");
+    }
+
+    #[tokio::test]
+    async fn stream_in_group_is_a_request_error() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let plan = stream_plan(
+            SendTarget::Group(OPENID.to_owned()),
+            StreamKind::Start,
+            None,
+            None,
+        );
+
+        let err = execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect_err("群聊流式必须报错");
+
+        assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
+        assert!(api.sent().is_empty(), "群聊流式不应发送");
+    }
+
+    // ---- music ----
+
+    #[tokio::test]
+    async fn music_falls_back_to_share_text() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let plan = request(
+            SendTarget::Private(OPENID.to_owned()),
+            OutboundPlan {
+                qqmusic: vec!["003OUlho2HcRHC".to_owned()],
+                ..OutboundPlan::default()
+            },
+        );
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("音乐分享应降级成文本发出");
+
+        let sent = api.sent();
+        assert_eq!(
+            sent[0].content.as_deref(),
+            Some("分享一首 QQ 音乐：003OUlho2HcRHC"),
+            "不伪造音乐卡片，只发分享文案"
+        );
+        assert_eq!(sent[0].msg_type, None, "降级后是普通文本消息");
+    }
+
+    #[tokio::test]
+    async fn music_with_markdown_is_a_request_error() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let plan = group_request(OutboundPlan {
+            qqmusic: vec!["003OUlho2HcRHC".to_owned()],
+            markdown: vec![
+                MarkdownPayload::from_json(r##"{"content":"# 标题"}"##).expect("markdown 载荷"),
+            ],
+            ..OutboundPlan::default()
+        });
+
+        let err = execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect_err("音乐与 markdown 同条必须报错");
+
+        assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
+        assert!(api.sent().is_empty(), "混用不应发送");
+    }
+
+    #[tokio::test]
+    async fn unknown_image_is_still_a_request_error() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let plan = group_request(OutboundPlan {
+            unknown_images: vec![MediaRef::Unknown("FILE-INFO".to_owned())],
+            ..OutboundPlan::default()
+        });
+
+        let err = execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect_err("unknown_image 仍是 1400");
+
+        assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
+        assert!(api.sent().is_empty(), "不支持的段不应发送");
     }
 
     #[tokio::test]
