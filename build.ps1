@@ -96,9 +96,16 @@ function Invoke-GensokyoBuild {
     $outPath = "release/$outName"
 
     Write-Host "[build] $($Target.GOOS)/$($Target.GOARCH) -> $outPath" -ForegroundColor Yellow
-    go build -trimpath -ldflags="$Ldflags" $tagArg -v -o $outPath .
+    # PowerShell 5.1 会把原生命令的 stderr 记录当成错误：$ErrorActionPreference='Stop' 时
+    # go 写到 stderr 的模块下载/构建提示会被误判为失败（产物其实已生成）。
+    # 此调用只在本函数作用域内降到 Continue，成功与否只看 $LASTEXITCODE。
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    go build -trimpath -ldflags="$Ldflags" $tagArg -o $outPath .
+    $buildExitCode = $LASTEXITCODE
+    $ErrorActionPreference = $prevEap
 
-    if ($LASTEXITCODE -ne 0) {
+    if ($buildExitCode -ne 0) {
         throw "Build failed: $($Target.GOOS)/$($Target.GOARCH)"
     }
 
@@ -126,10 +133,23 @@ function Invoke-Upx {
 
     foreach ($output in $Outputs) {
         Write-Host "[upx] Compressing $output..." -ForegroundColor Yellow
-        & $upx.Source "-$UPXLevel" $output
-        if ($LASTEXITCODE -ne 0) {
+        # UPX 对已压缩的产物会返回非 0 并抛 AlreadyPackedException（复跑场景属正常），
+        # 且提示走 stderr：本地降到 Continue 以便捕获输出，按输出 + 退出码判定
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $upxOutput = (& $upx.Source "-$UPXLevel" $output 2>&1 | Out-String).Trim()
+        $upxExitCode = $LASTEXITCODE
+        $ErrorActionPreference = $prevEap
+
+        if ($upxExitCode -ne 0) {
+            if ($upxOutput -match 'AlreadyPacked') {
+                Write-Host "  already packed, skip: $output" -ForegroundColor DarkYellow
+                continue
+            }
+            if ($upxOutput) { Write-Host $upxOutput -ForegroundColor Red }
             throw "UPX failed: $output"
         }
+        if ($upxOutput) { Write-Host $upxOutput }
     }
 }
 
