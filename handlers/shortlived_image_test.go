@@ -82,6 +82,18 @@ func withShortLivedUploadSeam(t *testing.T, seam *slUploadSeam) {
 	t.Cleanup(func() { markdownImageUpload = old })
 }
 
+// withShortLivedStaticBytes 只命中指定外链、自取直接回固定字节（离线，不触网）。
+func withShortLivedStaticBytes(t *testing.T, want string, data []byte) {
+	t.Helper()
+	oldMatch, oldFetch, oldSSRF := isShortLivedImageURL, selfFetchBytes, selfFetchSSRFBlocked
+	isShortLivedImageURL = slMatcher(want)
+	selfFetchBytes = func(string) ([]byte, error) { return data, nil }
+	selfFetchSSRFBlocked = func(string) bool { return false }
+	t.Cleanup(func() {
+		isShortLivedImageURL, selfFetchBytes, selfFetchSSRFBlocked = oldMatch, oldFetch, oldSSRF
+	})
+}
+
 // withShortLivedResolveSeam 覆写直链解析注入缝，用例结束后恢复。
 func withShortLivedResolveSeam(t *testing.T, resolve func(string) (string, error)) {
 	t.Helper()
@@ -129,6 +141,12 @@ type slMockAPI struct {
 
 	groupMsgs []dto.APIMessage
 	c2cMsgs   []dto.APIMessage
+}
+
+// PrepareMediaImage 本套用例不校验素材链：一律失败，让调用方走既有外链兜底；
+// 素材链自身的断言见 media_asset_test.go。
+func (m *slMockAPI) PrepareMediaImage(context.Context, *dto.MediaImagePrepareRequest) (*dto.MediaImagePrepareResponse, error) {
+	return nil, errors.New("素材链未启用（slMockAPI）")
 }
 
 func (m *slMockAPI) PostGroupMessage(_ context.Context, _ string, msg dto.APIMessage) (*dto.GroupMessageResponse, error) {
@@ -375,18 +393,12 @@ func TestUploadImageBytesToPublicURLAdoptsResolvedDirect(t *testing.T) {
 	}
 }
 
-// TestSelfFetchToStableImageURLResolvedDirect ① 直链解析成功分支：直接返回直链，
-// 不触发自取、不触达上传链（计数缝证明零网络）。
-func TestSelfFetchToStableImageURLResolvedDirect(t *testing.T) {
+// TestSelfFetchToStableImageURLFallsBackToDirect 素材链不可用（slMockAPI 的 prepare 恒失败）→
+// 退回直链解析（只读响应头，成本低），成功即采纳直链、不触达既有外链上传链。
+func TestSelfFetchToStableImageURLFallsBackToDirect(t *testing.T) {
 	const shortURL = "https://t1.chatglm.cn/file/x.png?expired_at=1&sign=a"
 	const directURL = "https://pfiles.chatglm.cn/file/x.png?x-oss-expires=899&sign=oss"
-	var fetchCalls int
-	oldFetch := selfFetchBytes
-	selfFetchBytes = func(string) ([]byte, error) {
-		fetchCalls++
-		return nil, errors.New("解析成功分支不应自取")
-	}
-	t.Cleanup(func() { selfFetchBytes = oldFetch })
+	withShortLivedStaticBytes(t, shortURL, slPNG())
 	withShortLivedResolveSeam(t, func(raw string) (string, error) {
 		if raw != shortURL {
 			t.Errorf("解析入参应为短签名外链: %q", raw)
@@ -398,13 +410,10 @@ func TestSelfFetchToStableImageURLResolvedDirect(t *testing.T) {
 
 	got, ok := selfFetchToStableImageURL(&slMockAPI{}, shortURL)
 	if !ok || got != directURL {
-		t.Fatalf("解析成功应直接采纳直链: url=%q ok=%v", got, ok)
-	}
-	if fetchCalls != 0 {
-		t.Fatalf("解析成功后不得自取字节，实际 %d 次", fetchCalls)
+		t.Fatalf("素材链不可用应退回直链: url=%q ok=%v", got, ok)
 	}
 	if len(seam.gotBase64) != 0 {
-		t.Fatalf("解析成功后不得触达上传链，实际 %d 次", len(seam.gotBase64))
+		t.Fatalf("直链兜底成功不得触达上传链，实际 %d 次", len(seam.gotBase64))
 	}
 }
 

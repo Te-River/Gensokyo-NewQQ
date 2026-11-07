@@ -2622,6 +2622,11 @@ func ResolveMarkdownImages(content string, apiv2 openapi.OpenAPI) string {
 		if strings.HasPrefix(mediaPath, "data:") {
 			return "", false
 		}
+		// 素材管理引用（qqbot-media://image/v1/<token>）由平台托管：令牌与机器人绑定，
+		// 本地无从校验，改写还会破坏引用本身，原样透传
+		if strings.HasPrefix(mediaPath, "qqbot-media://") {
+			return "", false
+		}
 		localPath := trimFilePrefix(mediaPath)
 		// 安全校验：防止路径穿越
 		safePath, err := safeLocalPath(localPath, ".")
@@ -2635,13 +2640,10 @@ func ResolveMarkdownImages(content string, apiv2 openapi.OpenAPI) string {
 			mylog.Printf("Error reading local image for markdown: %v", err)
 			return "", false
 		}
-		base64Encoded := base64.StdEncoding.EncodeToString(imageData)
-		cdnURL, _, _, err := images.UploadBase64ImageToServer(base64Encoded, apiv2)
-		if err != nil {
-			mylog.Printf("Error uploading image for markdown: %v", err)
-			return "", false
+		if ref, ok := resolveLocalImageMedia(apiv2, imageData); ok {
+			return ref, true
 		}
-		return cdnURL, true
+		return "", false
 	})
 }
 
@@ -2671,6 +2673,10 @@ func ResolveKeyboardImages(kb *keyboard.MessageKeyboard, apiv2 openapi.OpenAPI) 
 					if strings.HasPrefix(mediaPath, "data:") {
 						return "", false
 					}
+					// 素材管理引用由平台托管，原样透传（同 Markdown 口径）
+					if strings.HasPrefix(mediaPath, "qqbot-media://") {
+						return "", false
+					}
 					localPath := trimFilePrefix(mediaPath)
 					safePath, err := safeLocalPath(localPath, ".")
 					if err != nil {
@@ -2683,13 +2689,10 @@ func ResolveKeyboardImages(kb *keyboard.MessageKeyboard, apiv2 openapi.OpenAPI) 
 						mylog.Printf("Error reading local image for keyboard: %v", err)
 						return "", false
 					}
-					base64Encoded := base64.StdEncoding.EncodeToString(imageData)
-					cdnURL, _, _, err := images.UploadBase64ImageToServer(base64Encoded, apiv2)
-					if err != nil {
-						mylog.Printf("Error uploading image for keyboard: %v", err)
-						return "", false
+					if ref, ok := resolveLocalImageMedia(apiv2, imageData); ok {
+						return ref, true
 					}
-					return cdnURL, true
+					return "", false
 				})
 			}
 			if btn.RenderData.VisitedLabel != "" {
@@ -2704,6 +2707,10 @@ func ResolveKeyboardImages(kb *keyboard.MessageKeyboard, apiv2 openapi.OpenAPI) 
 					if strings.HasPrefix(mediaPath, "data:") {
 						return "", false
 					}
+					// 素材管理引用由平台托管，原样透传（同 Markdown 口径）
+					if strings.HasPrefix(mediaPath, "qqbot-media://") {
+						return "", false
+					}
 					localPath := trimFilePrefix(mediaPath)
 					safePath, err := safeLocalPath(localPath, ".")
 					if err != nil {
@@ -2716,13 +2723,10 @@ func ResolveKeyboardImages(kb *keyboard.MessageKeyboard, apiv2 openapi.OpenAPI) 
 						mylog.Printf("Error reading local image for keyboard: %v", err)
 						return "", false
 					}
-					base64Encoded := base64.StdEncoding.EncodeToString(imageData)
-					cdnURL, _, _, err := images.UploadBase64ImageToServer(base64Encoded, apiv2)
-					if err != nil {
-						mylog.Printf("Error uploading image for keyboard: %v", err)
-						return "", false
+					if ref, ok := resolveLocalImageMedia(apiv2, imageData); ok {
+						return ref, true
 					}
-					return cdnURL, true
+					return "", false
 				})
 			}
 		}
