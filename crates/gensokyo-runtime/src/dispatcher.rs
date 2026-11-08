@@ -35,9 +35,10 @@ use std::time::Duration;
 use futures::FutureExt;
 use gensokyo_actions::{ActionContext, ForwardRequest, SendRequest, SseRequest};
 use gensokyo_core::Error as CoreError;
+use gensokyo_core::telemetry::metrics;
 use gensokyo_protocol::Registry;
 use gensokyo_protocol::action::{ActionRequest, ActionResponse, Echo};
-use gensokyo_storage::EchoStore;
+use gensokyo_storage::{BotStatsStore, EchoStore};
 use serde_json::{Value, json};
 
 use crate::deferred::DeferredDeps;
@@ -58,6 +59,7 @@ pub struct Dispatcher {
     actions: Option<Arc<ActionContext>>,
     media: Arc<MediaRuntime>,
     echo: Option<Arc<EchoStore>>,
+    botstats: Option<Arc<BotStatsStore>>,
     hub: Option<EventHub>,
     forward_interval: Duration,
 }
@@ -71,6 +73,7 @@ impl Dispatcher {
             actions: None,
             media: Arc::new(MediaRuntime::default()),
             echo: None,
+            botstats: None,
             hub: None,
             forward_interval: crate::deferred::DEFAULT_FORWARD_SEND_INTERVAL,
         }
@@ -102,6 +105,15 @@ impl Dispatcher {
     #[must_use]
     pub fn with_hub(mut self, hub: Option<EventHub>) -> Self {
         self.hub = hub;
+        self
+    }
+
+    /// 挂上 botstats 统计库：每次 deferred 发送成功的当日计数 +1（Go `botstats.RecordMessageSent`）。
+    ///
+    /// 未挂时只递增内存指标 [`metrics::MESSAGES_SENT`]——统计库打不开不阻断发送。
+    #[must_use]
+    pub fn with_botstats(mut self, botstats: Option<Arc<BotStatsStore>>) -> Self {
+        self.botstats = botstats;
         self
     }
 
@@ -158,7 +170,10 @@ impl Dispatcher {
             // 计划只是 handler → runtime 的内部握手载荷，不能泄漏给客户端。
             let echo = response.echo.clone();
             response = match self.run_deferred(data, echo.as_ref()).await {
-                Ok(outcome) => ActionResponse::ok(outcome).with_echo(echo),
+                Ok(outcome) => {
+                    self.record_message_sent();
+                    ActionResponse::ok(outcome).with_echo(echo)
+                }
                 Err((retcode, message)) => failure(retcode, message, echo),
             };
         }
@@ -190,6 +205,7 @@ impl Dispatcher {
         };
         let deps = DeferredDeps {
             media: self.media.as_ref(),
+            hosting: crate::hosting::shared(),
             echo: self.echo.as_deref(),
             hub: self.hub.as_ref(),
             forward_send_interval: self.forward_interval,
@@ -224,6 +240,21 @@ impl Dispatcher {
             .await
             .map_err(|err| (deferred_retcode(&err), err.to_string()))?;
         Ok(json!({ "message_id": message_id }))
+    }
+
+    /// 一条 deferred 计划发送成功后记账（Go `botstats.RecordMessageSent` 的等价物）。
+    ///
+    /// 内存指标与 botstats 一起递增；统计库打不开 / 未装配时只丢掉落盘部分，发送不受影响。
+    /// 合并转发按**一条计划**记 1 次（Go 在 `message_parser` 里逐条解析时记账，转发分支会记
+    /// 多次），这是与 Go 唯一的口径差异。
+    fn record_message_sent(&self) {
+        metrics::MESSAGES_SENT.inc();
+        let Some(stats) = self.botstats.as_deref() else {
+            return;
+        };
+        if let Err(err) = stats.record_sent() {
+            tracing::warn!(error = %err, "botstats 写入失败，本次发送只计内存指标");
+        }
     }
 }
 

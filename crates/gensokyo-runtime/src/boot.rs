@@ -171,6 +171,8 @@ impl Runtime {
     /// # Errors
     /// 同 [`Runtime::start`]。
     pub async fn start_with(state: AppState, options: RuntimeOptions) -> Result<RuntimeHandle> {
+        // 锚定 uptime 起点：Go 在包初始化时记 `mylog.StartTime`，这里贴近进程启动（幂等）。
+        gensokyo_core::telemetry::metrics::mark_start();
         let state = Self::attach_echo(state);
         let state = Self::attach_idmap(state);
         let settings = state.config().snapshot();

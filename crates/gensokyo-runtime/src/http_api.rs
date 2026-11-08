@@ -2,6 +2,8 @@
 //!
 //! - `POST` 任意路径，body 是一个 OneBot action 请求 JSON，响应即 [`gensokyo_protocol::ActionResponse`]；
 //! - `GET /health` 返回健康检查文本，**不鉴权**（只含服务名，无敏感信息，方便探活）；
+//! - `GET /metrics` 返回 Prometheus 文本（`text/plain; version=0.0.4`），**不鉴权**（同 Go
+//!   `main.go:550` 挂在 HTTP API listener 上的那份）；
 //! - `GET /` 未挂 WebUI 时同样回健康检查文本；挂 WebUI 后 `/` 归前端首页，探活固定走
 //!   `/health`（见下文「挂 WebUI 后的优先级」）；
 //! - `http_access_token` 非空时，`Authorization: Bearer <token>` 或 `?access_token=` 必须匹配，
@@ -47,6 +49,9 @@ const MAX_ACTION_BODY: usize = 2 * 1024 * 1024;
 /// 健康检查正文；`/health` 与未挂 WebUI 时的 `/` 共用。
 const HEALTH_BODY: &str = "gensokyo-runtime: ok";
 
+/// Prometheus 文本格式的 Content-Type（与 Go `MetricsHandler` 显式设置的一致）。
+const METRICS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
+
 /// 独立健康检查路由：`GET /health` → 200 `text/plain`，不鉴权、不进 action 分派。
 ///
 /// 挂 WebUI 后 `/` 被前端首页占用，探活只能固定走这条路径。WebUI 的静态回退只处理
@@ -59,11 +64,24 @@ where
     Router::new().route("/health", get(health))
 }
 
+/// Prometheus 指标路由：`GET /metrics` → 200 `text/plain; version=0.0.4`，不鉴权。
+///
+/// 对应 Go `main.go:550` 挂在 HTTP API listener 上的那份（不带 uploadAuth）。Go 还在主服务器
+/// `main.go:522` 挂了一份带 uploadAuth 的；Rust 只在 HTTP API 端口提供——主 listener 缺
+/// uploadAuth 的等价中间件，公网暴露消息量不合适，等该中间件落地再补。
+pub(crate) fn metrics_router<S>() -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    Router::new().route("/metrics", get(metrics))
+}
+
 /// 正向 HTTP API 路由；`http_address` 的判定在 [`crate::boot::Runtime`]。
 pub(crate) fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(health).post(action))
         .merge(health_router())
+        .merge(metrics_router())
         .fallback(action)
         .with_state(state)
 }
@@ -76,11 +94,21 @@ pub(crate) fn router(state: AppState) -> Router {
 pub(crate) fn with_webui_router(webui: Router, state: AppState) -> Router {
     webui
         .merge(health_router())
+        .merge(metrics_router())
         .layer(middleware::from_fn_with_state(state, action_gate))
 }
 
 async fn health() -> &'static str {
     HEALTH_BODY
+}
+
+/// Prometheus 文本；指标集合与数值格式见 [`gensokyo_core::telemetry::metrics`]。
+async fn metrics() -> Response {
+    (
+        [(header::CONTENT_TYPE, METRICS_CONTENT_TYPE)],
+        gensokyo_core::telemetry::metrics::render_prometheus_text(),
+    )
+        .into_response()
 }
 
 async fn action(

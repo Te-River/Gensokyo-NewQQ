@@ -13,7 +13,7 @@
 //!   `ws_server_token`），连上即 `lifecycle/connect`，随后订阅总线推事件与心跳，多客户端并发，
 //!   断开即清理。
 //! - [`http_api`]：正向 HTTP API（`http_address` / `http_access_token`），`POST` 任意路径，
-//!   `GET /` 健康检查。
+//!   `GET /` 健康检查、`GET /metrics` Prometheus 文本（对齐 Go `MetricsHandler`）。
 //! - [`boot::Runtime`]：装配两个 listener，返回实际监听地址与优雅关闭句柄。
 //!
 //! # M1h-b 覆盖范围（反向 WS + webhook + 入站事件转换）
@@ -108,6 +108,7 @@ pub mod dispatcher;
 pub mod event_hub;
 /// QQ 上游事件 WS 网关客户端：`/gateway/bot` → Identify/Resume → dispatch（任务 #70）。
 pub mod gateway;
+pub mod hosting;
 pub mod http_api;
 /// QQ 事件 → OneBot 事件（`Processor/`，M1h-b）。
 pub mod inbound;

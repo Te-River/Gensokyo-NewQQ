@@ -14,7 +14,7 @@
 //! |----|------|------|
 //! | 文本 | `content` | 按 CQ 重新分词，`[CQ:at,qq=…]` 转 v2 的 `<@openid>`（虚拟号经 idmap 反查）；缺 `qq` 的 at 段（`[CQ:at]` / `[CQ:at ]` / `[CQ:at,foo]` / `[CQ:at,qq=]`）与反查失败的数字虚拟号都原样透传（后者只 `warn`）；`at` 后与键值两侧允许空白（`[CQ:at , qq = 1]` 照常解析）；`auto_escape = true` 时原样发送、不解析 |
 //! | `[CQ:at,qq=all]` / `[CQ:at,qq=everyone]` / 字面 `<qqbot-at-everyone />` | `<qqbot-at-everyone />` | 仅群聊，且受「每群每自然日 1 次」限制，见下节「@全员」 |
-//! | `markdown` | `markdown` + `msg_type=2` | 只取 `content`：模板字段（`template_id` / `custom_template_id`）已废弃，出站不构造；文本被丢弃、`card` 让位；正文里的本地图片按 `oss_type=7` 换成 `qqbot-media://` 引用（[`resolve_markdown_images`]）；与媒体同现时先发这一条，媒体另起 `msg_type=7` 条 |
+//! | `markdown` | `markdown` + `msg_type=2` | 只取 `content`：模板字段（`template_id` / `custom_template_id`）已废弃，出站不构造；文本被丢弃、`card` 让位；正文里的本地图片按 `oss_type` 换引用：`7` → `qqbot-media://` 素材库，`4~6/8~10` → 图床 CDN URL（[`resolve_markdown_images`]）；与媒体同现时先发这一条，媒体另起 `msg_type=7` 条 |
 //! | `card` | `card` + `msg_type=8` | 群聊与单聊同构；`{type:"tuwen", content:{title,description,url,pic_url}}`，四字段校验见 [`compose_card`]；与媒体同现时卡片先发、媒体另起 `msg_type=7` 条 |
 //! | 图片 / 语音 / 视频 / 文件 | `media` + `msg_type=7` | 见下节「媒体」 |
 //! | `[CQ:reply]` | `msg_id` | 虚拟号先经 idmap / echo 还原成真实消息 ID；还原失败 `1400`，不静默丢 |
@@ -139,6 +139,7 @@
 //! 映射在 [`crate::dispatcher`] 里完成。
 
 use std::path::PathBuf;
+use std::sync::Once;
 use std::time::Duration;
 
 use gensokyo_actions::{
@@ -164,6 +165,7 @@ use serde_json::Value;
 
 use crate::at_everyone::{self, Reservation};
 use crate::event_hub::EventHub;
+use crate::hosting::HostingRuntime;
 use crate::media::MediaRuntime;
 use crate::queue;
 
@@ -181,6 +183,9 @@ pub fn is_deferred(data: &Value) -> bool {
 pub struct DeferredDeps<'a> {
     /// 媒体下载器；生产用 [`MediaRuntime::default`]，单测注入假传输。
     pub media: &'a MediaRuntime,
+    /// 图床上传出口（`oss_type` 4~6/8~10 的 markdown 本地图片）；生产用
+    /// [`crate::hosting::shared`]，单测注入假传输。
+    pub hosting: &'a HostingRuntime,
     /// echo 存储：发送成功后回写 `message_id`，`[CQ:reply]` 反查虚拟号也走它。
     pub echo: Option<&'a EchoStore>,
     /// 事件总线：wakeup 发送到达终局后回推 `c2c_wakeup_resp` notice（对齐 Go
@@ -895,9 +900,9 @@ pub async fn compose(
 
     let rendered = music_fallback_text(&message.plan, render_text(context, message)?)?;
     if let Some(mut markdown) = compose_markdown(context, &message.plan, &rendered)? {
-        // 正文里的本地图片换成素材库引用（Go `ResolveMarkdownImages`）；失败保留原引用
+        // 正文里的本地图片换引用（Go `ResolveMarkdownImages`）；失败保留原引用
         if let Some(content) = markdown.content.take() {
-            markdown.content = Some(resolve_markdown_images(context, &content).await);
+            markdown.content = Some(resolve_markdown_images(context, deps.hosting, &content).await);
         }
         // markdown 胜 card，文本让位：msg_type=2 只认 markdown.content
         out.content = None;
@@ -1027,7 +1032,7 @@ fn render_markdown(context: &ActionContext, content: &str) -> Result<String> {
     }
 }
 
-/// Markdown 正文里的本地图片 → 官方素材库引用（Go `ResolveMarkdownImages`）。
+/// Markdown 正文里的本地图片 → 可公网访问的引用（Go `ResolveMarkdownImages`）。
 ///
 /// 只替换 **URL**：`![alt #480px #640px](path)` 的 alt 与尺寸语法、`[text](path)` 的链接
 /// 文本、`<img>` 的其余属性都逐字节保留——与 Go 的两条正则同口径：
@@ -1036,14 +1041,19 @@ fn render_markdown(context: &ActionContext, content: &str) -> Result<String> {
 /// - `(?i)(<img\b[^>]*?\bsrc=)(["']?)([^"'\s>]+)([^>]*>)`
 ///
 /// 分流照 Go：`http(s)://` / `data:` / `qqbot-media://` 原样；其余当本地路径读字节、嗅探
-/// 格式后上传素材库。**任一步失败保留原引用**：一张坏图片不能拖死整条消息。
+/// 格式后按 `oss_type` 选上传链（见 [`resolve_url`]）。**任一步失败保留原引用**：一张坏
+/// 图片不能拖死整条消息。
 ///
 /// 两遍扫描（先 markdown 链接、后 HTML img）与 Go 一致；workspace 没有 `regex` 依赖，
 /// 为两条正则引入外部依赖不值得，这里用等价的手写扫描（见 [`markdown_link_urls`] /
 /// [`html_img_urls`]）。
-async fn resolve_markdown_images(context: &ActionContext, content: &str) -> String {
-    let content = rewrite_urls(content, markdown_link_urls(content), context).await;
-    rewrite_urls(&content, html_img_urls(&content), context).await
+async fn resolve_markdown_images(
+    context: &ActionContext,
+    hosting: &HostingRuntime,
+    content: &str,
+) -> String {
+    let content = rewrite_urls(content, markdown_link_urls(content), context, hosting).await;
+    rewrite_urls(&content, html_img_urls(&content), context, hosting).await
 }
 
 /// 一处待改写的 URL 在原文里的字节区间（`[start, end)`）。
@@ -1053,12 +1063,17 @@ struct UrlSpan {
 }
 
 /// 按 `spans` 逐个改写 URL；[`resolve_url`] 返回 `None` 时保留原引用。
-async fn rewrite_urls(content: &str, spans: Vec<UrlSpan>, context: &ActionContext) -> String {
+async fn rewrite_urls(
+    content: &str,
+    spans: Vec<UrlSpan>,
+    context: &ActionContext,
+    hosting: &HostingRuntime,
+) -> String {
     let mut out = String::with_capacity(content.len());
     let mut cursor = 0;
     for span in spans {
         out.push_str(&content[cursor..span.start]);
-        match resolve_url(context, &content[span.start..span.end]).await {
+        match resolve_url(context, hosting, &content[span.start..span.end]).await {
             Some(url) => out.push_str(&url),
             None => out.push_str(&content[span.start..span.end]),
         }
@@ -1194,8 +1209,17 @@ fn local_media_path(raw: &str) -> Option<PathBuf> {
     std::path::absolute(raw).ok()
 }
 
-/// 一处引用 → 可写进 Markdown 的素材库 URL；`None` 表示保留原引用。
-async fn resolve_url(context: &ActionContext, raw: &str) -> Option<String> {
+/// 一处引用 → 可写进 Markdown 的公网 URL；`None` 表示保留原引用。
+///
+/// 按 `oss_type` 选上传链（Go `resolveLocalImageMedia`）：
+/// - `7`（ChatGLM）：官方素材库，产出 `qqbot-media://` 引用；
+/// - `4~6` / `8~10`：图床后端，产出 CDN URL（[`HostingRuntime::upload`]）；
+/// - `0~3`：内置 OSS（腾讯云 / 百度云 / 阿里云）三后端属下一包，保留原引用。
+async fn resolve_url(
+    context: &ActionContext,
+    hosting: &HostingRuntime,
+    raw: &str,
+) -> Option<String> {
     // Go 同口径：远端地址、内联数据、已是素材引用的都原样保留（远端稳定化不在本阶段）
     if raw.starts_with("http://")
         || raw.starts_with("https://")
@@ -1204,13 +1228,8 @@ async fn resolve_url(context: &ActionContext, raw: &str) -> Option<String> {
     {
         return None;
     }
-    // Go `ossTypeShortLivedImage()`：只有 oss_type=7（ChatGLM）走官方素材库。其余图床
-    // （4~6 / 8~10）要先经图床链换 CDN URL，deferred 尚未接入，保留原引用而不是发坏图。
-    if HostingKind::from_oss_type(context.config().snapshot().get_oss_type())
-        != Some(HostingKind::ChatGlm)
-    {
-        return None;
-    }
+    // 0~3（内置 OSS）与越界值不是图床：`from_oss_type` 返回 `None`，保留原引用
+    let kind = HostingKind::from_oss_type(context.config().snapshot().get_oss_type())?;
     let Some(path) = local_media_path(raw) else {
         tracing::warn!(url = %raw, "markdown 图片路径未通过安全校验，保留原引用");
         return None;
@@ -1226,34 +1245,68 @@ async fn resolve_url(context: &ActionContext, raw: &str) -> Option<String> {
             return None;
         }
     };
-    let Some(kind) = sniff_image(&bytes) else {
+    let Some(image) = sniff_image(&bytes) else {
         tracing::warn!(path = %path.display(), "markdown 图片格式无法识别，保留原引用");
         return None;
     };
-    let (content_type, extension) = match kind {
-        ImageKind::Png => ("image/png", "png"),
-        ImageKind::Jpeg => ("image/jpeg", "jpg"),
-        ImageKind::Gif => ("image/gif", "gif"),
-        ImageKind::WebP => ("image/webp", "webp"),
-        // `validate_image_upload` 只收 png / jpeg / gif / webp（Go `sniffMediaImageFormat` 同）
-        ImageKind::Bmp => {
-            tracing::warn!(path = %path.display(), "markdown 图片是 BMP，素材库不收，保留原引用");
-            return None;
-        }
+    let extension = match image {
+        ImageKind::Png => "png",
+        ImageKind::Jpeg => "jpg",
+        ImageKind::Gif => "gif",
+        ImageKind::WebP => "webp",
+        ImageKind::Bmp => "bmp",
     };
     // Go `uploadImageBytesToMediaStore` 的文件名是 `<source>.<ext>`，Markdown 侧 source = "markdown"
     let file_name = format!("markdown.{extension}");
-    match upload_bytes_to_media_store(context.api(), &bytes, &file_name, content_type).await {
-        Ok(uploaded) => Some(uploaded.url),
+    if kind == HostingKind::ChatGlm {
+        // `validate_image_upload` 只收 png / jpeg / gif / webp（Go `sniffMediaImageFormat` 同）
+        if image == ImageKind::Bmp {
+            tracing::warn!(path = %path.display(), "markdown 图片是 BMP，素材库不收，保留原引用");
+            return None;
+        }
+        return match upload_bytes_to_media_store(context.api(), &bytes, &file_name, image.mime())
+            .await
+        {
+            Ok(uploaded) => Some(uploaded.url),
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "markdown 图片上传素材库失败，保留原引用"
+                );
+                None
+            }
+        };
+    }
+    let config = crate::hosting::config_from_settings(&context.config().snapshot());
+    match hosting.upload(kind, &config, &bytes, &file_name).await {
+        Ok(url) => Some(url),
         Err(err) => {
-            tracing::warn!(
-                path = %path.display(),
-                error = %err,
-                "markdown 图片上传素材库失败，保留原引用"
-            );
+            warn_hosting_failure(kind, &path, &err);
             None
         }
     }
+}
+
+/// 图床上传失败的告警：缺凭据（配置问题）只喊一次，其余错误逐图喊（带路径，便于排障）。
+fn warn_hosting_failure(kind: HostingKind, path: &std::path::Path, err: &gensokyo_media::Error) {
+    if matches!(err, gensokyo_media::Error::HostingConfig(_)) {
+        static WARNED: Once = Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                provider = kind.provider_name(),
+                error = %err,
+                "图床缺少必要配置，markdown 本地图片保留原引用"
+            );
+        });
+        return;
+    }
+    tracing::warn!(
+        provider = kind.provider_name(),
+        path = %path.display(),
+        error = %err,
+        "markdown 图片图床上传失败，保留原引用"
+    );
 }
 
 /// `plan.card` → 图文卡片：`{type:"tuwen", content:{title,description,url,pic_url}}`。
@@ -1701,7 +1754,7 @@ fn unsupported_segment(plan: &OutboundPlan) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, LazyLock, Mutex};
     use std::time::{Duration, SystemTime};
 
     use gensokyo_actions::{
@@ -1711,6 +1764,9 @@ mod tests {
     use gensokyo_config::ConfigManager;
     use gensokyo_core::{Error, Ob11Id, Result};
     use gensokyo_media::{BoxFuture, FetchRequest, Fetcher, MediaTransport, TransportResponse};
+    use gensokyo_media::{
+        HostingTransport, UploadMethod, UploadRequest, UploadResponse,
+    };
     use gensokyo_protocol::Event;
     use gensokyo_protocol::outbound::{
         ActiveKind, CardFields, CardPayload, InputNotifyPayload, KeyboardPayload, MarkdownPayload,
@@ -1736,6 +1792,7 @@ mod tests {
     };
     use crate::at_everyone::SECTION;
     use crate::event_hub::EventHub;
+    use crate::hosting::HostingRuntime;
     use crate::media::{MAX_MEDIA_BYTES, MediaRuntime};
 
     /// 测试统一的 32 位 OpenID（`resolve_openid` 对 32 位直通，不需要 idmap）。
@@ -2029,6 +2086,60 @@ mod tests {
         }
     }
 
+    /// 假上传递出：成功时按调用序号给 `https://cdn.example/<n>.png`（Bilibili 响应形状），
+    /// 非 200 时只回状态码（后端映射成不可重试的 `HttpStatus`，用例不必真等退避）。
+    #[derive(Debug, Clone)]
+    struct FakeHosting {
+        status: u16,
+        requests: Arc<Mutex<Vec<UploadRequest>>>,
+    }
+
+    impl FakeHosting {
+        fn ok() -> Self {
+            Self::with_status(200)
+        }
+
+        fn with_status(status: u16) -> Self {
+            Self {
+                status,
+                requests: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn requests(&self) -> Vec<UploadRequest> {
+            self.requests.lock().expect("上传记录锁未中毒").clone()
+        }
+    }
+
+    impl HostingTransport for FakeHosting {
+        fn send(
+            &self,
+            request: UploadRequest,
+        ) -> BoxFuture<'_, gensokyo_media::Result<UploadResponse>> {
+            let index = {
+                let mut requests = self.requests.lock().expect("上传记录锁未中毒");
+                requests.push(request);
+                requests.len()
+            };
+            let status = self.status;
+            Box::pin(async move {
+                let body = if status == 200 {
+                    format!(
+                        r#"{{"code":0,"data":{{"location":"https://cdn.example/{index}.png"}}}}"#
+                    )
+                    .into_bytes()
+                } else {
+                    Vec::new()
+                };
+                Ok(UploadResponse { status, body })
+            })
+        }
+    }
+
+    /// oss_type=5 的可用配置（Bilibili 只要 csrf_token + sessdata）。
+    const BILIBILI_SETTINGS: &str =
+        "  oss_type: 5\n  bilibili:\n    csrf_token: csrf\n    sessdata: sess\n    bucket: b\n";
+
     fn request(target: SendTarget, plan: OutboundPlan) -> SendRequest {
         SendRequest {
             target,
@@ -2046,6 +2157,9 @@ mod tests {
         request(SendTarget::Group(OPENID.to_owned()), plan)
     }
 
+    /// 默认图床运行时：惰性客户端，测试里真正上传的用例都注入专用假传输。
+    static TEST_HOSTING: LazyLock<HostingRuntime> = LazyLock::new(HostingRuntime::default);
+
     fn deps<'a>(media: &'a MediaRuntime, echo: Option<&'a EchoStore>) -> DeferredDeps<'a> {
         deps_with_hub(media, echo, None)
     }
@@ -2056,9 +2170,20 @@ mod tests {
         echo: Option<&'a EchoStore>,
         hub: Option<&'a EventHub>,
     ) -> DeferredDeps<'a> {
+        deps_with_hosting(media, echo, hub, &TEST_HOSTING)
+    }
+
+    /// 带图床注入的依赖（`oss_type` 4~6/8~10 的 markdown 图片用例）。
+    fn deps_with_hosting<'a>(
+        media: &'a MediaRuntime,
+        echo: Option<&'a EchoStore>,
+        hub: Option<&'a EventHub>,
+        hosting: &'a HostingRuntime,
+    ) -> DeferredDeps<'a> {
         // 测试统一零间隔：合并转发用例免真睡 2×500ms（评审 ③）
         DeferredDeps {
             media,
+            hosting,
             echo,
             hub,
             forward_send_interval: Duration::ZERO,
@@ -4401,7 +4526,10 @@ mod tests {
             "![a](data:image/png;base64,AAAA)",
             "![a](qqbot-media://image/v1/token)",
         ] {
-            assert_eq!(resolve_markdown_images(&context, raw).await, raw);
+            assert_eq!(
+                resolve_markdown_images(&context, &TEST_HOSTING, raw).await,
+                raw
+            );
         }
     }
 
@@ -4414,7 +4542,7 @@ mod tests {
         let (_cfg, context) = context_with_settings(Arc::clone(&api), "  oss_type: 7\n");
         let raw = format!("![坏图]({missing})");
         assert_eq!(
-            resolve_markdown_images(&context, &raw).await,
+            resolve_markdown_images(&context, &TEST_HOSTING, &raw).await,
             raw,
             "读失败保留原引用"
         );
@@ -4424,7 +4552,7 @@ mod tests {
         let (_cfg, context) = context_with_settings(api, "  oss_type: 7\n");
         let raw = format!("![坏上传]({path})");
         assert_eq!(
-            resolve_markdown_images(&context, &raw).await,
+            resolve_markdown_images(&context, &TEST_HOSTING, &raw).await,
             raw,
             "上传失败保留原引用"
         );
@@ -4461,14 +4589,188 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oss_type_other_than_seven_keeps_local_paths() {
-        // Go `ossTypeShortLivedImage()`：oss_type != 7 走图床链，deferred 尚未接入 → 原样保留
+    async fn local_image_goes_through_the_configured_hosting_backend() {
         let dir = tempfile::tempdir().expect("临时目录");
         let path = write_png(&dir, "a.png");
-        let api = Arc::new(FakeQqApi::default());
-        let (_cfg, context) = context(api);
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_cfg, context) = context_with_settings(Arc::clone(&api), BILIBILI_SETTINGS);
+        let media = no_media();
+        let transport = Arc::new(FakeHosting::ok());
+        let hosting = HostingRuntime::with_transport(transport.clone());
+        let plan = group_request(markdown_plan(&format!("![本地]({path})")));
+
+        execute(
+            &context,
+            &plan,
+            &deps_with_hosting(&media, None, None, &hosting),
+        )
+        .await
+        .expect("图床上传成功后应替换成 CDN URL");
+
+        assert_eq!(
+            api.sent()[0]
+                .markdown
+                .as_ref()
+                .and_then(|md| md.content.as_deref()),
+            Some("![本地](https://cdn.example/1.png)"),
+            "oss_type=5 的本地图片换成图床返回的 URL"
+        );
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 1, "一张图一次上传");
+        assert_eq!(requests[0].method, UploadMethod::Post);
+        assert!(requests[0].body.is_some(), "Bilibili 走 multipart POST");
+    }
+
+    #[tokio::test]
+    async fn hosting_failure_keeps_the_original_reference() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = write_png(&dir, "a.png");
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_cfg, context) = context_with_settings(Arc::clone(&api), BILIBILI_SETTINGS);
+        let media = no_media();
+        let transport = Arc::new(FakeHosting::with_status(400));
+        let hosting = HostingRuntime::with_transport(transport.clone());
         let raw = format!("![图]({path})");
-        assert_eq!(resolve_markdown_images(&context, &raw).await, raw);
+        let plan = group_request(markdown_plan(&raw));
+
+        execute(
+            &context,
+            &plan,
+            &deps_with_hosting(&media, None, None, &hosting),
+        )
+        .await
+        .expect("上传失败不能阻断发送");
+
+        assert_eq!(
+            api.sent()[0]
+                .markdown
+                .as_ref()
+                .and_then(|md| md.content.as_deref()),
+            Some(raw.as_str()),
+            "上传失败保留原引用"
+        );
+        assert_eq!(transport.requests().len(), 1, "4xx 不重试");
+    }
+
+    #[tokio::test]
+    async fn chatglm_keeps_media_store_chain_and_never_calls_hosting() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = write_png(&dir, "a.png");
+        let api = Arc::new(
+            FakeQqApi::default()
+                .with_send("MSG-1")
+                .with_media("qqbot-media://image/v1/token"),
+        );
+        let (_cfg, context) = context_with_settings(Arc::clone(&api), "  oss_type: 7\n");
+        let media = no_media();
+        let transport = Arc::new(FakeHosting::ok());
+        let hosting = HostingRuntime::with_transport(transport.clone());
+        let plan = group_request(markdown_plan(&format!("![本地]({path})")));
+
+        execute(
+            &context,
+            &plan,
+            &deps_with_hosting(&media, None, None, &hosting),
+        )
+        .await
+        .expect("oss_type=7 仍走素材库");
+
+        assert_eq!(
+            api.sent()[0]
+                .markdown
+                .as_ref()
+                .and_then(|md| md.content.as_deref()),
+            Some("![本地](qqbot-media://image/v1/token)"),
+            "oss_type=7 零回归：仍是素材库引用"
+        );
+        assert!(transport.requests().is_empty(), "oss_type=7 不走图床链");
+    }
+
+    #[tokio::test]
+    async fn builtin_oss_types_keep_local_paths() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = write_png(&dir, "a.png");
+        let transport = Arc::new(FakeHosting::ok());
+        let hosting = HostingRuntime::with_transport(transport.clone());
+        for oss_type in 0..=3 {
+            let api = Arc::new(FakeQqApi::default());
+            let (_cfg, context) = context_with_settings(api, &format!("  oss_type: {oss_type}\n"));
+            let raw = format!("![图]({path})");
+            assert_eq!(
+                resolve_markdown_images(&context, &hosting, &raw).await,
+                raw,
+                "oss_type={oss_type} 的内置 OSS 后端属下一包，保留原引用"
+            );
+        }
+        assert!(transport.requests().is_empty(), "0~3 不试图床链");
+    }
+
+    #[tokio::test]
+    async fn missing_hosting_credentials_keep_the_original_reference() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = write_png(&dir, "a.png");
+        let transport = Arc::new(FakeHosting::ok());
+        let hosting = HostingRuntime::with_transport(transport.clone());
+        let api = Arc::new(FakeQqApi::default());
+        // oss_type=5 但 bilibili 段缺失：后端在发请求前就报 HostingConfig
+        let (_cfg, context) = context_with_settings(api, "  oss_type: 5\n");
+        let raw = format!("![图]({path})");
+
+        assert_eq!(
+            resolve_markdown_images(&context, &hosting, &raw).await,
+            raw,
+            "缺凭据保留原引用"
+        );
+        assert!(transport.requests().is_empty(), "缺凭据不发请求");
+    }
+
+    #[tokio::test]
+    async fn signed_backend_without_config_is_dispatched() {
+        // oss_type=9（星野，免配置）：签名请求发出去就证明走的是图床链而不是素材库
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = write_png(&dir, "a.png");
+        let transport = Arc::new(FakeHosting::with_status(400));
+        let hosting = HostingRuntime::with_transport(transport.clone());
+        let api = Arc::new(FakeQqApi::default());
+        let (_cfg, context) = context_with_settings(api, "  oss_type: 9\n");
+        let raw = format!("![图]({path})");
+
+        assert_eq!(
+            resolve_markdown_images(&context, &hosting, &raw).await,
+            raw,
+            "签名失败保留原引用"
+        );
+        assert_eq!(transport.requests().len(), 1, "星野先取签名");
+    }
+
+    #[tokio::test]
+    async fn every_markdown_image_goes_through_hosting() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let first = write_png(&dir, "1.png");
+        let second = write_png(&dir, "2.png");
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_cfg, context) = context_with_settings(Arc::clone(&api), BILIBILI_SETTINGS);
+        let media = no_media();
+        let transport = Arc::new(FakeHosting::ok());
+        let hosting = HostingRuntime::with_transport(transport.clone());
+        let plan = group_request(markdown_plan(&format!("![一]({first}) 和 ![二]({second})")));
+
+        execute(
+            &context,
+            &plan,
+            &deps_with_hosting(&media, None, None, &hosting),
+        )
+        .await
+        .expect("多图应逐个上传替换");
+
+        assert_eq!(
+            api.sent()[0]
+                .markdown
+                .as_ref()
+                .and_then(|md| md.content.as_deref()),
+            Some("![一](https://cdn.example/1.png) 和 ![二](https://cdn.example/2.png)")
+        );
+        assert_eq!(transport.requests().len(), 2);
     }
 
     #[tokio::test]

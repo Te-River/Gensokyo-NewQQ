@@ -32,8 +32,9 @@ M1j 起把运行时装配成一个能按 `config.yml` 启动的二进制。**不
      热字段逐项 `info` 即时生效，重启项逐项 `warn`（快照保持不变、需重启进程）；监听启动失败
      只 `warn`，不阻断启动。
 6. 打印 `已注册 action: <N> 个（…）` 与**实际**监听地址（配置 `127.0.0.1:0` 这类写法会打印
-   真实端口），随后打印启动横幅：`Gensokyo-NewQQ - Te-River` + 控制台地址 + Go 版同款东方
-   群像字符画 + 公网控制台地址（`banner` 模块；终端里青色，重定向时不带 ANSI）。控制台地址取
+   真实端口），随后打印启动横幅：`Gensokyo-NewQQ - Te-River` + 控制台地址 + 大号
+   `Gensokyo-NewQQ` 字画 + Go 版同款东方群像字符画 + 公网控制台地址（`banner` 模块；终端里
+   青色，重定向时不带 ANSI）。控制台地址取
    实际承载 WebUI 的 listener（WS 优先，退到 HTTP API）；公网地址按 `server_dir:port` 拼，
    未配置或仍是 `<YOUR_SERVER_DIR>` 占位时该行写明原因。
 7. Ctrl-C → `RuntimeHandle::shutdown_with_timeout(5s)`：先停 config 热重载监听与反向 WS 客户端，

@@ -1,8 +1,8 @@
 //! 运行时共享状态。
 //!
 //! [`AppState`] 只强依赖「配置快照 + handler 注册表」；action 依赖容器
-//! （[`gensokyo_actions::ActionContext`]）、idmap / echo / OpenAPI 是 M1h-b（入站事件）与
-//! M1i（`send_*`）才需要的句柄，用 builder 选择性注入，缺省 `None`。
+//! （[`gensokyo_actions::ActionContext`]）、idmap / echo / botstats / OpenAPI 是 M1h-b
+//! （入站事件）与 M1i（`send_*`）才需要的句柄，用 builder 选择性注入，缺省 `None`。
 //! 这样 M1h-a 的传输层可以单独测试，不必先把存储与上游客户端装配起来。
 //!
 //! 生产路径由 `gensokyo_runtime::boot` 的 `Runtime::attach_idmap` / `attach_echo` 兜底注入
@@ -14,7 +14,7 @@ use gensokyo_actions::ActionContext;
 use gensokyo_config::ConfigManager;
 use gensokyo_protocol::Registry;
 use gensokyo_qq::{OpenApiClient, ReqwestTransport};
-use gensokyo_storage::{EchoStore, IdMapStore};
+use gensokyo_storage::{BotStatsStore, EchoStore, IdMapStore};
 
 use crate::builtin;
 use crate::dispatcher::Dispatcher;
@@ -29,6 +29,7 @@ pub struct AppState {
     actions: Option<Arc<ActionContext>>,
     idmap: Option<Arc<IdMapStore>>,
     echo: Option<Arc<EchoStore>>,
+    botstats: Option<Arc<BotStatsStore>>,
     api: Option<Arc<OpenApiClient<ReqwestTransport>>>,
     media: Arc<MediaRuntime>,
     hub: EventHub,
@@ -47,6 +48,7 @@ impl AppState {
             actions: None,
             idmap: None,
             echo: None,
+            botstats: None,
             api: None,
             media: Arc::new(MediaRuntime::default()),
             hub: EventHub::default(),
@@ -96,6 +98,13 @@ impl AppState {
     #[must_use]
     pub fn with_echo(mut self, echo: Arc<EchoStore>) -> Self {
         self.echo = Some(echo);
+        self
+    }
+
+    /// 注入 botstats 统计库（未注入时收发计数只留在内存指标里，见 [`crate::dispatcher`]）。
+    #[must_use]
+    pub fn with_botstats(mut self, botstats: Arc<BotStatsStore>) -> Self {
+        self.botstats = Some(botstats);
         self
     }
 
@@ -197,6 +206,12 @@ impl AppState {
         self.echo.clone()
     }
 
+    /// botstats 句柄（未注入时为 `None`：统计不落盘，`/metrics` 的内存计数照常）。
+    #[must_use]
+    pub fn botstats(&self) -> Option<&BotStatsStore> {
+        self.botstats.as_deref()
+    }
+
     /// deferred 的媒体下载器。
     #[must_use]
     pub fn media(&self) -> &MediaRuntime {
@@ -220,6 +235,7 @@ impl AppState {
             .with_actions(self.actions_arc())
             .with_media(Arc::clone(&self.media))
             .with_echo(self.echo.clone())
+            .with_botstats(self.botstats.clone())
             .with_hub(Some(self.hub.clone()))
     }
 }

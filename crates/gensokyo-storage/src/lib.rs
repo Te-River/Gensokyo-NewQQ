@@ -12,6 +12,7 @@
 //! |------|-----------|---------------------|
 //! | 身份 ↔ vUIN | `openid-map.db` | `openid-map.redb` |
 //! | 消息 ID ↔ 虚拟 ID | `msgid-map.db` | `msgid-map.redb` |
+//! | 当日收发消息统计 | `botstats.db` | `bot-stats.redb` |
 //!
 //! 路径由 [`IdMapOptions`] 指定；文件格式本身与 bbolt 不同（redb 有自己的页格式），
 //! 但**表名、key 与 value 的字节编码与 Go 保持一致**，[`importer`] 因此可以逐行搬运。
@@ -77,10 +78,12 @@
 //! 计数器在写事务内自增，因此并发分配不会重号；实测 8 线程 × 100 次分配得到连续的
 //! `1..=800`。
 
+pub mod botstats;
 mod error;
 pub mod idmap;
 pub mod importer;
 
+pub use botstats::{BotStats, BotStatsStore, DEFAULT_BOTSTATS_PATH};
 pub use echo::{Clock, EchoStore, MessageGroupPair, MessageScene};
 pub use error::StorageError;
 pub use idmap::grpc::{IdMapClient, IdMapService};

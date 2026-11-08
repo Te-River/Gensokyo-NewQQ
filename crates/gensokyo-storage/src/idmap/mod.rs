@@ -985,7 +985,8 @@ pub(crate) fn rb<E: Into<redb::Error>>(err: E) -> StorageError {
     StorageError::Redb(err.into())
 }
 
-fn unix_now() -> i64 {
+/// 当前 Unix 秒（`botstats` 的当日判据也用它）。
+pub(crate) fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| {
