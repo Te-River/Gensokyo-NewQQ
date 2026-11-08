@@ -33,17 +33,23 @@
 //! # 字段口径
 //!
 //! - `self_id` = `use_uin ? uin : app_id`，恒为数字（Go 两种上报形态里 `self_id` 都是 `int64`）。
-//! - `group_id` / `user_id`：`string_ob11 = true` 时是原始 OpenID 字符串；数字形态时经
-//!   [`IdMapStore::retrieve_virtual_value`] 取虚拟 ID，**idmap 未注入或分配失败则回退原始
-//!   字符串**（不伪造数字）。
-//! - `message_id`：字符串形态原样上报；数字形态经 [`IdMapStore::store_cache`] 拿虚拟 ID，
-//!   失败同样回退字符串。
+//! - **消息事件**（`message`）：`string_ob11 = true` 时 `group_id` / `user_id` / `message_id`
+//!   是原始 OpenID 字符串；数字形态时经 [`IdMapStore::retrieve_virtual_value`] 取虚拟 ID，
+//!   **idmap 未注入或分配失败则回退原始字符串**（不伪造数字）。群消息在 string 形态下
+//!   额外带 `platform = "qq"`、`sender.user_id` 恒为 `0`（Go `OnebotGroupMessageS` 的
+//!   M1-B 口径：string 形态不做 idmap 转换），`message_seq` / `font` 恒为 `0`。
+//! - **notice / request 事件**：Go 对这些 handler 一律 `idmap.StoreIDv2` 取**数字 vUIN**，
+//!   与 `string_ob11` 无关（string 形态只影响 message 事件），这里用
+//!   [`Inbound::vuid`]；idmap 未注入时回退原始字符串。
 //! - `!native_ob11` 时补 `real_user_id` / `real_group_id` / `real_message_type` 附加字段
 //!   （与 Go 的「增强配置」一致）。例外：`GROUP_MEMBER_ADD/REMOVE` 在 Go 里**不区分**
 //!   `native_ob11`（`RealUserID`/`RealGroupID` 只被 `omitempty` 省略空值），这里照搬。
 //! - `time`：QQ 负载带 `timestamp` 时用它，否则取当前秒级时间戳。Go 群消息用 `time.Now()`，
 //!   这里偏向可复现（同一事件重放得到同一 `time`）。`GROUP_JOIN_REQUEST` 的 `apply_at`
 //!   优先按 RFC3339 解析（Go `time.Parse`），失败再按秒级数字解析。
+//!
+//! 金样（`Processor/testdata/inbound/`）是这些字段口径的回归保险：改动事件形态时先跑
+//! `tests/golden_inbound.rs`。
 //!
 //! # 未做项
 //!
@@ -121,6 +127,8 @@ struct QqAuthor {
 /// 群操作类事件（`GROUP_ADD_ROBOT` / `GROUP_DEL_ROBOT` / `GROUP_MSG_REJECT` / `GROUP_MSG_RECEIVE`）。
 #[derive(Debug, Deserialize)]
 struct QqGroupOp {
+    #[serde(default)]
+    event_id: String,
     #[serde(default)]
     group_openid: String,
     #[serde(default)]
@@ -279,12 +287,8 @@ impl Inbound {
             "GROUP_DEL_ROBOT" => {
                 self.group_op_notice(&settings, data, "group_decrease", Some("kick_me"))
             }
-            "GROUP_MSG_REJECT" => {
-                self.group_op_notice(&settings, data, "group_reject", Some("create"))
-            }
-            "GROUP_MSG_RECEIVE" => {
-                self.group_op_notice(&settings, data, "group_receive", Some("create"))
-            }
+            "GROUP_MSG_REJECT" => self.group_payload_notice(&settings, data, "group_reject"),
+            "GROUP_MSG_RECEIVE" => self.group_payload_notice(&settings, data, "group_receive"),
             "FRIEND_ADD" => self.friend_add(&settings, data, envelope_id),
             "FRIEND_DEL" => self.user_op_notice(&settings, data, "friend_decrease"),
             "C2C_MSG_REJECT" => self.user_op_notice(&settings, data, "c2c_msg_reject"),
@@ -367,6 +371,25 @@ impl Inbound {
         }
     }
 
+    /// notice / request 事件的 group_id / user_id：Go 这些 handler 一律
+    /// `idmap.StoreIDv2` 取**数字 vUIN**，与 `string_ob11` 无关（string 形态只影响
+    /// message 事件）。idmap 未注入时回退原始字符串，不伪造数字。
+    fn vuid(&self, raw: &str) -> Ob11Id {
+        if raw.is_empty() {
+            return Ob11Id::Str(String::new());
+        }
+        let Some(idmap) = self.idmap.as_deref() else {
+            return Ob11Id::Str(raw.to_owned());
+        };
+        match idmap.retrieve_virtual_value(raw) {
+            Ok((_, vuin)) => Ob11Id::Num(vuin),
+            Err(err) => {
+                tracing::warn!(identity = raw, error = %err, "idmap 分配虚拟 ID 失败，回退原始字符串");
+                Ob11Id::Str(raw.to_owned())
+            }
+        }
+    }
+
     /// 群事件上报形态 → idmap 注册表（`<section>:type = group`）。
     ///
     /// 对齐 Go `WriteConfigv2(GroupID 字符串, "type", "group")` 的注册点：section 直接取
@@ -431,17 +454,34 @@ impl Inbound {
         if flavor == GroupFlavor::Full {
             extra.insert("is_full_group_message".to_owned(), Value::Bool(true));
         }
+        // Go `OnebotGroupMessageS` 的 `platform` 非 omitempty：string 形态恒上报；
+        // 数字形态的 `OnebotGroupMessage` 根本没有该字段。
+        if settings.get_string_ob11() {
+            extra.insert("platform".to_owned(), Value::String("qq".to_owned()));
+        }
 
         let sender = Sender {
-            user_id: Some(self.ob11_id(settings, user_raw)),
-            nickname: author.and_then(|author| non_empty(&author.username)),
-            role: author
-                .and_then(|author| author.member_role.clone())
-                .or_else(|| Some("member".to_owned())),
+            // Go M1-B：string 形态不做 idmap 转换，`sender.user_id` 恒为 0。
+            user_id: Some(if settings.get_string_ob11() {
+                Ob11Id::num(0)
+            } else {
+                self.ob11_id(settings, user_raw)
+            }),
+            nickname: Some(
+                author
+                    .map_or("", |author| author.username.as_str())
+                    .to_owned(),
+            ),
+            role: Some(
+                author
+                    .and_then(|author| author.member_role.clone())
+                    .filter(|role| !role.is_empty())
+                    .unwrap_or_else(|| "member".to_owned()),
+            ),
             sex: Some("0".to_owned()),
-            age: Some(0),
-            area: Some("0".to_owned()),
             level: Some("0".to_owned()),
+            // Go `Sender.TinyID` 非 omitempty：未取到时上报空串。
+            tiny_id: Some(String::new()),
             ..Sender::default()
         };
 
@@ -461,8 +501,9 @@ impl Inbound {
             font: Some(0),
             sender: Some(sender),
             anonymous: None,
-            message_seq: None,
-            to_me: Some(flavor == GroupFlavor::At),
+            message_seq: Some(0),
+            // Go `ToMe` 是 omitempty：只有 @ 机器人的 AT 事件才出现。
+            to_me: (flavor == GroupFlavor::At).then_some(true),
             extra,
         }))
     }
@@ -490,11 +531,9 @@ impl Inbound {
 
         let sender = Sender {
             user_id: Some(self.ob11_id(settings, user_raw)),
-            nickname: author.and_then(|author| non_empty(&author.username)),
-            sex: Some("0".to_owned()),
-            age: Some(0),
-            area: Some("0".to_owned()),
-            level: Some("0".to_owned()),
+            // Go `PrivateSenderS`：nickname / tiny_id 非 omitempty，恒上报（空串）。
+            nickname: Some(String::new()),
+            tiny_id: Some(String::new()),
             ..Sender::default()
         };
 
@@ -512,7 +551,7 @@ impl Inbound {
             font: Some(0),
             sender: Some(sender),
             anonymous: None,
-            message_seq: None,
+            message_seq: Some(0),
             to_me: None,
             extra,
         }))
@@ -525,9 +564,9 @@ impl Inbound {
     ) -> Result<Vec<Event>, serde_json::Error> {
         let payload = QqGroupOp::deserialize(data)?;
         let time = timestamp_of(payload.timestamp.as_ref());
-        let group_id = self.ob11_id(settings, &payload.group_openid);
+        let group_id = self.vuid(&payload.group_openid);
         self.register_group(&group_id);
-        let user_id = self.ob11_id(settings, &payload.op_member_openid);
+        let user_id = self.vuid(&payload.op_member_openid);
         let extra = self.enhanced_extra(settings, &payload.op_member_openid, &payload.group_openid);
 
         // 对齐 Go `ProcessGroupAddBot`：先 request（方便客户端审批），再 notice。
@@ -573,7 +612,7 @@ impl Inbound {
     ) -> Result<Vec<Event>, serde_json::Error> {
         let payload = QqGroupOp::deserialize(data)?;
         let extra = self.enhanced_extra(settings, &payload.op_member_openid, &payload.group_openid);
-        let group_id = self.ob11_id(settings, &payload.group_openid);
+        let group_id = self.vuid(&payload.group_openid);
         self.register_group(&group_id);
         Ok(vec![Event::Notice(NoticeEvent {
             time: timestamp_of(payload.timestamp.as_ref()),
@@ -581,8 +620,59 @@ impl Inbound {
             notice_type: notice_type.to_owned(),
             sub_type: sub_type.map(str::to_owned),
             group_id: Some(group_id),
-            user_id: Some(self.ob11_id(settings, &payload.op_member_openid)),
+            user_id: Some(self.vuid(&payload.op_member_openid)),
             operator_id: Some(Ob11Id::num(0)),
+            target_id: None,
+            message_id: None,
+            duration: None,
+            file: None,
+            card_new: None,
+            card_old: None,
+            honor_type: None,
+            online: None,
+            client: None,
+            extra,
+        })])
+    }
+
+    /// `GROUP_MSG_REJECT` / `GROUP_MSG_RECEIVE`：Go 用 `OnebotGroupRejectNotice` /
+    /// `OnebotGroupReceiveNotice` 上报——**没有** `operator_id`，整块 dto 落在 `data`。
+    fn group_payload_notice(
+        &self,
+        settings: &Settings,
+        data: &Value,
+        notice_type: &str,
+    ) -> Result<Vec<Event>, serde_json::Error> {
+        let payload = QqGroupOp::deserialize(data)?;
+        let mut extra =
+            self.enhanced_extra(settings, &payload.op_member_openid, &payload.group_openid);
+        // Go 的 `Data` 就是该事件的 dto：四个字段非 omitempty，缺失时上报 null。
+        let mut dto = serde_json::Map::new();
+        dto.insert("event_id".to_owned(), Value::String(payload.event_id));
+        dto.insert(
+            "group_openid".to_owned(),
+            Value::String(payload.group_openid.clone()),
+        );
+        dto.insert(
+            "op_member_openid".to_owned(),
+            Value::String(payload.op_member_openid.clone()),
+        );
+        dto.insert(
+            "timestamp".to_owned(),
+            payload.timestamp.clone().unwrap_or(Value::Null),
+        );
+        extra.insert("data".to_owned(), Value::Object(dto));
+
+        let group_id = self.vuid(&payload.group_openid);
+        self.register_group(&group_id);
+        Ok(vec![Event::Notice(NoticeEvent {
+            time: timestamp_of(payload.timestamp.as_ref()),
+            self_id: Ob11Id::num(self.self_id_of(settings)),
+            notice_type: notice_type.to_owned(),
+            sub_type: Some("create".to_owned()),
+            group_id: Some(group_id),
+            user_id: Some(self.vuid(&payload.op_member_openid)),
+            operator_id: None,
             target_id: None,
             message_id: None,
             duration: None,
@@ -604,7 +694,7 @@ impl Inbound {
     ) -> Result<Vec<Event>, serde_json::Error> {
         let payload = QqFriendAdd::deserialize(data)?;
         let time = timestamp_of(payload.timestamp.as_ref());
-        let user_id = self.ob11_id(settings, &payload.openid);
+        let user_id = self.vuid(&payload.openid);
         let event_id = if payload.event_id.is_empty() {
             envelope_id.unwrap_or_default()
         } else {
@@ -618,7 +708,6 @@ impl Inbound {
                 Value::String(payload.openid.clone()),
             );
         }
-        extra.insert("scene".to_owned(), Value::Number(payload.scene.into()));
 
         // Go 把 scene_param 塞进 comment 供上层归因；为空时退化成 `Scene: <n>`。
         let comment = if payload.scene_param.is_empty() {
@@ -639,7 +728,13 @@ impl Inbound {
         });
 
         let mut notice_extra = extra;
-        notice_extra.insert("scene_param".to_owned(), Value::String(payload.scene_param));
+        // Go `FriendNoticeEvent`：`scene` / `scene_param` 都带 omitempty。
+        if payload.scene != 0 {
+            notice_extra.insert("scene".to_owned(), Value::Number(payload.scene.into()));
+        }
+        if !payload.scene_param.is_empty() {
+            notice_extra.insert("scene_param".to_owned(), Value::String(payload.scene_param));
+        }
         let notice = Event::Notice(NoticeEvent {
             time,
             self_id: Ob11Id::num(self.self_id_of(settings)),
@@ -684,7 +779,7 @@ impl Inbound {
             notice_type: notice_type.to_owned(),
             sub_type: None,
             group_id: None,
-            user_id: Some(self.ob11_id(settings, &payload.openid)),
+            user_id: Some(self.vuid(&payload.openid)),
             operator_id: None,
             target_id: None,
             message_id: None,
@@ -708,9 +803,9 @@ impl Inbound {
         flavor: GroupMemberFlavor,
     ) -> Result<Vec<Event>, serde_json::Error> {
         let payload = QqGroupMember::deserialize(data)?;
-        let group_id = self.ob11_id(settings, &payload.group_openid);
+        let group_id = self.vuid(&payload.group_openid);
         self.register_group(&group_id);
-        let user_id = self.ob11_id(settings, &payload.member_openid);
+        let user_id = self.vuid(&payload.member_openid);
 
         // Go 对这两个事件不区分 native_ob11：RealUserID/RealGroupID 只被 omitempty 省略空值。
         let mut extra = Extra::new();
@@ -802,8 +897,8 @@ impl Inbound {
             self_id: Ob11Id::num(self.self_id_of(settings)),
             request_type: "group".to_owned(),
             sub_type: Some("add".to_owned()),
-            user_id: Some(self.ob11_id(settings, &payload.member_openid)),
-            group_id: Some(self.ob11_id(settings, &payload.group_openid)),
+            user_id: Some(self.vuid(&payload.member_openid)),
+            group_id: Some(self.vuid(&payload.group_openid)),
             comment: verify_comment(payload.verify_info.as_ref()),
             flag: payload.join_request_id,
             extra,
@@ -837,8 +932,8 @@ impl Inbound {
             self_id: Ob11Id::num(self.self_id_of(settings)),
             notice_type: "interaction".to_owned(),
             sub_type: Some("create".to_owned()),
-            group_id: non_empty(&payload.group_openid).map(|raw| self.ob11_id(settings, &raw)),
-            user_id: non_empty(user_raw).map(|raw| self.ob11_id(settings, &raw)),
+            group_id: non_empty(&payload.group_openid).map(|raw| self.vuid(&raw)),
+            user_id: non_empty(user_raw).map(|raw| self.vuid(&raw)),
             operator_id: None,
             target_id: None,
             message_id: None,

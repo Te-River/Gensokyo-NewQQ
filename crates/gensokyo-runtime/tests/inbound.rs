@@ -62,8 +62,26 @@ fn group_at_message_becomes_group_message() {
     let sender = message.sender.as_ref().expect("sender 不应缺失");
     assert_eq!(sender.nickname.as_deref(), Some("alice"));
     assert_eq!(sender.role.as_deref(), Some("admin"));
-    assert_eq!(sender.user_id.as_ref(), Some(&Ob11Id::str("U1")));
-    assert!(message.extra.is_empty(), "native_ob11 下不应有增强字段");
+    // Go M1-B：string 形态不做 idmap 转换，`sender.user_id` 恒为 0（数字）
+    assert_eq!(sender.user_id.as_ref(), Some(&Ob11Id::num(0)));
+    assert_eq!(
+        sender.tiny_id.as_deref(),
+        Some(""),
+        "tiny_id 恒上报（空串）"
+    );
+    assert_eq!(sender.sex.as_deref(), Some("0"));
+    assert_eq!(sender.level.as_deref(), Some("0"));
+    assert_eq!(sender.age, None, "Go `Sender.Age` 带 omitempty，0 不上报");
+    assert_eq!(
+        message.extra.get("platform"),
+        Some(&Value::String("qq".to_owned())),
+        "string 形态的群消息恒带 platform"
+    );
+    assert_eq!(
+        message.message_seq,
+        Some(0),
+        "message_seq 非 omitempty，缺省上报 0"
+    );
 }
 
 #[test]
@@ -75,7 +93,10 @@ fn full_group_message_is_not_to_me() {
     let Event::Message(message) = &events[0] else {
         panic!("应为 message 事件");
     };
-    assert_eq!(message.to_me, Some(false));
+    assert_eq!(
+        message.to_me, None,
+        "Go `ToMe` 带 omitempty：全量群消息不上报该字段"
+    );
     assert_eq!(
         message.extra.get("is_full_group_message"),
         Some(&Value::Bool(true))

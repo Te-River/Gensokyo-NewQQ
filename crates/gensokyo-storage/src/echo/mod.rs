@@ -916,7 +916,9 @@ fn random_in_seq_range() -> i32 {
 
 /// Go `idmap.GenerateRowID`：MD5 → 十六进制 → 只保留 ASCII 数字 → 取前 `length` 位
 /// （不足右侧补 `0`）→ 十进制解析。
-fn generate_row_id(id: &str, length: usize) -> Result<i64, StorageError> {
+///
+/// `pub(crate)`：身份库 [`crate::idmap`] 在 `hash_id` 模式下也要用它派生 vUIN。
+pub(crate) fn generate_row_id(id: &str, length: usize) -> Result<i64, StorageError> {
     let digest = Md5::digest(id.as_bytes());
     let mut digits = String::with_capacity(digest.len() * 2);
     for &byte in digest.iter() {

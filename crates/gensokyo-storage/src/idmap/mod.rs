@@ -17,6 +17,7 @@ use redb::{
 use tracing::{debug, warn};
 
 use crate::StorageError;
+use crate::echo::generate_row_id;
 use encoding::{decode_i64, encode_i64, normalize_identity, vuin_identity_key, vuin_prefix};
 
 /// 身份库默认文件名（Go `openid-map.db` 的 redb 等价物）。
@@ -66,6 +67,10 @@ const SCHEMA_VERSION: &[u8] = b"2";
 /// Go `defaultLastSeenScope`。
 const LAST_SEEN_SCOPE: &str = "default";
 
+/// `hash_id` 模式下 vUIN 的最短/最长位数（Go `allocateVuinTx` 的 `9..=18`）。
+const HASH_VUIN_MIN_DIGITS: usize = 9;
+const HASH_VUIN_MAX_DIGITS: usize = 18;
+
 /// [`IdMapOptions`] 的 AppID 占位值：空串。
 ///
 /// [`IdMapStore::open`] 拒绝该值：空 AppID 会让 OpenID 的 key 变成
@@ -84,6 +89,8 @@ pub struct IdMapOptions {
     pub app_id: String,
     /// Go `idmap_isolation` 开启时的 `uin`；`None` 等价关闭隔离。
     pub uin: Option<String>,
+    /// Go `hash_id`：vUIN 用 MD5 派生（`GenerateRowID`）；`false` 顺序递增。
+    pub hash_id: bool,
     /// 消息 ID 的 TTL，默认 [`DEFAULT_MSG_TTL`]。
     pub msg_ttl: Duration,
     /// 名称缓存 TTL，默认 [`DEFAULT_USER_NAME_TTL`]。
@@ -99,6 +106,7 @@ impl Default for IdMapOptions {
             msg_path: PathBuf::from(DEFAULT_MSG_PATH),
             app_id: UNSET_APP_ID.to_owned(),
             uin: None,
+            hash_id: false,
             msg_ttl: DEFAULT_MSG_TTL,
             user_name_ttl: DEFAULT_USER_NAME_TTL,
         }
@@ -127,6 +135,13 @@ impl IdMapOptions {
     #[must_use]
     pub fn with_uin(mut self, uin: impl Into<String>) -> Self {
         self.uin = Some(uin.into());
+        self
+    }
+
+    /// 设置 `hash_id`：`true` 时 vUIN 与 Go 一致按 MD5 派生（等价 Go `hash_id: true`）。
+    #[must_use]
+    pub fn with_hash_id(mut self, hash_id: bool) -> Self {
+        self.hash_id = hash_id;
         self
     }
 
@@ -279,8 +294,12 @@ impl IdMapStore {
                     // 写事务内读 counter 与已占用的 vUIN：redb 的读事务可与写事务共存，
                     // 读到的是已提交状态，因此不会看到本事务未提交的写入。
                     let current = read_counter_tx(&txn, CURRENT_VUIN_KEY)?;
-                    let planned = self.next_free_vuin(current)?;
-                    let vuin = allocate_vuin_tx(&txn, planned, &normalized)?;
+                    let planned = if self.options.hash_id {
+                        self.hash_vuin(&normalized.raw)?
+                    } else {
+                        self.next_free_vuin(current)?
+                    };
+                    let vuin = allocate_vuin_tx(&txn, planned, &normalized, self.options.hash_id)?;
                     (vuin, true)
                 }
             }
@@ -706,6 +725,24 @@ impl IdMapStore {
         Ok(candidate)
     }
 
+    /// Go `allocateVuinTx` 的 `hash_id` 分支：MD5 派生 9 位 vUIN，撞号就加长到 18 位。
+    ///
+    /// 与 [`IdMapStore::next_free_vuin`] 一致，读的是已提交状态（写事务内看不到本事务未提交
+    /// 的写入），因此并发写入方仍靠 `prefix_exists` 的已提交视图排重。
+    fn hash_vuin(&self, raw: &str) -> Result<i64, StorageError> {
+        let txn = self.identity_db.begin_read().map_err(rb)?;
+        let table = txn.open_table(VUIN_TO_IDENTITY).map_err(rb)?;
+        for digits in HASH_VUIN_MIN_DIGITS..=HASH_VUIN_MAX_DIGITS {
+            let candidate = generate_row_id(raw, digits)?;
+            if !prefix_exists(&table, candidate)? {
+                return Ok(candidate);
+            }
+        }
+        Err(StorageError::Corrupt(format!(
+            "身份 {raw} 在 {HASH_VUIN_MIN_DIGITS}~{HASH_VUIN_MAX_DIGITS} 位内无法派生唯一 vUIN"
+        )))
+    }
+
     /// 从已提交状态里找下一个未被占用的虚拟消息 ID（Go `allocateMsgIDTx`）。
     fn next_free_msg_id(&self, current: i64) -> Result<i64, StorageError> {
         let mut candidate = if current <= 0 {
@@ -729,6 +766,7 @@ fn allocate_vuin_tx(
     txn: &WriteTransaction,
     planned: i64,
     identity: &encoding::NormalizedIdentity,
+    hash_derived: bool,
 ) -> Result<i64, StorageError> {
     let mut meta = txn.open_table(META).map_err(rb)?;
     let mut forward = txn.open_table(IDENTITY_TO_VUIN).map_err(rb)?;
@@ -739,20 +777,25 @@ fn allocate_vuin_tx(
         Some(guard) => decode_vuin(guard.value())?,
         None => 0,
     };
-    // planned 已跳过反表中占用中的 vUIN；并发写入方可能已推进 counter，
+    // 顺序模式：planned 已跳过反表中占用中的 vUIN；并发写入方可能已推进 counter，
     // 取两者较大者，保证同一事务内分配到的 vUIN 不重号。
-    let vuin = if current >= planned {
-        current.checked_add(1)
+    // 哈希模式（Go `allocateVuinTx`）：vUIN 由 MD5 决定，不随 counter 改写。
+    let vuin = if !hash_derived && current >= planned {
+        current
+            .checked_add(1)
+            .ok_or_else(|| StorageError::Corrupt("vUIN 空间耗尽".to_owned()))?
     } else {
-        Some(planned)
-    }
-    .ok_or_else(|| StorageError::Corrupt("vUIN 空间耗尽".to_owned()))?;
+        planned
+    };
 
-    let counter = encode_i64(vuin);
+    // Go 只在 vUIN 更大时推进计数器（哈希派生值通常远高于顺序计数）。
+    let counter = encode_i64(vuin.max(current));
     meta.insert(CURRENT_VUIN_KEY, counter.as_slice())
         .map_err(rb)?;
+    // 身份映射的值永远是本次分配的 vUIN，不能跟着计数器走。
+    let mapped = encode_i64(vuin);
     forward
-        .insert(identity.key.as_str(), counter.as_slice())
+        .insert(identity.key.as_str(), mapped.as_slice())
         .map_err(rb)?;
     let reverse_key = vuin_identity_key(vuin, &identity.key);
     reverse

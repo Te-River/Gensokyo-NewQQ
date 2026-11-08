@@ -31,6 +31,11 @@
 //! - [`boot::Runtime`]：以上四块与 M1h-a 的 listener 一起装配，全部由
 //!   [`RuntimeHandle::shutdown`] 收摊。
 //!
+//! # 入站金样回放
+//! - `tests/golden_inbound.rs`：以同仓 Go 侧 `Processor/testdata/inbound/` 的金样逐字段回归
+//!   [`inbound::Inbound`]（15 类事件，随 `cargo test` 自动跑，零 Go 依赖）。金样重生成命令、
+//!   `time` 归一化约定与新增事件类型的做法见该文件的模块文档。
+//!
 //! # M3 WebUI 挂载
 //! - `disable_webui=false`（默认）时 [`boot::Runtime`] 建一份 [`gensokyo_webui::WebUiState`]
 //!   （配置走 `ConfigManager` 快照，热重载即时生效），把 `WebUi::router` 挂到 HTTP API 与

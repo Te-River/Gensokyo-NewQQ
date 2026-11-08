@@ -58,8 +58,9 @@
 //! - **ASCII-only 数字**：Go `isDigits` 用 `unicode.IsDigit`（接受阿拉伯数字等 Unicode
 //!   数字）；本 crate 只认 ASCII `0-9`（`idmap/encoding.rs` 的 `is_ascii_digits`），
 //!   `rUIN` 的 base32 解码结果同理。
-//! - **哈希 vUIN**：Go `HashID=true` 时用 `GenerateRowID` 派生 vUIN；M1d 只实现单调
-//!   递增（Go 的默认路径），哈希模式随配置层接入后再补。
+//! - **哈希 vUIN**：Go `HashID=true` 时用 `GenerateRowID` 派生 vUIN；本 crate 由
+//!   [`IdMapOptions::hash_id`] 选择（`false` 走 Go 的顺序递增默认路径）。
+//!   注意 Go 的配置默认是 `hash_id: true`，接入配置层时要显式打开。
 //! - **`uin_prefix` 隔离**：Go 从配置读 `idmap_isolation`/`uin`；本 crate 由
 //!   [`IdMapOptions::uin`] 显式传入（`None` 等价 Go 关闭隔离）。
 //! - **名称缓存**：Go 用 `sync.Map` + 后台每 10 分钟清理；本 crate 用 `Mutex<HashMap>`
