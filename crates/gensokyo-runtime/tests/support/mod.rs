@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use gensokyo_config::ConfigManager;
 use gensokyo_core::Ob11Id;
-use gensokyo_protocol::Registry;
 use gensokyo_protocol::action::{ActionRequest, ActionResponse};
 use gensokyo_protocol::event::{MessageEvent, MessageType};
 use gensokyo_protocol::{Event, Handler, HandlerFuture, MessageContent};
@@ -36,18 +35,16 @@ pub fn config(settings: &str) -> (Arc<ConfigManager>, TempDir) {
 /// 构造只注册内置 action 的 `AppState`。
 pub fn state(settings: &str) -> (AppState, TempDir) {
     let (manager, dir) = config(settings);
-    let mut registry = Registry::new();
-    gensokyo_runtime::builtin::register_all(&mut registry, Arc::clone(&manager));
-    (AppState::new(manager, Arc::new(registry)), dir)
+    (AppState::with_builtin_handlers(manager), dir)
 }
 
-/// 在 `dir` 里开一份临时 idmap 并注入状态。
+/// 在 `dir` 里开一份临时 idmap 与 botstats 并注入状态。
 ///
-/// `Runtime::start*` 的 `attach_idmap` 在状态没有 idmap 时按默认路径（工作目录）建库；
-/// 集成测试必须先注入，否则 `cargo test` 会在 crate 目录留下
-/// `openid-map.redb` / `msgid-map.redb`。
-pub fn with_temp_idmap(state: AppState, dir: &TempDir) -> AppState {
-    let store = gensokyo_storage::IdMapStore::open(
+/// `Runtime::start*` 的 `attach_idmap` / `attach_botstats` 在状态没有对应句柄时按默认路径
+/// （工作目录）建库；集成测试必须先注入，否则 `cargo test` 会在 crate 目录留下
+/// `openid-map.redb` / `msgid-map.redb` / `bot-stats.redb`。
+pub fn with_temp_stores(state: AppState, dir: &TempDir) -> AppState {
+    let idmap = gensokyo_storage::IdMapStore::open(
         gensokyo_storage::IdMapOptions::new(
             dir.path().join("openid-map.redb"),
             dir.path().join("msgid-map.redb"),
@@ -55,7 +52,13 @@ pub fn with_temp_idmap(state: AppState, dir: &TempDir) -> AppState {
         .with_app_id("102000001"),
     )
     .expect("打开临时 idmap 失败");
-    state.with_idmap(Arc::new(store))
+    let botstats = gensokyo_storage::BotStatsStore::open(
+        dir.path().join(gensokyo_storage::DEFAULT_BOTSTATS_PATH),
+    )
+    .expect("打开临时 botstats 失败");
+    state
+        .with_idmap(Arc::new(idmap))
+        .with_botstats(Arc::new(botstats))
 }
 
 /// 裸 HTTP `POST`（不走 reqwest：测试不需要额外依赖）。

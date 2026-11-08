@@ -37,7 +37,7 @@ async fn wait_for_bind_prefix(config: &ConfigManager, expected: &str) {
 }
 
 async fn start_runtime(config: Arc<ConfigManager>, idmap_dir: &TempDir) -> RuntimeHandle {
-    let state = support::with_temp_idmap(AppState::with_builtin_handlers(config), idmap_dir);
+    let state = support::with_temp_stores(AppState::with_builtin_handlers(config), idmap_dir);
     Runtime::start_with(
         state,
         RuntimeOptions {

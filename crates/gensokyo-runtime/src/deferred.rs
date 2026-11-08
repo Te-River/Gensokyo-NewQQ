@@ -14,7 +14,7 @@
 //! |----|------|------|
 //! | 文本 | `content` | 按 CQ 重新分词，`[CQ:at,qq=…]` 转 v2 的 `<@openid>`（虚拟号经 idmap 反查）；缺 `qq` 的 at 段（`[CQ:at]` / `[CQ:at ]` / `[CQ:at,foo]` / `[CQ:at,qq=]`）与反查失败的数字虚拟号都原样透传（后者只 `warn`）；`at` 后与键值两侧允许空白（`[CQ:at , qq = 1]` 照常解析）；`auto_escape = true` 时原样发送、不解析 |
 //! | `[CQ:at,qq=all]` / `[CQ:at,qq=everyone]` / 字面 `<qqbot-at-everyone />` | `<qqbot-at-everyone />` | 仅群聊，且受「每群每自然日 1 次」限制，见下节「@全员」 |
-//! | `markdown` | `markdown` + `msg_type=2` | 只取 `content`：模板字段（`template_id` / `custom_template_id`）已废弃，出站不构造；文本被丢弃、`card` 让位；正文里的本地图片按 `oss_type` 换引用：`7` → `qqbot-media://` 素材库，`4~6/8~10` → 图床 CDN URL（[`resolve_markdown_images`]）；与媒体同现时先发这一条，媒体另起 `msg_type=7` 条 |
+//! | `markdown` | `markdown` + `msg_type=2` | 只取 `content`：模板字段（`template_id` / `custom_template_id`）已废弃，出站不构造；文本被丢弃、`card` 让位；正文里的本地图片按 `oss_type` 换引用：`7` → `qqbot-media://` 素材库，`1~3` → 内置云 OSS 对象 URL，`4~6/8~10` → 图床 CDN URL（[`resolve_markdown_images`]）；与媒体同现时先发这一条，媒体另起 `msg_type=7` 条 |
 //! | `card` | `card` + `msg_type=8` | 群聊与单聊同构；`{type:"tuwen", content:{title,description,url,pic_url}}`，四字段校验见 [`compose_card`]；与媒体同现时卡片先发、媒体另起 `msg_type=7` 条 |
 //! | 图片 / 语音 / 视频 / 文件 | `media` + `msg_type=7` | 见下节「媒体」 |
 //! | `[CQ:reply]` | `msg_id` | 虚拟号先经 idmap / echo 还原成真实消息 ID；还原失败 `1400`，不静默丢 |
@@ -148,7 +148,7 @@ use gensokyo_actions::{
 };
 use gensokyo_core::{Error, Ob11Id, Result};
 use gensokyo_media::source::FILE_PREFIX;
-use gensokyo_media::{HostingKind, ImageKind, MediaSource, sniff_image};
+use gensokyo_media::{HostingKind, ImageKind, MediaSource, OssKind, sniff_image};
 
 use gensokyo_protocol::cqcode;
 use gensokyo_protocol::event::NoticeEvent;
@@ -183,7 +183,7 @@ pub fn is_deferred(data: &Value) -> bool {
 pub struct DeferredDeps<'a> {
     /// 媒体下载器；生产用 [`MediaRuntime::default`]，单测注入假传输。
     pub media: &'a MediaRuntime,
-    /// 图床上传出口（`oss_type` 4~6/8~10 的 markdown 本地图片）；生产用
+    /// 上传出口（`oss_type` 1~3 内置云 OSS 与 4~6/8~10 图床的 markdown 本地图片）；生产用
     /// [`crate::hosting::shared`]，单测注入假传输。
     pub hosting: &'a HostingRuntime,
     /// echo 存储：发送成功后回写 `message_id`，`[CQ:reply]` 反查虚拟号也走它。
@@ -194,6 +194,13 @@ pub struct DeferredDeps<'a> {
     /// 合并转发逐条重发之间的间隔（Go 固定 500ms；生产走
     /// [`DEFAULT_FORWARD_SEND_INTERVAL`]，测试可注入 [`Duration::ZERO`] 免真睡，评审 ③）。
     pub forward_send_interval: Duration,
+    /// 群消息发送前的令牌桶：生产走 [`queue::RateLimiter::shared`]（进程级 5qps / burst 10，
+    /// Go `GetRateLimiter`），`None` 即不限速。
+    ///
+    /// 测试必须传 `None`：全量并行用例共享同一个进程级桶，突发额度打满后
+    /// [`queue::WAIT_TIMEOUT`] 等不到令牌、按失败尝试走重试，而重试会重取 `msg_seq`，
+    /// 把「首条消息」的序号推高。
+    pub limiter: Option<&'a queue::RateLimiter>,
 }
 
 /// 执行一条 deferred 计划，返回上游消息 ID。
@@ -276,7 +283,7 @@ async fn execute_inner(
     // 先占当天的 @全员 名额再发送：并发两条 @全员 只有一条能占住。标签只可能在首条
     // （正文在 markdown 条），后续媒体条没有正文。
     let mut reservation = reserve_at_everyone(context, &plan.target, &openid, &primary)?;
-    let mut outcome = match send_body(context, &plan.target, &openid, primary, deps.echo).await {
+    let mut outcome = match send_body(context, &plan.target, &openid, primary, deps).await {
         Ok(message_id) => Ok(message_id),
         Err(err) => {
             // 发送失败要回滚，不能让一次失败吃掉当天的名额
@@ -289,7 +296,7 @@ async fn execute_inner(
     for (offset, body) in extras.into_iter().enumerate() {
         // 首条占 1，媒体条从 2 起编号，日志里好对账
         let number = offset + 2;
-        match send_body(context, &plan.target, &openid, body, deps.echo).await {
+        match send_body(context, &plan.target, &openid, body, deps).await {
             Ok(message_id) => outcome = Ok(message_id),
             Err(err) => {
                 tracing::warn!(message = number, error = %err, "deferred 拆条发送有一条失败，继续发后续");
@@ -304,8 +311,9 @@ async fn execute_inner(
 ///
 /// 走 Go 的**活路径**（`messagequeue/queue.go` 的 worker 在 Go 里没有启动点，见 [`crate::queue`]
 /// 模块文档）：
-/// - 群消息每次尝试前先过令牌桶（5qps / burst 10、最多等 [`queue::WAIT_TIMEOUT`]，
-///   Go `send_group_msg.go:3065`），私聊不过桶（Go `postC2CMessageWithRetry` 同）；
+/// - 群消息每次尝试前先过 [`DeferredDeps::limiter`] 的令牌桶（生产 5qps / burst 10、最多等
+///   [`queue::WAIT_TIMEOUT`]，Go `send_group_msg.go:3065`），私聊不过桶（Go
+///   `postC2CMessageWithRetry` 同）；
 /// - 投递超时最多尝试 [`queue::MAX_ATTEMPTS`] 次、线性退避 [`queue::backoff`]，每次重试前重取
 ///   `msg_seq`（Go `postGroupMessageWithRetry` 在循环里调 `echo.NextMappingSeq`）；
 /// - 其余错误（频控 `22009`、事件过期等）**一次即返回**，群消息照旧落 SSM 队列
@@ -315,8 +323,9 @@ async fn send_body(
     target: &SendTarget,
     openid: &str,
     mut message: MessageToCreate,
-    echo: Option<&EchoStore>,
+    deps: &DeferredDeps<'_>,
 ) -> Result<String> {
+    let echo = deps.echo;
     // 入队要用原始消息体，而发送会把它移走，所以群聊在发送前先序列化一份
     let payload = match target {
         SendTarget::Group(_) => serde_json::to_string(&message).ok(),
@@ -324,13 +333,11 @@ async fn send_body(
     };
     let mut attempt: u32 = 0;
     let sent = loop {
-        let permitted = match target {
-            SendTarget::Group(_) => {
-                queue::RateLimiter::shared()
-                    .wait_with_timeout(queue::WAIT_TIMEOUT)
-                    .await
+        let permitted = match (target, deps.limiter) {
+            (SendTarget::Group(_), Some(limiter)) => {
+                limiter.wait_with_timeout(queue::WAIT_TIMEOUT).await
             }
-            SendTarget::Private(_) => true,
+            _ => true,
         };
         let outcome = if permitted {
             dispatch_body(context, target, openid, message.clone()).await
@@ -1211,10 +1218,13 @@ fn local_media_path(raw: &str) -> Option<PathBuf> {
 
 /// 一处引用 → 可写进 Markdown 的公网 URL；`None` 表示保留原引用。
 ///
-/// 按 `oss_type` 选上传链（Go `resolveLocalImageMedia`）：
+/// 按 `oss_type` 选上传链（Go `resolveLocalImageMedia` → `images.UploadBase64ImageToServer`）：
 /// - `7`（ChatGLM）：官方素材库，产出 `qqbot-media://` 引用；
 /// - `4~6` / `8~10`：图床后端，产出 CDN URL（[`HostingRuntime::upload`]）；
-/// - `0~3`：内置 OSS（腾讯云 / 百度云 / 阿里云）三后端属下一包，保留原引用。
+/// - `1~3`：内置云 OSS（腾讯云 COS / 百度云 BOS / 阿里云 OSS），产出对象存储 URL
+///   （[`HostingRuntime::upload_oss`]）；
+/// - `0`：Go 走 `localUploadBehavior`——把图片 POST 给本机（或 lotus）的 `/uploadpic` 换公网
+///   URL；Rust 侧没有这个端点，保留原引用并提示一次。
 async fn resolve_url(
     context: &ActionContext,
     hosting: &HostingRuntime,
@@ -1228,8 +1238,16 @@ async fn resolve_url(
     {
         return None;
     }
-    // 0~3（内置 OSS）与越界值不是图床：`from_oss_type` 返回 `None`，保留原引用
-    let kind = HostingKind::from_oss_type(context.config().snapshot().get_oss_type())?;
+    // 0（本地上传）与越界值两条链都不是：保留原引用
+    let oss_type = context.config().snapshot().get_oss_type();
+    let hosting_kind = HostingKind::from_oss_type(oss_type);
+    let oss_kind = OssKind::from_oss_type(oss_type);
+    if hosting_kind.is_none() && oss_kind.is_none() {
+        if oss_type == 0 {
+            warn_local_upload_unavailable();
+        }
+        return None;
+    }
     let Some(path) = local_media_path(raw) else {
         tracing::warn!(url = %raw, "markdown 图片路径未通过安全校验，保留原引用");
         return None;
@@ -1245,6 +1263,17 @@ async fn resolve_url(
             return None;
         }
     };
+    // 1~3：内置云 OSS 直传。Go 这条分支不做格式嗅探（对象 key 写死 `.jpg`），这里也不做。
+    if let Some(kind) = oss_kind {
+        let config = crate::hosting::oss_config_from_settings(&context.config().snapshot());
+        return match hosting.upload_oss(kind, &config, &bytes).await {
+            Ok(url) => Some(url),
+            Err(err) => {
+                warn_oss_failure(kind, &path, &err);
+                None
+            }
+        };
+    }
     let Some(image) = sniff_image(&bytes) else {
         tracing::warn!(path = %path.display(), "markdown 图片格式无法识别，保留原引用");
         return None;
@@ -1258,6 +1287,8 @@ async fn resolve_url(
     };
     // Go `uploadImageBytesToMediaStore` 的文件名是 `<source>.<ext>`，Markdown 侧 source = "markdown"
     let file_name = format!("markdown.{extension}");
+    // 走到这里只可能是图床（1~3 已在上面返回）
+    let kind = hosting_kind?;
     if kind == HostingKind::ChatGlm {
         // `validate_image_upload` 只收 png / jpeg / gif / webp（Go `sniffMediaImageFormat` 同）
         if image == ImageKind::Bmp {
@@ -1307,6 +1338,39 @@ fn warn_hosting_failure(kind: HostingKind, path: &std::path::Path, err: &gensoky
         error = %err,
         "markdown 图片图床上传失败，保留原引用"
     );
+}
+
+/// 内置云 OSS 上传失败的告警：缺凭据 / 审核未实现（配置或能力问题）只喊一次，
+/// 其余错误逐图喊（带路径，便于排障）。
+fn warn_oss_failure(kind: OssKind, path: &std::path::Path, err: &gensokyo_media::Error) {
+    if matches!(err, gensokyo_media::Error::HostingConfig(_)) {
+        static WARNED: Once = Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                provider = kind.name(),
+                error = %err,
+                "内置云 OSS 不可用（配置缺失或能力未实现），markdown 本地图片保留原引用"
+            );
+        });
+        return;
+    }
+    tracing::warn!(
+        provider = kind.name(),
+        path = %path.display(),
+        error = %err,
+        "markdown 图片内置云 OSS 上传失败，保留原引用"
+    );
+}
+
+/// `oss_type=0`（Go `localUploadBehavior`）在 Rust 侧没有落地条件：Go 把 base64 图片 POST 给
+/// 本机或 lotus 的 `/uploadpic` 换公网 URL，本仓既无该端点也没有 lotus 通道。
+fn warn_local_upload_unavailable() {
+    static WARNED: Once = Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            "oss_type=0（本地上传）在 Rust 侧未实现：缺少 /uploadpic 端点，markdown 本地图片保留原引用"
+        );
+    });
 }
 
 /// `plan.card` → 图文卡片：`{type:"tuwen", content:{title,description,url,pic_url}}`。
@@ -2140,6 +2204,24 @@ mod tests {
     const BILIBILI_SETTINGS: &str =
         "  oss_type: 5\n  bilibili:\n    csrf_token: csrf\n    sessdata: sess\n    bucket: b\n";
 
+    /// oss_type=1~3 的可用配置：三后端凭据全填，后端只读自己那一段。
+    fn oss_settings(oss_type: i64) -> String {
+        const REST: &str = "  app_id: 10001
+  t_COS_BUCKETNAME: bucket-125
+  t_COS_REGION: ap-shanghai
+  t_COS_SECRETID: t-id
+  t_COS_SECRETKEY: t-key
+  b_BOS_BUCKETNAME: bj.bcebos.com
+  b_BCE_AK: b-ak
+  b_BCE_SK: b-sk
+  a_OSS_EndPoint: oss-cn-hangzhou.aliyuncs.com
+  a_OSS_BucketName: a-bucket
+  a_OSS_AccessKeyId: a-id
+  a_OSS_AccessKeySecret: a-secret
+";
+        format!("  oss_type: {oss_type}\n{REST}")
+    }
+
     fn request(target: SendTarget, plan: OutboundPlan) -> SendRequest {
         SendRequest {
             target,
@@ -2173,20 +2255,22 @@ mod tests {
         deps_with_hosting(media, echo, hub, &TEST_HOSTING)
     }
 
-    /// 带图床注入的依赖（`oss_type` 4~6/8~10 的 markdown 图片用例）。
+    /// 带上传出口注入的依赖（`oss_type` 1~3 内置云 OSS 与 4~6/8~10 图床的 markdown 图片用例）。
     fn deps_with_hosting<'a>(
         media: &'a MediaRuntime,
         echo: Option<&'a EchoStore>,
         hub: Option<&'a EventHub>,
         hosting: &'a HostingRuntime,
     ) -> DeferredDeps<'a> {
-        // 测试统一零间隔：合并转发用例免真睡 2×500ms（评审 ③）
+        // 测试统一零间隔：合并转发用例免真睡 2×500ms（评审 ③）；不限速：并行用例共享
+        // 进程级桶会打满突发额度，等待超时后重试推高 `msg_seq`（见 `limiter` 字段文档）
         DeferredDeps {
             media,
             hosting,
             echo,
             hub,
             forward_send_interval: Duration::ZERO,
+            limiter: None,
         }
     }
 
@@ -4687,22 +4771,118 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builtin_oss_types_keep_local_paths() {
+    async fn builtin_oss_backends_upload_and_rewrite_markdown() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = write_png(&dir, "a.png");
+        for (oss_type, prefix) in [
+            (1, "https://bucket-125.cos.ap-shanghai.myqcloud.com/"),
+            (2, "https://bj.bcebos.com/10001/"),
+            (3, "https://a-bucket.oss-cn-hangzhou.aliyuncs.com/"),
+        ] {
+            let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+            let (_cfg, context) = context_with_settings(Arc::clone(&api), &oss_settings(oss_type));
+            let media = no_media();
+            let transport = Arc::new(FakeHosting::ok());
+            let hosting = HostingRuntime::with_transport(transport.clone());
+            let plan = group_request(markdown_plan(&format!("![本地]({path})")));
+
+            execute(
+                &context,
+                &plan,
+                &deps_with_hosting(&media, None, None, &hosting),
+            )
+            .await
+            .expect("内置云 OSS 上传成功后应替换成对象 URL");
+
+            let sent = api.sent();
+            let content = sent[0]
+                .markdown
+                .as_ref()
+                .and_then(|md| md.content.as_deref())
+                .expect("有 markdown 正文");
+            assert!(
+                content.starts_with(&format!("![本地]({prefix}")),
+                "oss_type={oss_type}: {content}"
+            );
+            assert!(content.ends_with(".jpg)"), "oss_type={oss_type}: {content}");
+
+            let requests = transport.requests();
+            assert_eq!(requests.len(), 1, "oss_type={oss_type}：一张图一次上传、不重试");
+            assert_eq!(requests[0].method, UploadMethod::Put);
+            assert!(
+                requests[0].body.is_some(),
+                "oss_type={oss_type} 原始字节直传（不是 multipart）"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn builtin_oss_failure_keeps_the_original_reference() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = write_png(&dir, "a.png");
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_cfg, context) = context_with_settings(Arc::clone(&api), &oss_settings(1));
+        let media = no_media();
+        let transport = Arc::new(FakeHosting::with_status(403));
+        let hosting = HostingRuntime::with_transport(transport.clone());
+        let raw = format!("![图]({path})");
+        let plan = group_request(markdown_plan(&raw));
+
+        execute(
+            &context,
+            &plan,
+            &deps_with_hosting(&media, None, None, &hosting),
+        )
+        .await
+        .expect("内置 OSS 失败不能阻断发送");
+
+        assert_eq!(
+            api.sent()[0]
+                .markdown
+                .as_ref()
+                .and_then(|md| md.content.as_deref()),
+            Some(raw.as_str()),
+            "上传失败保留原引用"
+        );
+        assert_eq!(transport.requests().len(), 1, "4xx 不重试");
+    }
+
+    #[tokio::test]
+    async fn builtin_oss_audit_switch_fails_closed() {
         let dir = tempfile::tempdir().expect("临时目录");
         let path = write_png(&dir, "a.png");
         let transport = Arc::new(FakeHosting::ok());
         let hosting = HostingRuntime::with_transport(transport.clone());
-        for oss_type in 0..=3 {
-            let api = Arc::new(FakeQqApi::default());
-            let (_cfg, context) = context_with_settings(api, &format!("  oss_type: {oss_type}\n"));
-            let raw = format!("![图]({path})");
-            assert_eq!(
-                resolve_markdown_images(&context, &hosting, &raw).await,
-                raw,
-                "oss_type={oss_type} 的内置 OSS 后端属下一包，保留原引用"
-            );
-        }
-        assert!(transport.requests().is_empty(), "0~3 不试图床链");
+        let api = Arc::new(FakeQqApi::default());
+        // 审核未实现 → 发请求前就报 HostingConfig，绝不把未审核的图片传上去
+        let settings = format!("{}  t_audit: true\n", oss_settings(1));
+        let (_cfg, context) = context_with_settings(api, &settings);
+        let raw = format!("![图]({path})");
+
+        assert_eq!(
+            resolve_markdown_images(&context, &hosting, &raw).await,
+            raw,
+            "审核开关打开时保留原引用"
+        );
+        assert!(transport.requests().is_empty(), "审核未实现不发请求");
+    }
+
+    #[tokio::test]
+    async fn local_upload_type_zero_keeps_local_paths() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = write_png(&dir, "a.png");
+        let transport = Arc::new(FakeHosting::ok());
+        let hosting = HostingRuntime::with_transport(transport.clone());
+        let api = Arc::new(FakeQqApi::default());
+        let (_cfg, context) = context_with_settings(api, "  oss_type: 0\n");
+        let raw = format!("![图]({path})");
+
+        assert_eq!(
+            resolve_markdown_images(&context, &hosting, &raw).await,
+            raw,
+            "oss_type=0 依赖 Go 的 /uploadpic 端点，Rust 侧没有 → 保留原引用"
+        );
+        assert!(transport.requests().is_empty(), "0 不走图床也不走内置 OSS");
     }
 
     #[tokio::test]

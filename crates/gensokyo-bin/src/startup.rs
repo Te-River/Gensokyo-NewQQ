@@ -453,10 +453,21 @@ settings:
         )
     }
 
+    /// 在 `dir` 里开一份临时 botstats：`Runtime::start*` 的 `attach_botstats` 只会补缺，
+    /// 不先注入就会在工作目录建 `bot-stats.redb`。
+    fn temp_botstats(dir: &tempfile::TempDir) -> Arc<gensokyo_storage::BotStatsStore> {
+        Arc::new(
+            gensokyo_storage::BotStatsStore::open(
+                dir.path().join(gensokyo_storage::DEFAULT_BOTSTATS_PATH),
+            )
+            .expect("打开临时 botstats 失败"),
+        )
+    }
+
     /// 加载（必要时生成 `config.yml`）+ 启动；端口压到 `127.0.0.1:0`。
     ///
-    /// 与 `start_with_config` 等价，但先把 idmap 指到 `dir`——生产装配会落到工作目录，
-    /// 单测必须让 crate 目录保持零新增文件。
+    /// 与 `start_with_config` 等价，但先把 idmap / botstats 指到 `dir`——生产装配会落到
+    /// 工作目录，单测必须让 crate 目录保持零新增文件。
     async fn start_at(path: &std::path::Path, dir: &tempfile::TempDir) -> Started {
         let loaded = load_config(path).expect("加载配置失败");
         let ws_path = loaded
@@ -465,7 +476,9 @@ settings:
             .get_ws_server_path()
             .trim()
             .to_owned();
-        let state = build_state(loaded.config).with_idmap(temp_idmap(dir));
+        let state = build_state(loaded.config)
+            .with_idmap(temp_idmap(dir))
+            .with_botstats(temp_botstats(dir));
         let actions = state.registry().len();
         let qq = state.actions().is_some();
         let handle = Runtime::start_with(state, loopback_options())

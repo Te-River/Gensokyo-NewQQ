@@ -25,6 +25,10 @@
 //! `idmap.InitializeDB` 同样是启动期全局单例）。打开失败只 `warn`：Go 在同样情形 `Fatalf`
 //! 退出，这里选择降级——入站回退原始 OpenID、虚拟号反查报 `1500`，比进程起不来好排查。
 //!
+//! 再往后是 `Runtime::attach_botstats`：状态里没有统计库时打开 `bot-stats.redb`
+//! （[`DEFAULT_BOTSTATS_PATH`]；Go 侧 `botstats.InitializeDB`，`main.go:272`）。打开失败只
+//! `warn`——当日收发计数不落盘、`get_status` 统计字段报 0，`/metrics` 的内存计数照常。
+//!
 //! [`RuntimeOptions`] 可覆盖两个绑定地址：测试用 `127.0.0.1:0` 取随机端口，避免端口冲突。
 //!
 //! [`RuntimeOptions::config_watch`]（默认开）在启动时拉起 [`gensokyo_config::ConfigWatcher`]：
@@ -42,6 +46,7 @@
 
 use std::fmt;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -49,8 +54,8 @@ use axum::Router;
 use gensokyo_config::{ConfigWatcher, ReloadOutcome, Settings, WatcherHandle};
 use gensokyo_core::{Error, Result};
 use gensokyo_qq::{ReqwestTransport, TokenConfig, TokenManager};
-use gensokyo_storage::EchoStore;
 use gensokyo_storage::idmap::{DEFAULT_IDENTITY_PATH, DEFAULT_MSG_PATH, IdMapOptions, IdMapStore};
+use gensokyo_storage::{BotStatsStore, DEFAULT_BOTSTATS_PATH, EchoStore};
 use gensokyo_webui::{WebUi, WebUiState};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::Receiver;
@@ -157,6 +162,32 @@ impl Runtime {
         }
     }
 
+    /// 生产装配：未注入 botstats 时打开默认统计库并挂进状态（Go `botstats.InitializeDB`，
+    /// `main.go:272`；文件名见 [`DEFAULT_BOTSTATS_PATH`]）。
+    ///
+    /// 打开失败只 warn、不阻断启动：当日收发计数不落盘、`get_status` 统计字段报 0，
+    /// `/metrics` 的内存计数照常。已注入时原样返回，测试与嵌入场景可复用同一份存储。
+    fn attach_botstats(state: AppState) -> AppState {
+        Self::attach_botstats_with(state, DEFAULT_BOTSTATS_PATH)
+    }
+
+    /// [`Runtime::attach_botstats`] 的实现主体（测试用它注入临时路径）。
+    fn attach_botstats_with(state: AppState, path: impl AsRef<Path>) -> AppState {
+        if state.botstats().is_some() {
+            return state;
+        }
+        match BotStatsStore::open(path) {
+            Ok(store) => state.with_botstats(Arc::new(store)),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "botstats 打开失败，收发统计不落盘（get_status 统计报 0，/metrics 照常）"
+                );
+                state
+            }
+        }
+    }
+
     /// 按当前配置快照启动全部启用的 listener。
     ///
     /// # Errors
@@ -175,6 +206,7 @@ impl Runtime {
         gensokyo_core::telemetry::metrics::mark_start();
         let state = Self::attach_echo(state);
         let state = Self::attach_idmap(state);
+        let state = Self::attach_botstats(state);
         let settings = state.config().snapshot();
 
         // 注册表在 `AppState` 装配时创建（内置 3 个 + `gensokyo_actions::register_all`）；
@@ -910,6 +942,98 @@ mod tests {
         let state = Runtime::attach_idmap_with(state, options);
         let kept = state.idmap_arc().expect("idmap 仍在");
         assert!(Arc::ptr_eq(&injected, &kept), "已注入时不应被替换");
+    }
+
+    /// 生产启动路径的统计库装配（`Runtime::start_with` 的第三步）：打开统计库，且不覆盖已注入的实例。
+    #[test]
+    fn attach_botstats_injects_store_once() {
+        use std::sync::Arc;
+
+        use gensokyo_config::ConfigManager;
+
+        use super::Runtime;
+        use crate::state::AppState;
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nsettings: {}\n").expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let stats_path = dir.path().join("bot-stats.redb");
+
+        let state = Runtime::attach_botstats_with(
+            AppState::with_builtin_handlers(Arc::clone(&manager)),
+            &stats_path,
+        );
+        let injected = state.botstats_arc().expect("启动路径应自动装配 botstats");
+
+        let state = Runtime::attach_botstats_with(state, &stats_path);
+        let kept = state.botstats_arc().expect("botstats 仍在");
+        assert!(Arc::ptr_eq(&injected, &kept), "已注入时不应被替换");
+    }
+
+    /// 统计库打开失败只降级为「无 botstats」：不 panic、不阻断启动。
+    #[test]
+    fn attach_botstats_failure_keeps_state_without_store() {
+        use std::sync::Arc;
+
+        use gensokyo_config::ConfigManager;
+
+        use super::Runtime;
+        use crate::state::AppState;
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nsettings: {}\n").expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        // 父目录不存在：redb 建库失败，走 warn 降级分支。
+        let missing = dir.path().join("missing").join("bot-stats.redb");
+
+        let state =
+            Runtime::attach_botstats_with(AppState::with_builtin_handlers(manager), missing);
+        assert!(
+            state.botstats().is_none(),
+            "打开失败不应 panic，应降级为无 botstats"
+        );
+    }
+
+    /// 注册期单元为空、启动期才填：已注册的 `get_status` 必须能读到装配后的统计
+    /// （Go `botstats.InitializeDB` 晚于 handler 注册、`GetStats` 在请求时读全局 `db`）。
+    #[tokio::test]
+    async fn attach_botstats_reaches_registered_get_status() {
+        use std::sync::Arc;
+
+        use gensokyo_config::ConfigManager;
+        use gensokyo_protocol::action::ActionRequest;
+
+        use super::Runtime;
+        use crate::state::AppState;
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nsettings: {}\n").expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+
+        let state = Runtime::attach_botstats_with(
+            AppState::with_builtin_handlers(manager),
+            dir.path().join("bot-stats.redb"),
+        );
+        state
+            .botstats()
+            .expect("应已装配 botstats")
+            .record_received()
+            .expect("记收");
+
+        let response = state
+            .dispatcher()
+            .dispatch(&ActionRequest {
+                action: "get_status".to_owned(),
+                params: None,
+                echo: None,
+            })
+            .await;
+        assert_eq!(response.retcode, 0);
+        let data = response.data.expect("data");
+        assert_eq!(data["stat"]["message_received"], 1);
     }
 
     /// 打开失败只降级为「无 idmap」：不 panic、不阻断启动（Go 在同样情形 `Fatalf`）。

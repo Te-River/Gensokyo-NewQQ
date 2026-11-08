@@ -45,13 +45,13 @@
 pub mod bilibili;
 pub mod chatglm;
 pub mod cos;
-mod digest;
+pub(crate) mod digest;
 #[cfg(test)]
 pub(crate) mod fixtures;
 mod json;
 pub mod multipart;
 pub mod nature;
-mod qcloud;
+pub(crate) mod qcloud;
 pub mod qq_channel;
 pub mod retry;
 pub mod signed;
@@ -101,7 +101,8 @@ pub enum HostingKind {
 }
 
 impl HostingKind {
-    /// `oss_type` → 图床种类。0（未启用）与 1~3（内置 OSS 后端）不是图床，返回 `None`。
+    /// `oss_type` → 图床种类。0（本地上传，Go `localUploadBehavior`）与 1~3（内置云 OSS，
+    /// 见 [`crate::oss`]）不是图床，返回 `None`。
     #[must_use]
     pub const fn from_oss_type(oss_type: i64) -> Option<Self> {
         match oss_type {

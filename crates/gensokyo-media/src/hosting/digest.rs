@@ -1,15 +1,22 @@
-//! SHA-1 / HMAC-SHA1 / MD5：只为图床协议里写死的摘要。
+//! SHA-1 / HMAC-SHA1 / MD5 / SHA-256 / HMAC-SHA256：只为上传协议里写死的摘要。
 //!
 //! 为什么手写：腾讯云 COS 的 `q-sign-algorithm=sha1` 自签要 HMAC-SHA1，QQ频道图床的
 //! CDN 地址要图片内容的 MD5（Go `imagehosting/qq_channel.go`），而本 crate 的依赖图里
 //! 没有 `sha1` / `hmac` / `md-5`（`md-5` 只在 `gensokyo-storage`），这一轮也不允许扩边。
 //! 三者都是公开规范的固定算法，按 RFC 3174 / RFC 2104 / RFC 1321 实现并带标准测试向量。
 //!
+//! 例外是 SHA-256：`sha2` 本就在 workspace 依赖里（`gensokyo-storage` 的 JSONL 校验用），
+//! 百度云 BOS 的 `bce-auth-v1` 签名要它，直接复用而不是再手写一份 256 位压缩函数。
+//!
 //! 这里的摘要**不承担安全职责**：SHA-1 是 COS 协议规定的（服务端按同一算法校验），
 //! MD5 只用来拼 CDN 路径，两者都不用于签名校验或口令。
 
+use sha2::{Digest, Sha256};
+
 /// SHA-1 摘要长度（字节）。
 pub(crate) const SHA1_LEN: usize = 20;
+/// SHA-256 摘要长度（字节）。
+pub(crate) const SHA256_LEN: usize = 32;
 /// HMAC / MD5 的分组长度（字节）。
 const BLOCK_LEN: usize = 64;
 
@@ -34,6 +41,12 @@ pub(crate) fn sha1_hex(data: &[u8]) -> String {
 /// 注意 Go 侧把上一次 `hmacSha1` 的**十六进制字符串**再当 key 传给下一次（COS 的
 /// `signKey`），这里不做任何解读，按字节入参即可复现。
 pub(crate) fn hmac_sha1_hex(key: &[u8], message: &[u8]) -> String {
+    hex(&hmac_sha1(key, message))
+}
+
+/// HMAC-SHA1 原始摘要。阿里云 OSS 的 V1 签名要 base64 而不是十六进制
+/// （`Authorization: OSS <ak>:<base64(hmac-sha1)>`），因此单独暴露一份。
+pub(crate) fn hmac_sha1(key: &[u8], message: &[u8]) -> [u8; SHA1_LEN] {
     let mut block = [0u8; BLOCK_LEN];
     if key.len() > BLOCK_LEN {
         block[..SHA1_LEN].copy_from_slice(&sha1(key));
@@ -50,13 +63,57 @@ pub(crate) fn hmac_sha1_hex(key: &[u8], message: &[u8]) -> String {
     outer.extend(block.iter().map(|byte| byte ^ 0x5C));
     outer.extend_from_slice(&inner_digest);
 
-    hex(&sha1(&outer))
+    sha1(&outer)
+}
+
+/// HMAC-SHA256 十六进制摘要（小写），对齐 Go `bce-sdk-go` 的 `HmacSha256Hex`。
+///
+/// 与 [`hmac_sha1_hex`] 同一套 RFC 2104 结构，只是把压缩函数换成 SHA-256；
+/// BOS 的 `signingKey` 同样是「上一级结果的十六进制字符串再当 key」。
+pub(crate) fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
+    let mut block = [0u8; BLOCK_LEN];
+    if key.len() > BLOCK_LEN {
+        block[..SHA256_LEN].copy_from_slice(&sha256(key));
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+
+    let mut inner = Vec::with_capacity(BLOCK_LEN + message.len());
+    inner.extend(block.iter().map(|byte| byte ^ 0x36));
+    inner.extend_from_slice(message);
+
+    let inner_digest = sha256(&inner);
+    let mut outer = Vec::with_capacity(BLOCK_LEN + SHA256_LEN);
+    outer.extend(block.iter().map(|byte| byte ^ 0x5C));
+    outer.extend_from_slice(&inner_digest);
+
+    hex(&sha256(&outer))
+}
+
+/// SHA-256（FIPS 180-4），`sha2` crate 的实现。
+fn sha256(data: &[u8]) -> [u8; SHA256_LEN] {
+    let digest = Sha256::digest(data);
+    let mut out = [0u8; SHA256_LEN];
+    out.copy_from_slice(&digest);
+    out
 }
 
 /// MD5 十六进制摘要（大写），对齐 Go `strings.ToUpper(hex.EncodeToString(md5))`。
 pub(crate) fn md5_hex_upper(data: &[u8]) -> String {
     hex(&md5(data)).to_uppercase()
 }
+
+/// MD5 十六进制摘要（小写），对齐 Go `hex.EncodeToString(md5)`（oss 三后端的对象 key）。
+pub(crate) fn md5_hex(data: &[u8]) -> String {
+    hex(&md5(data))
+}
+
+/// MD5 原始摘要。阿里云 `Content-MD5` 头要 base64（`base64(md5(bytes))`）。
+pub(crate) fn md5_digest(data: &[u8]) -> [u8; 16] {
+    md5(data)
+}
+
+
 
 /// SHA-1（RFC 3174）。
 fn sha1(data: &[u8]) -> [u8; SHA1_LEN] {
@@ -252,7 +309,7 @@ fn md5(data: &[u8]) -> [u8; 16] {
 
 #[cfg(test)]
 mod tests {
-    use super::{hmac_sha1_hex, md5_hex_upper, sha1_hex};
+    use super::{hmac_sha1_hex, hmac_sha256_hex, md5_hex, md5_hex_upper, sha1_hex};
 
     #[test]
     fn sha1_matches_rfc_3174_vectors() {
@@ -303,6 +360,29 @@ mod tests {
                 b"12345678901234567890123456789012345678901234567890123456789012345678901234567890"
             ),
             "57EDF4A22BE3C955AC49DA2E2107B67A"
+        );
+        assert_eq!(md5_hex(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
+    }
+
+    #[test]
+    fn hmac_sha256_matches_rfc_4231_vectors() {
+        // RFC 4231 §4.2（key "Jefe"）
+        assert_eq!(
+            hmac_sha256_hex(b"Jefe", b"what do ya want for nothing?"),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        // RFC 4231 §4.3（20 字节 0xaa key，50 字节 0xdd 消息）
+        assert_eq!(
+            hmac_sha256_hex(&[0xaa; 20], &[0xdd; 50]),
+            "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe"
+        );
+        // key 超过 64 字节时先做一次 SHA-256（RFC 4231 §4.6）
+        assert_eq!(
+            hmac_sha256_hex(
+                &[0xaa; 131],
+                b"Test Using Larger Than Block-Size Key - Hash Key First"
+            ),
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
         );
     }
 }

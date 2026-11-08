@@ -389,7 +389,7 @@ async fn runtime_skips_gateway_when_disabled_or_without_credentials() {
     let (state, dir) = support::state(
         "  app_id: 102000001\n  client_secret: s3cret\n  enable_ws_server: false\n  http_address: \"\"\n",
     );
-    let state = support::with_temp_idmap(state, &dir);
+    let state = support::with_temp_stores(state, &dir);
     let handle = Runtime::start_with(
         state,
         RuntimeOptions {
@@ -407,7 +407,7 @@ async fn runtime_skips_gateway_when_disabled_or_without_credentials() {
     let (state, dir) = support::state(
         "  app_id: 102000001\n  enable_ws_server: false\n  http_address: \"\"\n",
     );
-    let state = support::with_temp_idmap(state, &dir);
+    let state = support::with_temp_stores(state, &dir);
     let handle = Runtime::start_with(
         state,
         RuntimeOptions {

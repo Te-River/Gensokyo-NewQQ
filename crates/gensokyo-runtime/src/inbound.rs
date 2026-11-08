@@ -4,9 +4,10 @@
 //! [`gensokyo_protocol::Event`]，不碰框架指令、黑白名单、被动转主动等
 //! [`Processor`](https://github.com/hoshinonyaruko/gensokyo) 里的业务逻辑。
 //!
-//! 除把群注册进 idmap 外，唯一的副作用是喂 echo（[`Inbound::with_echo`]）：消息事件写懒
+//! 除把群注册进 idmap 外，副作用有两个：喂 echo（[`Inbound::with_echo`]）——消息事件写懒
 //! message_id 池与 msg_id / msg_type 映射，入群类事件写 event_id，供出站解析被动回复凭据；
-//! 未装配 echo 时静默跳过，绝不阻断事件上报。
+//! 以及收发统计（`Inbound::record_message_received`）——三个消息事件各记一次当日接收数
+//! （Go `botstats.RecordMessageReceived`）。两者未装配时静默跳过，绝不阻断事件上报。
 //!
 //! # 已覆盖事件
 //!
@@ -79,13 +80,14 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gensokyo_config::{ConfigManager, Settings};
+use gensokyo_core::telemetry::metrics;
 use gensokyo_core::{Ob11Id, acnode};
 use gensokyo_protocol::event::{
     HeartbeatStatus, MessageEvent, MessageType, MetaEvent, NoticeEvent, RequestEvent, Sender,
 };
 use gensokyo_protocol::{Event, Extra, MessageContent};
 use gensokyo_qq::dto::interaction::Interaction;
-use gensokyo_storage::{EchoStore, IdMapStore};
+use gensokyo_storage::{BotStatsStore, EchoStore, IdMapStore};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -213,12 +215,13 @@ enum GroupMemberFlavor {
     Remove,
 }
 
-/// 入站转换器：配置快照 + 可选 idmap。
+/// 入站转换器：配置快照 + 可选 idmap / echo / botstats。
 #[derive(Debug, Clone)]
 pub struct Inbound {
     config: Arc<ConfigManager>,
     idmap: Option<Arc<IdMapStore>>,
     echo: Option<Arc<EchoStore>>,
+    botstats: Option<Arc<BotStatsStore>>,
 }
 
 impl Inbound {
@@ -229,16 +232,18 @@ impl Inbound {
             config,
             idmap,
             echo: None,
+            botstats: None,
         }
     }
 
-    /// 从 [`AppState`] 取配置、idmap 与 echo（webhook 每个请求现构造，Arc 克隆开销可忽略）。
+    /// 从 [`AppState`] 取配置、idmap、echo 与 botstats（webhook 每个请求现构造，Arc 克隆开销可忽略）。
     #[must_use]
     pub fn from_state(state: &AppState) -> Self {
         Self {
             config: state.config_arc(),
             idmap: state.idmap_arc(),
             echo: state.echo_arc(),
+            botstats: state.botstats_arc(),
         }
     }
 
@@ -255,6 +260,25 @@ impl Inbound {
     #[must_use]
     pub fn self_id(&self) -> i64 {
         self.self_id_of(&self.config.snapshot())
+    }
+
+    /// 记一条收到的消息（Go `botstats.RecordMessageReceived`：内存指标 + 当日计数落盘）。
+    ///
+    /// Go 在三个 WS 事件处理器里各调一次（`main.go:763` 群 AT、`:785` C2C、`:1135` 群全量），
+    /// 且都包在 `if !config.GetDisableErrorChan()` 里——那个开关在 Go 被当成统计开关用，这里
+    /// 照搬。与 Go 的差异：Go 的 webhook 回调（`server/webhook.go`）不记账，这里在转换的唯一
+    /// 入口记账，四种传输到达的消息事件都记，口径是「每条到达的消息事件一次」。
+    fn record_message_received(&self, settings: &Settings) {
+        if settings.get_disable_error_chan() {
+            return;
+        }
+        metrics::MESSAGES_RECEIVED.inc();
+        let Some(stats) = self.botstats.as_deref() else {
+            return;
+        };
+        if let Err(err) = stats.record_received() {
+            tracing::warn!(error = %err, "botstats 写入失败，本次接收只计内存指标");
+        }
     }
 
     /// 把 QQ 回调原文转成零条或多条 OneBot 事件。
@@ -300,17 +324,21 @@ impl Inbound {
         };
         let data = filtered.as_ref().unwrap_or(data);
         match kind {
-            "GROUP_AT_MESSAGE_CREATE" => Ok(vec![self.group_message(
-                &settings,
-                data,
-                GroupFlavor::At,
-            )?]),
-            "GROUP_MESSAGE_CREATE" => Ok(vec![self.group_message(
-                &settings,
-                data,
-                GroupFlavor::Full,
-            )?]),
-            "C2C_MESSAGE_CREATE" => Ok(vec![self.private_message(&settings, data)?]),
+            "GROUP_AT_MESSAGE_CREATE" => {
+                let event = self.group_message(&settings, data, GroupFlavor::At)?;
+                self.record_message_received(&settings);
+                Ok(vec![event])
+            }
+            "GROUP_MESSAGE_CREATE" => {
+                let event = self.group_message(&settings, data, GroupFlavor::Full)?;
+                self.record_message_received(&settings);
+                Ok(vec![event])
+            }
+            "C2C_MESSAGE_CREATE" => {
+                let event = self.private_message(&settings, data)?;
+                self.record_message_received(&settings);
+                Ok(vec![event])
+            }
             "GROUP_ADD_ROBOT" => self.group_add_robot(&settings, data),
             "GROUP_DEL_ROBOT" => {
                 self.group_op_notice(&settings, data, "group_decrease", Some("kick_me"))

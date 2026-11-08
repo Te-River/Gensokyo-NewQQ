@@ -25,11 +25,11 @@ fn options() -> RuntimeOptions {
     }
 }
 
-/// 起一个只带内置 action 的运行时；不注入 botstats（降级路径即默认路径）。
+/// 起一个只带内置 action 的运行时；注入临时 idmap / botstats（否则 `attach_*` 会落到 cwd）。
 async fn start() -> (RuntimeHandle, SocketAddr, TempDir) {
     let (manager, dir) = support::config(METRICS_SETTINGS);
-    let state = support::with_temp_idmap(AppState::with_builtin_handlers(manager), &dir);
-    assert!(state.botstats().is_none(), "本用例刻意不装配 botstats");
+    let state = support::with_temp_stores(AppState::with_builtin_handlers(manager), &dir);
+    assert!(state.botstats().is_some(), "应注入临时统计库");
     let handle = Runtime::start_with(state, options())
         .await
         .expect("启动失败");
@@ -92,31 +92,12 @@ async fn metrics_endpoint_serves_prometheus_text() {
     handle.shutdown_with_timeout(DEFAULT_SHUTDOWN_TIMEOUT).await;
 }
 
-/// 统计库未装配（生产装配前 / 打不开）时端点照旧可用，只是不落盘。
-#[tokio::test]
-async fn metrics_endpoint_degrades_without_botstats() {
-    let (handle, addr, _dir) = start().await;
-
-    let (status, response) = support::get(addr, "/metrics").await;
-    assert_eq!(status, 200, "未装配 botstats 不应影响端点: {response}");
-    let body = support::response_body(&response);
-    assert!(
-        body.contains("gensokyo_messages_received_total "),
-        "内存计数不受统计库缺失影响\n{body}"
-    );
-
-    handle.shutdown_with_timeout(DEFAULT_SHUTDOWN_TIMEOUT).await;
-}
-
-/// 装配 botstats 后端点照旧，且状态里能拿到句柄（生产装配走 `AppState::with_botstats`；
-/// `Runtime::attach_botstats` 尚未接线，见 HANDOFF）。
+/// 统计库随状态装配进运行时：端点照旧，且注入的是临时库（`attach_botstats` 不覆盖已注入实例，
+/// 否则 `cargo test` 会在 crate 目录留下 `bot-stats.redb`）。
 #[tokio::test]
 async fn metrics_endpoint_survives_attached_botstats() {
     let (manager, dir) = support::config(METRICS_SETTINGS);
-    let store = gensokyo_storage::BotStatsStore::open(dir.path().join("bot-stats.redb"))
-        .expect("打开临时 botstats");
-    let state = support::with_temp_idmap(AppState::with_builtin_handlers(manager), &dir)
-        .with_botstats(std::sync::Arc::new(store));
+    let state = support::with_temp_stores(AppState::with_builtin_handlers(manager), &dir);
     assert!(state.botstats().is_some(), "注入后应有句柄");
     let handle = Runtime::start_with(state, options())
         .await

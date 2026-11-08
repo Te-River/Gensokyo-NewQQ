@@ -209,6 +209,7 @@ impl Dispatcher {
             echo: self.echo.as_deref(),
             hub: self.hub.as_ref(),
             forward_send_interval: self.forward_interval,
+            limiter: Some(crate::queue::RateLimiter::shared()),
         };
         if data.get("forward").is_some() {
             let request = serde_json::from_value::<ForwardRequest>(data).map_err(bad_plan)?;

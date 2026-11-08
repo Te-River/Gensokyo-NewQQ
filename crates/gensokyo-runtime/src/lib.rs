@@ -137,6 +137,6 @@ pub use intent::IntentPlan;
 pub use media::{FetchedMedia, MAX_MEDIA_BYTES, MediaRuntime};
 pub use queue::{QueueOptions, RateLimiter, SendQueue};
 pub use reporter::{PostUrlReporter, PostUrlReporterHandle};
-pub use state::AppState;
+pub use state::{AppState, BotStatsSlot};
 pub use webhook::{ACK_BODY as WEBHOOK_ACK_BODY, MAX_BODY_BYTES as WEBHOOK_MAX_BODY_BYTES};
 pub use ws_client::{WsClient, WsClientHandle, WsClientOptions};

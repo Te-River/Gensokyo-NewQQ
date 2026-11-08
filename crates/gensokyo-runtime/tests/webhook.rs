@@ -117,7 +117,7 @@ async fn post_signed(addr: SocketAddr, body: &str) -> (u16, String) {
 #[tokio::test]
 async fn webhook_post_publishes_onebot_event() {
     let (state, dir) = support::state(SETTINGS);
-    let state = support::with_temp_idmap(state, &dir);
+    let state = support::with_temp_stores(state, &dir);
     let mut events = state.hub().subscribe();
     let handle = Runtime::start(state).await.expect("启动运行时失败");
     let addr = handle.http_addr().expect("HTTP API 未启动");
@@ -149,7 +149,7 @@ async fn webhook_post_publishes_onebot_event() {
 #[tokio::test]
 async fn webhook_rejects_bad_signatures() {
     let (state, dir) = support::state(SETTINGS);
-    let state = support::with_temp_idmap(state, &dir);
+    let state = support::with_temp_stores(state, &dir);
     let mut events = state.hub().subscribe();
     let handle = Runtime::start(state).await.expect("启动运行时失败");
     let addr = handle.http_addr().expect("HTTP API 未启动");
@@ -209,7 +209,7 @@ async fn webhook_rejects_bad_signatures() {
 #[tokio::test]
 async fn webhook_verifies_signature_before_parsing_body() {
     let (state, dir) = support::state(SETTINGS);
-    let state = support::with_temp_idmap(state, &dir);
+    let state = support::with_temp_stores(state, &dir);
     let mut events = state.hub().subscribe();
     let handle = Runtime::start(state).await.expect("启动运行时失败");
     let addr = handle.http_addr().expect("HTTP API 未启动");
@@ -239,7 +239,7 @@ async fn webhook_verifies_signature_before_parsing_body() {
 #[tokio::test]
 async fn webhook_answers_op13_callback_validation() {
     let (state, dir) = support::state(SETTINGS);
-    let state = support::with_temp_idmap(state, &dir);
+    let state = support::with_temp_stores(state, &dir);
     let mut events = state.hub().subscribe();
     let handle = Runtime::start(state).await.expect("启动运行时失败");
     let addr = handle.http_addr().expect("HTTP API 未启动");
@@ -287,7 +287,7 @@ async fn webhook_is_also_mounted_on_forward_ws_port() {
         .replace("enable_ws_server: false", "enable_ws_server: true")
         .replace("http_address: \"127.0.0.1:0\"", "http_address: \"\"");
     let (state, dir) = support::state(&settings);
-    let state = support::with_temp_idmap(state, &dir);
+    let state = support::with_temp_stores(state, &dir);
     let mut events = state.hub().subscribe();
     let handle = Runtime::start_with(
         state,

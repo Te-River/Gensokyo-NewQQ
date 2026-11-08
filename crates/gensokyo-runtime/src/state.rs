@@ -5,10 +5,11 @@
 //! （入站事件）与 M1i（`send_*`）才需要的句柄，用 builder 选择性注入，缺省 `None`。
 //! 这样 M1h-a 的传输层可以单独测试，不必先把存储与上游客户端装配起来。
 //!
-//! 生产路径由 `gensokyo_runtime::boot` 的 `Runtime::attach_idmap` / `attach_echo` 兜底注入
-//! （状态里已有则原样保留）；这里的 builder 仍可覆盖，嵌入与测试场景可注入自己的实例。
+//! 生产路径由 `gensokyo_runtime::boot` 的 `Runtime::attach_idmap` / `attach_echo` /
+//! `attach_botstats` 兜底注入（状态里已有则原样保留）；这里的 builder 仍可覆盖，嵌入与测试
+//! 场景可注入自己的实例。
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use gensokyo_actions::ActionContext;
 use gensokyo_config::ConfigManager;
@@ -21,6 +22,14 @@ use crate::dispatcher::Dispatcher;
 use crate::event_hub::EventHub;
 use crate::media::MediaRuntime;
 
+/// botstats 的延迟注入单元。
+///
+/// Go 的 `botstats.db` 是包级指针，`handlers/get_status.go` 在**请求时**读它，因此统计库的
+/// 打开（`botstats.InitializeDB`，`main.go:272`）晚于 handler 注册也没有问题。`OnceLock`
+/// 复刻这个顺序：注册期 `get_status` 拿到的单元可以是空的，`Runtime::attach_botstats` 在启动
+/// 时填进去；已经填过时再次注入被忽略（对齐各 `attach_*` 的「状态里已有则原样保留」）。
+pub type BotStatsSlot = Arc<OnceLock<Arc<BotStatsStore>>>;
+
 /// 传输层与 handler 共享的状态。
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -29,7 +38,7 @@ pub struct AppState {
     actions: Option<Arc<ActionContext>>,
     idmap: Option<Arc<IdMapStore>>,
     echo: Option<Arc<EchoStore>>,
-    botstats: Option<Arc<BotStatsStore>>,
+    botstats: BotStatsSlot,
     api: Option<Arc<OpenApiClient<ReqwestTransport>>>,
     media: Arc<MediaRuntime>,
     hub: EventHub,
@@ -48,7 +57,7 @@ impl AppState {
             actions: None,
             idmap: None,
             echo: None,
-            botstats: None,
+            botstats: BotStatsSlot::default(),
             api: None,
             media: Arc::new(MediaRuntime::default()),
             hub: EventHub::default(),
@@ -59,9 +68,9 @@ impl AppState {
     /// 构造只注册 M1h-a 内置 action 的状态（[`builtin::register_all`]）。
     #[must_use]
     pub fn with_builtin_handlers(config: Arc<ConfigManager>) -> Self {
-        let mut registry = Registry::new();
-        builtin::register_all(&mut registry, Arc::clone(&config));
-        Self::new(config, Arc::new(registry))
+        let mut state = Self::new(config, Arc::new(Registry::new()));
+        state.install_handlers();
+        state
     }
 
     /// 构造「内置 action + `gensokyo_actions` 全集」的状态。
@@ -79,12 +88,26 @@ impl AppState {
     /// 注意：注册表被整体替换，此前经 [`AppState::new`] 注入的自定义 handler 不会保留。
     #[must_use]
     pub fn with_action_context(mut self, actions: Arc<ActionContext>) -> Self {
-        let mut registry = Registry::new();
-        builtin::register_all(&mut registry, Arc::clone(&self.config));
-        gensokyo_actions::register_all(&mut registry, Arc::clone(&actions));
-        self.registry = Arc::new(registry);
         self.actions = Some(actions);
+        self.install_handlers();
         self
+    }
+
+    /// 按当前状态重建注册表：内置 3 个 action + 已装配的 action 全集。
+    ///
+    /// 内置 handler 在注册期捕获 `Arc` 句柄（配置、botstats 单元），换实例只能整份重建再
+    /// 重注册；botstats 走 [`BotStatsSlot`] 共享，注入时不需要重建。
+    fn install_handlers(&mut self) {
+        let mut registry = Registry::new();
+        builtin::register_all(
+            &mut registry,
+            Arc::clone(&self.config),
+            Arc::clone(&self.botstats),
+        );
+        if let Some(actions) = &self.actions {
+            gensokyo_actions::register_all(&mut registry, Arc::clone(actions));
+        }
+        self.registry = Arc::new(registry);
     }
 
     /// 注入 idmap（M1h-b 的入站转换需要虚拟 ID ↔ OpenID 映射）。
@@ -102,9 +125,12 @@ impl AppState {
     }
 
     /// 注入 botstats 统计库（未注入时收发计数只留在内存指标里，见 [`crate::dispatcher`]）。
+    ///
+    /// 句柄经 [`BotStatsSlot`] 共享：已经注册的 `get_status` 立刻能读到它，不必重建注册表；
+    /// 已注入过时保持原值。
     #[must_use]
-    pub fn with_botstats(mut self, botstats: Arc<BotStatsStore>) -> Self {
-        self.botstats = Some(botstats);
+    pub fn with_botstats(self, botstats: Arc<BotStatsStore>) -> Self {
+        let _ = self.botstats.set(botstats);
         self
     }
 
@@ -209,7 +235,13 @@ impl AppState {
     /// botstats 句柄（未注入时为 `None`：统计不落盘，`/metrics` 的内存计数照常）。
     #[must_use]
     pub fn botstats(&self) -> Option<&BotStatsStore> {
-        self.botstats.as_deref()
+        self.botstats.get().map(|stats| stats.as_ref())
+    }
+
+    /// botstats 句柄的 `Arc`（[`crate::inbound::Inbound`] / [`crate::dispatcher::Dispatcher`] 要持有）。
+    #[must_use]
+    pub fn botstats_arc(&self) -> Option<Arc<BotStatsStore>> {
+        self.botstats.get().cloned()
     }
 
     /// deferred 的媒体下载器。
@@ -235,7 +267,7 @@ impl AppState {
             .with_actions(self.actions_arc())
             .with_media(Arc::clone(&self.media))
             .with_echo(self.echo.clone())
-            .with_botstats(self.botstats.clone())
+            .with_botstats(self.botstats_arc())
             .with_hub(Some(self.hub.clone()))
     }
 }

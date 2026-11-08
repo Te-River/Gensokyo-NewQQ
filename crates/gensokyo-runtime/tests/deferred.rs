@@ -353,7 +353,11 @@ async fn deferred_without_action_context_is_1500() {
 
     // 只装注册表、不挂 ActionContext：deferred 计划无法执行，必须 1500 而不是泄漏计划。
     let mut registry = Registry::new();
-    gensokyo_runtime::builtin::register_all(&mut registry, Arc::clone(&manager));
+    gensokyo_runtime::builtin::register_all(
+        &mut registry,
+        Arc::clone(&manager),
+        gensokyo_runtime::BotStatsSlot::default(),
+    );
     gensokyo_actions::register_all(&mut registry, context);
     let state = AppState::new(manager, Arc::new(registry));
 

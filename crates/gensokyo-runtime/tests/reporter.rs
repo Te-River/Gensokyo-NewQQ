@@ -312,7 +312,7 @@ async fn runtime_can_disable_post_url_reporting() {
     let (state, dir) = support::state(
         "  app_id: 102000001\n  post_url: [\"http://127.0.0.1:1/cb\"]\n  enable_ws_server: false\n  http_address: \"\"\n",
     );
-    let state = support::with_temp_idmap(state, &dir);
+    let state = support::with_temp_stores(state, &dir);
     let handle = Runtime::start_with(
         state,
         RuntimeOptions {

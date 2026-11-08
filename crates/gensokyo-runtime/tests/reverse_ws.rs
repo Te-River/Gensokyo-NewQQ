@@ -29,7 +29,11 @@ fn settings_with(address: &str, extra: &str) -> String {
 fn state_with(settings: &str, handlers: Vec<(&'static str, Arc<dyn Handler>)>) -> (AppState, TempDir) {
     let (manager, dir) = support::config(settings);
     let mut registry = Registry::new();
-    gensokyo_runtime::builtin::register_all(&mut registry, Arc::clone(&manager));
+    gensokyo_runtime::builtin::register_all(
+        &mut registry,
+        Arc::clone(&manager),
+        gensokyo_runtime::BotStatsSlot::default(),
+    );
     for (action, handler) in handlers {
         assert!(
             registry.register(action, handler).is_none(),

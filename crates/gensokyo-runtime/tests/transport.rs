@@ -107,7 +107,11 @@ async fn start_with_handlers(
         .expect("写测试配置失败");
     let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
     let mut registry = Registry::new();
-    gensokyo_runtime::builtin::register_all(&mut registry, Arc::clone(&manager));
+    gensokyo_runtime::builtin::register_all(
+        &mut registry,
+        Arc::clone(&manager),
+        gensokyo_runtime::BotStatsSlot::default(),
+    );
     for (action, handler) in handlers {
         assert!(
             registry.register(action, handler).is_none(),
@@ -116,7 +120,7 @@ async fn start_with_handlers(
     }
     let state = AppState::new(manager, Arc::new(registry));
     // 先注入临时 idmap：`Runtime::start_with` 的 attach_idmap 只会补缺，不然会落到 cwd。
-    let state = support::with_temp_idmap(state, &dir);
+    let state = support::with_temp_stores(state, &dir);
     let handle = Runtime::start_with(state, options)
         .await
         .expect("启动运行时失败");
@@ -477,7 +481,7 @@ async fn invalid_ws_server_path_fails_startup() {
     let path = dir.path().join("config.yml");
     std::fs::write(&path, format!("version: 1\nsettings:\n{WS_BAD_PATH}")).expect("写测试配置失败");
     let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
-    let state = support::with_temp_idmap(AppState::with_builtin_handlers(manager), &dir);
+    let state = support::with_temp_stores(AppState::with_builtin_handlers(manager), &dir);
 
     let err = Runtime::start_with(state, ws_options())
         .await

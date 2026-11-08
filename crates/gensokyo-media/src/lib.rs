@@ -18,7 +18,11 @@
 //! - [`image::image_size`]：从文件头读出 `(宽, 高)`，覆盖 PNG / JPEG（SOF0、SOF2 及同类
 //!   SOFn）/ GIF / WebP（VP8、VP8L、VP8X）/ BMP，不做像素解码。
 //! - [`hosting::HostingKind`]：`oss_type` 4~10 的图床枚举与
-//!   [`hosting::HostingKind::from_oss_type`]（0 = 未启用，1~3 = 内置 OSS，均返回 `None`）。
+//!   [`hosting::HostingKind::from_oss_type`]（0 = 本地上传，1~3 = 内置云 OSS（见 [`oss`]），均返回 `None`）。
+//! - [`oss::OssKind`]：`oss_type` 1~3 的内置云 OSS（腾讯云 COS / 百度云 BOS / 阿里云 OSS），
+//!   [`oss::upload`] 单次尝试直传（Go `oss` 包同口径，无重试），对象 key 是 `md5(字节).jpg`，
+//!   签名与请求头逐字段照 Go；审核开关（`t_audit` / `b_audit` / `a_audit`）未实现，
+//!   打开时在发请求前返回 [`Error::HostingConfig`]，由调用方保留原引用（fail-closed）。
 //! - [`hosting::HostingBackend`]：`async fn upload(&self, data, filename) -> Result<String>`；
 //!   oss_type 4~10 全部落地（COS / Bilibili / QQ频道 / ChatGLM / Ukaka / 星野 / Nature），
 //!   端点、表单字段、签名与成功判定都照 Go `imagehosting/`。
@@ -125,6 +129,7 @@ pub mod error;
 pub mod fetch;
 pub mod hosting;
 pub mod image;
+pub mod oss;
 pub mod silk;
 pub mod sniff;
 pub mod source;
@@ -146,6 +151,9 @@ pub use hosting::{
     is_retryable, upload, upload_with_retry,
 };
 pub use image::image_size;
+pub use oss::{
+    AliyunOssConfig, BaiduBosConfig, OssConfig, OssKind, TencentCosConfig, upload as oss_upload,
+};
 pub use silk::{CommandRunner, DEFAULT_SAMPLE_RATE, ProcessOutput, ProcessRunner, SilkCodec};
 pub use sniff::{ImageKind, sniff_content_type, sniff_image};
 pub use source::MediaSource;

@@ -27,6 +27,10 @@ base64.workspace = true
 tracing.workspace = true
 # image：M2c 图片压缩（JPEG / PNG / WebP 解码，JPEG / PNG 编码）；M2b 之前只用文件头探测
 image.workspace = true
+# sha2：百度云 BOS 的 bce-auth-v1 签名要 HMAC-SHA256；workspace 已有（gensokyo-storage 同用）
+sha2.workspace = true
+# time：内置云 OSS 的 Date / x-bce-date 头格式化（RFC 1123 / ISO 8601 UTC）
+time.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
