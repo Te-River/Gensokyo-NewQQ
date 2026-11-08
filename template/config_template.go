@@ -189,7 +189,7 @@ settings:
   transfer_url : true                #默认开启,关闭后自理url发送,配置server_dir为你的域名,配置crt和key后,将域名/url和/image在q.qq.com后台通过校验,自动使用302跳转处理机器人发出的所有域名.
 
   #框架修改
-  title : "Gensokyo © 2023 - Hoshinonyaruko"              #程序的标题 如果多个机器人 可根据标题区分
+  title : "Gensokyo-NewQQ - Te-River"                     #程序的标题 如果多个机器人 可根据标题区分
   frp_port : "0"                    #不使用请保持为0,frp的端口,frp有内外端口,请在frp软件设置gensokyo的port,并将frp显示的对外端口填入这里
   union_webhook : ""                #罚壳模式,将webhook流量转发给另一个gensokyo一起运行.
   union_id : false                  #启用罚壳id,将传入的罚壳id作为主id使用.

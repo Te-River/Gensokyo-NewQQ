@@ -176,7 +176,7 @@ func main() {
 	if conf.Settings.AppID == 12345 {
 		// 输出天蓝色文本
 		cyan := color.New(color.FgCyan)
-		cyan.Printf("欢迎来到Gensokyo, 控制台地址: %s\n", webuiURL)
+		cyan.Printf("欢迎来到Gensokyo-NewQQ, 控制台地址: %s\n", webuiURL)
 		log.Println("请完成机器人配置后重启框架。")
 
 	} else {
@@ -662,9 +662,10 @@ func main() {
 
 	// 使用color库输出天蓝色的文本
 	cyan := color.New(color.FgCyan)
-	cyan.Printf("欢迎来到Gensokyo, 控制台地址: %s\n", webuiURL)
+	cyan.Printf("Gensokyo-NewQQ - Te-River\n")
+	cyan.Printf("欢迎来到Gensokyo-NewQQ, 控制台地址: %s\n", webuiURL)
 	cyan.Printf("%s\n", template.Logo)
-	cyan.Printf("欢迎来到Gensokyo, 公网控制台地址(需开放端口): %s\n", webuiURLv2)
+	cyan.Printf("欢迎来到Gensokyo-NewQQ, 公网控制台地址(需开放端口): %s\n", webuiURLv2)
 
 	// 使用通道来等待信号
 	sigCh := make(chan os.Signal, 1)

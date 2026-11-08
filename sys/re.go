@@ -160,7 +160,7 @@ func setConsoleTitle(title string) error {
 	return nil
 }
 
-// SetTitle sets the window title to "Gensokyo © 2023 - [Year] Hoshinonyaruko".
+// SetTitle sets the window title to "Gensokyo-NewQQ - Te-River".
 func SetTitle(title string) {
 	err := setConsoleTitle(title)
 	if err != nil {
