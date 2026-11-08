@@ -68,6 +68,9 @@ func main() {
 			return
 		case "run":
 			args = args[1:]
+		case "legacy-export":
+			// 导出子命令必须在 sys.InitBase() 之前退出：不初始化配置单例、WS 与连接。
+			os.Exit(runLegacyExport(args[1:]))
 		}
 	}
 
@@ -1196,4 +1199,38 @@ func botDetailsErrorHint(err error) string {
 		hint += " (trace_id:" + traceID + ")"
 	}
 	return hint
+}
+
+// runLegacyExport 执行 legacy-export 子命令并返回进程退出码。
+// 只做数据库只读导出，不触碰 sys.InitBase()、配置单例与任何连接。
+func runLegacyExport(args []string) int {
+	fs := flag.NewFlagSet("legacy-export", flag.ContinueOnError)
+	out := fs.String("out", "", "导出的 JSONL 文件路径")
+	includeMsgIDs := fs.Bool("include-msg-ids", false, "同时导出 msg_id / latest 映射")
+	noUserInfo := fs.Bool("no-user-info", false, "跳过 UserInfo 桶")
+	appID := fs.String("app-id", "", "覆盖 config.yml 中的 app_id")
+	dbDir := fs.String("db-dir", ".", "idmap 数据库所在目录")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	res, err := idmap.ExportLegacy(idmap.ExportOptions{
+		Dir:           *dbDir,
+		Out:           *out,
+		AppID:         *appID,
+		IncludeMsgIDs: *includeMsgIDs,
+		NoUserInfo:    *noUserInfo,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "legacy-export 失败:", err)
+		return 1
+	}
+
+	fmt.Printf("已导出 %s\nidentity=%d config=%d user_info=%d last_seen=%d msg_id=%d latest=%d\nsha256=%s\n",
+		res.Path, res.Counts.Identity, res.Counts.Config, res.Counts.UserInfo,
+		res.Counts.LastSeen, res.Counts.MsgID, res.Counts.Latest, res.Sha256)
+	for _, warning := range res.Warnings {
+		fmt.Fprintln(os.Stderr, "提示:", warning)
+	}
+	return 0
 }
