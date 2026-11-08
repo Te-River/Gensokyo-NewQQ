@@ -81,3 +81,7 @@ webui/dist/js/*
 
 # cargo build cache
 target/
+
+# idmap redb 测试库（测试应使用临时路径；兜底忽略）
+*.redb
+*.redb-journal
