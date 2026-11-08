@@ -21,8 +21,11 @@
 //!
 //! - 反向 WS 收到的 OneBot action（`send_group_msg` 等）只记 debug 日志，不 dispatch
 //!   —— 本里程碑只做出站事件推送，action 回环属于后续里程碑。
-//! - Go 的 `sendFailures` 补发队列、`processFailedMessages` 未实现：断线期间的事件直接丢
-//!   （与 broadcast 语义一致）。
+//! - Go 的 `sendFailures` / `processFailedMessages` 已对齐：写失败且 `disable_error_chan=false`
+//!   时把原事件 JSON 入队，下一个心跳 tick 重发后**无条件清空**（重发失败的也不再重试）；
+//!   `disable_error_chan=true` 时只记日志丢弃。缓冲按地址持有、跨重连保留（同 Go 把
+//!   `sendFailures` 挂在 `WebSocketClient` 上）；与 Go 一样**没有容量上限**，长时间断线
+//!   会持续占用内存。
 //! - 不支持 `wss://`：workspace 的 `tokio-tungstenite` 未开 TLS feature，也没有走
 //!   `ProxyFromEnvironment`；`ws://` 之外的地址会在 dial 阶段报错并按退避重试。
 //! - `launch_reconnect_times`（启动阶段单独的重试上限）未区分，统一用 `reconnect_times`。
@@ -164,6 +167,8 @@ async fn run_address(
 ) {
     let mut failures: u32 = 0;
     let mut backoff = options.initial_backoff;
+    // Go 的 `sendFailures` 挂在 `WebSocketClient` 上：缓冲按地址持有，重连不清空。
+    let mut failed = FailedMessages::default();
 
     loop {
         if *stop.borrow() {
@@ -181,7 +186,8 @@ async fn run_address(
                 backoff = options.initial_backoff;
                 tracing::info!(address, "反向 WS 已连接");
 
-                let reason = serve(socket, &state, &inbound, heartbeat, stop).await;
+                let reason =
+                    serve(socket, &state, &inbound, heartbeat, stop, &mut failed).await;
                 tracing::info!(address, ?reason, "反向 WS 连接结束");
                 if reason == StopReason::Stopped {
                     break;
@@ -224,12 +230,20 @@ async fn serve(
     inbound: &Inbound,
     heartbeat: Duration,
     stop: &mut watch::Receiver<bool>,
+    failed: &mut FailedMessages,
 ) -> StopReason {
-    // 每次连接重新订阅：broadcast 不重放历史，断线期间的事件不会补发。
+    // 每次连接重新订阅：broadcast 不重放历史，写失败的事件由 `failed` 缓冲补发。
     let mut events = state.hub().subscribe();
     let (mut sink, mut source) = socket.split();
 
-    if !send_event(&mut sink, &inbound.lifecycle_connect()).await {
+    if send_event(
+        &mut sink,
+        &inbound.lifecycle_connect(),
+        failed,
+        disable_error_chan(state),
+    )
+    .await
+    {
         return StopReason::Disconnected;
     }
 
@@ -266,7 +280,7 @@ async fn serve(
             },
             event = events.recv() => match event {
                 Ok(event) => {
-                    if !send_event(&mut sink, &event).await {
+                    if send_event(&mut sink, &event, failed, disable_error_chan(state)).await {
                         return StopReason::Disconnected;
                     }
                 }
@@ -276,15 +290,28 @@ async fn serve(
                 Err(broadcast::error::RecvError::Closed) => return StopReason::Stopped,
             },
             _ = ticker.tick() => {
-                if !send_event(&mut sink, &inbound.heartbeat(interval_ms)).await {
+                let heartbeat_event = inbound.heartbeat(interval_ms);
+                if send_event(&mut sink, &heartbeat_event, failed, disable_error_chan(state)).await {
                     return StopReason::Disconnected;
                 }
+                // 与 Go 一致：心跳写完补发缓冲，补发后无条件清空。
+                failed.flush(&mut sink).await;
             }
         }
     }
 }
 
-async fn send_event<S>(sink: &mut S, event: &Event) -> bool
+/// 写一条事件。
+///
+/// 写失败时（[`write_payload`] 报错且 `disable_error_chan=false`）把原 JSON 压入
+/// [`FailedMessages`]，返回 `true` 表示连接已不可写、调用方应断开重连。
+/// 序列化失败只记 error：没有可补发的 payload，也不断开。
+async fn send_event<S>(
+    sink: &mut S,
+    event: &Event,
+    failed: &mut FailedMessages,
+    disable_error_chan: bool,
+) -> bool
 where
     S: futures::Sink<Message> + Unpin,
 {
@@ -292,10 +319,76 @@ where
         Ok(text) => text,
         Err(err) => {
             tracing::error!(error = %err, "事件序列化失败，跳过该事件");
-            return true;
+            return false;
         }
     };
-    sink.send(Message::Text(text.into())).await.is_ok()
+    if write_payload(sink, &text).await {
+        return false;
+    }
+    failed.record(text, disable_error_chan);
+    true
+}
+
+/// 写一帧文本；`false` 表示底层写失败。
+async fn write_payload<S>(sink: &mut S, payload: &str) -> bool
+where
+    S: futures::Sink<Message> + Unpin,
+{
+    sink.send(Message::Text(payload.to_owned().into()))
+        .await
+        .is_ok()
+}
+
+/// Go `config.GetDisableErrorChan()`：每次写失败现读快照，热重载即时生效。
+fn disable_error_chan(state: &AppState) -> bool {
+    state.config().snapshot().get_disable_error_chan()
+}
+
+/// 写失败缓冲（Go `WebSocketClient.sendFailures` + `processFailedMessages`）。
+///
+/// Go 侧没有 key、TTL、容量上限，这里照抄：长时间断线会持续占用内存。
+#[derive(Debug, Default)]
+struct FailedMessages {
+    entries: Vec<String>,
+}
+
+impl FailedMessages {
+    /// 按写失败入队；`disable_error_chan=true` 时只记日志丢弃（Go 同款开关）。
+    fn record(&mut self, payload: String, disable_error_chan: bool) {
+        if disable_error_chan {
+            tracing::warn!(
+                bytes = payload.len(),
+                "写失败且 disable_error_chan 已开启，丢弃该事件"
+            );
+            return;
+        }
+        self.entries.push(payload);
+        tracing::warn!(pending = self.entries.len(), "写失败，事件进入补发缓冲");
+    }
+
+    /// 重发缓冲并**无条件清空**（对齐 Go `processFailedMessages`）：
+    /// 重发失败的也不再重试，避免无限堆积。
+    async fn flush<S>(&mut self, sink: &mut S)
+    where
+        S: futures::Sink<Message> + Unpin,
+    {
+        if self.entries.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.entries);
+        let total = pending.len();
+        let mut failed = 0usize;
+        for payload in pending {
+            if !write_payload(sink, &payload).await {
+                failed += 1;
+            }
+        }
+        if failed == 0 {
+            tracing::info!(count = total, "补发缓冲事件完成");
+        } else {
+            tracing::warn!(count = total, failed, "补发缓冲事件部分失败，已清空不再重试");
+        }
+    }
 }
 
 /// 建连；token 非空时带 `Authorization: Token <token>`（Go 同款）。
@@ -433,8 +526,16 @@ impl Drop for WsClientHandle {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_HEARTBEAT_INTERVAL, access_token_from_uri};
+    use super::{DEFAULT_HEARTBEAT_INTERVAL, FailedMessages, access_token_from_uri, send_event};
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
     use std::time::Duration;
+
+    use futures::Sink;
+    use gensokyo_core::Ob11Id;
+    use gensokyo_protocol::Event;
+    use gensokyo_protocol::event::MetaEvent;
+    use tokio_tungstenite::tungstenite::Message;
 
     #[test]
     fn access_token_query_param_is_parsed() {
@@ -449,5 +550,119 @@ mod tests {
     #[test]
     fn default_heartbeat_is_used_for_non_positive_config() {
         assert_eq!(DEFAULT_HEARTBEAT_INTERVAL, Duration::from_secs(30));
+    }
+
+    /// 可注入写失败的假连接：`fail=true` 时每次写都返回错误，否则记录写入的文本帧。
+    #[derive(Debug, Default)]
+    struct FakeSink {
+        fail: bool,
+        sent: Vec<String>,
+    }
+
+    impl Sink<Message> for FakeSink {
+        type Error = std::io::Error;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+            if self.fail {
+                return Err(std::io::Error::other("注入的写失败"));
+            }
+            let Message::Text(text) = item else {
+                panic!("只应写入文本帧");
+            };
+            self.sent.push(text.to_string());
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn heartbeat_event() -> Event {
+        Event::MetaEvent(MetaEvent {
+            time: 1_700_000_000,
+            self_id: Ob11Id::num(12345),
+            meta_event_type: "heartbeat".to_owned(),
+            sub_type: None,
+            interval: Some(30_000),
+            status: None,
+            extra: Default::default(),
+        })
+    }
+
+    #[tokio::test]
+    async fn write_failure_is_buffered_and_resent_after_heartbeat() {
+        let event = heartbeat_event();
+        let expected = serde_json::to_string(&event).expect("序列化失败");
+        let mut sink = FakeSink {
+            fail: true,
+            ..FakeSink::default()
+        };
+        let mut failed = FailedMessages::default();
+
+        assert!(send_event(&mut sink, &event, &mut failed, false).await);
+        assert_eq!(failed.entries, vec![expected.clone()], "写失败应压入缓冲");
+
+        // 下一个心跳 tick：连接恢复后补发并清空。
+        sink.fail = false;
+        failed.flush(&mut sink).await;
+        assert_eq!(sink.sent, vec![expected], "心跳 tick 应补发缓冲事件");
+        assert!(failed.entries.is_empty(), "补发后应清空缓冲");
+    }
+
+    #[tokio::test]
+    async fn write_failure_is_dropped_when_disable_error_chan() {
+        let mut sink = FakeSink {
+            fail: true,
+            ..FakeSink::default()
+        };
+        let mut failed = FailedMessages::default();
+
+        assert!(send_event(&mut sink, &heartbeat_event(), &mut failed, true).await);
+        assert!(failed.entries.is_empty(), "disable_error_chan 时不进缓冲");
+
+        failed.flush(&mut sink).await;
+        assert!(sink.sent.is_empty(), "没有缓冲就没有补发");
+    }
+
+    #[tokio::test]
+    async fn flush_clears_buffer_even_when_resend_fails() {
+        let mut failed = FailedMessages::default();
+        failed.record("first".to_owned(), false);
+        failed.record("second".to_owned(), false);
+        let mut sink = FakeSink {
+            fail: true,
+            ..FakeSink::default()
+        };
+
+        failed.flush(&mut sink).await;
+        assert!(failed.entries.is_empty(), "重发失败也要无条件清空（对齐 Go）");
+    }
+
+    #[tokio::test]
+    async fn successful_write_does_not_buffer() {
+        let mut sink = FakeSink::default();
+        let mut failed = FailedMessages::default();
+
+        assert!(!send_event(&mut sink, &heartbeat_event(), &mut failed, false).await);
+        assert!(failed.entries.is_empty(), "成功路径不应缓冲");
+        assert_eq!(sink.sent.len(), 1);
     }
 }
