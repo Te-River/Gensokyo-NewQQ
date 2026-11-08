@@ -37,6 +37,7 @@ const WEBUI_OFF: &str = r#"  port: "5700"
 
 async fn start(settings_yaml: &str, options: RuntimeOptions) -> (RuntimeHandle, tempfile::TempDir) {
     let (state, dir) = support::state(settings_yaml);
+    let state = support::with_temp_idmap(state, &dir);
     let handle = Runtime::start_with(state, options)
         .await
         .expect("启动运行时失败");

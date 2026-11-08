@@ -1,11 +1,14 @@
 //! 配置热重载接线：真实文件变动驱动快照更新，关闭后监听线程退出。
 
+mod support;
+
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gensokyo_config::ConfigManager;
 use gensokyo_runtime::{AppState, Runtime, RuntimeHandle, RuntimeOptions};
+use tempfile::TempDir;
 
 /// 只改 `bind_prefix`（热字段），并保持两个 listener 都不启动：用例不占端口。
 fn write_config(path: &Path, bind_prefix: &str) {
@@ -33,9 +36,10 @@ async fn wait_for_bind_prefix(config: &ConfigManager, expected: &str) {
     );
 }
 
-async fn start_runtime(config: Arc<ConfigManager>) -> RuntimeHandle {
+async fn start_runtime(config: Arc<ConfigManager>, idmap_dir: &TempDir) -> RuntimeHandle {
+    let state = support::with_temp_idmap(AppState::with_builtin_handlers(config), idmap_dir);
     Runtime::start_with(
-        AppState::with_builtin_handlers(config),
+        state,
         RuntimeOptions {
             config_watch: true,
             ..RuntimeOptions::default()
@@ -52,7 +56,7 @@ async fn runtime_applies_config_change_and_stops_watcher_on_shutdown() {
     write_config(&path, "/before");
 
     let config = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
-    let handle = start_runtime(Arc::clone(&config)).await;
+    let handle = start_runtime(Arc::clone(&config), &dir).await;
     assert!(
         handle.config_watch_enabled(),
         "config_watch=true 时应启动监听"
@@ -81,10 +85,12 @@ async fn watcher_start_failure_only_warns() {
     let path = dir.path().join("config.yml");
     write_config(&path, "/before");
     let config = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+    // idmap 用独立临时目录：下面要删掉 config 目录来模拟监听不可用。
+    let idmap_dir = tempfile::tempdir().expect("临时目录");
     // 快照已读入内存；删掉目录让 notify 注册监听失败，模拟监听不可用的环境。
     std::fs::remove_dir_all(dir.path()).expect("删除临时目录失败");
 
-    let handle = start_runtime(config).await;
+    let handle = start_runtime(config, &idmap_dir).await;
     assert!(
         !handle.config_watch_enabled(),
         "监听启动失败应降级为未启用，而不是阻断启动"

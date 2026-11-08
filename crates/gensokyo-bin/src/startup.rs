@@ -268,14 +268,14 @@ mod tests {
     use gensokyo_qq::{
         Error as QqError, HttpRequest, HttpResponse, HttpTransport, Result as QqResult,
     };
-    use gensokyo_runtime::{AppState, RuntimeOptions};
+    use gensokyo_runtime::{AppState, Runtime, RuntimeOptions};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
     use tokio::time::timeout;
 
     use super::{
-        address_lines, build_state, install_crypto_provider, load_config, qq_client,
-        start_with_config, token_config,
+        Started, address_lines, build_state, install_crypto_provider, load_config, qq_client,
+        token_config,
     };
 
     /// 两个 listener 都启用；绑定地址由 `RuntimeOptions` 覆盖成随机端口。
@@ -298,12 +298,45 @@ settings:
         }
     }
 
+    /// 在 `dir` 里开一份临时 idmap：`Runtime::start*` 的 `attach_idmap` 只会补缺，
+    /// 不先注入就会在工作目录建 `openid-map.redb` / `msgid-map.redb`。
+    fn temp_idmap(dir: &tempfile::TempDir) -> Arc<gensokyo_storage::IdMapStore> {
+        Arc::new(
+            gensokyo_storage::IdMapStore::open(
+                gensokyo_storage::IdMapOptions::new(
+                    dir.path().join("openid-map.redb"),
+                    dir.path().join("msgid-map.redb"),
+                )
+                .with_app_id("102000001"),
+            )
+            .expect("打开临时 idmap 失败"),
+        )
+    }
+
     /// 加载（必要时生成 `config.yml`）+ 启动；端口压到 `127.0.0.1:0`。
-    async fn start_at(path: &std::path::Path) -> super::Started {
+    ///
+    /// 与 `start_with_config` 等价，但先把 idmap 指到 `dir`——生产装配会落到工作目录，
+    /// 单测必须让 crate 目录保持零新增文件。
+    async fn start_at(path: &std::path::Path, dir: &tempfile::TempDir) -> Started {
         let loaded = load_config(path).expect("加载配置失败");
-        start_with_config(loaded.config, loopback_options())
+        let ws_path = loaded
+            .config
+            .snapshot()
+            .get_ws_server_path()
+            .trim()
+            .to_owned();
+        let state = build_state(loaded.config).with_idmap(temp_idmap(dir));
+        let actions = state.registry().len();
+        let qq = state.actions().is_some();
+        let handle = Runtime::start_with(state, loopback_options())
             .await
-            .expect("启动运行时失败")
+            .expect("启动运行时失败");
+        Started {
+            handle,
+            ws_path,
+            actions,
+            qq,
+        }
     }
 
     async fn http_get(addr: SocketAddr, path: &str) -> String {
@@ -333,7 +366,7 @@ settings:
         let path = dir.path().join("config.yml");
         std::fs::write(&path, CONFIG).expect("写测试配置失败");
 
-        let started = start_at(&path).await;
+        let started = start_at(&path, &dir).await;
         assert_eq!(started.ws_path, "ws", "应读取 ws_server_path");
         assert!(!started.qq, "测试配置没有 QQ 凭据，应走降级路径");
         assert_eq!(started.actions, 3, "无凭据时只注册内置 3 个 action");
@@ -377,7 +410,7 @@ settings:
         let dir = tempfile::tempdir().expect("临时目录");
         let path = dir.path().join("config.yml");
 
-        let started = start_at(&path).await;
+        let started = start_at(&path, &dir).await;
         assert!(path.exists(), "首启应写出 config.yml");
         let written = std::fs::read_to_string(&path).expect("读回 config.yml 失败");
         // 模板里的 <YOUR_SERVER_DIR> 会被替换成本机 IP，故只做结构性断言。

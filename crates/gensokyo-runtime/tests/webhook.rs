@@ -36,7 +36,8 @@ fn group_at_body() -> String {
 
 #[tokio::test]
 async fn webhook_post_publishes_onebot_event() {
-    let (state, _dir) = support::state(SETTINGS);
+    let (state, dir) = support::state(SETTINGS);
+    let state = support::with_temp_idmap(state, &dir);
     let mut events = state.hub().subscribe();
     let handle = Runtime::start(state).await.expect("启动运行时失败");
     let addr = handle.http_addr().expect("HTTP API 未启动");
@@ -67,7 +68,8 @@ async fn webhook_post_publishes_onebot_event() {
 
 #[tokio::test]
 async fn webhook_rejects_invalid_json_and_ignores_unknown_events() {
-    let (state, _dir) = support::state(SETTINGS);
+    let (state, dir) = support::state(SETTINGS);
+    let state = support::with_temp_idmap(state, &dir);
     let mut events = state.hub().subscribe();
     let handle = Runtime::start(state).await.expect("启动运行时失败");
     let addr = handle.http_addr().expect("HTTP API 未启动");
@@ -97,7 +99,8 @@ async fn webhook_is_also_mounted_on_forward_ws_port() {
     let settings = SETTINGS
         .replace("enable_ws_server: false", "enable_ws_server: true")
         .replace("http_address: \"127.0.0.1:0\"", "http_address: \"\"");
-    let (state, _dir) = support::state(&settings);
+    let (state, dir) = support::state(&settings);
+    let state = support::with_temp_idmap(state, &dir);
     let mut events = state.hub().subscribe();
     let handle = Runtime::start_with(
         state,

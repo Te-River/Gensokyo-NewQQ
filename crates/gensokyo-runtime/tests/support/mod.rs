@@ -35,6 +35,23 @@ pub fn state(settings: &str) -> (AppState, TempDir) {
     (AppState::new(manager, Arc::new(registry)), dir)
 }
 
+/// 在 `dir` 里开一份临时 idmap 并注入状态。
+///
+/// `Runtime::start*` 的 `attach_idmap` 在状态没有 idmap 时按默认路径（工作目录）建库；
+/// 集成测试必须先注入，否则 `cargo test` 会在 crate 目录留下
+/// `openid-map.redb` / `msgid-map.redb`。
+pub fn with_temp_idmap(state: AppState, dir: &TempDir) -> AppState {
+    let store = gensokyo_storage::IdMapStore::open(
+        gensokyo_storage::IdMapOptions::new(
+            dir.path().join("openid-map.redb"),
+            dir.path().join("msgid-map.redb"),
+        )
+        .with_app_id("102000001"),
+    )
+    .expect("打开临时 idmap 失败");
+    state.with_idmap(Arc::new(store))
+}
+
 /// 裸 HTTP `POST`（不走 reqwest：测试不需要额外依赖）。
 pub async fn post_json(addr: SocketAddr, path: &str, body: &str) -> (u16, String) {
     let mut stream = TcpStream::connect(addr).await.expect("连接测试服务失败");
