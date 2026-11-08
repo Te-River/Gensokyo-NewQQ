@@ -32,7 +32,10 @@ M1j 起把运行时装配成一个能按 `config.yml` 启动的二进制。**不
      热字段逐项 `info` 即时生效，重启项逐项 `warn`（快照保持不变、需重启进程）；监听启动失败
      只 `warn`，不阻断启动。
 6. 打印 `已注册 action: <N> 个（…）` 与**实际**监听地址（配置 `127.0.0.1:0` 这类写法会打印
-   真实端口）。
+   真实端口），随后打印启动横幅：`Gensokyo-NewQQ - Te-River` + 控制台地址 + Go 版同款东方
+   群像字符画 + 公网控制台地址（`banner` 模块；终端里青色，重定向时不带 ANSI）。控制台地址取
+   实际承载 WebUI 的 listener（WS 优先，退到 HTTP API）；公网地址按 `server_dir:port` 拼，
+   未配置或仍是 `<YOUR_SERVER_DIR>` 占位时该行写明原因。
 7. Ctrl-C → `RuntimeHandle::shutdown_with_timeout(5s)`：先停 config 热重载监听与反向 WS 客户端，
    再收摊 listener；超时强制中止残留任务。
 
@@ -97,18 +100,38 @@ rustup run 1.99.1-x86_64-pc-windows-gnu cargo test -p gensokyo-bin
 | `gensokyo` / `gensokyo run` | 启动运行时（默认） |
 | `gensokyo --version` / `-V` / `gensokyo version` | 打印 `gensokyo <ver>` 并退出 0 |
 | `gensokyo faststart` / `--faststart` / `-faststart` | 同 `run`；M1j 没有需要跳过的初始化步骤 |
+| `gensokyo import-idmap --file <path> [--merge] [--dry-run] [--on-vuin-conflict=fail\|remap]` | 导入 Go `legacy-export` 产出的 idmap JSONL（M1e） |
+| `--no-auto-import` | 关闭启动期的 idmap 自动导入（见下） |
 | `tidy` / `clean_ids` / `del_ids` / `del_cache` / `compaction` / `-m` / `-local-logger <v>` | **未实现**：stderr 打印「未实现…」，退出码 2 |
 
 Go 用标准库 `flag`，长选项是单横线（`-faststart`、`-local-logger=enable`）；本二进制在解析前
 把已知的单横线长选项改写成 `--name`，两种写法都可用（`-m` / `-V` 短选项不变）。
 
+### idmap 导入（M1e）
+
+Go 侧保留一版二进制做导出（`legacy-export` → `idmap.jsonl`），Rust 只消费 JSONL：
+
+- 文件格式、字段与 `end` 行的 sha256/counts 校验见 `crates/gensokyo-storage/src/importer`。
+- 默认要求目标库为空（迁移只在首启做一次）；`--merge` 允许合并写入，且整份导入幂等
+  （同 key 同 vUIN 是 no-op，计数器只取 max）。
+- 同 key 不同 vUIN（或 vUIN 已被别的身份占用）默认报冲突；`--on-vuin-conflict=remap` 时给该
+  身份分配新 vUIN，旧 vUIN 的归属保留。新 vUIN 跟随文件 `meta.allocator`（缺省用本机
+  `hash_id`）：`counter` 取 `max(库内计数器, 文件内最大 vUIN) + 1`，`hash` 走 MD5 派生。
+- `--dry-run` 只解析+校验（含只读的冲突检测），库不动。
+- 库路径与 AppID 取自工作目录的 `config.yml`（`idmap` 两个 `*.redb` 的默认位置）。
+- **启动期自动导入**：库为空且工作目录存在 `idmap.jsonl` 时，`serve` 会在 `Runtime::start`
+  之前先导入一次；失败只 `warn`、不阻断启动（与 idmap 打开失败同口径）。`--no-auto-import`
+  关闭该行为。
+
 ### 退出码
 
 | 码 | 含义 |
 |----|------|
-| 0 | 正常退出（`--version`、Ctrl-C 优雅关闭） |
-| 1 | 配置生成/解析失败、端口绑定失败、Ctrl-C 处理器注册失败 |
+| 0 | 正常退出（`--version`、Ctrl-C 优雅关闭、导入成功） |
+| 1 | 配置生成/解析失败、端口绑定失败、Ctrl-C 处理器注册失败；导入时目标库非空或读文件失败 |
 | 2 | 未实现的子命令/开关；以及 clap 的参数错误 |
+| 3 | `import-idmap`：vUIN 冲突（`--on-vuin-conflict=fail` 默认） |
+| 4 | `import-idmap`：JSONL 格式错（meta/version/sha256/counts/字段类型） |
 
 ## 环境变量
 

@@ -16,6 +16,8 @@ tracing.workspace = true
 # 编译期嵌入 `webui/dist`（前端构建产物）并按扩展名推 Content-Type
 rust-embed.workspace = true
 mime_guess.workspace = true
+# 会话落盘（`cookie.redb`）：redb 已是 workspace 依赖（gensokyo-storage 同版本）
+redb.workspace = true
 
 [dev-dependencies]
 # 直接用 `Router` 发请求（`tower::ServiceExt::oneshot`），不监听端口、不碰外网

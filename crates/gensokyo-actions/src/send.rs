@@ -78,6 +78,9 @@ use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+use std::sync::{Arc, OnceLock};
+
+use gensokyo_config::ConfigManager;
 use gensokyo_core::{Error, Result};
 use gensokyo_protocol::action::{SendGroupMsgParams, SendPrivateMsgParams};
 use gensokyo_protocol::{MessageContent, OutboundPlan, Segment};
@@ -90,6 +93,36 @@ use crate::params::{
 /// Go `send_private_msg_sse.go:193`：`msg_seq = index + 10`，给上下文消息预留 10 个序号，
 /// 避免流式分片与普通回复撞 seq 被去重。
 const SSE_MSG_SEQ_RESERVE: i64 = 10;
+
+/// 进程级配置句柄：`register_all` 记下 `ActionContext` 的 `Arc<ConfigManager>`。
+///
+/// Go 的出站过滤在 `parseMessageContent` 里逐次读 `config.GetEnableChangeWord()`
+/// （`handlers/message_parser.go:733/752/838/862/1270`）；本 crate 的 planner 是纯函数、
+/// 拿不到 context，故用同一个进程级句柄复刻「逐次读开关」的热重载语义。
+static CHANGE_WORD_CONFIG: OnceLock<Arc<ConfigManager>> = OnceLock::new();
+
+/// 登记配置句柄（`register_all` 调用；重复登记保留首次结果）。
+pub(crate) fn use_change_word_config(config: Arc<ConfigManager>) {
+    let _ = CHANGE_WORD_CONFIG.set(config);
+}
+
+/// Go `parseMessageContent` 的出站过滤：开关关闭 / 词库未装载 / 空文本时原样返回。
+fn change_word_out(text: &str) -> String {
+    match CHANGE_WORD_CONFIG.get() {
+        Some(config) => outbound_text(config, text),
+        None => text.to_owned(),
+    }
+}
+
+/// [`change_word_out`] 的配置入口（单测直接喂配置，不依赖进程级句柄）。
+fn outbound_text(config: &ConfigManager, text: &str) -> String {
+    // 空文本不进过滤：Go 对空串会返回「错误：缺少 'word' 参数」，那是它已删除的
+    // 词表 HTTP 端点遗留的分支，照搬会把空正文的媒体消息改成错误提示。
+    if text.is_empty() || !config.snapshot().get_enable_change_word() {
+        return text.to_owned();
+    }
+    gensokyo_core::acnode::filter_out(text)
+}
 
 /// 出站消息的收件人。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,22 +197,28 @@ impl MessageOut {
     /// - 字符串形态：`auto_escape = false` 时按 CQ 解析（`[CQ:at]` 字面量留在文本里，
     ///   `[CQ:image]` / `[CQ:reply]` 等落进 `plan`）；`auto_escape = true` 时原样保留、不解析。
     /// - 数组形态：段已是结构化数据，`auto_escape` 无语义，忽略（字段记为 `false`）。
+    ///
+    /// 正文在解析后过一遍敏感词出站过滤（Go `parseMessageContent` 的文本路径，
+    /// 见 [`change_word_out`]）；`from_parts` 不做，避免 runtime 还原计划时二次替换。
     #[must_use]
     pub fn from_content(content: &MessageContent, auto_escape: bool) -> Self {
-        if auto_escape && !content.is_array() {
-            return Self {
+        let mut message = if auto_escape && !content.is_array() {
+            Self {
                 text: content.as_str().unwrap_or_default().to_owned(),
                 plan: OutboundPlan::default(),
                 auto_escape: true,
-            };
-        }
-        let mut plan = OutboundPlan::from_segments(&content.segments());
-        let text = std::mem::take(&mut plan.text);
-        Self {
-            text,
-            plan,
-            auto_escape: false,
-        }
+            }
+        } else {
+            let mut plan = OutboundPlan::from_segments(&content.segments());
+            let text = std::mem::take(&mut plan.text);
+            Self {
+                text,
+                plan,
+                auto_escape: false,
+            }
+        };
+        message.text = change_word_out(&message.text);
+        message
     }
 
     /// 由 `text` + 非文本段 + `auto_escape` 还原（[`Deserialize`] 与 runtime 手工构造共用）。
@@ -771,6 +810,45 @@ mod tests {
     };
     use gensokyo_core::Ob11Id;
     use gensokyo_protocol::MediaRef;
+
+    #[test]
+    fn outbound_text_follows_switch_and_vocabulary() {
+        // 词库是进程级一次性的（Go 的包级 `acout`）：用独占词条，不干扰其它用例。
+        if !gensokyo_core::acnode::is_installed() {
+            let dir = std::env::temp_dir()
+                .join(format!("gensokyo-actions-acnode-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("建临时目录失败");
+            std::fs::write(dir.join("sensitive_words_out.txt"), "违禁短语####□\n").unwrap();
+            std::fs::write(dir.join("sensitive_words_in.txt"), "").unwrap();
+            std::fs::write(dir.join("white.txt"), "").unwrap();
+            assert!(gensokyo_core::acnode::load_into_process(&dir, "*"));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        let enabled = temp_config(
+            "gensokyo-actions-word-on",
+            "enableChangeWord: true\ndefaultChangeWord: \"*\"\n",
+        );
+        assert_eq!(super::outbound_text(&enabled, "这是违禁短语"), "这是□");
+        assert_eq!(super::outbound_text(&enabled, ""), "", "空正文不进过滤");
+        assert_eq!(super::outbound_text(&enabled, "正常文本"), "正常文本");
+
+        let disabled = temp_config("gensokyo-actions-word-off", "{}\n");
+        assert_eq!(
+            super::outbound_text(&disabled, "这是违禁短语"),
+            "这是违禁短语",
+            "开关关闭时原样透传"
+        );
+    }
+
+    /// 临时目录里写一份最小 `config.yml` 后立即删除。
+    fn temp_config(name: &str, body: &str) -> gensokyo_config::ConfigManager {
+        let path = std::env::temp_dir().join(format!("{name}-{}.yml", std::process::id()));
+        std::fs::write(&path, body).expect("写临时 config.yml 失败");
+        let manager = gensokyo_config::ConfigManager::new(&path).expect("加载临时 config.yml 失败");
+        let _ = std::fs::remove_file(&path);
+        manager
+    }
 
     #[test]
     fn group_text_message_plans_without_media() {

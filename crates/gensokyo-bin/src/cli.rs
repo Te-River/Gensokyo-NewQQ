@@ -6,16 +6,27 @@
 //! 尚未实现的维护开关（`tidy` / `clean_ids` / `del_ids` / `del_cache` / `compaction` /
 //! `-m` / `-local-logger`）不静默成功：统一由 [`resolve`] 映射为
 //! [`Action::Unimplemented`]，由 `main` 打印「未实现」并以 [`EXIT_UNIMPLEMENTED`] 退出。
+//!
+//! 已实现维护子命令：`import-idmap`（M1e）把 Go `legacy-export` 产出的 idmap JSONL
+//! 导入 redb，见 `gensokyo_storage::importer`。
 
 use std::ffi::OsString;
+use std::path::PathBuf;
 
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use gensokyo_storage::{ImportOptions, OnVuinConflict};
 
 /// 二进制名，与 Go 产物保持一致。
 pub const BIN_NAME: &str = "gensokyo";
 
 /// 未实现功能的退出码；与「启动失败」（1）区分，便于脚本判断。
 pub const EXIT_UNIMPLEMENTED: u8 = 2;
+
+/// 导入时 vUIN 冲突的退出码（`--on-vuin-conflict=fail` 默认行为）。
+pub const EXIT_IMPORT_CONFLICT: u8 = 3;
+
+/// 导入文件格式错误的退出码（meta/version/sha256/counts/字段类型）。
+pub const EXIT_IMPORT_FORMAT: u8 = 4;
 
 /// `flag` 接受过长选项名（用于单横线兼容改写）。
 const LONG_FLAGS: &[&str] = &[
@@ -75,6 +86,10 @@ pub struct Cli {
     #[arg(long = "local-logger", value_name = "enable", global = true)]
     pub local_logger: Option<String>,
 
+    /// 关闭启动期的 idmap 自动导入（库为空且存在 `idmap.jsonl` 时的自动迁移）。
+    #[arg(long = "no-auto-import", global = true, action = ArgAction::SetTrue)]
+    pub no_auto_import: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -101,6 +116,40 @@ pub enum Command {
     DelCache,
     /// 对数据库执行 compaction。
     Compaction,
+    /// 导入 Go `legacy-export` 产出的 idmap JSONL（M1e）。
+    #[command(name = "import-idmap")]
+    ImportIdmap {
+        /// JSONL 文件路径。
+        #[arg(long = "file", value_name = "path")]
+        file: PathBuf,
+        /// 只解析与校验，不写库。
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+        /// 允许写入已有数据的库（默认要求库为空）。
+        #[arg(long = "merge")]
+        merge: bool,
+        /// vUIN 冲突处理策略。
+        #[arg(long = "on-vuin-conflict", value_enum, default_value_t = ConflictPolicy::Fail)]
+        on_vuin_conflict: ConflictPolicy,
+    },
+}
+
+/// `--on-vuin-conflict` 的取值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ConflictPolicy {
+    /// 报冲突并以 [`EXIT_IMPORT_CONFLICT`] 退出（默认）。
+    Fail,
+    /// 给冲突的身份换一个新 vUIN。
+    Remap,
+}
+
+impl From<ConflictPolicy> for OnVuinConflict {
+    fn from(policy: ConflictPolicy) -> Self {
+        match policy {
+            ConflictPolicy::Fail => Self::Fail,
+            ConflictPolicy::Remap => Self::Remap,
+        }
+    }
 }
 
 /// 解析后的动作。
@@ -112,6 +161,15 @@ pub enum Action {
     Run {
         /// Go `-faststart`。
         faststart: bool,
+        /// 启动期是否允许 idmap 自动导入（`--no-auto-import` 关闭）。
+        auto_import: bool,
+    },
+    /// 导入 idmap JSONL。
+    ImportIdmap {
+        /// JSONL 文件路径。
+        file: PathBuf,
+        /// `--dry-run` / `--merge` / `--on-vuin-conflict`。
+        options: ImportOptions,
     },
     /// 尚未实现：打印提示并非零退出。
     Unimplemented {
@@ -163,14 +221,31 @@ pub fn resolve(cli: Cli) -> Action {
 
     match cli.command {
         Some(Command::Version) => Action::Version,
-        Some(Command::Faststart) => Action::Run { faststart: true },
+        Some(Command::Faststart) => Action::Run {
+            faststart: true,
+            auto_import: !cli.no_auto_import,
+        },
         Some(Command::Tidy) => unimplemented("-tidy", "备份并整理 config.yml"),
         Some(Command::CleanIds) => unimplemented("-clean_ids", "清理 ids bucket 中的 msg_id"),
         Some(Command::DelIds) => unimplemented("-del_ids", "删除 ids bucket"),
         Some(Command::DelCache) => unimplemented("-del_cache", "删除 cache bucket"),
         Some(Command::Compaction) => unimplemented("-compaction", "对数据库执行 compaction"),
+        Some(Command::ImportIdmap {
+            file,
+            dry_run,
+            merge,
+            on_vuin_conflict,
+        }) => Action::ImportIdmap {
+            file,
+            options: ImportOptions {
+                merge,
+                dry_run,
+                on_vuin_conflict: on_vuin_conflict.into(),
+            },
+        },
         Some(Command::Run) | None => Action::Run {
             faststart: cli.faststart,
+            auto_import: !cli.no_auto_import,
         },
     }
 }
@@ -212,6 +287,8 @@ mod tests {
     use clap::Parser as _;
 
     use super::{Action, Cli, normalize_legacy_flags, resolve};
+    use gensokyo_storage::{ImportOptions, OnVuinConflict};
+    use std::path::PathBuf;
 
     fn parse(argv: &[&str]) -> Action {
         let cli = Cli::try_parse_from(argv.iter().copied()).expect("解析失败");
@@ -236,21 +313,73 @@ mod tests {
     fn default_and_run_start_the_runtime() {
         assert_eq!(
             parse(&["gensokyo"]),
-            Action::Run { faststart: false },
+            Action::Run {
+                faststart: false,
+                auto_import: true
+            },
             "无子命令时默认 run"
         );
         assert_eq!(
             parse(&["gensokyo", "run"]),
-            Action::Run { faststart: false }
+            Action::Run {
+                faststart: false,
+                auto_import: true
+            }
         );
         assert_eq!(
             parse(&["gensokyo", "run", "--faststart"]),
-            Action::Run { faststart: true }
+            Action::Run {
+                faststart: true,
+                auto_import: true
+            }
         );
         assert_eq!(
             parse(&["gensokyo", "faststart"]),
-            Action::Run { faststart: true }
+            Action::Run {
+                faststart: true,
+                auto_import: true
+            }
         );
+        assert_eq!(
+            parse(&["gensokyo", "run", "--no-auto-import"]),
+            Action::Run {
+                faststart: false,
+                auto_import: false
+            },
+            "--no-auto-import 只关自动导入，不影响启动"
+        );
+    }
+
+    #[test]
+    fn import_idmap_flags_map_to_import_options() {
+        assert_eq!(
+            parse(&["gensokyo", "import-idmap", "--file", "idmap.jsonl"]),
+            Action::ImportIdmap {
+                file: PathBuf::from("idmap.jsonl"),
+                options: ImportOptions::default(),
+            }
+        );
+        assert_eq!(
+            parse(&[
+                "gensokyo",
+                "import-idmap",
+                "--file",
+                "idmap.jsonl",
+                "--merge",
+                "--dry-run",
+                "--on-vuin-conflict=remap",
+            ]),
+            Action::ImportIdmap {
+                file: PathBuf::from("idmap.jsonl"),
+                options: ImportOptions {
+                    merge: true,
+                    dry_run: true,
+                    on_vuin_conflict: OnVuinConflict::Remap,
+                },
+            }
+        );
+        // `--file` 是必填项：缺了要让 clap 报错，而不是静默导入某个默认文件。
+        assert!(Cli::try_parse_from(["gensokyo", "import-idmap"]).is_err());
     }
 
     #[test]
@@ -280,7 +409,10 @@ mod tests {
         // Go: 只有非空值才启用本地日志文件。
         assert_eq!(
             parse(&["gensokyo", "--local-logger="]),
-            Action::Run { faststart: false }
+            Action::Run {
+                faststart: false,
+                auto_import: true
+            }
         );
     }
 

@@ -134,6 +134,8 @@ fn ws_options() -> RuntimeOptions {
         config_watch: false,
         // 传输层用例不关心 QQ 网关：关掉避免任何出站尝试。
         gateway: false,
+        // post_url 事件上报同样是出站链路，用例里不需要。
+        post_url: false,
     }
 }
 

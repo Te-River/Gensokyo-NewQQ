@@ -104,7 +104,8 @@ fn looks_like_file(path: &str) -> bool {
         .is_some_and(|last| last.contains('.'))
 }
 
-fn not_found() -> Response {
+/// 未命中的 API / 静态资源（`/api/*` 不回退 `index.html`，见模块文档）。
+pub(crate) fn not_found() -> Response {
     (StatusCode::NOT_FOUND, "404 Not Found").into_response()
 }
 

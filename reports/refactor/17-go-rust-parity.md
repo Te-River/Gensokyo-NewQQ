@@ -8,15 +8,17 @@
 | 级别 | 缺口 | Go 证据 | Rust 现状 | 状态 | 规模 |
 |---|---|---|---|---|---|
 | 主干 | QQ 上游事件 WS 网关 | main.go:315,375-400；botgo/websocket/client/client.go:64-138,155-185,254-349 | gateway.rs（950 行）+ boot 装配 + 7 条 mock 用例 | **已对齐（#70 `dfee81b`）** | — |
-| 主干 | `post_url` 上报 | Processor/Processor.go:402-452 | 无运行期实现（仅配置字段） | 缺失 | 150-250 行 |
-| 功能 | 正向 WS 不下发事件 | server/wsserver.go:111-112 + Processor.go:292-330 | ws_server.rs:138-170 只收 action，无 hub 订阅 | 缺失（P4） | 120-200 行 |
-| 功能 | 反向 WS 收到 action 不 dispatch | wsclient/ws.go:249-261 | ws_client.rs:275-278 仅 debug | 缺失（P4） | 50-100 行 |
-| 安全 | webhook ed25519 签名 / op13 | server/webhook.go:94,115-120,163-193 | webhook.rs 不校验、op13 回 501 | 缺失（Critical） | 150-250 行 |
+| 主干 | `post_url` 上报 | Processor/Processor.go:402-452 | reporter.rs（223 行）+ boot 装配，6 用例 | **已对齐（P5，待提交）** | — |
+| 功能 | 正向 WS 不下发事件 | server/wsserver.go:111-112 + Processor.go:292-330 | ws_server.rs：lifecycle/hub 订阅/心跳/回执并行 | **已对齐（P4 `9e71c31`）** | — |
+| 功能 | 反向 WS 收到 action 不 dispatch | wsclient/ws.go:249-261 | ws_client.rs：dispatch_json + mpsc 回执写回 | **已对齐（P4 `9e71c31`）** | — |
+| 安全 | webhook ed25519 签名 / op13 | server/webhook.go:94,115-120,163-193 | webhook.rs：Go 同款 seed 派生/待签/401；op13 {plain_token,signature} | **已对齐（W1，待提交）** | — |
 | 功能 | union_webhook 扇出 | main.go:530,1046-1090 | 无 | 缺失 | 80-120 行 |
 | 功能 | 反向 WS TLS/代理 | ws.go:352-355 | 无 TLS/代理 | 缺失 | 30-80 行 |
 | 功能 | `array_value` 消息段 | ProcessGroupMessage.go:189-190 | inbound.rs:61-63 自述未实现 | 缺失 | 300-500 行 |
 | 功能 | `remove_at`/`convert_other_at` | message_parser.go:1679-1721,1877,1895 | 无 RevertTransformedText | 缺失 | 400-700 行 |
 | 功能 | `enable_change_word` | main.go:765-770,787-792 | 仅配置字段 | 缺失 | 待估 |
+| 功能 | `add_at_group` 消费者 | ProcessGroupNormalMessage.go:148-150（**入站上报**变换，非出站） | inbound.rs reported_group_content（全量群消息加 `[CQ:at,qq=AppID]`，与 Go 同点） | **已对齐（W2，待提交）** | — |
+| 功能 | AppID→BotID | message_parser.go:1669-1683（需 `/users/@me` 的 BotID 注入） | 缺 BotID 来源（Go main.go:254/304），暂缓 | 缺失 | 中 |
 | 功能 | `op_user_id_type`/`http_only_bot` | Processor.go:245-270,374-399 | 无 | 缺失 | 待估 |
 | 边角 | 401/403 语义 | wsserver.go:85-91；httpapi.go:28 | auth.rs 统一 401 | 部分 | 小 |
 | — | 15 类 QQ 事件转换 | main.go:746-887,889-930 | inbound.rs:282-328 | **已对齐** | — |
@@ -26,15 +28,15 @@
 
 | 级别 | 缺口 | Go 证据 | Rust 现状 | 状态 |
 |---|---|---|---|---|
-| P0 | bbolt→redb 导入器（含 UserInfo 表） | map_service.go:124；new_service.go:96；main.go:371 | 无（storage/lib.rs:5 留给后续） | 缺失 |
-| P0 | WebUI 登录路径兼容 `/api/check-login-status` | webui/api.go:47 | `/api/checkLoginStatus`（前端 404） | 不兼容 |
+| P0 | bbolt→redb 导入器（含 UserInfo 表） | map_service.go:124；new_service.go:96；main.go:371 | G1 `legacy-export`（`2c7f058`）+ R1 importer（JSONL v1、幂等/冲突/校验/自动导入） | **已对齐（待提交）** |
+| P0 | WebUI 登录路径兼容 `/api/check-login-status` | webui/api.go:47 | 双路径并存同 handler + login isLoggedIn 契约 | **已对齐（P6a）** |
 | P0 | `/uploadpic`、`/uploadpicv2`、`/getid` HTTP 端点 | main.go:508,523-524；server/uploadpic.go；server/getIDHandler.go:104 | 无路由 | 缺失（/getid 安全 High） |
 | P0 | idmap 解绑/重绑定 UpdateVirtualValue*/ForceUnbindID | service.go:1405,1654,2036,2394 | grpc.rs 2 RPC unimplemented | 缺失 |
-| P1 | WebUI 余 9 路由（config 写/accounts/status/logs WS/cookie 持久化） | webui/api.go:36-134；cookie.go:15 | 仅 4 条路由、登录纯内存 | 缺失 |
+| P1 | WebUI 余 9 路由（config 写/accounts/status/logs WS/cookie 持久化） | webui/api.go:36-134；cookie.go:15 | P6a+P6b：config 三方法/accounts/status/process/status/cookie.redb；余 logs WS 与 PUT /api/{uin} | **大部分对齐（待提交；logs WS 在册）** |
 | P1 | 图床后端 4/5/6/9/10 | imagehosting/hosting.go:45-63 | 仅 ChatGlm(7)/Ukaka(8) | 部分 |
 | P1 | oss 阿里/百度/腾讯后端 | oss/{aliyun,baidu,tencent}.go | 无 | 缺失 |
-| P1 | acnode AC 自动机 | acnode/acnode.go:17-111 | 无 | 缺失 |
-| P1 | messagequeue（发送队列/限速） | messagequeue/queue.go:96-122 | 无 | 缺失 |
+| P1 | acnode AC 自动机 | acnode/acnode.go:17-111 | core/acnode.rs（手写 AC、IN/OUT 双接入、词表回写） | **已对齐（P8，待提交）** |
+| P1 | messagequeue（发送队列/限速） | messagequeue/queue.go:96-122 | queue.rs（令牌桶+重试；Go 队列本身为死代码，SendQueue 同构未默认启用） | **已对齐（P10，待提交）** |
 | P1 | botstats + Prometheus `/metrics` | botstats/botstats.go；main.go:522,1140-1175 | builtin.rs 返回 0；无端点 | 缺失 |
 | P2 | unioncache / url 短链 / sys 全量 | unioncache/*；url/shorturl.go；sys/* | 无 / 仅 local_ip | 缺失 |
 | P2 | 视频/QR/SSRF 防护 | images/*；sys/* | media/lib.rs:108-118 未做清单 | 缺失 |
@@ -83,8 +85,8 @@
 | High | qqmusic 降级为分享文案 | 歌曲查询 + markdown 模板 + 键盘（music_prefix） | 250-350 行 |
 | High | 多媒体段无 markdown 时 1400 | 照 Go 逐媒体段各发一条 | ~~120-200 行~~ **已修（P1 `3fcb426`）** |
 | High | card 本地 pic_url 未上传 | 照 resolveCardPic 接素材链 | 60-100 行 |
-| Medium | 图床 provider 仅 7/8，缺 4/5/6/9/10 | 每 provider 一个 backend（hosting trait 已有） | 500-700 行 |
-| Medium | 图床上传无重试 | 3 次 1s/2s 退避 | 40-60 行 |
+| Medium | 图床 provider 仅 7/8，缺 4/5/6/9/10 | 每 provider 一个 backend（hosting trait 已有） | ~~500-700 行~~ **已修（P7，待提交；接线 P11）** |
+| Medium | 图床上传无重试 | 3 次 1s/2s 退避 | ~~40-60 行~~ **已修（P7 retry.rs）** |
 | Medium | 无发送队列/5qps/发送间隔 | runtime 全局令牌桶 + 串行队列 | 200-300 行 |
 | Medium | get_g_list_delay 缺失 | get_group_list/成员列表逐群 sleep | ~~30-50 行~~ **已修（P2 `e1f822c`）** |
 | Medium | add_at_group 无消费者、AppID→BotID 缺失 | 入站/文本渲染各补一处 | 40-60 行 |

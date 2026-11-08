@@ -73,14 +73,25 @@
 //! - 失败分档：请求侧问题（媒体来源 / 大小 / 类型、reply 无法还原、不支持的段）`1400`，
 //!   其余（未装配 `ActionContext`、下载 / 上传 / 上游失败）`1500`。
 //!
+//! # P10 发送队列与限速（`messagequeue/`）
+//! - [`queue::RateLimiter`]：Go `GetRateLimiter` 的 5qps / burst 10 令牌桶 +
+//!   [`queue::WAIT_TIMEOUT`]（5s）；deferred 的发送收口在**每次群消息尝试**前取令牌
+//!   （Go `send_group_msg.go:3065` 的唯一调用点），私聊不过桶（Go 同）。
+//! - 投递超时重试：[`queue::should_retry`] + [`queue::backoff`] 对齐 Go
+//!   `RetryPolicy{MaxAttempts: 3, Backoff: attempt × 1s}`，每次重试前按 Go 重取 `msg_seq`。
+//!   频控 `22009` 不重试，照旧落 SSM 队列——两条路径互不影响。
+//! - [`queue::SendQueue`]：`messagequeue/queue.go` 的串行 worker（发送间隔 `send_delay`，
+//!   `<= 0` 取 300ms；失败重试 3 次、线性退避 1s×n 后丢弃）。Go 的 `StartWorker` 全仓零调用，
+//!   这里保持同构——提供完整实现与生命周期，默认不启动。
+//!
 //! # 未做项（后续里程碑）
 //! - 消息段：图片 / 语音 / 视频 / ark 卡片 / markdown / card 一律停留在文本形态，
 //!   `array_value` 不生效（细节见 [`inbound`] 模块文档）。
 //! - `INTERACTION_CREATE`、`MESSAGE_AUDIT_*`、`FORUM_*`、`AUDIO_*`、频道 `GUILD_*` 未转换。
 //! - webhook 的 ed25519 签名校验与 `op=13` 回调校验（workspace 无 ed25519 依赖），
 //!   `union_webhook` 扇出亦未做。
-//! - 具体 `send_*` / 群管理 action（M1i）、有界队列与令牌桶（[`queue`]）。
-//!   群管理其余端点、有界队列与令牌桶仍属后续里程碑。
+//! - 具体 `send_*` / 群管理 action（M1i）。
+//!   群管理其余端点仍属后续里程碑。
 //! - deferred 的媒体片段级能力：markdown / keyboard / card / music / stream / input_notify
 //!   段仍返回 `1400`；超 5MB 媒体缺分片上传；`active` / `wakeup` 标记被忽略。
 //! - WebUI 与 Go 主服务器路由：M1h-a 的 WS 独立监听 `0.0.0.0:{port}`（Go 是挂在主服务器
@@ -104,8 +115,10 @@ pub mod inbound;
 pub mod intent;
 /// deferred 媒体链路：`MediaRef` → 字节 → QQ `files` 端点 → `file_info`。
 pub mod media;
-/// 有界队列 + 令牌桶（`messagequeue/`，M1i）。
-pub mod queue {}
+/// 发送队列与限速（`messagequeue/`）：令牌桶 5qps/burst10 + 串行 worker。
+pub mod queue;
+/// post_url 事件上报（Go `Processor/Processor.go` 的 `PostMessageToUrls`，P5）。
+pub mod reporter;
 pub mod state;
 /// 反向 HTTP 回调（`server/webhook.go`，M1h-b）。
 pub mod webhook;
@@ -121,6 +134,8 @@ pub use gateway::{GatewayClient, GatewayHandle, GatewayOptions};
 pub use inbound::Inbound;
 pub use intent::IntentPlan;
 pub use media::{FetchedMedia, MAX_MEDIA_BYTES, MediaRuntime};
+pub use queue::{QueueOptions, RateLimiter, SendQueue};
+pub use reporter::{PostUrlReporter, PostUrlReporterHandle};
 pub use state::AppState;
 pub use webhook::{ACK_BODY as WEBHOOK_ACK_BODY, MAX_BODY_BYTES as WEBHOOK_MAX_BODY_BYTES};
 pub use ws_client::{WsClient, WsClientHandle, WsClientOptions};

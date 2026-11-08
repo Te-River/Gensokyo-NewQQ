@@ -1,8 +1,8 @@
-//! gensokyo-storage：idmap、echo、cookie、bbolt 导入、IDMapService gRPC。
+//! gensokyo-storage：idmap、echo、cookie、JSONL 导入、IDMapService gRPC。
 //!
-//! M1d 落地 [`idmap`] 的**本地**存储（redb），M1e 落地 [`echo`] 的进程内映射，
-//! M1f 落地 [`idmap::grpc`] 的 `IDMapService`（tonic，17 个 RPC 中 14 个已接线，3 个明确
-//! `unimplemented`，见该模块文档）。HTTP 远程回退与 bbolt 导入留给后续里程碑。
+//! M1d 落地 [`idmap`] 的**本地**存储（redb），M1e 落地 [`echo`] 的进程内映射与
+//! [`importer`] 的 JSONL 导入，M1f 落地 [`idmap::grpc`] 的 `IDMapService`（tonic，17 个 RPC
+//! 中 14 个已接线，3 个明确 `unimplemented`，见该模块文档）。HTTP 远程回退留给后续里程碑。
 //!
 //! # 库文件
 //!
@@ -14,7 +14,7 @@
 //! | 消息 ID ↔ 虚拟 ID | `msgid-map.db` | `msgid-map.redb` |
 //!
 //! 路径由 [`IdMapOptions`] 指定；文件格式本身与 bbolt 不同（redb 有自己的页格式），
-//! 但**表名、key 与 value 的字节编码与 Go 保持一致**，M1e 的导入器可以逐行搬运。
+//! 但**表名、key 与 value 的字节编码与 Go 保持一致**，[`importer`] 因此可以逐行搬运。
 //!
 //! # 表结构（镜像 Go bbolt bucket）
 //!
@@ -65,11 +65,11 @@
 //!   [`IdMapOptions::uin`] 显式传入（`None` 等价 Go 关闭隔离）。
 //! - **名称缓存**：Go 用 `sync.Map` + 后台每 10 分钟清理；本 crate 用 `Mutex<HashMap>`
 //!   + 读时惰性过期，写满 [`USER_NAME_SWEEP_THRESHOLD`] 条时顺带清理过期项。
-//! - **身份库缺 `UserInfo` 桶**：Go `initNewDBs` 在身份库额外建 `config` / `UserInfo` 两个
-//!   bucket。`config` 已由 M1f 补上（[`IdMapStore::write_config`] /
-//!   [`IdMapStore::read_config`] / [`IdMapStore::delete_config`]，供 gRPC `WriteConfigV2` 等
-//!   使用）；`UserInfo` 仍未建，**M1e 的 bbolt 导入器落地前必须补上**，否则导入器在身份库里
-//!   无表可写。
+//! - **`UserInfo` 桶**：Go `initNewDBs` 在身份库额外建 `config` / `UserInfo` 两个 bucket。
+//!   `config` 由 M1f 补上（[`IdMapStore::write_config`] / [`IdMapStore::read_config`] /
+//!   [`IdMapStore::delete_config`]，供 gRPC `WriteConfigV2` 等使用）；`UserInfo`（表名
+//!   `user_info`）由 M1e 的导入器补上，目前只有导入入口，`StoreUserInfo` / `ListAllUsers`
+//!   尚未暴露（没有调用方）。
 //!
 //! # 并发
 //!
@@ -79,11 +79,13 @@
 
 mod error;
 pub mod idmap;
+pub mod importer;
 
 pub use echo::{Clock, EchoStore, MessageGroupPair, MessageScene};
 pub use error::StorageError;
 pub use idmap::grpc::{IdMapClient, IdMapService};
 pub use idmap::{IdMapOptions, IdMapStore, USER_NAME_SWEEP_THRESHOLD};
+pub use importer::{ImportError, ImportOptions, ImportReport, OnVuinConflict};
 
 /// 消息 ID 懒加载 / msg_seq / SSM 补发队列 / REFIDX 等进程内映射（Go `echo/`）。
 pub mod echo;

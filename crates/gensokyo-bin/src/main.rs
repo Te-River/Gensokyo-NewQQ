@@ -14,7 +14,7 @@
 //!   （`ws_address[]` 非空即连）；`disable_webui=false` 时 WebUI 静态页与 `/api` 登录路由一并
 //!   挂载。有 QQ 凭据时装配 `ReqwestTransport` + `ActionContext`（当前 81 个 action 名：
 //!   内置 3 + `gensokyo-actions` 75 + 别名 3），无凭据或传输构建失败时降级为内置 3 个；
-//!   启动后打印 action 数量与实际监听地址，Ctrl-C 触发带超时的优雅关闭。
+//!   启动后打印 action 数量、实际监听地址与启动横幅（[`banner`]），Ctrl-C 触发带超时的优雅关闭。
 //! - 配置热重载经 [`gensokyo_runtime::RuntimeOptions::config_watch`]（默认开）接线：文件变动后
 //!   热字段逐项 `info`、重启项逐项 `warn`（需重启生效）；监听启动失败只 `warn`，不阻断启动，
 //!   监听线程随运行时句柄关闭一起停止。
@@ -25,16 +25,21 @@
 //!
 //! 退出码与 CLI 细节见 `crates/gensokyo-bin/README.md`。
 
+mod banner;
 mod cli;
 mod logging;
 mod startup;
 mod version;
 
+use std::path::Path;
 use std::process::ExitCode;
 
 use clap::Parser as _;
 
-use crate::cli::{Action, BIN_NAME, Cli, EXIT_UNIMPLEMENTED};
+use crate::cli::{
+    Action, BIN_NAME, Cli, EXIT_IMPORT_CONFLICT, EXIT_IMPORT_FORMAT, EXIT_UNIMPLEMENTED,
+};
+use gensokyo_storage::{ImportError, ImportOptions};
 
 fn main() -> ExitCode {
     let argv = cli::normalize_legacy_flags(std::env::args_os());
@@ -52,12 +57,39 @@ fn main() -> ExitCode {
             );
             ExitCode::from(EXIT_UNIMPLEMENTED)
         }
-        Action::Run { faststart } => run(faststart),
+        Action::ImportIdmap { file, options } => import(&file, &options),
+        Action::Run {
+            faststart,
+            auto_import,
+        } => run(faststart, auto_import),
+    }
+}
+
+/// `gensokyo import-idmap --file <path>`：单次导入，退出码区分冲突（3）与格式错（4）。
+fn import(file: &Path, options: &ImportOptions) -> ExitCode {
+    match startup::import_idmap(file, options) {
+        Ok(report) => {
+            println!("{}", startup::report_line(&report));
+            ExitCode::SUCCESS
+        }
+        Err(startup::StartupError::Import(err)) => {
+            eprintln!("{err}");
+            let code = match err {
+                ImportError::Conflict(_) => EXIT_IMPORT_CONFLICT,
+                ImportError::Format(_) => EXIT_IMPORT_FORMAT,
+                ImportError::NotEmpty(_) | ImportError::Read(_) | ImportError::Storage(_) => 1,
+            };
+            ExitCode::from(code)
+        }
+        Err(err) => {
+            eprintln!("导入失败：{err}");
+            ExitCode::FAILURE
+        }
     }
 }
 
 /// 起异步运行时并跑启动链。
-fn run(faststart: bool) -> ExitCode {
+fn run(faststart: bool, auto_import: bool) -> ExitCode {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -69,7 +101,7 @@ fn run(faststart: bool) -> ExitCode {
         }
     };
 
-    match runtime.block_on(startup::serve(faststart)) {
+    match runtime.block_on(startup::serve(faststart, auto_import)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("启动失败：{err}");

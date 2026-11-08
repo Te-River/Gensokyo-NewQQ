@@ -63,6 +63,10 @@ protoc-bin-vendored = "3.3.0"
 rust-embed = "8.13.0"
 mime_guess = "2.0.5"
 
+# webhook 回调的 ed25519 验签 / op13 应答签名。
+# 不是新增 crate：ring 0.17.14 早经 rustls（tokio-tungstenite → tokio-rustls）进树并参与编译。
+ring = "0.17.14"
+
 # 序列化 / 配置
 serde = { version = "1.0.229", features = ["derive"] }
 # OneBot 协议层：事件/消息段/action 参数都是 JSON，`#[serde(flatten)] extra` 也需要 Value
@@ -77,6 +81,8 @@ redb = "4.4.0"
 # 行号派生：Go `idmap.GenerateRowID` 用 MD5，虚拟行号迁移/对拍必须逐位一致
 # 关闭默认特性：只需要摘要核心，不需要 oid（const-oid）与 alloc
 md-5 = { version = "0.11.0", default-features = false }
+# JSONL 导入器的整文件校验（`end` 行的 sha256）：rust-embed-utils 已把它带进依赖图
+sha2 = "0.11.1"
 
 # 可观测性 / 错误
 tracing = "0.1.44"

@@ -8,8 +8,9 @@
 //!    内置 3 个；
 //! 4. `Runtime::start` 按配置装配正向 WS / 正向 HTTP API / webhook / 反向 WS（见
 //!    `gensokyo_runtime::boot`），并拉起 config 热重载监听；
-//! 5. 打印 action 数量与**实际**监听地址（`127.0.0.1:0` 这类覆盖后的真实端口），Ctrl-C 后按
-//!    [`DEFAULT_SHUTDOWN_TIMEOUT`] 优雅关闭（热重载监听随运行时句柄一起停止）。
+//! 5. 打印 action 数量、**实际**监听地址与启动横幅（[`crate::banner`]；`127.0.0.1:0` 这类
+//!    覆盖后的真实端口），Ctrl-C 后按 [`DEFAULT_SHUTDOWN_TIMEOUT`] 优雅关闭（热重载监听随
+//!    运行时句柄一起停止）。
 //!
 //! 现状：反向 WS、webhook 与 WebUI 都在 `gensokyo_runtime::boot` 装配；配置热重载经
 //! [`RuntimeOptions::config_watch`]（默认开）接线，监听失败只 `warn`、不阻断启动。idmap 与 echo
@@ -27,12 +28,19 @@ use gensokyo_qq::{HttpTransport, OpenApiClient, ReqwestTransport, TokenConfig, T
 use gensokyo_runtime::{
     AppState, DEFAULT_SHUTDOWN_TIMEOUT, Runtime, RuntimeHandle, RuntimeOptions,
 };
+use gensokyo_storage::idmap::{DEFAULT_IDENTITY_PATH, DEFAULT_MSG_PATH};
+use gensokyo_storage::{
+    IdMapOptions, IdMapStore, ImportError, ImportOptions, ImportReport, importer,
+};
 use thiserror::Error;
 
-use crate::logging;
+use crate::{banner, logging};
 
 /// 默认配置文件名（与 Go 的工作目录约定一致）。
 pub const CONFIG_FILE: &str = "config.yml";
+
+/// 启动期自动导入用的 JSONL 文件名（Go `legacy-export` 的输出，落在工作目录）。
+pub const AUTO_IMPORT_FILE: &str = "idmap.jsonl";
 
 /// 启动失败的原因。
 #[derive(Debug, Error)]
@@ -49,6 +57,9 @@ pub enum StartupError {
     /// 注册 Ctrl-C 处理器失败。
     #[error("监听 Ctrl-C 失败: {0}")]
     Signal(#[source] std::io::Error),
+    /// idmap JSONL 导入失败（`import-idmap` 子命令）。
+    #[error(transparent)]
+    Import(#[from] ImportError),
 }
 
 /// 加载后的配置。
@@ -210,11 +221,110 @@ pub fn address_lines(started: &Started) -> Vec<String> {
     lines
 }
 
+/// `gensokyo import-idmap` 主链：加载 `config.yml`（决定 AppID 与库路径）→ 打开库 → 导入。
+///
+/// 导入按 `config.yml` 的 `app_id` 打开库：`identity` 行带的是 Go 侧已归一化的 key，
+/// 这里不重新归一化，但后续新身份仍按本机 AppID 生成 key，两者必须一致才有意义。
+///
+/// # Errors
+///
+/// 配置加载、打开库或导入失败时返回 [`StartupError`]。
+pub fn import_idmap(file: &Path, options: &ImportOptions) -> Result<ImportReport, StartupError> {
+    let loaded = load_config(CONFIG_FILE)?;
+    let store =
+        IdMapStore::open(idmap_options(&loaded.config.snapshot())).map_err(ImportError::Storage)?;
+    Ok(importer::import_file(&store, file, options)?)
+}
+
+/// 导入结果的单行摘要（`import-idmap` 的打印与启动期自动导入的 info 日志共用）。
+#[must_use]
+pub fn report_line(report: &ImportReport) -> String {
+    format!(
+        "{}记录 {} 条（忽略未知 kind {}）：身份 新 {} / 幂等 {} / 重映射 {}，\
+         config {}，user_info {}，last_seen {}，msg_id {}，latest {}；\
+         current_vuin={} current_msg={}",
+        if report.dry_run { "dry-run " } else { "" },
+        report.records,
+        report.unknown_kinds,
+        report.identities_imported,
+        report.identities_unchanged,
+        report.identities_remapped,
+        report.configs,
+        report.user_infos,
+        report.last_seen,
+        report.msg_ids,
+        report.latest,
+        report.vuin_counter,
+        report.msg_counter,
+    )
+}
+
+/// idmap 的打开参数：AppID 参与 OpenID 的 key、`hash_id` 决定 vUIN 的派生方式、
+/// `idmap_isolation` 开启时带 `uin` 前缀。
+///
+/// 与 `gensokyo_runtime::boot::idmap_options`（私有）**必须逐字段一致**：自动导入要在
+/// `Runtime::start` 的 `attach_idmap` 之前先打开同一对库文件，两处都只读同一份 `config.yml`。
+fn idmap_options(settings: &Settings) -> IdMapOptions {
+    let mut options = IdMapOptions::new(DEFAULT_IDENTITY_PATH, DEFAULT_MSG_PATH)
+        .with_app_id(settings.get_app_id().to_string())
+        .with_hash_id(settings.get_hash_id());
+    if settings.get_idmap_isolation() {
+        options = options.with_uin(settings.get_uin().to_string());
+    }
+    options
+}
+
+/// 启动期自动导入：redb 为空且工作目录有 [`AUTO_IMPORT_FILE`] 时先导入，再交给 boot 装配。
+///
+/// 口径与 idmap 打开失败一致（`Runtime::attach_idmap` 只 warn、不阻断启动）：这里任何失败
+/// 都只 warn，进程照常启动。导入本身幂等（`--merge` 语义），所以失败后重跑或手动
+/// `gensokyo import-idmap --file idmap.jsonl --merge` 都能补上。
+fn auto_import_idmap(config: &ConfigManager) {
+    let path = Path::new(AUTO_IMPORT_FILE);
+    if !path.is_file() {
+        return;
+    }
+    let store = match IdMapStore::open(idmap_options(&config.snapshot())) {
+        Ok(store) => store,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "idmap 自动导入跳过：打开库失败（站点沿用原始 OpenID）"
+            );
+            return;
+        }
+    };
+    match store.is_empty() {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::debug!(file = AUTO_IMPORT_FILE, "idmap 库已有数据，跳过自动导入");
+            return;
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "idmap 自动导入跳过：无法判断库是否为空");
+            return;
+        }
+    }
+    let options = ImportOptions {
+        merge: true,
+        ..ImportOptions::default()
+    };
+    match importer::import_file(&store, path, &options) {
+        Ok(report) => tracing::info!(file = AUTO_IMPORT_FILE, "{}", report_line(&report)),
+        Err(err) => tracing::warn!(
+            error = %err,
+            file = AUTO_IMPORT_FILE,
+            "idmap 自动导入失败（不阻断启动），可手动 `gensokyo import-idmap --file idmap.jsonl --merge` 重试"
+        ),
+    }
+    // store 到函数结束即 drop：`Runtime::start` 的 `attach_idmap` 随后才能重新打开同一对文件。
+}
+
 /// `gensokyo` / `gensokyo run` 主链：装配 → 打印监听地址 → 等 Ctrl-C → 带超时关闭。
 ///
 /// # Errors
 /// 配置、绑定或信号注册失败时返回 [`StartupError`]；此时不会留下监听端口。
-pub async fn serve(faststart: bool) -> Result<(), StartupError> {
+pub async fn serve(faststart: bool, auto_import: bool) -> Result<(), StartupError> {
     let loaded = load_config(CONFIG_FILE)?;
     // 日志级别来自 config.yml，所以要在配置加载之后初始化；`RUST_LOG` 优先。
     logging::init(loaded.config.snapshot().get_log_level());
@@ -224,7 +334,21 @@ pub async fn serve(faststart: bool) -> Result<(), StartupError> {
     if faststart {
         tracing::info!("faststart：没有可跳过的额外初始化步骤，行为与 run 相同");
     }
+    if auto_import {
+        auto_import_idmap(&loaded.config);
+    }
+    // Go `acnode.init()`：进程启动时从工作目录加载三份词表（缺文件即释放空文件并在
+    // 每行补全 `词####替换文本`）。开关不在这里判断——由调用点逐次读配置。
+    let default_change_word = loaded
+        .config
+        .snapshot()
+        .get_default_change_word()
+        .to_owned();
+    gensokyo_core::acnode::load_into_process(Path::new("."), &default_change_word);
 
+    // 横幅要用的配置：`start_with_config` 会取走 `Arc<ConfigManager>`，先留一份快照。
+    let settings = loaded.config.snapshot();
+    let webui_enabled = !settings.get_disable_webui();
     let started = start_with_config(loaded.config, RuntimeOptions::default()).await?;
     println!(
         "已注册 action: {} 个（{}）",
@@ -243,6 +367,18 @@ pub async fn serve(faststart: bool) -> Result<(), StartupError> {
             "没有任何 listener 启动：检查 config.yml 的 enable_ws_server 与 http_address"
         );
     }
+    // Go `main.go:663-667`：WebUI 挂在主 listener 上（`gensokyo_runtime::boot` 的
+    // `merge_webui`），所以控制台地址取 WS listener，没有时退到 HTTP API 端口。
+    let webui_listener = if webui_enabled {
+        started
+            .handle
+            .ws_addr()
+            .or_else(|| started.handle.http_addr())
+    } else {
+        None
+    };
+    let (console_url, public_url) = banner::console_urls(webui_listener, &settings);
+    banner::welcome(console_url.as_deref(), public_url.as_deref());
     tracing::info!("按 Ctrl-C 退出");
 
     tokio::signal::ctrl_c()
@@ -297,6 +433,8 @@ settings:
             config_watch: false,
             // 单测不连 QQ 网关。
             gateway: false,
+            // 单测不往外部 URL 上报事件。
+            post_url: false,
         }
     }
 

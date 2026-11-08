@@ -59,6 +59,7 @@ use tokio::task::{AbortHandle, JoinHandle};
 
 use crate::event_hub::EventHub;
 use crate::gateway::{GatewayClient, GatewayHandle, GatewayOptions};
+use crate::reporter::{PostUrlReporter, PostUrlReporterHandle};
 use crate::state::AppState;
 use crate::ws_client::{WsClient, WsClientHandle};
 
@@ -82,6 +83,8 @@ pub struct RuntimeOptions {
     pub config_watch: bool,
     /// 是否启动 QQ 上游 WS 网关订阅（默认 `true`；缺凭据时自动跳过，测试可关）。
     pub gateway: bool,
+    /// 是否启动 `post_url` 事件上报（默认 `true`；配置为空时空转）。
+    pub post_url: bool,
 }
 
 impl Default for RuntimeOptions {
@@ -92,6 +95,7 @@ impl Default for RuntimeOptions {
             // 手写 Default：派生会给 `false`，而生产默认要监听配置文件
             config_watch: true,
             gateway: true,
+            post_url: true,
         }
     }
 }
@@ -274,6 +278,15 @@ impl Runtime {
             None
         };
 
+        // post_url 事件上报：订阅总线后逐事件 POST（Go `BroadcastMessageToAll` 尾部的
+        // `go PostMessageToUrls(message)`）。配置为空时任务空转，热重载后自动生效。
+        let post_url = if options.post_url {
+            Some(PostUrlReporter::start(state.clone()))
+        } else {
+            tracing::info!("post_url=false，事件上报未启动");
+            None
+        };
+
         // 会话清理任务只在 WebUI 挂载时存在；句柄未 `shutdown` 就 drop 时由 `Drop` 中止。
         let webui_cleanup = webui.as_ref().map(spawn_session_cleanup);
 
@@ -291,6 +304,7 @@ impl Runtime {
             http,
             ws_client,
             gateway,
+            post_url,
             hub: state.hub().clone(),
             webui_cleanup,
             config_watch,
@@ -529,6 +543,8 @@ pub struct RuntimeHandle {
     ws_client: Option<WsClientHandle>,
     /// QQ 上游 WS 网关（`gateway=false`、缺凭据或传输构建失败时为 `None`）。
     gateway: Option<GatewayHandle>,
+    /// `post_url` 事件上报（`post_url=false` 或 HTTP 传输构建失败时为 `None`）。
+    post_url: Option<PostUrlReporterHandle>,
     hub: EventHub,
     /// WebUI 会话清理任务（未挂 WebUI 时为 `None`）。
     webui_cleanup: Option<JoinHandle<()>>,
@@ -561,6 +577,16 @@ impl RuntimeHandle {
     #[must_use]
     pub fn gateway_started(&self) -> bool {
         self.gateway.is_some()
+    }
+
+    /// `post_url` 事件上报是否已启动（`post_url=false` 或 HTTP 传输构建失败时为 `false`）。
+    ///
+    /// 配置为空时任务仍在跑（空转），热重载新增 URL 后自动开始上报。
+    #[must_use]
+    pub fn post_url_started(&self) -> bool {
+        self.post_url
+            .as_ref()
+            .is_some_and(PostUrlReporterHandle::is_running)
     }
 
     /// 事件总线：入站发布、反向 WS 订阅；外部也可订阅做旁路观测。
@@ -598,6 +624,12 @@ impl RuntimeHandle {
         if let Some(gateway) = self.gateway.take() {
             gateway.shutdown(limit).await;
             tracing::debug!("QQ 上游 WS 网关已关闭");
+        }
+
+        // post_url 上报也是出站任务：先停它，避免 listener 收摊期间还在 POST。
+        if let Some(reporter) = self.post_url.take() {
+            reporter.shutdown(limit).await;
+            tracing::debug!("post_url 事件上报已关闭");
         }
 
         // 会话清理是纯定时器：没有需要落盘的收尾，直接中止。
@@ -666,6 +698,9 @@ impl RuntimeHandle {
         if let Some(gateway) = &self.gateway {
             gateway.abort();
         }
+        if let Some(reporter) = &self.post_url {
+            reporter.abort();
+        }
         if let Some(task) = &self.webui_cleanup {
             task.abort();
         }
@@ -699,6 +734,10 @@ impl Drop for RuntimeHandle {
         if let Some(gateway) = self.gateway.take() {
             tracing::warn!("RuntimeHandle 未 shutdown 即被 drop，已中止 QQ 上游 WS 网关");
             drop(gateway);
+        }
+        if let Some(reporter) = self.post_url.take() {
+            tracing::warn!("RuntimeHandle 未 shutdown 即被 drop，已中止 post_url 事件上报");
+            drop(reporter);
         }
         for server in [self.ws.take(), self.http.take()].into_iter().flatten() {
             if server.task.is_finished() {

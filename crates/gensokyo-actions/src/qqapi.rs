@@ -1096,6 +1096,12 @@ impl ActionContext {
         self.config.as_ref()
     }
 
+    /// 配置管理器句柄（进程级组件登记用，如出站敏感词开关）。
+    #[must_use]
+    pub fn config_arc(&self) -> Arc<ConfigManager> {
+        Arc::clone(&self.config)
+    }
+
     /// idmap（未装配时为 `None`）。
     #[must_use]
     pub fn idmap(&self) -> Option<&IdMapStore> {

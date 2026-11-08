@@ -68,6 +68,8 @@ use crate::users::{GetFriendListHandler, GetStrangerInfoHandler, SendLikeHandler
 /// 重复注册时后注册者胜出（[`Registry::register`] 的既有语义）；别名目标缺失会 panic——
 /// 别名表是编译期常量，装配期炸出来比线上 `1404` 更容易定位。
 pub fn register_all(registry: &mut Registry, context: Arc<ActionContext>) {
+    // planner 是纯函数、拿不到 context：出站敏感词开关的配置句柄在这里登记一次。
+    crate::send::use_change_word_config(context.config_arc());
     let entries: [(&'static str, Arc<dyn Handler>); 75] = [
         (
             ".handle_quick_operation",

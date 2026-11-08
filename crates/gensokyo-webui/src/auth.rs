@@ -1,26 +1,38 @@
 //! 登录、会话 cookie 与登录态查询。
 //!
 //! 凭据来自 `config.yml` 的 `server_user_name` / `server_user_password`（与 Go
-//! `webui/api.go:checkCredentials` 同源）。会话只存进程内存，重启后所有浏览器都要重新登录；
-//! 持久化到 `cookie.db` 属 M3b。
+//! `webui/api.go:checkCredentials` 同源）。会话默认落 redb（`cookie.redb`，与 `config.yml`
+//! 同目录，见 [`crate::session_db`]），重启后浏览器无需重新登录；磁盘不可写时降级为
+//! 纯内存会话并 `warn`。
 //!
-//! 与 Go 的差异（响应体）：M3 按管理台约定的 `{code:0}` / `{code:1}` 返回，不沿用 Go 的
-//! `{isLoggedIn}`；cookie 名保持 `login_cookie`，现有前端无需改动。Go 的
-//! `checkLoginStatus` 在未登录时回 200 + `isLoggedIn:false`，这里统一回 401，便于前端用
-//! HTTP 状态判断。
+//! # 响应体（与 Go 逐条对照）
+//!
+//! - `POST /api/login`：成功 200 `{isLoggedIn:true,cookie:"<token>"}` + 24h cookie（Go
+//!   `webui/api.go:330-335`；前端 `LoginView.vue` 读 `data.isLoggedIn`，M3 的 `{code:0}`
+//!   会被当成登录失败）；失败 401 `{isLoggedIn:false}`；请求体不是合法 JSON / 缺字段 → 400
+//!   `{error:...}`（Go `ShouldBindJSON`）。
+//! - `GET /api/check-login-status`（Go 的路径）与 `GET /api/checkLoginStatus`（M3 旧名）
+//!   共用同一个处理函数：**始终 200**，body `{"isLoggedIn":true}` /
+//!   `{"isLoggedIn":false,"error":...}`，与 Go `HandleCheckLoginStatusRequest` 一致——前端
+//!   `router/index.ts` 与 `LoginView.vue` 只读 `isLoggedIn`，不看 HTTP 状态码。旧名保留，
+//!   避免 M3 起的调用方 404。
+//! - `POST /api/logout`：Rust 扩展。Go 没有登出接口，会话只能等 24h 过期或删 `cookie.db`。
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::Json;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::session_db::{SESSION_DB_FILE, SessionDb};
 use crate::state::WebUiState;
 
 /// 会话 cookie 名（与 Go `webui/api.go` 的 `login_cookie` 一致）。
@@ -29,55 +41,134 @@ pub const SESSION_COOKIE: &str = "login_cookie";
 /// 会话有效期 24h（与 Go `SetCookie(..., 3600*24, ...)` 一致）。
 pub const SESSION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// 进程内会话存储：`token → 过期时刻`。
+/// 会话存储：`token → 过期时刻`（Unix 毫秒），可选落 redb。
 ///
-/// 没有后台清理任务：调用方需要定期调 [`SessionStore::cleanup`]（M3b 的持久化任务一并接入），
-/// 在此之前过期条目只是"校验失败"，仍占内存。写路径只有 issue / remove / cleanup。
+/// 本类型不带后台任务：runtime 按固定周期外调 [`SessionStore::cleanup`]
+/// （见 `gensokyo-runtime/src/boot.rs` 的 `spawn_session_cleanup`）；在此之前过期条目只是
+/// "校验失败"，仍占内存与磁盘。写路径只有 issue / remove / cleanup。
 #[derive(Debug)]
 pub struct SessionStore {
-    sessions: RwLock<HashMap<String, Instant>>,
+    sessions: RwLock<HashMap<String, u64>>,
     ttl: Duration,
+    db: Option<SessionDb>,
 }
 
 impl SessionStore {
-    /// 以指定 TTL 建空存储（生产走 [`WebUiState::new`]，固定 24h）。
+    /// 进程内会话（不落盘）。测试与降级路径用。
     #[must_use]
     pub fn new(ttl: Duration) -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
             ttl,
+            db: None,
+        }
+    }
+
+    /// 打开 `cookie.redb` 并把未过期会话读回内存。
+    ///
+    /// # Errors
+    ///
+    /// 库打不开、读事务或过期行清理失败时返回 [`redb::Error`]。
+    pub fn with_db(ttl: Duration, path: impl AsRef<Path>) -> Result<Self, redb::Error> {
+        let db = SessionDb::open(path.as_ref())?;
+        let sessions = db.load(now_ms())?;
+        Ok(Self {
+            sessions: RwLock::new(sessions),
+            ttl,
+            db: Some(db),
+        })
+    }
+
+    /// 生产装配：会话库放 `config.yml` 同目录的 [`SESSION_DB_FILE`]。
+    ///
+    /// 打不开时降级为纯内存（只 `warn`）：磁盘只读不该让机器人在启动阶段挂掉。
+    #[must_use]
+    pub fn open_default(ttl: Duration, config_path: &Path) -> Self {
+        let path = config_path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(SESSION_DB_FILE);
+        match Self::with_db(ttl, &path) {
+            Ok(store) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    sessions = store.len(),
+                    "WebUI 会话库已加载"
+                );
+                store
+            }
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "WebUI 会话库不可用，降级为纯内存会话"
+                );
+                Self::new(ttl)
+            }
         }
     }
 
     /// 发放新会话并返回 token。
-    pub fn issue(&self) -> String {
+    ///
+    /// # Errors
+    ///
+    /// 会话库写入失败时返回 [`redb::Error`]：此时不创建内存条目，避免向调用方报告一个
+    /// 重启就会消失的会话。
+    pub fn issue(&self) -> Result<String, redb::Error> {
         let token = generate_token();
-        let expires_at = Instant::now() + self.ttl;
+        let expires_at = now_ms().saturating_add(ttl_ms(self.ttl));
+        if let Some(db) = &self.db {
+            db.put(&token, expires_at)?;
+        }
         self.write().insert(token.clone(), expires_at);
-        token
+        Ok(token)
     }
 
     /// token 存在且未过期。
     #[must_use]
     pub fn validate(&self, token: &str) -> bool {
-        let now = Instant::now();
+        let now = now_ms();
         self.read()
             .get(token)
             .is_some_and(|expires_at| *expires_at > now)
     }
 
-    /// 删除会话（登出）；返回是否确实删掉了一个会话。
+    /// 删除会话（登出）；返回是否确实删掉了一个内存条目。
+    ///
+    /// 落盘失败只 `warn`：内存条目已失效、当前进程内登出立即生效，但重启后该 token 会
+    /// 复活（直到 24h 过期）——失败只进日志，因为登出没有可回滚的语义。
     pub fn remove(&self, token: &str) -> bool {
+        if let Some(db) = &self.db
+            && let Err(err) = db.remove(token)
+        {
+            tracing::warn!(error = %err, "WebUI 会话删除落盘失败");
+        }
         self.write().remove(token).is_some()
     }
 
-    /// 清掉已过期会话，返回删除条数。
+    /// 清掉已过期会话（内存 + 磁盘），返回删除条数。
     pub fn cleanup(&self) -> usize {
-        let now = Instant::now();
+        let now = now_ms();
+        let mut expired = Vec::new();
         let mut sessions = self.write();
         let before = sessions.len();
-        sessions.retain(|_, expires_at| *expires_at > now);
-        before - sessions.len()
+        sessions.retain(|token, expires_at| {
+            let live = *expires_at > now;
+            if !live {
+                expired.push(token.clone());
+            }
+            live
+        });
+        let removed = before - sessions.len();
+        drop(sessions);
+        if let Some(db) = &self.db {
+            for token in &expired {
+                if let Err(err) = db.remove(token) {
+                    tracing::warn!(error = %err, "WebUI 过期会话删盘失败");
+                }
+            }
+        }
+        removed
     }
 
     /// 当前会话数（含尚未 cleanup 的过期条目）。
@@ -92,24 +183,35 @@ impl SessionStore {
         self.len() == 0
     }
 
-    fn read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<String, Instant>> {
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<String, u64>> {
         self.sessions
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn write(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<String, Instant>> {
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<String, u64>> {
         self.sessions
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
+/// 当前 Unix 毫秒；系统时间早于 epoch（不可能）时取 0。
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64)
+}
+
+fn ttl_ms(ttl: Duration) -> u64 {
+    ttl.as_millis() as u64
+}
+
 /// 32 位 hex 会话 token。
 ///
-/// 不引入 `rand` / `uuid`：`RandomState` 的键由 OS 熵在进程内播种，两轮 SipHash 把
-/// 「纳秒时间 + 原子计数 + 轮次」摊成 128 bit，足以抵抗会话猜测。M3b 把 token 落盘
-/// （`cookie.db`）时再换 CSPRNG——离开本进程的凭据应有明确的随机源保证。
+/// 不引入 `rand` / `uuid`：`RandomState` 的两把 SipHash 密钥由 OS 熵在进程内播种，
+/// 每次 `new()` 还会递增密钥；两轮把「纳秒时间 + 原子计数 + 轮次」摊成 128 bit，对
+/// 落盘后的离线猜测同样要求先拿到进程的密钥，与 Go 的 `uuid.New()` 同级。
 fn generate_token() -> String {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
@@ -166,11 +268,19 @@ pub struct LoginRequest {
     pub password: String,
 }
 
-/// `POST /api/login`：成功下发 24h 会话 cookie，失败 401。
+/// `POST /api/login`：成功下发 24h 会话 cookie 并回 `{isLoggedIn:true,cookie}`，失败 401。
 pub(crate) async fn login(
     State(state): State<Arc<WebUiState>>,
-    Json(body): Json<LoginRequest>,
+    body: Result<Json<LoginRequest>, JsonRejection>,
 ) -> Response {
+    // Go `ShouldBindJSON` 失败（非 JSON、缺字段）回 400 且 body 带解析错误。
+    let Ok(Json(body)) = body else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Invalid request body" })),
+        )
+            .into_response();
+    };
     let snapshot = state.config().snapshot();
     let username = snapshot.get_username();
     let password = snapshot.get_password();
@@ -182,29 +292,46 @@ pub(crate) async fn login(
 
     if !matched {
         tracing::debug!("WebUI 登录失败");
-        return unauthorized();
+        return (StatusCode::UNAUTHORIZED, Json(json!({ "isLoggedIn": false }))).into_response();
     }
 
-    let token = state.sessions().issue();
+    let token = match state.sessions().issue() {
+        Ok(token) => token,
+        Err(err) => {
+            // Go 在 `GenerateCookie` 失败时回 500 + `Failed to generate cookie`。
+            tracing::error!(error = %err, "WebUI 会话落盘失败，登录中止");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "Failed to generate cookie" })),
+            )
+                .into_response();
+        }
+    };
     (
         [(
             header::SET_COOKIE,
             set_cookie(&token, SESSION_TTL.as_secs()),
         )],
-        success(),
+        // `cookie` 与 Set-Cookie 同值：Go 把 token 回给前端，前端只依赖 `isLoggedIn`。
+        Json(json!({ "isLoggedIn": true, "cookie": token })),
     )
         .into_response()
 }
 
-/// `GET /api/checkLoginStatus`：cookie 有效 `{code:0}`，否则 401。
+/// `GET /api/check-login-status` 与 `GET /api/checkLoginStatus`：始终 200，见模块文档。
 pub(crate) async fn check_login_status(
     State(state): State<Arc<WebUiState>>,
     headers: HeaderMap,
 ) -> Response {
-    if is_authenticated(&state, &headers) {
-        success()
+    let Some(token) = cookie_token(&headers) else {
+        return login_status(false, Some("Cookie not provided"));
+    };
+    if state.sessions().validate(token) {
+        login_status(true, None)
     } else {
-        unauthorized()
+        // Go 区分 "Cookie not found" 与 "Cookie has expired"，前端只读 `isLoggedIn`；
+        // 这里合成一条，避免为两个错误串多加一个查询枚举。
+        login_status(false, Some("Cookie not found or expired"))
     }
 }
 
@@ -220,12 +347,34 @@ pub(crate) async fn logout(State(state): State<Arc<WebUiState>>, headers: Header
     response
 }
 
+fn login_status(is_logged_in: bool, error: Option<&str>) -> Response {
+    let body = error.map_or_else(
+        || json!({ "isLoggedIn": is_logged_in }),
+        |error| json!({ "isLoggedIn": is_logged_in, "error": error }),
+    );
+    Json(body).into_response()
+}
+
 fn success() -> Response {
     Json(json!({ "code": 0 })).into_response()
 }
 
 pub(crate) fn unauthorized() -> Response {
     (StatusCode::UNAUTHORIZED, Json(json!({ "code": 1 }))).into_response()
+}
+
+/// 账号维度路由（`/{uin}/config`、`/{uin}/process*`、`/{uin}/api`）的前置条件：
+/// 已登录 + `{uin}` 等于配置里的 `app_id`。
+///
+/// Go 拿 `GetAppIDStr()` 拼路径做字符串比较，其它 uin 落不到任何分支 → 404。
+pub(crate) fn guard_uin(state: &WebUiState, headers: &HeaderMap, uin: u64) -> Option<Response> {
+    if !is_authenticated(state, headers) {
+        return Some(unauthorized());
+    }
+    if state.config().snapshot().get_app_id() != uin {
+        return Some(crate::assets::not_found());
+    }
+    None
 }
 
 /// 常数时间比较：长度不同也走满较长者，避免 `==` 提前返回泄露密码前缀。
@@ -280,8 +429,8 @@ mod tests {
     #[test]
     fn issued_tokens_are_32_hex_and_unique() {
         let store = SessionStore::new(SESSION_TTL);
-        let first = store.issue();
-        let second = store.issue();
+        let first = store.issue().expect("内存会话发放不应失败");
+        let second = store.issue().expect("内存会话发放不应失败");
         assert_eq!(first.len(), 32);
         assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_ne!(first, second);
@@ -292,7 +441,7 @@ mod tests {
     #[test]
     fn zero_ttl_sessions_expire_and_cleanup_drops_them() {
         let store = SessionStore::new(Duration::ZERO);
-        let token = store.issue();
+        let token = store.issue().expect("内存会话发放不应失败");
         assert!(!store.validate(&token), "TTL=0 的会话必须立即过期");
         assert_eq!(store.cleanup(), 1);
         assert!(store.is_empty());
@@ -301,7 +450,7 @@ mod tests {
     #[test]
     fn remove_reports_whether_the_session_existed() {
         let store = SessionStore::new(SESSION_TTL);
-        let token = store.issue();
+        let token = store.issue().expect("内存会话发放不应失败");
         assert!(store.remove(&token));
         assert!(!store.remove(&token));
         assert!(!store.validate(&token));

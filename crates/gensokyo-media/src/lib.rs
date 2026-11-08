@@ -20,10 +20,12 @@
 //! - [`hosting::HostingKind`]：`oss_type` 4~10 的图床枚举与
 //!   [`hosting::HostingKind::from_oss_type`]（0 = 未启用，1~3 = 内置 OSS，均返回 `None`）。
 //! - [`hosting::HostingBackend`]：`async fn upload(&self, data, filename) -> Result<String>`；
-//!   已落地[`hosting::ChatGlmBackend`]（oss_type 7）与 [`hosting::UkakaBackend`]（oss_type 8），
-//!   URL / 表单字段 / 成功判定都照 Go `imagehosting/`。
-//! - [`hosting::upload_plan`]：纯函数，把「后端 + 文件名 + 字节」变成可断言的
-//!   [`hosting::UploadPlan`]；[`hosting::upload`] 按种类分派到对应后端。
+//!   oss_type 4~10 全部落地（COS / Bilibili / QQ频道 / ChatGLM / Ukaka / 星野 / Nature），
+//!   端点、表单字段、签名与成功判定都照 Go `imagehosting/`。
+//! - [`hosting::upload`]：按种类分派并重试（3 次、1s/2s 退避；只重试网络 / 超时 / 5xx），
+//!   [`hosting::upload_with_retry`] 由调用方自定 [`hosting::RetryPolicy`]。
+//! - [`hosting::HostingConfig`]：oss_type 4/5/6 需要的凭据与目标桶（Go 从全局 config 读，
+//!   这里由接入层注入）。
 //! - [`hosting::HostingTransport`]：上传递出口（POST / PUT / GET），生产实现复用
 //!   [`fetch::HttpTransport`] 的 `reqwest::Client`，测试用 Fake 断言 multipart。
 //!
@@ -75,8 +77,9 @@
 //! - **错误**：统一 [`Error`]，不再有 Go 那样散落的 `fmt.Errorf` 字符串。
 //!
 //! # 与 Go 的差异（M2b）
-//! 图床侧的差异（不重试、URL 校验、文件部件 MIME、文件名清洗）集中在 [`hosting`] 的模块
-//! 文档里；尺寸探测的差异（JPEG 严格标记、Go 宽高写反、WebP/BMP 补齐）在 [`image`] 里。
+//! 图床侧的差异（重试的错误集合、URL 校验、状态码收紧、文件部件 MIME、文件名清洗）集中在
+//! [`hosting`] 的模块文档里；尺寸探测的差异（JPEG 严格标记、Go 宽高写反、WebP/BMP 补齐）在
+//! [`image`] 里。
 //!
 //! # 与 Go 的差异（M2c）
 //! 细节在 [`compress`] 的模块文档里，要点：
@@ -103,19 +106,18 @@
 //! # 依赖边界
 //! 只用 workspace 已锁定并已在本 crate 依赖图里的 crate（`reqwest` / `tokio` / `base64` /
 //! `thiserror` / `rustls` / `tracing`）。M2c 起新增 `image`（workspace 早已声明，此前未入图）——
-//! 这是 M2c 唯一的新依赖边。M2d 不新增依赖：silk 走 `std::process` + `std::env`。
+//! 这是 M2c 唯一的新依赖边。M2d 不新增依赖：silk 走 `std::process` + `std::env`。P7 的图床
+//! 签名同样不新增依赖：COS 的 HMAC-SHA1 与 QQ频道的 MD5 在 [`hosting`] 内按 RFC 实现。
 //!
 //! # 未做项（留给 M2e+）
 //! - silk 编解码器的**内嵌二进制**（`silk/exec/` 的 8 个平台产物）：M2d 只调用外部 `ffmpeg` /
 //!   `pts`，体积与平台矩阵留到 M4。
 //! - GIF 逐帧压缩（Go `compressGIF`），以及 BMP 解码。
-//! - COS 自签上传（`imagehosting/cos.go` 的 q-sign）与 Nature 的内置 COS 密钥直传。
-//! - Bilibili 登录态上传与分片（`imagehosting/bilibili.go`）。
-//! - 星野的 PUT 直传（`imagehosting/signed.go` 的 xingye 分支）与 QQ频道（oss_type 6）上传。
+//! - Bilibili 的分片 / 大文件上传（Go 也只有单请求 `imagehosting/bilibili.go`）。
 //! - 视频处理（抽帧 / 转码 / 体积压缩）。
 //! - 上传到 QQ（`/v2/.../files` 的 `file_data` / 分片上传）——由 `gensokyo-qq` + actions 负责。
 //! - QR 码生成。
-//! - SSRF 防护、重定向次数限制、DNS 私网拦截；图床上传的库内重试与退避。
+//! - SSRF 防护、重定向次数限制、DNS 私网拦截。
 
 pub mod compress;
 pub mod data_uri;
@@ -137,9 +139,11 @@ pub use fetch::{
     MediaTransport, TransportResponse,
 };
 pub use hosting::{
-    ChatGlmBackend, DirectMultipartPlan, HostingBackend, HostingKind, HostingTransport,
-    MultipartBody, SignedPlan, UkakaBackend, UploadBody, UploadMethod, UploadPlan, UploadRequest,
-    UploadResponse, upload, upload_plan,
+    BilibiliBackend, BilibiliConfig, BilibiliPlan, ChatGlmBackend, ChatGlmPlan, CosBackend,
+    CosConfig, CosPlan, HostingBackend, HostingConfig, HostingKind, HostingTransport, MultipartBody,
+    NatureBackend, NaturePlan, QqChannelBackend, QqChannelConfig, QqChannelPlan, RetryPolicy,
+    SignedPlan, UkakaBackend, UploadBody, UploadMethod, UploadRequest, UploadResponse, XingyeBackend,
+    is_retryable, upload, upload_with_retry,
 };
 pub use image::image_size;
 pub use silk::{CommandRunner, DEFAULT_SAMPLE_RATE, ProcessOutput, ProcessRunner, SilkCodec};

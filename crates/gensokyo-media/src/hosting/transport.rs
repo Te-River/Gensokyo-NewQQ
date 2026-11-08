@@ -25,7 +25,7 @@ pub enum UploadMethod {
     Get,
     /// multipart 上传。
     Post,
-    /// 原始字节直传（签名 URL 场景，M2b 未实现）。
+    /// 原始字节直传（COS / Nature / 星野的签名上传）。
     Put,
 }
 

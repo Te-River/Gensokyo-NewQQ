@@ -79,7 +79,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gensokyo_config::{ConfigManager, Settings};
-use gensokyo_core::Ob11Id;
+use gensokyo_core::{Ob11Id, acnode};
 use gensokyo_protocol::event::{
     HeartbeatStatus, MessageEvent, MessageType, MetaEvent, NoticeEvent, RequestEvent, Sender,
 };
@@ -290,6 +290,15 @@ impl Inbound {
             return Ok(Vec::new());
         };
         let settings = self.config.snapshot();
+        // Go `main.go:765-770` / `:787-792` / `:1124-1129`：三个消息事件在 `Process*` 之前用
+        // `acnode.CheckWordIN` 过滤正文与昵称。载荷先改写再解析，所以 `add_at_group` 补的
+        // `[CQ:at,qq=…]` 前缀不会进入过滤（与 Go 的先后顺序一致）；开关逐事件读，热重载生效。
+        let filtered = if settings.get_enable_change_word() {
+            filtered_message_payload(kind, data)
+        } else {
+            None
+        };
+        let data = filtered.as_ref().unwrap_or(data);
         match kind {
             "GROUP_AT_MESSAGE_CREATE" => Ok(vec![self.group_message(
                 &settings,
@@ -582,6 +591,7 @@ impl Inbound {
         let user_id = self.ob11_id(settings, user_raw);
         self.register_group(&group_id);
         self.feed_group_echo(settings, &payload, &group_id, &user_id, &message_id);
+        let content = reported_group_content(settings, payload.content, flavor);
         Ok(Event::Message(MessageEvent {
             time: timestamp_of(payload.timestamp.as_ref()),
             self_id: Ob11Id::num(self.self_id_of(settings)),
@@ -590,8 +600,8 @@ impl Inbound {
             message_id,
             user_id,
             group_id: Some(group_id),
-            message: MessageContent::Text(payload.content.clone()),
-            raw_message: payload.content,
+            message: MessageContent::Text(content.clone()),
+            raw_message: content,
             font: Some(0),
             sender: Some(sender),
             anonymous: None,
@@ -1080,6 +1090,52 @@ impl Inbound {
     }
 }
 
+/// 上报正文：`add_at_group` 打开时给全量群消息补回 `[CQ:at,qq=<appid>]`。
+///
+/// Go `ProcessGroupNormalMessage.go:148-150` 在剥离 @bot / 去前缀之后无条件前置
+/// （`GetAppIDStr()`，与 `use_uin` 无关），`message` 与 `raw_message` 同源
+/// （`:205` / `:281` 都赋 `messageText`），这里两条一起改。
+///
+/// 只在 `GROUP_MESSAGE_CREATE`（[`GroupFlavor::Full`]）生效：AT 事件的正文本身就带 @，
+/// 再补一次就是重复 @（Go `ProcessGroupMessage.go:154-157`）。单聊不适用。
+///
+/// 不去重：Go 也不去重，且全量消息里的 @bot 更早的入站阶段已被剥离，重复分支走不到。
+fn reported_group_content(settings: &Settings, content: String, flavor: GroupFlavor) -> String {
+    if flavor != GroupFlavor::Full || !settings.get_add_at_group() {
+        return content;
+    }
+    format!("[CQ:at,qq={}] {content}", settings.get_app_id())
+}
+
+/// 入站敏感词过滤：只改写三个消息事件的 `content` 与 `author.username`
+/// （Go `main.go:765-770` / `:787-792` / `:1124-1129`），其余事件返回 `None` 走原载荷。
+///
+/// 空正文/空昵称直接跳过：Go 对空串会返回「错误：缺少 'word' 参数」，那是它已删除的
+/// 词表 HTTP 端点遗留的分支，照搬会把纯媒体消息的正文改成错误提示。
+fn filtered_message_payload(kind: &str, data: &Value) -> Option<Value> {
+    if !matches!(
+        kind,
+        "GROUP_AT_MESSAGE_CREATE" | "GROUP_MESSAGE_CREATE" | "C2C_MESSAGE_CREATE"
+    ) {
+        return None;
+    }
+    let mut data = data.clone();
+    if let Some(object) = data.as_object_mut() {
+        if let Some(Value::String(content)) = object.get_mut("content")
+            && !content.is_empty()
+        {
+            *content = acnode::filter_in(content);
+        }
+        if let Some(Value::Object(author)) = object.get_mut("author")
+            && let Some(Value::String(username)) = author.get_mut("username")
+            && !username.is_empty()
+        {
+            *username = acnode::filter_in(username);
+        }
+    }
+    Some(data)
+}
+
 fn non_empty(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
 }
@@ -1399,6 +1455,173 @@ mod tests {
                 .read_config("g0123456789abcdef0123456789abcdef", "type")
                 .expect("群应已注册"),
             "group"
+        );
+    }
+
+    /// `add_at_group` 只给全量群消息补 `[CQ:at,qq=<appid>]`（Go `ProcessGroupNormalMessage.go:148-150`）。
+    #[test]
+    fn add_at_group_prefixes_full_group_only() {
+        use gensokyo_protocol::{Event, MessageContent};
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "app_id: 102001234\nadd_at_group: true\n").expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let store = test_store(dir.path());
+        let inbound = Inbound::new(manager, Some(store));
+
+        let events = inbound
+            .convert("GROUP_MESSAGE_CREATE", Some(&group_at_payload()), None)
+            .expect("全量群消息应可转换");
+        let Event::Message(full) = &events[0] else {
+            panic!("GROUP_MESSAGE_CREATE 应转成群消息");
+        };
+        let MessageContent::Text(text) = &full.message else {
+            panic!("群消息正文应为文本");
+        };
+        assert_eq!(text, "[CQ:at,qq=102001234] hello");
+        // Go 的 `message` 与 `raw_message` 同源（`ProcessGroupNormalMessage.go:205` / `:281`）
+        assert_eq!(full.raw_message, "[CQ:at,qq=102001234] hello");
+
+        // AT 事件的正文自带 @，再补一次就是重复 @（Go `ProcessGroupMessage.go:154-157`）
+        let events = inbound
+            .convert("GROUP_AT_MESSAGE_CREATE", Some(&group_at_payload()), None)
+            .expect("群 @ 消息应可转换");
+        let Event::Message(at) = &events[0] else {
+            panic!("GROUP_AT_MESSAGE_CREATE 应转成群消息");
+        };
+        let MessageContent::Text(text) = &at.message else {
+            panic!("群消息正文应为文本");
+        };
+        assert_eq!(text, "hello");
+    }
+
+    /// 开关关闭零变化：正文逐字透传。
+    #[test]
+    fn add_at_group_off_keeps_content_verbatim() {
+        use gensokyo_protocol::{Event, MessageContent};
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "app_id: 102001234\n").expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let store = test_store(dir.path());
+        let inbound = Inbound::new(manager, Some(store));
+
+        let events = inbound
+            .convert("GROUP_MESSAGE_CREATE", Some(&group_at_payload()), None)
+            .expect("全量群消息应可转换");
+        let Event::Message(full) = &events[0] else {
+            panic!("GROUP_MESSAGE_CREATE 应转成群消息");
+        };
+        let MessageContent::Text(text) = &full.message else {
+            panic!("群消息正文应为文本");
+        };
+        assert_eq!(text, "hello");
+        assert_eq!(full.raw_message, "hello");
+    }
+
+    /// 单聊不适用：Go 的私聊路径没有 `add_at_group`。
+    #[test]
+    fn add_at_group_ignores_private_msg() {
+        use gensokyo_protocol::{Event, MessageContent};
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "app_id: 102001234\nadd_at_group: true\n").expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let store = test_store(dir.path());
+        let inbound = Inbound::new(manager, Some(store));
+
+        let events = inbound
+            .convert("C2C_MESSAGE_CREATE", Some(&c2c_payload()), None)
+            .expect("单聊消息应可转换");
+        let Event::Message(c2c) = &events[0] else {
+            panic!("C2C_MESSAGE_CREATE 应转成单聊消息");
+        };
+        let MessageContent::Text(text) = &c2c.message else {
+            panic!("单聊正文应为文本");
+        };
+        assert_eq!(text, "hi");
+    }
+
+    /// Go `main.go:765-770` / `:787-792` / `:1124-1129`：`enableChangeWord` 打开时正文与昵称
+    /// 都过 `CheckWordIN`；关掉则逐字透传。
+    #[test]
+    fn change_word_filters_content_and_nickname_when_enabled() {
+        use gensokyo_protocol::{Event, MessageContent};
+
+        if !gensokyo_core::acnode::is_installed() {
+            let dir = std::env::temp_dir()
+                .join(format!("gensokyo-inbound-acnode-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("建临时目录失败");
+            std::fs::write(dir.join("sensitive_words_in.txt"), "违禁字样####□\n").unwrap();
+            std::fs::write(dir.join("sensitive_words_out.txt"), "").unwrap();
+            std::fs::write(dir.join("white.txt"), "").unwrap();
+            assert!(gensokyo_core::acnode::load_into_process(&dir, "*"));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        let payload = || {
+            json!({
+                "id": "m-1",
+                "group_id": "g0123456789abcdef0123456789abcdef",
+                "content": "违禁字样混进来了",
+                "author": {
+                    "id": "u0123456789abcdef0123456789abcdef",
+                    "username": "违禁字样"
+                }
+            })
+        };
+
+        let on_dir = tempfile::tempdir().expect("临时目录");
+        let on = on_dir.path().join("config.yml");
+        std::fs::write(&on, "app_id: 102001234\nenableChangeWord: true\n").expect("写测试配置失败");
+        let inbound = Inbound::new(
+            Arc::new(ConfigManager::new(&on).expect("加载配置失败")),
+            Some(test_store(on_dir.path())),
+        );
+        let events = inbound
+            .convert("GROUP_MESSAGE_CREATE", Some(&payload()), None)
+            .expect("全量群消息应可转换");
+        let Event::Message(message) = &events[0] else {
+            panic!("GROUP_MESSAGE_CREATE 应转成群消息");
+        };
+        let MessageContent::Text(text) = &message.message else {
+            panic!("群消息正文应为文本");
+        };
+        assert_eq!(text, "□混进来了");
+        assert_eq!(
+            message
+                .sender
+                .as_ref()
+                .and_then(|sender| sender.nickname.as_deref()),
+            Some("□")
+        );
+
+        let off_dir = tempfile::tempdir().expect("临时目录");
+        let off = off_dir.path().join("config.yml");
+        std::fs::write(&off, "app_id: 102001234\n").expect("写测试配置失败");
+        let inbound = Inbound::new(
+            Arc::new(ConfigManager::new(&off).expect("加载配置失败")),
+            Some(test_store(off_dir.path())),
+        );
+        let events = inbound
+            .convert("GROUP_MESSAGE_CREATE", Some(&payload()), None)
+            .expect("全量群消息应可转换");
+        let Event::Message(message) = &events[0] else {
+            panic!("GROUP_MESSAGE_CREATE 应转成群消息");
+        };
+        let MessageContent::Text(text) = &message.message else {
+            panic!("群消息正文应为文本");
+        };
+        assert_eq!(text, "违禁字样混进来了");
+        assert_eq!(
+            message
+                .sender
+                .as_ref()
+                .and_then(|sender| sender.nickname.as_deref()),
+            Some("违禁字样")
         );
     }
 

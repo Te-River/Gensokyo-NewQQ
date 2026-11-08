@@ -15,7 +15,7 @@ use crate::hosting::multipart::{self, MultipartBody};
 use crate::hosting::transport::{
     HostingTransport, USER_AGENT, USER_AGENT_HEADER, UploadBody, UploadMethod, UploadRequest,
 };
-use crate::hosting::{DEFAULT_UPLOAD_TIMEOUT, DirectMultipartPlan, HostingBackend, check_url};
+use crate::hosting::{DEFAULT_UPLOAD_TIMEOUT, HostingBackend, check_url};
 use crate::sniff::{self, ImageKind};
 
 /// 上传端点。
@@ -27,11 +27,24 @@ const FALLBACK_MIME: &str = "image/jpeg";
 /// 表单里的文件字段名（Go `CreateFormFile("file", …)`）。
 const FILE_FIELD: &str = "file";
 
+/// 一次 ChatGLM 上传的纯数据描述。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatGlmPlan {
+    /// 上传端点。
+    pub url: &'static str,
+    /// 规整后的文件名（扩展名已按真实格式修正）。
+    pub filename: String,
+    /// 图片 MIME（嗅探结果，未知时兜底 `image/jpeg`）。
+    pub mime: &'static str,
+    /// 需要随请求附带的头。
+    pub headers: Vec<(&'static str, &'static str)>,
+}
+
 /// 构造上传计划（纯函数，便于断言端点 / 文件名 / MIME）。
 #[must_use]
-pub fn plan(filename: &str, data: &[u8]) -> DirectMultipartPlan {
+pub fn plan(filename: &str, data: &[u8]) -> ChatGlmPlan {
     let mime = sniff::sniff_image(data).map_or(FALLBACK_MIME, ImageKind::mime);
-    DirectMultipartPlan {
+    ChatGlmPlan {
         url: ENDPOINT,
         filename: multipart::ensured_filename(filename, data),
         mime,

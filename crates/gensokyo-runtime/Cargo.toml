@@ -21,6 +21,8 @@ gensokyo-media.workspace = true
 gensokyo-webui.workspace = true
 # 正向 WS / HTTP API 服务端；`ws` 提供 WebSocket 升级
 axum = { workspace = true, features = ["ws"] }
+# webhook ed25519 验签（ring 已随 TLS 栈进树，这里只是直连）
+ring.workspace = true
 # 反向 WS 客户端：`SinkExt` / `StreamExt` 拆读写两半
 futures.workspace = true
 serde.workspace = true
@@ -33,6 +35,8 @@ tracing.workspace = true
 [dev-dependencies]
 # WS 测试客户端（SinkExt / StreamExt）
 futures.workspace = true
+# webhook 用例要按 Go 的 seed 规则自己派生密钥并签名
+ring.workspace = true
 tempfile = "3.27.0"
 tokio = { workspace = true, features = [
     "io-util",

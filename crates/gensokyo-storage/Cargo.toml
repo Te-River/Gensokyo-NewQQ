@@ -11,6 +11,11 @@ publish.workspace = true
 gensokyo-core.workspace = true
 redb.workspace = true
 md-5.workspace = true
+# JSONL 导入器：逐行 serde_json 解析（workspace 已有，协议层在用）
+serde.workspace = true
+serde_json.workspace = true
+# `end` 行的整文件校验：SHA-2 家族摘要，已在依赖图内（rust-embed-utils → sha2 0.11）
+sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tonic.workspace = true

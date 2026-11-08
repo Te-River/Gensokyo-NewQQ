@@ -2,7 +2,7 @@
 //!
 //! 表的定义、key 构造与 value 编码逐条对齐 Go `idmap/map_service.go`，差异见 crate 文档。
 
-mod encoding;
+pub(crate) mod encoding;
 pub mod grpc;
 
 use std::collections::HashMap;
@@ -12,7 +12,8 @@ use std::sync::PoisonError;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use redb::{
-    Database, ReadOnlyTable, ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction,
+    Database, ReadOnlyTable, ReadTransaction, ReadableDatabase, ReadableTable, TableDefinition,
+    WriteTransaction,
 };
 use tracing::{debug, warn};
 
@@ -32,44 +33,56 @@ pub const DEFAULT_USER_NAME_TTL: Duration = Duration::from_secs(600);
 pub const USER_NAME_SWEEP_THRESHOLD: usize = 1024;
 
 /// 身份库：正表与反表。
-const IDENTITY_TO_VUIN: TableDefinition<'static, &'static str, &'static [u8]> =
+///
+/// `pub(crate)`：JSONL 导入器（[`crate::importer`]）在同一 crate 内按表名逐字节搬运，
+/// 与 Go 一致的表名/key/value 编码是导入器的唯一契约，重建一份就会漂移。
+pub(crate) const IDENTITY_TO_VUIN: TableDefinition<'static, &'static str, &'static [u8]> =
     TableDefinition::new("identity_to_vuin");
-const VUIN_TO_IDENTITY: TableDefinition<'static, &'static str, &'static [u8]> =
+pub(crate) const VUIN_TO_IDENTITY: TableDefinition<'static, &'static str, &'static [u8]> =
     TableDefinition::new("vuin_to_identity");
-const LAST_SEEN: TableDefinition<'static, &'static str, &'static [u8]> =
+pub(crate) const LAST_SEEN: TableDefinition<'static, &'static str, &'static [u8]> =
     TableDefinition::new("last_seen");
 
 /// 身份库：配置 KV（Go `ConfigBucket` = `"config"`），key 为 `"<section>:<subtype>"`，
 /// value 是原始字符串字节（Go `WriteConfig` 直接 `b.Put(key, []byte(value))`）。
-const CONFIG: TableDefinition<'static, &'static str, &'static [u8]> =
+pub(crate) const CONFIG: TableDefinition<'static, &'static str, &'static [u8]> =
     TableDefinition::new("config");
 
+/// 身份库：用户信息 KV（Go `UserInfoBucket` = `"UserInfo"`）。
+///
+/// key 为 `"<rawID>:<UserID>"`、value 为 `structs.FriendData` 的 JSON 字节
+/// （Go `StoreUserInfo` / `ListAllUsers`）。表名沿用本 crate 其余表的 snake_case 约定
+/// （Go 的 bucket 名是 `UserInfo`，bbolt 按名字精确匹配，这里只保留同一张表的语义）。
+pub(crate) const USER_INFO: TableDefinition<'static, &'static str, &'static [u8]> =
+    TableDefinition::new("user_info");
+
 /// 两个库各自的 `meta` 表（Go 同名 bucket）。
-const META: TableDefinition<'static, &'static str, &'static [u8]> = TableDefinition::new("meta");
+pub(crate) const META: TableDefinition<'static, &'static str, &'static [u8]> =
+    TableDefinition::new("meta");
 
 /// 消息库：正表、反表、过期时间与"群 × 用户 最新消息"。
-const MSG_TO_VIRTUAL: TableDefinition<'static, &'static str, &'static [u8]> =
+pub(crate) const MSG_TO_VIRTUAL: TableDefinition<'static, &'static str, &'static [u8]> =
     TableDefinition::new("msg_to_virtual");
-const VIRTUAL_TO_MSG: TableDefinition<'static, &'static str, &'static [u8]> =
+pub(crate) const VIRTUAL_TO_MSG: TableDefinition<'static, &'static str, &'static [u8]> =
     TableDefinition::new("virtual_to_msg");
-const EXPIRES_AT: TableDefinition<'static, &'static str, &'static [u8]> =
+pub(crate) const EXPIRES_AT: TableDefinition<'static, &'static str, &'static [u8]> =
     TableDefinition::new("expires_at");
-const LATEST_BY_GROUP_USER: TableDefinition<'static, &'static str, &'static [u8]> =
+pub(crate) const LATEST_BY_GROUP_USER: TableDefinition<'static, &'static str, &'static [u8]> =
     TableDefinition::new("latest_by_group_user");
-const LATEST_EXPIRES_AT: TableDefinition<'static, &'static str, &'static [u8]> =
+pub(crate) const LATEST_EXPIRES_AT: TableDefinition<'static, &'static str, &'static [u8]> =
     TableDefinition::new("latest_expires_at");
 
 /// Go `identityCounterKey` / `msgCounterKey` / `schemaVersionKey`。
-const CURRENT_VUIN_KEY: &str = "current_vuin";
-const CURRENT_MSG_KEY: &str = "current_msg";
+pub(crate) const CURRENT_VUIN_KEY: &str = "current_vuin";
+pub(crate) const CURRENT_MSG_KEY: &str = "current_msg";
 const SCHEMA_VERSION_KEY: &str = "schema_version";
 const SCHEMA_VERSION: &[u8] = b"2";
 /// Go `defaultLastSeenScope`。
 const LAST_SEEN_SCOPE: &str = "default";
 
 /// `hash_id` 模式下 vUIN 的最短/最长位数（Go `allocateVuinTx` 的 `9..=18`）。
-const HASH_VUIN_MIN_DIGITS: usize = 9;
-const HASH_VUIN_MAX_DIGITS: usize = 18;
+pub(crate) const HASH_VUIN_MIN_DIGITS: usize = 9;
+pub(crate) const HASH_VUIN_MAX_DIGITS: usize = 18;
 
 /// [`IdMapOptions`] 的 AppID 占位值：空串。
 ///
@@ -221,6 +234,51 @@ impl IdMapStore {
         &self.options
     }
 
+    /// 两个库是否都还没有任何记录（`meta` 内的 `schema_version` 不算数据）。
+    ///
+    /// 供导入器判断「默认要求目标库为空」（`--merge` 的反面）与启动期自动导入的空库检测。
+    ///
+    /// # Errors
+    ///
+    /// redb 事务打开失败时返回 [`StorageError`]。
+    pub fn is_empty(&self) -> Result<bool, StorageError> {
+        let txn = self.identity_db.begin_read().map_err(rb)?;
+        for table in [
+            IDENTITY_TO_VUIN,
+            VUIN_TO_IDENTITY,
+            LAST_SEEN,
+            CONFIG,
+            USER_INFO,
+        ] {
+            if !table_is_empty(&txn, table)? {
+                return Ok(false);
+            }
+        }
+        let txn = self.msg_db.begin_read().map_err(rb)?;
+        for table in [
+            MSG_TO_VIRTUAL,
+            VIRTUAL_TO_MSG,
+            EXPIRES_AT,
+            LATEST_BY_GROUP_USER,
+            LATEST_EXPIRES_AT,
+        ] {
+            if !table_is_empty(&txn, table)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// 身份库句柄（导入器在单写事务里跨表搬运时用）。
+    pub(crate) fn identity_db(&self) -> &Database {
+        &self.identity_db
+    }
+
+    /// 消息库句柄（同上）。
+    pub(crate) fn msg_db(&self) -> &Database {
+        &self.msg_db
+    }
+
     /// 建表并写入 schema 版本（Go `initNewDBs` 的建 bucket + `schema_version`）。
     ///
     /// 与 Go 一致，每次打开都**无条件**覆盖 `schema_version`；读到未知版本时按 Go
@@ -233,6 +291,7 @@ impl IdMapStore {
             let _ = txn.open_table(VUIN_TO_IDENTITY).map_err(rb)?;
             let _ = txn.open_table(LAST_SEEN).map_err(rb)?;
             let _ = txn.open_table(CONFIG).map_err(rb)?;
+            let _ = txn.open_table(USER_INFO).map_err(rb)?;
             let existing = meta
                 .get(SCHEMA_VERSION_KEY)
                 .map_err(rb)?
@@ -864,7 +923,7 @@ fn read_counter_tx(txn: &WriteTransaction, key: &str) -> Result<i64, StorageErro
 }
 
 /// 反表里是否存在 `"<vUIN>:"` 前缀的 key（Go `vuinExistsTx`）。
-fn prefix_exists(
+pub(crate) fn prefix_exists(
     table: &ReadOnlyTable<&'static str, &'static [u8]>,
     vuin: i64,
 ) -> Result<bool, StorageError> {
@@ -879,30 +938,40 @@ fn prefix_exists(
     }
 }
 
+/// 表里是否一条记录都没有（[`IdMapStore::is_empty`] 用）。
+fn table_is_empty(
+    txn: &ReadTransaction,
+    definition: TableDefinition<'static, &'static str, &'static [u8]>,
+) -> Result<bool, StorageError> {
+    let table = txn.open_table(definition).map_err(rb)?;
+    let mut range = table.iter().map_err(rb)?;
+    Ok(range.next().is_none())
+}
+
 fn is_openid(value: &str) -> bool {
     value.len() == encoding::OPENID_LEN
 }
 
 /// Go `lastSeenKey`：`"default:<十进制 vUIN>"`。
-fn last_seen_key(vuin: i64) -> String {
+pub(crate) fn last_seen_key(vuin: i64) -> String {
     format!("{LAST_SEEN_SCOPE}:{vuin}")
 }
 
 /// Go `joinSectionAndKey`：`"<section>:<subtype>"`。
-fn config_key(section: &str, subtype: &str) -> String {
+pub(crate) fn config_key(section: &str, subtype: &str) -> String {
     format!("{section}:{subtype}")
 }
 
 /// Go `StoreLatestMsgID` 的 key 构造：`"<群>:<用户>"`。
-fn latest_key(group: &str, user: &str) -> String {
+pub(crate) fn latest_key(group: &str, user: &str) -> String {
     format!("{group}:{user}")
 }
 
-fn counter_text(value: i64) -> String {
+pub(crate) fn counter_text(value: i64) -> String {
     value.to_string()
 }
 
-fn decode_vuin(bytes: &[u8]) -> Result<i64, StorageError> {
+pub(crate) fn decode_vuin(bytes: &[u8]) -> Result<i64, StorageError> {
     decode_i64(bytes).ok_or_else(|| StorageError::Corrupt("期望 8 字节大端整数".to_owned()))
 }
 
@@ -912,7 +981,7 @@ fn decode_text(bytes: &[u8]) -> Result<String, StorageError> {
 }
 
 /// redb 的具体错误统一归入 [`StorageError::Redb`]。
-fn rb<E: Into<redb::Error>>(err: E) -> StorageError {
+pub(crate) fn rb<E: Into<redb::Error>>(err: E) -> StorageError {
     StorageError::Redb(err.into())
 }
 

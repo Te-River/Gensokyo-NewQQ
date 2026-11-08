@@ -4,18 +4,20 @@
 //! 的依赖边不允许变动），而本 crate 只需要「按路径取字符串」。因此这里实现一个只读、
 //! 零依赖的子集解析器：
 //! - 支持 object / array / string / number / `true` / `false` / `null`；
-//! - 数字与数组不构造值（跳过即止），图床响应里我们没有消费方；
+//! - 整数保留为 [`Value::Number`]（取 Bilibili 的 `code` 用），浮点与数组不构造值（跳过即止）；
 //! - 严格按 RFC 8259 处理转义，含 `\/` 与 `\uXXXX` 代理对；
 //! - 拒绝尾随垃圾，与 Go `json.Unmarshal` 一致。
 
-/// 解析后的 JSON 值：只需要对象容器与字符串，其余标量统一成 [`Value::Other`]。
+/// 解析后的 JSON 值：只需要对象容器、字符串与整数，其余标量统一成 [`Value::Other`]。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Value {
     /// JSON 字符串（已解码转义）。
     String(String),
+    /// JSON 整数（图床响应里的状态码，如 Bilibili 的 `code`）。
+    Number(i64),
     /// JSON 对象，保持书写顺序。
     Object(Vec<(String, Value)>),
-    /// 数字 / 布尔 / null / 数组：只要能跳过，就不需要值。
+    /// 布尔 / null / 数组 / 浮点数：只要能跳过，就不需要值。
     Other,
 }
 
@@ -40,6 +42,14 @@ impl Value {
     pub(crate) fn path_str(&self, path: &[&str]) -> Option<&str> {
         match self.path(path)? {
             Self::String(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// 按路径取整数；路径不存在或末节点不是整数时返回 `None`。
+    pub(crate) fn path_i64(&self, path: &[&str]) -> Option<i64> {
+        match self.path(path)? {
+            Self::Number(value) => Some(*value),
             _ => None,
         }
     }
@@ -162,19 +172,22 @@ impl Parser<'_> {
         }
     }
 
-    /// 数字只校验形状，不构造数值。
+    /// 数字：整数值保留为 [`Value::Number`]，带小数或指数的只校验形状。
     fn number(&mut self) -> Option<Value> {
+        let start = self.index;
         if self.peek() == Some(b'-') {
             self.index += 1;
         }
-        let start = self.index;
+        let integral_start = self.index;
         while matches!(self.peek(), Some(b'0'..=b'9')) {
             self.index += 1;
         }
-        if self.index == start {
+        if self.index == integral_start {
             return None;
         }
+        let mut integral = true;
         if self.peek() == Some(b'.') {
+            integral = false;
             self.index += 1;
             let fraction = self.index;
             while matches!(self.peek(), Some(b'0'..=b'9')) {
@@ -185,6 +198,7 @@ impl Parser<'_> {
             }
         }
         if matches!(self.peek(), Some(b'e' | b'E')) {
+            integral = false;
             self.index += 1;
             if matches!(self.peek(), Some(b'+' | b'-')) {
                 self.index += 1;
@@ -197,7 +211,12 @@ impl Parser<'_> {
                 return None;
             }
         }
-        Some(Value::Other)
+        if !integral {
+            return Some(Value::Other);
+        }
+        // JSON 允许任意精度的整数；超出 i64 的按「取不到值」处理
+        let text = std::str::from_utf8(&self.bytes[start..self.index]).ok()?;
+        Some(text.parse::<i64>().map_or(Value::Other, Value::Number))
     }
 
     fn string(&mut self) -> Option<String> {
@@ -299,6 +318,22 @@ mod tests {
         );
         assert!(root.string_entries("missing").is_empty());
         assert!(root.string_entries("other").is_empty());
+    }
+
+    #[test]
+    fn reads_integers_for_status_codes() {
+        let root =
+            parse(br#"{"code":0,"error":{"code":-101},"ratio":1.5,"exp":1e3}"#).expect("合法 JSON");
+        assert_eq!(root.path_i64(&["code"]), Some(0));
+        assert_eq!(root.path_i64(&["error", "code"]), Some(-101));
+        assert_eq!(root.path_i64(&["ratio"]), None, "浮点不构造值");
+        assert_eq!(root.path_i64(&["exp"]), None, "指数形式不构造值");
+        assert_eq!(root.path_i64(&["missing"]), None);
+        assert_eq!(root.path_str(&["code"]), None, "整数不是字符串");
+        // 超出 i64 的整数同样取不到值，但不能让整份响应解析失败
+        let huge = parse(br#"{"code":99999999999999999999999999,"ok":"yes"}"#).expect("合法 JSON");
+        assert_eq!(huge.path_i64(&["code"]), None);
+        assert_eq!(huge.path_str(&["ok"]), Some("yes"));
     }
 
     #[test]

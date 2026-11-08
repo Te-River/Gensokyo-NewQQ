@@ -155,7 +155,8 @@ use gensokyo_protocol::outbound::{InputNotifyPayload, StreamKind, StreamPayload}
 use gensokyo_protocol::{Event, MediaRef, OutboundPlan};
 use gensokyo_qq::dto::message::{MessageCard, MessageCardContent};
 use gensokyo_qq::dto::{
-    FileUpload, InputNotify, Markdown, Media, MessageToCreate, StreamSse, file_type, msg_type,
+    FileUpload, InputNotify, Markdown, Media, MessageResponse, MessageToCreate, StreamSse,
+    file_type, msg_type,
 };
 use gensokyo_storage::EchoStore;
 use gensokyo_storage::echo::{DEFAULT_MESSAGE_ID, MessageGroupPair};
@@ -164,6 +165,7 @@ use serde_json::Value;
 use crate::at_everyone::{self, Reservation};
 use crate::event_hub::EventHub;
 use crate::media::MediaRuntime;
+use crate::queue;
 
 /// handler 响应 `data` 里的 deferred 标记（与 `gensokyo_actions::DEFERRED_FIELD` 同值）。
 pub const DEFERRED_FIELD: &str = gensokyo_actions::DEFERRED_FIELD;
@@ -295,12 +297,19 @@ async fn execute_inner(
 
 /// 按 target 发出单条消息，成功后回写 echo；失败原样上抛，由调用方决定回滚还是继续。
 ///
-/// 群聊失败且上游是 `22009`（频控）时顺手入 SSM 队列（见模块文档「SSM 补发」）。
+/// 走 Go 的**活路径**（`messagequeue/queue.go` 的 worker 在 Go 里没有启动点，见 [`crate::queue`]
+/// 模块文档）：
+/// - 群消息每次尝试前先过令牌桶（5qps / burst 10、最多等 [`queue::WAIT_TIMEOUT`]，
+///   Go `send_group_msg.go:3065`），私聊不过桶（Go `postC2CMessageWithRetry` 同）；
+/// - 投递超时最多尝试 [`queue::MAX_ATTEMPTS`] 次、线性退避 [`queue::backoff`]，每次重试前重取
+///   `msg_seq`（Go `postGroupMessageWithRetry` 在循环里调 `echo.NextMappingSeq`）；
+/// - 其余错误（频控 `22009`、事件过期等）**一次即返回**，群消息照旧落 SSM 队列
+///   （见 [`enqueue_ssm`]）——重试与 SSM 是两条互不影响的路径。
 async fn send_body(
     context: &ActionContext,
     target: &SendTarget,
     openid: &str,
-    message: MessageToCreate,
+    mut message: MessageToCreate,
     echo: Option<&EchoStore>,
 ) -> Result<String> {
     // 入队要用原始消息体，而发送会把它移走，所以群聊在发送前先序列化一份
@@ -308,18 +317,31 @@ async fn send_body(
         SendTarget::Group(_) => serde_json::to_string(&message).ok(),
         SendTarget::Private(_) => None,
     };
-    let sent = match target {
-        SendTarget::Group(_) => {
-            context
-                .api()
-                .send_group_message(openid.to_owned(), message)
-                .await
-        }
-        SendTarget::Private(_) => {
-            context
-                .api()
-                .send_c2c_message(openid.to_owned(), message)
-                .await
+    let mut attempt: u32 = 0;
+    let sent = loop {
+        let permitted = match target {
+            SendTarget::Group(_) => {
+                queue::RateLimiter::shared()
+                    .wait_with_timeout(queue::WAIT_TIMEOUT)
+                    .await
+            }
+            SendTarget::Private(_) => true,
+        };
+        let outcome = if permitted {
+            dispatch_body(context, target, openid, message.clone()).await
+        } else {
+            // Go 在这里只记日志并 `continue`（耗尽后返回 nil 错误，调用方会踩空 resp）；
+            // 这里按一次失败尝试处理，语义更明确
+            Err(Error::Network("群消息发送等待限流超时".to_owned()))
+        };
+        match outcome {
+            Ok(response) => break Ok(response),
+            Err(err) if queue::should_retry(&err, attempt) => {
+                attempt += 1;
+                refresh_msg_seq(echo, &mut message);
+                tokio::time::sleep(queue::backoff(attempt)).await;
+            }
+            Err(err) => break Err(err),
         }
     };
     let response = match sent {
@@ -336,6 +358,40 @@ async fn send_body(
     };
     record_sent_message(echo, &response.id);
     Ok(response.id)
+}
+
+/// 单次上游发送（群 / 私聊各一个端点）。
+async fn dispatch_body(
+    context: &ActionContext,
+    target: &SendTarget,
+    openid: &str,
+    message: MessageToCreate,
+) -> Result<MessageResponse> {
+    match target {
+        SendTarget::Group(_) => {
+            context
+                .api()
+                .send_group_message(openid.to_owned(), message)
+                .await
+        }
+        SendTarget::Private(_) => {
+            context
+                .api()
+                .send_c2c_message(openid.to_owned(), message)
+                .await
+        }
+    }
+}
+
+/// 重试前重取 `msg_seq`（Go `postGroupMessageWithRetry` 每次尝试都 `echo.NextMappingSeq(MsgID)`）。
+///
+/// 只动 `msg_seq`：`msg_id` / `event_id` 沿用本次发送定好的被动身份，否则重试会换掉回复目标。
+fn refresh_msg_seq(echo: Option<&EchoStore>, message: &mut MessageToCreate) {
+    let Some(echo) = echo else {
+        return;
+    };
+    let key = message.msg_id.clone().unwrap_or_default();
+    message.msg_seq = Some(u32::try_from(echo.next_mapping_seq(&key)).unwrap_or_default());
 }
 
 /// 上游业务码是否是需要 SSM 补发的频控（Go `retry_policy.go` 的 `IsQQError(err, 22009)`）。

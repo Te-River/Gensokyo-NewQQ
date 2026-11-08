@@ -84,7 +84,13 @@ async fn webui_serves_index_and_login_rejects_empty_credentials() {
     )
     .await;
     assert_eq!(status, 200, "正确凭据应登录成功: {response}");
-    assert_eq!(parse_json(&response)["code"], 0, "登录响应: {response}");
+    // Go `HandleLoginRequest:332-335`：前端读 `data.isLoggedIn`，不是 `code`
+    let value = parse_json(&response);
+    assert_eq!(value["isLoggedIn"], true, "登录响应: {response}");
+    assert!(
+        value["cookie"].is_string(),
+        "登录响应应带 cookie: {response}"
+    );
 
     // 未注册的 `/api` 不能落回 SPA（否则前端会把 404 当正常页面）。
     let (status, response) = support::get(addr, "/api/unknown").await;
@@ -177,7 +183,10 @@ async fn disable_webui_restores_action_semantics() {
     assert_eq!(status, 200, "响应: {response}");
     let value = parse_json(&response);
     assert_eq!(value["retcode"], 1404, "响应: {response}");
-    assert_ne!(value["code"], 0, "不应返回 WebUI 登录成功体: {response}");
+    assert!(
+        value["isLoggedIn"].is_null(),
+        "不应返回 WebUI 登录成功体: {response}"
+    );
 
     stop(handle).await;
 }
@@ -200,6 +209,7 @@ async fn webui_is_also_mounted_on_forward_ws_port() {
             http_bind: None,
             config_watch: false,
             gateway: false,
+            post_url: false,
         },
     )
     .await;
