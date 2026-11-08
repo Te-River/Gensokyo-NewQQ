@@ -10,7 +10,8 @@
 //! - [`builtin`]：`get_status` / `get_version_info` / `get_login_info`（字段对齐 Go
 //!   `handlers/`）。
 //! - [`ws_server`]：正向 WS 服务端（`enable_ws_server` / `ws_server_path` /
-//!   `ws_server_token`），多客户端并发，断开即清理。
+//!   `ws_server_token`），连上即 `lifecycle/connect`，随后订阅总线推事件与心跳，多客户端并发，
+//!   断开即清理。
 //! - [`http_api`]：正向 HTTP API（`http_address` / `http_access_token`），`POST` 任意路径，
 //!   `GET /` 健康检查。
 //! - [`boot::Runtime`]：装配两个 listener，返回实际监听地址与优雅关闭句柄。
@@ -78,13 +79,10 @@
 //! - `INTERACTION_CREATE`、`MESSAGE_AUDIT_*`、`FORUM_*`、`AUDIO_*`、频道 `GUILD_*` 未转换。
 //! - webhook 的 ed25519 签名校验与 `op=13` 回调校验（workspace 无 ed25519 依赖），
 //!   `union_webhook` 扇出亦未做。
-//! - 反向 WS 上收到的 OneBot action 不 dispatch；`sendFailures` 补发队列未实现。
 //! - 具体 `send_*` / 群管理 action（M1i）、有界队列与令牌桶（[`queue`]）。
 //!   群管理其余端点、有界队列与令牌桶仍属后续里程碑。
 //! - deferred 的媒体片段级能力：markdown / keyboard / card / music / stream / input_notify
 //!   段仍返回 `1400`；超 5MB 媒体缺分片上传；`active` / `wakeup` 标记被忽略。
-//! - 正向 WS 连接建立时仍**不发送** `meta_event/lifecycle/connect`（只有反向 WS 发），
-//!   与 Go 的行为差异保留到正向 WS 的 M1h-b 后续对齐。
 //! - WebUI 与 Go 主服务器路由：M1h-a 的 WS 独立监听 `0.0.0.0:{port}`（Go 是挂在主服务器
 //!   同一端口上），后续里程碑合并。
 

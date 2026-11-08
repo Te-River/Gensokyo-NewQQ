@@ -1,4 +1,5 @@
-//! 任务树与启动器：把正向 WS / HTTP API / webhook / 反向 WS 装配成可关闭的 [`RuntimeHandle`]。
+//! 任务树与启动器：把正向 WS / HTTP API / webhook / 反向 WS / QQ 上游网关装配成可关闭的
+//! [`RuntimeHandle`]。
 //!
 //! 绑定地址来源（对齐 Go `main.go`）：
 //! - 正向 WS：`0.0.0.0:{port}`。Go 把 WS 挂在主服务器（`serverPort`）上；Rust 侧仍是独立
@@ -12,6 +13,8 @@
 //!   action 留在 `http_address` 的 `NoRoute`）。两个 listener 都保留 `GET /health` 探活文本。
 //!   会话清理是个 10 分钟定时任务，随 [`RuntimeHandle`] 一起停。
 //! - 反向 WS（`ws_address[]`）：纯出站连接，不需要监听端口；地址全为空则不启动。
+//! - QQ 上游 WS 网关（[`crate::gateway`]）：凭据齐备时订阅 dispatch 事件并发布到事件总线；
+//!   [`RuntimeOptions::gateway`] 默认开启，缺凭据或传输构建失败只 `warn` 跳过。
 //!
 //! 启动的第一步是 `Runtime::attach_echo`：状态里没有 echo 时按配置建一份（`ramdom_seq`
 //! 跟随 [`gensokyo_config::Settings::get_ramdom_seq`]）并启动清理线程，供入站喂懒 message_id
@@ -32,8 +35,8 @@
 //! 不会迁移监听端口（与 Go 只在启动时 `ListenAndServe` 一致），需要新端口请重启进程。
 //! token 与其余热字段在每次请求 / 每次握手时现读快照。
 //!
-//! 关闭语义见 [`RuntimeHandle::shutdown`]：先停反向 WS 客户端（否则它们会在 listener
-//! 收摊期间继续重连），再给全部 listener 发信号并逐个 await，整体受
+//! 关闭语义见 [`RuntimeHandle::shutdown`]：先停反向 WS 客户端与 QQ 上游网关（否则它们会在
+//! listener 收摊期间继续重连），再给全部 listener 发信号并逐个 await，整体受
 //! [`DEFAULT_SHUTDOWN_TIMEOUT`] 约束；句柄未 `shutdown` 就被 drop 时由 `Drop` 兜底
 //! 中止任务，避免端口继续监听。
 

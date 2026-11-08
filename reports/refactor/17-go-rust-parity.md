@@ -7,7 +7,7 @@
 
 | 级别 | 缺口 | Go 证据 | Rust 现状 | 状态 | 规模 |
 |---|---|---|---|---|---|
-| 主干 | QQ 上游事件 WS 网关 | main.go:315,375-400；botgo/websocket/client/client.go:64-138,155-185,254-349 | 无 gateway 模块（#70 在制） | 缺失 | 1200-1800 行 |
+| 主干 | QQ 上游事件 WS 网关 | main.go:315,375-400；botgo/websocket/client/client.go:64-138,155-185,254-349 | gateway.rs（950 行）+ boot 装配 + 7 条 mock 用例 | **已对齐（#70 `dfee81b`）** | — |
 | 主干 | `post_url` 上报 | Processor/Processor.go:402-452 | 无运行期实现（仅配置字段） | 缺失 | 150-250 行 |
 | 功能 | 正向 WS 不下发事件 | server/wsserver.go:111-112 + Processor.go:292-330 | ws_server.rs:138-170 只收 action，无 hub 订阅 | 缺失（P4） | 120-200 行 |
 | 功能 | 反向 WS 收到 action 不 dispatch | wsclient/ws.go:249-261 | ws_client.rs:275-278 仅 debug | 缺失（P4） | 50-100 行 |
@@ -71,7 +71,7 @@
 | 发送队列 | messagequeue/queue.go:96-122（GetSendDelay≤0 取 300ms、失败 3 次线性退避） | 无全局队列；仅 forward_send_interval | **缺失** | High |
 | 令牌桶 | ratelimit.go:26-33（5qps/burst10，WaitWithTimeout 5s） | 无 | **缺失** | High |
 | 错误分类/重试 | retry_policy.go:18-30（22009/40034025/26）、默认 3 次 | 22009→SSM；40034025 无分支 | 部分 | High |
-| get_g_list_delay | config.go:2520；逐群 sleep | group_admin.rs 无 delay | **缺失** | High |
+| get_g_list_delay | config.go:2520；逐群 sleep | group_admin.rs 每请求读快照、N-1 次异步 sleep | **已对齐（P2 `e1f822c`）** | High |
 | SSM 队列 | send_group_msg.go:483-490 | deferred.rs:297-420 | 已对齐 | High |
 
 ### B6. 缺口汇总（按 severity）
@@ -81,12 +81,12 @@
 | High | >5MB 分片上传缺失（Rust 直接 1400） | runtime/media 补 init/分片/complete，deferred 按需切换 | 400-600 行 |
 | High | silk 转码 + 图片压缩未接线 | 复用 gensokyo-media/silk.rs + compress.rs | 200-300 行 |
 | High | qqmusic 降级为分享文案 | 歌曲查询 + markdown 模板 + 键盘（music_prefix） | 250-350 行 |
-| High | 多媒体段无 markdown 时 1400 | 照 Go 逐媒体段各发一条 | 120-200 行 |
+| High | 多媒体段无 markdown 时 1400 | 照 Go 逐媒体段各发一条 | ~~120-200 行~~ **已修（P1 `3fcb426`）** |
 | High | card 本地 pic_url 未上传 | 照 resolveCardPic 接素材链 | 60-100 行 |
 | Medium | 图床 provider 仅 7/8，缺 4/5/6/9/10 | 每 provider 一个 backend（hosting trait 已有） | 500-700 行 |
 | Medium | 图床上传无重试 | 3 次 1s/2s 退避 | 40-60 行 |
 | Medium | 无发送队列/5qps/发送间隔 | runtime 全局令牌桶 + 串行队列 | 200-300 行 |
-| Medium | get_g_list_delay 缺失 | get_group_list/成员列表逐群 sleep | 30-50 行 |
+| Medium | get_g_list_delay 缺失 | get_group_list/成员列表逐群 sleep | ~~30-50 行~~ **已修（P2 `e1f822c`）** |
 | Medium | add_at_group 无消费者、AppID→BotID 缺失 | 入站/文本渲染各补一处 | 40-60 行 |
 | Low | lib.rs:50 陈旧文档（SSM/#62 已落地仍写未接线） | 改注释 | 5 行 |
 | Low | KNOWN_ACTIONS 3 个幽灵项 | 对齐 Go 实际注册表 | 10 行 |
