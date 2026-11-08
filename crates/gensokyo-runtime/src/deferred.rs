@@ -14,7 +14,7 @@
 //! |----|------|------|
 //! | 文本 | `content` | 按 CQ 重新分词，`[CQ:at,qq=…]` 转 v2 的 `<@openid>`（虚拟号经 idmap 反查）；缺 `qq` 的 at 段（`[CQ:at]` / `[CQ:at ]` / `[CQ:at,foo]` / `[CQ:at,qq=]`）与反查失败的数字虚拟号都原样透传（后者只 `warn`）；`at` 后与键值两侧允许空白（`[CQ:at , qq = 1]` 照常解析）；`auto_escape = true` 时原样发送、不解析 |
 //! | `[CQ:at,qq=all]` / `[CQ:at,qq=everyone]` / 字面 `<qqbot-at-everyone />` | `<qqbot-at-everyone />` | 仅群聊，且受「每群每自然日 1 次」限制，见下节「@全员」 |
-//! | `markdown` | `markdown` + `msg_type=2` | 只取 `content`：模板字段（`template_id` / `custom_template_id`）已废弃，出站不构造；文本被丢弃、`card` 让位；正文里的本地图片按 `oss_type=7` 换成 `qqbot-media://` 引用（[`resolve_markdown_images`]） |
+//! | `markdown` | `markdown` + `msg_type=2` | 只取 `content`：模板字段（`template_id` / `custom_template_id`）已废弃，出站不构造；文本被丢弃、`card` 让位；正文里的本地图片按 `oss_type=7` 换成 `qqbot-media://` 引用（[`resolve_markdown_images`]）；与媒体同现时先发这一条，媒体另起 `msg_type=7` 条 |
 //! | `card` | `card` + `msg_type=8` | 群聊与单聊同构；`{type:"tuwen", content:{title,description,url,pic_url}}`，四字段校验见 [`compose_card`] |
 //! | 图片 / 语音 / 视频 / 文件 | `media` + `msg_type=7` | 见下节「媒体」 |
 //! | `[CQ:reply]` | `msg_id` | 虚拟号先经 idmap / echo 还原成真实消息 ID；还原失败 `1400`，不静默丢 |
@@ -27,14 +27,20 @@
 //!   召回语义由 [`SendRequest::wakeup`] 承载，[`execute`] 置 `is_wakeup` 并强制不带回复 ID；
 //!   `[CQ:active]` 主动推送标记仍未接线（SSM / 懒消息不在本阶段） |
 //!
-//! ## 消息体三选一
+//! ## 消息体拆分与优先级
 //!
 //! `msg_type` 只能取一个值，因此 markdown / card / rich media 互为排他：同时出现时按
-//! markdown > card > media 取更高优先级的那个，media 与 markdown / card 同现直接 `1400`
-//! （否则必须静默丢段）。markdown 与 card 同现时 card 不参与校验（避免一张坏卡片拦住
-//! 合法的 markdown），与 Go 的「markdown 胜 card」一致。
+//! markdown > card > media 取更高优先级的那个。markdown 与媒体同现时**拆成多条**发送
+//! （Go `handlers/send_group_msg.go:606-613` 先发 markdown 条、`:787-802` 再把每个媒体段
+//! 各发一条）：首条 `msg_type=2`（正文走 `markdown.content`，`content` 留空），随后每个媒体段
+//! 一条 `msg_type=7`（单条消息仍只有一个 `media` 槽）。card 与媒体同现仍 `1400`——本阶段不拆
+//! 卡片条。markdown 与 card 同现时 card 不参与校验（避免一张坏卡片拦住合法的 markdown），
+//! 与 Go 的「markdown 胜 card」一致。
 //!
-//! `keyboard` 是加性字段，不参与上面的优先级：文本 / markdown / card 谁胜出都照样挂上去。
+//! `keyboard` 是加性字段，不参与上面的优先级：文本 / markdown / card 谁胜出都照样挂上去；
+//! 拆条时只挂在首条（markdown 条），后续媒体条不带（Go 只在 markdown 那轮挂键盘，
+//! `send_group_msg.go:831-843`）。`[CQ:reply]` 同样只落在首条（`:659-680`；循环里只在
+//! `key == "markdown"` 时补 reply，`:815`、`send_private_msg.go:625`）。
 //! `input_notify`（`msg_type=6`）与 `stream`（`msg_type=2` + `stream`）则**独占**整条消息：
 //! 它们带不了正文 / 媒体，与其它内容同条出现一律 `1400`，而不是丢掉另一部分。
 //! `music` 降级成正文，与 markdown / card 同条出现同样 `1400`（正文会让位，分享文案会丢）。
@@ -69,8 +75,8 @@
 //! `handlers/send_group_msg.go` 的口径把 `msg_type` 置为 [`msg_type::RICH_MEDIA`]（7）。
 //!
 //! 限制（细节见 [`crate::media`]）：
-//! - **单条消息只有一个 `media` 槽**：两个以上媒体段（含多张图片）返回 `1400`，而不是丢掉
-//!   后面的段；
+//! - **单条消息只有一个 `media` 槽**：没有 markdown 时两个以上媒体段（含多张图片）返回
+//!   `1400`，而不是丢掉后面的段；有 markdown 时按上面的拆条模型一条消息一个媒体段；
 //! - **单条媒体上限 5MB**（[`MAX_MEDIA_BYTES`](crate::media::MAX_MEDIA_BYTES)，对齐 Go
 //!   `file_data` 直传上限），超限 `1400`；Go 的超限分片上传尚未落地；
 //! - [`MediaRef::Unknown`] 视为「已经拿到上游 `file_info`」，直接透传、不再上传（Go 的
@@ -89,8 +95,8 @@
 //! 发送任一步失败——都经 [`EventHub`](crate::event_hub::EventHub) 回推一条
 //! `notice_type = c2c_wakeup_resp` 事件（对齐 Go `send_private_msg_wakeup.go` 的
 //! `sendWakeupNotice`：每个终局出口推一次，收件人还原失败的早退不推，Go 同点也不推）。
-//! 一计划一 notice：Go 的逐条消息推送口径由计划切分承担（Rust 多媒体段在合成期即
-//! `1400`，两边实际推送计数一致）。
+//! 一计划一 notice：Go 的逐条消息推送口径由计划切分承担（拆条只在 markdown 与媒体同现时
+//! 发生，wakeup 召回本身不带媒体，推送计数不受影响）。
 //! JSON 逐字段对齐 Go `WakeupResponseNotice`，见 [`publish_wakeup_notice`]；总线未装配
 //! 时静默跳过，回推不影响 API 回执。
 //!
@@ -152,8 +158,9 @@ pub struct DeferredDeps<'a> {
 
 /// 执行一条 deferred 计划，返回上游消息 ID。
 ///
-/// 成功后把 `message_id` 回写 echo（见模块文档「echo 回写」）。`plan.wakeup` 的终局
-/// （成功或失败）另经 `deps.hub` 回推一条 `c2c_wakeup_resp` notice（见
+/// 一条计划可能发出多条消息（markdown + 媒体拆条，见 [`compose`]）：每条都回写 echo，返回值
+/// 取**最后一条**的结果（Go 的 `resp` / `err` 逐条覆盖，`send_group_msg.go:987-1005`）。
+/// `plan.wakeup` 的终局（成功或失败）另经 `deps.hub` 回推一条 `c2c_wakeup_resp` notice（见
 /// [`publish_wakeup_notice`]）。
 ///
 /// # Errors
@@ -177,7 +184,11 @@ pub async fn execute(
     result
 }
 
-/// [`execute`] 的落体：合成 → 占 @全员 名额 → 发送 → echo 回写。
+/// [`execute`] 的落体：合成 → 占 @全员 名额 → 逐条发送 → echo 回写。
+///
+/// 拆条发送（markdown + 媒体）时单条失败不回滚已发、也不阻断后续：每条各自发送、失败逐条
+/// 告警，回执取**最后一条**的结果（Go `send_group_msg.go:787-802` 每个 foundItems 项独立发送、
+/// `:987-1005` 用最后一次的 `resp` / `err` 回执）。
 async fn execute_inner(
     context: &ActionContext,
     plan: &SendRequest,
@@ -186,7 +197,7 @@ async fn execute_inner(
 ) -> Result<String> {
     // 互动召回（Go `send_private_msg_wakeup.go`）：`is_wakeup` 与 `msg_id` / `event_id` 互斥，
     // 回复目标强制不带，正文合成完统一置标记。
-    let mut message = if plan.wakeup {
+    let (mut primary, mut extras) = if plan.wakeup {
         let mut cleared = plan.message.clone();
         cleared.plan.reply_msg_id = None;
         compose(context, &plan.target, &openid, &cleared, deps).await?
@@ -194,25 +205,61 @@ async fn execute_inner(
         compose(context, &plan.target, &openid, &plan.message, deps).await?
     };
     if plan.wakeup {
-        message.is_wakeup = true;
+        primary.is_wakeup = true;
+        for extra in &mut extras {
+            extra.is_wakeup = true;
+        }
     }
-    // 先占当天的 @全员 名额再发送：并发两条 @全员 只有一条能占住
-    let reservation = reserve_at_everyone(context, &plan.target, &openid, &message)?;
-    let sent = match &plan.target {
-        SendTarget::Group(_) => context.api().send_group_message(openid, message).await,
-        SendTarget::Private(_) => context.api().send_c2c_message(openid, message).await,
-    };
-    let response = match sent {
-        Ok(response) => response,
+    // 先占当天的 @全员 名额再发送：并发两条 @全员 只有一条能占住。标签只可能在首条
+    // （正文在 markdown 条），后续媒体条没有正文。
+    let mut reservation = reserve_at_everyone(context, &plan.target, &openid, &primary)?;
+    let mut outcome = match send_body(context, &plan.target, &openid, primary, deps.echo).await {
+        Ok(message_id) => Ok(message_id),
         Err(err) => {
             // 发送失败要回滚，不能让一次失败吃掉当天的名额
-            if let (Some(reservation), Some(idmap)) = (reservation, context.idmap()) {
+            if let (Some(reservation), Some(idmap)) = (reservation.take(), context.idmap()) {
                 reservation.rollback(idmap);
             }
-            return Err(err);
+            Err(err)
         }
     };
-    record_sent_message(deps.echo, &response.id);
+    for (offset, body) in extras.into_iter().enumerate() {
+        // 首条占 1，媒体条从 2 起编号，日志里好对账
+        let number = offset + 2;
+        match send_body(context, &plan.target, &openid, body, deps.echo).await {
+            Ok(message_id) => outcome = Ok(message_id),
+            Err(err) => {
+                tracing::warn!(message = number, error = %err, "deferred 拆条发送有一条失败，继续发后续");
+                outcome = Err(err);
+            }
+        }
+    }
+    outcome
+}
+
+/// 按 target 发出单条消息，成功后回写 echo；失败原样上抛，由调用方决定回滚还是继续。
+async fn send_body(
+    context: &ActionContext,
+    target: &SendTarget,
+    openid: &str,
+    message: MessageToCreate,
+    echo: Option<&EchoStore>,
+) -> Result<String> {
+    let response = match target {
+        SendTarget::Group(_) => {
+            context
+                .api()
+                .send_group_message(openid.to_owned(), message)
+                .await
+        }
+        SendTarget::Private(_) => {
+            context
+                .api()
+                .send_c2c_message(openid.to_owned(), message)
+                .await
+        }
+    }?;
+    record_sent_message(echo, &response.id);
     Ok(response.id)
 }
 
@@ -422,7 +469,12 @@ fn record_sent_message(echo: Option<&EchoStore>, message_id: &str) {
     }
 }
 
-/// 把一条待发送消息合成 [`MessageToCreate`]（文本 + reply + 单个 media + 键盘 / 输入状态 / 流式）。
+/// 把一条待发送消息合成 **一条或多条** [`MessageToCreate`]（文本 + reply + media + 键盘 /
+/// 输入状态 / 流式）。
+///
+/// 返回 `(首条, 后续媒体条)`：markdown 与媒体同现时首条是 markdown、后续每个媒体段各一条
+/// （Go `handlers/send_group_msg.go:606-613` 先发 markdown 条、`:787-802` 再把每个媒体段
+/// 各发一条）；其余组合只有首条、后续为空。
 ///
 /// `openid` 由调用方从 `target` 还原：媒体上传要按群 / C2C 选端点，两者都要它。
 ///
@@ -436,18 +488,17 @@ pub async fn compose(
     openid: &str,
     message: &MessageOut,
     deps: &DeferredDeps<'_>,
-) -> Result<MessageToCreate> {
+) -> Result<(MessageToCreate, Vec<MessageToCreate>)> {
     if let Some(kind) = unsupported_segment(&message.plan) {
         return Err(Error::Protocol(format!(
             "deferred 发送暂不支持 {kind} 段：{message:?}"
         )));
     }
-    // msg_type 只能取一个值：rich media 与 markdown / card 混用必须在这里拒绝，否则只能静默丢段
-    if (!message.plan.markdown.is_empty() || !message.plan.card.is_empty())
-        && has_media(&message.plan)
-    {
+    // msg_type 只能取一个值：card 与 rich media 混用必须在这里拒绝，否则只能静默丢段
+    // （markdown 与媒体不再拒绝：markdown 条先行，媒体拆条，见下）
+    if !message.plan.card.is_empty() && has_media(&message.plan) {
         return Err(Error::Protocol(
-            "markdown / card 与图片 / 语音 / 视频 / 文件不能出现在同一条消息里（msg_type 只能取一个）"
+            "card 与图片 / 语音 / 视频 / 文件不能出现在同一条消息里（msg_type 只能取一个）"
                 .to_owned(),
         ));
     }
@@ -460,10 +511,12 @@ pub async fn compose(
 
     // 单聊专属段独占整条消息：msg_type=6 / 流式都带不了正文与媒体
     if let Some(notify) = &message.plan.input_notify {
-        return compose_input_notify(target, &message.plan, notify, message, out.msg_id);
+        return compose_input_notify(target, &message.plan, notify, message, out.msg_id)
+            .map(|body| (body, Vec::new()));
     }
     if let Some(stream) = &message.plan.stream {
-        return compose_stream(context, target, &message.plan, stream, message, out.msg_id);
+        return compose_stream(context, target, &message.plan, stream, message, out.msg_id)
+            .map(|body| (body, Vec::new()));
     }
 
     let rendered = music_fallback_text(&message.plan, render_text(context, message)?)?;
@@ -477,7 +530,9 @@ pub async fn compose(
         out.msg_type = Some(msg_type::MARKDOWN);
         out.markdown = Some(markdown);
         out.keyboard = compose_keyboard(&message.plan)?;
-        return Ok(out);
+        // 其余媒体各一条 msg_type=7：单条消息只有一个 media 槽，只能拆
+        let extras = compose_media_extras(context, target, openid, &message.plan, deps).await?;
+        return Ok((out, extras));
     }
     if let Some(card) = compose_card(&message.plan, &rendered)? {
         // 卡片独占正文：官方要求 msg_type=8 时 content 为空
@@ -485,7 +540,7 @@ pub async fn compose(
         out.msg_type = Some(msg_type::CARD);
         out.card = Some(card);
         out.keyboard = compose_keyboard(&message.plan)?;
-        return Ok(out);
+        return Ok((out, Vec::new()));
     }
     if !rendered.is_empty() {
         out.content = Some(rendered);
@@ -495,7 +550,7 @@ pub async fn compose(
         out.media = Some(media);
         out.msg_type = Some(msg_type::RICH_MEDIA);
     }
-    Ok(out)
+    Ok((out, Vec::new()))
 }
 
 /// 计划里是否有任何媒体段。
@@ -1164,17 +1219,37 @@ impl MediaKind {
     }
 }
 
-/// 单个媒体段 → `MessageToCreate.media`（取字节 → 上传 → `file_info`）。
+/// markdown 条之后的后续媒体条：每个媒体段一条 `msg_type=7`。
 ///
-/// v2 文本消息只承载一个 `media`，因此多段媒体报错而不是丢掉后面的段。
-async fn compose_media(
+/// Go 的 foundItems 循环把每个 URL 单独塞进 `singleItem` 再发一条
+/// （`handlers/send_group_msg.go:787-802`），私聊同构（`send_private_msg.go:596-611`）。媒体条
+/// 不带正文 / reply / 键盘：Go 那三样只挂 `key == "markdown"` 那轮（`:815` / `:831-843`）。
+async fn compose_media_extras(
     context: &ActionContext,
     target: &SendTarget,
     openid: &str,
     plan: &OutboundPlan,
     deps: &DeferredDeps<'_>,
-) -> Result<Option<Media>> {
-    let mut candidates: Vec<(MediaKind, &MediaRef, Option<&str>)> = Vec::new();
+) -> Result<Vec<MessageToCreate>> {
+    let mut extras = Vec::new();
+    for (kind, reference, file_name) in media_candidates(plan) {
+        let media =
+            compose_single_media(context, target, openid, kind, reference, file_name, deps).await?;
+        extras.push(MessageToCreate {
+            msg_type: Some(msg_type::RICH_MEDIA),
+            media: Some(media),
+            ..MessageToCreate::default()
+        });
+    }
+    Ok(extras)
+}
+
+/// 计划里的媒体段按段序展开成扁平清单：图片 → 语音 → 视频 → 文件。
+///
+/// Go 按 `foundItems` 的 map 顺序遍历（每次发送顺序随机）；这里固定成计划顺序，多图时
+/// 发出的次序可复现。
+fn media_candidates(plan: &OutboundPlan) -> Vec<(MediaKind, &MediaRef, Option<&str>)> {
+    let mut candidates = Vec::new();
     candidates.extend(
         plan.images
             .iter()
@@ -1195,27 +1270,24 @@ async fn compose_media(
             .iter()
             .map(|file| (MediaKind::File, &file.media, file.file_name.as_deref())),
     );
+    candidates
+}
 
-    let Some(&(kind, reference, file_name)) = candidates.first() else {
-        return Ok(None);
-    };
-    if candidates.len() > 1 {
-        let labels = candidates
-            .iter()
-            .map(|(kind, _, _)| kind.label())
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Err(Error::Protocol(format!(
-            "QQ v2 单条消息只支持一个 media（收到 {} 个媒体段：{labels}），请拆分后重发",
-            candidates.len()
-        )));
-    }
-
+/// 单个媒体段 → `MessageToCreate.media`（取字节 → 上传 → `file_info`）。
+async fn compose_single_media(
+    context: &ActionContext,
+    target: &SendTarget,
+    openid: &str,
+    kind: MediaKind,
+    reference: &MediaRef,
+    file_name: Option<&str>,
+    deps: &DeferredDeps<'_>,
+) -> Result<Media> {
     // 已是上游 `file_info` 的形态（Go 的 `unknown_*` 回退）：直接透传，不再上传
     if let MediaRef::Unknown(file_info) = reference {
-        return Ok(Some(Media {
+        return Ok(Media {
             file_info: file_info.clone(),
-        }));
+        });
     }
 
     let fetched = deps.media.fetch(reference).await?;
@@ -1235,9 +1307,38 @@ async fn compose_media(
             message: "媒体上传成功但未返回 file_info".to_owned(),
         });
     }
-    Ok(Some(Media {
+    Ok(Media {
         file_info: uploaded.file_info,
-    }))
+    })
+}
+
+/// 非 markdown 路径的单个 media 槽：v2 文本消息只承载一个 `media`，两个以上媒体段报错
+/// 而不是丢掉后面的段（markdown 与媒体同现时改走拆条，见 [`compose_media_extras`]）。
+async fn compose_media(
+    context: &ActionContext,
+    target: &SendTarget,
+    openid: &str,
+    plan: &OutboundPlan,
+    deps: &DeferredDeps<'_>,
+) -> Result<Option<Media>> {
+    let candidates = media_candidates(plan);
+    let Some(&(kind, reference, file_name)) = candidates.first() else {
+        return Ok(None);
+    };
+    if candidates.len() > 1 {
+        let labels = candidates
+            .iter()
+            .map(|(kind, _, _)| kind.label())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(Error::Protocol(format!(
+            "QQ v2 单条消息只支持一个 media（收到 {} 个媒体段：{labels}），请拆分后重发",
+            candidates.len()
+        )));
+    }
+    compose_single_media(context, target, openid, kind, reference, file_name, deps)
+        .await
+        .map(Some)
 }
 
 /// 本阶段仍不支持的消息段；返回第一个命中的段名。
@@ -2426,25 +2527,162 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn markdown_with_media_is_a_request_error() {
+    async fn markdown_with_one_image_sends_markdown_then_media() {
+        let api = Arc::new(
+            FakeQqApi::with_upload("FILE-1")
+                .with_send("MSG-MD")
+                .with_send("MSG-IMG"),
+        );
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = MediaRuntime::with_transport(Arc::new(FakeTransport::new(b"PNG-BYTES")));
+        let plan = group_request(OutboundPlan {
+            images: vec![MediaRef::Url("https://example.com/a.png".to_owned())],
+            ..markdown_plan("# 标题")
+        });
+
+        let message_id = execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("markdown + 图片应拆成两条发送");
+
+        assert_eq!(message_id, "MSG-IMG", "回执取最后一条（媒体条）");
+        let sent = api.sent();
+        assert_eq!(sent.len(), 2, "markdown 一条 + 图片一条");
+        assert_eq!(sent[0].msg_type, Some(msg_type::MARKDOWN));
+        assert!(
+            sent[0].content.is_none(),
+            "markdown 条正文走 markdown.content"
+        );
+        assert!(sent[0].media.is_none(), "markdown 条不占 media 槽");
+        assert_eq!(sent[1].msg_type, Some(msg_type::RICH_MEDIA));
+        assert!(sent[1].markdown.is_none(), "媒体条不带 markdown");
+        assert!(sent[1].content.is_none(), "媒体条没有正文");
+        assert_eq!(
+            sent[1].media.as_ref().map(|media| media.file_info.as_str()),
+            Some("FILE-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn markdown_with_two_images_sends_three_messages_in_plan_order() {
+        let api = Arc::new(
+            FakeQqApi::default()
+                .with_send("MSG-MD")
+                .with_send("MSG-A")
+                .with_send("MSG-B"),
+        );
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let plan = group_request(OutboundPlan {
+            // `Unknown` 已是上游 file_info：免上传，只验拆条与顺序
+            images: vec![
+                MediaRef::Unknown("FILE-A".to_owned()),
+                MediaRef::Unknown("FILE-B".to_owned()),
+            ],
+            ..markdown_plan("# 标题")
+        });
+
+        let message_id = execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("markdown + 两图应拆成三条发送");
+
+        assert_eq!(message_id, "MSG-B", "回执取最后一条");
+        let sent = api.sent();
+        assert_eq!(sent.len(), 3, "markdown 一条 + 每图一条");
+        assert_eq!(sent[0].msg_type, Some(msg_type::MARKDOWN));
+        let infos = sent[1..]
+            .iter()
+            .map(|message| message.media.as_ref().map(|media| media.file_info.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            infos,
+            vec![Some("FILE-A"), Some("FILE-B")],
+            "媒体条按计划顺序发出"
+        );
+    }
+
+    #[tokio::test]
+    async fn keyboard_and_reply_ride_on_the_markdown_body_only() {
+        let api = Arc::new(
+            FakeQqApi::default()
+                .with_send("MSG-MD")
+                .with_send("MSG-IMG"),
+        );
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let mut plan = group_request(OutboundPlan {
+            keyboard: vec![KeyboardPayload {
+                raw: r#"{"id":"tpl_1"}"#.to_owned(),
+            }],
+            images: vec![MediaRef::Unknown("FILE-1".to_owned())],
+            ..markdown_plan("# 标题")
+        });
+        plan.message.plan.reply_msg_id = Some(Ob11Id::str("MSG-REF"));
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("markdown + 键盘 + 图片应发送成功");
+
+        let sent = api.sent();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(
+            sent[0].keyboard,
+            Some(serde_json::json!({"id": "tpl_1"})),
+            "键盘只挂 markdown 条"
+        );
+        assert_eq!(
+            sent[0].msg_id.as_deref(),
+            Some("MSG-REF"),
+            "reply 只挂 markdown 条"
+        );
+        assert!(sent[1].keyboard.is_none(), "媒体条不带键盘");
+        assert!(sent[1].msg_id.is_none(), "媒体条不带 reply");
+    }
+
+    #[tokio::test]
+    async fn failed_media_body_does_not_block_later_bodies() {
+        let api = Arc::new(
+            FakeQqApi::default()
+                .with_send("MSG-MD")
+                .with_send_error(Error::Upstream {
+                    code: 40_054_005,
+                    message: "msgseq 去重".to_owned(),
+                })
+                .with_send("MSG-B"),
+        );
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let plan = group_request(OutboundPlan {
+            images: vec![
+                MediaRef::Unknown("FILE-A".to_owned()),
+                MediaRef::Unknown("FILE-B".to_owned()),
+            ],
+            ..markdown_plan("# 标题")
+        });
+
+        let message_id = execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("单条媒体失败不能挡住后面的条");
+
+        assert_eq!(message_id, "MSG-B", "回执取最后一条");
+        assert_eq!(api.sent().len(), 3, "失败的那条不阻断后续发送");
+    }
+
+    #[tokio::test]
+    async fn card_with_media_is_still_a_request_error() {
         let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
         let (_dir, context) = context(Arc::clone(&api));
         let media = no_media();
-        let plan = request(
-            SendTarget::Group(OPENID.to_owned()),
-            OutboundPlan {
-                markdown: vec![
-                    MarkdownPayload::from_json(r##"{"content":"# 标题"}"##).expect("markdown 载荷"),
-                ],
-                images: vec![MediaRef::Url("https://example.com/a.png".to_owned())],
-                ..OutboundPlan::default()
-            },
-        );
+        let plan = group_request(OutboundPlan {
+            images: vec![MediaRef::Unknown("FILE-1".to_owned())],
+            ..card_plan()
+        });
 
         let err = execute(&context, &plan, &deps(&media, None))
             .await
-            .expect_err("markdown 与媒体同现必须拒绝");
+            .expect_err("card 与媒体同现仍必须拒绝");
+
         assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
+        assert!(api.sent().is_empty(), "拒绝时不应发出任何一条");
     }
 
     // ---- @全员 ----
