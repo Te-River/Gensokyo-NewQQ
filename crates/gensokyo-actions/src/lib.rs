@@ -47,15 +47,17 @@
 //! 4. 按 target 调 [`qqapi::QqApi::send_group_message`] / [`qqapi::QqApi::send_c2c_message`]，
 //!    最终回客户端 `data = {"message_id": …}`——计划本身（含 `deferred` 标记）不会泄漏。
 //!
-//! 尚未接线的部分：媒体上传（图片需先拿到上游 `file_info`）、echo / 懒消息回写。
+//! 尚未接线的部分：SSM / 懒消息（`[CQ:active]` 主动推送标记）与 markdown 正文内嵌本地图的素材链替换（#62 待办）。媒体上传与 echo 回写已在 `gensokyo-runtime` 的 deferred 执行链落地。
 //!
 //! # 尚未实现
 //!
 //! - **`send_*` 的真实发送**：handler 仍只产出 deferred 计划（[`handler::DEFERRED_FIELD`]），
 //!   真正的 QQ 调用在 `gensokyo-runtime` 的 deferred 执行链上完成，链路见下文。
-//! - **媒体上传**：`[CQ:image]` / `[CQ:record]` / `[CQ:video]` / `[CQ:file]` 的上传、图床选择
-//!   仍未接线；deferred 执行链只接受「已是上游 `file_info`」的图片（[`gensokyo_protocol::MediaRef::Unknown`]），
-//!   其余媒体形态回 `1500`，不做静默丢弃。
+//! - **媒体上传**：已在 `gensokyo-runtime` 的 deferred 执行链接线——`[CQ:image]` / `[CQ:record]` /
+//!   `[CQ:video]` / `[CQ:file]` 的 `local_*` / `url_*` / `base64_*` 三种来源经 Fetcher 取字节 →
+//!   `upload_group_file` / `upload_c2c_file` → `file_info` → `msg_type=7`；`MediaRef::Unknown` 直通不再上传。
+//!   限制（单条一个 media 槽、5MB、不压缩）见 `gensokyo-runtime::deferred`「媒体」节；
+//!   markdown 正文内嵌本地图的素材链替换尚未接线（#62）。
 //! - **尚未接线**：`get_msg` / `get_forward_msg`（官方无查询端点）、`get_friend_list` /
 //!   `get_stranger_info` / `send_like`（官方无端点）、`set_group_leave`（官方无退群端点）、
 //!   群荣誉 / 匿名禁言
