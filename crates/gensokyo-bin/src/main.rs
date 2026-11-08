@@ -1,17 +1,26 @@
 //! gensokyo 可执行入口（M1j：二进制装配）。
 //!
-//! # M1j 范围
+//! # CLI 形状
 //! - 保留 Go 的 CLI 形状（`main.go:62-87`）：`version` / `--version`、`run`（默认）、
 //!   `faststart`、`tidy`、`clean_ids`、`del_ids`、`del_cache`、`compaction`、`-m`、
 //!   `-local-logger`。未实现的维护开关打印「未实现」并以退出码 [`cli::EXIT_UNIMPLEMENTED`]
 //!   结束，不静默成功。
-//! - 启动链见 [`startup`]：`config.yml` → [`gensokyo_config::ConfigManager`] →
-//!   [`gensokyo_runtime::AppState`] → [`gensokyo_runtime::Runtime::start`]，即**正向 WS +
-//!   正向 HTTP API**。有 QQ 凭据时装配 `ReqwestTransport` + `ActionContext`（47 个 action
-//!   名：内置 3 + `gensokyo-actions` 41 + 别名 3），无凭据或传输构建失败时降级为内置 3 个；
+//!
+//! # 启动链（现状）
+//! - [`startup`]：`config.yml` → [`gensokyo_config::ConfigManager`] →
+//!   [`gensokyo_runtime::AppState`] → [`gensokyo_runtime::Runtime::start`]。
+//! - 四种连接都在 `gensokyo_runtime::boot` 装配：正向 WS（`enable_ws_server`）、正向 HTTP API
+//!   （`http_address`）、webhook（`webhook_path`，merge 进 listener 路由表）、反向 WS 客户端
+//!   （`ws_address[]` 非空即连）；`disable_webui=false` 时 WebUI 静态页与 `/api` 登录路由一并
+//!   挂载。有 QQ 凭据时装配 `ReqwestTransport` + `ActionContext`（当前 81 个 action 名：
+//!   内置 3 + `gensokyo-actions` 75 + 别名 3），无凭据或传输构建失败时降级为内置 3 个；
 //!   启动后打印 action 数量与实际监听地址，Ctrl-C 触发带超时的优雅关闭。
-//! - 启动期**不联网**（access_token 在首次调用上游时才惰性换取），不启动反向 WS / webhook
-//!   （M1h-b）、不装配 idmap / echo（M1i），也不启动 config watcher 与 WebUI。
+//! - 配置热重载经 [`gensokyo_runtime::RuntimeOptions::config_watch`]（默认开）接线：文件变动后
+//!   热字段逐项 `info`、重启项逐项 `warn`（需重启生效）；监听启动失败只 `warn`，不阻断启动，
+//!   监听线程随运行时句柄关闭一起停止。
+//! - idmap / echo 仍未在本二进制注入（`AppState::with_idmap` / `with_echo` 已就绪，留给后续
+//!   里程碑）：虚拟号互转不可用，`ActionContext` 只接受 32 位 OpenID。
+//! - 启动期**不联网**（access_token 在首次调用上游时才惰性换取）。
 //!
 //! 退出码与 CLI 细节见 `crates/gensokyo-bin/README.md`。
 

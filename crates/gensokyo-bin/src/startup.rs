@@ -1,18 +1,21 @@
-//! 启动装配：`config.yml` → `ConfigManager` → `AppState` → 正向 WS / HTTP 运行时。
+//! 启动装配：`config.yml` → `ConfigManager` → `AppState` → 运行时（四种连接 + 热重载）。
 //!
 //! 顺序对齐 Go `main.go`：
 //! 1. `ensure_config_file`（首启按模板生成 `config.yml`）；
 //! 2. `ConfigManager::new` 加载快照；
 //! 3. 装配 [`AppState`]（见 [`build_state`]）：有 `app_id` + `client_secret` 时装 QQ 客户端与
-//!    action 全集（47 个注册名 = 内置 3 + `gensokyo-actions` 41 + 别名的 3），否则降级为
+//!    action 全集（当前 81 个注册名 = 内置 3 + `gensokyo-actions` 75 + 别名 3），否则降级为
 //!    内置 3 个；
-//! 4. `Runtime::start` 按配置启动正向 WS 与正向 HTTP API；
+//! 4. `Runtime::start` 按配置装配正向 WS / 正向 HTTP API / webhook / 反向 WS（见
+//!    `gensokyo_runtime::boot`），并拉起 config 热重载监听；
 //! 5. 打印 action 数量与**实际**监听地址（`127.0.0.1:0` 这类覆盖后的真实端口），Ctrl-C 后按
-//!    [`DEFAULT_SHUTDOWN_TIMEOUT`] 优雅关闭。
+//!    [`DEFAULT_SHUTDOWN_TIMEOUT`] 优雅关闭（热重载监听随运行时句柄一起停止）。
 //!
-//! M1j 只到「能发请求的客户端 + 注册表」：启动期不联网（access_token 在首次调用上游时才惰性
-//! 换取），不启动反向 WS / webhook，不装配 idmap / echo —— 无 idmap 时 [`ActionContext`]
-//! 只接受 32 位 OpenID，虚拟号互转留给 M1h-b。
+//! 现状：反向 WS、webhook 与 WebUI 都在 `gensokyo_runtime::boot` 装配；配置热重载经
+//! [`RuntimeOptions::config_watch`]（默认开）接线，监听失败只 `warn`、不阻断启动。idmap / echo
+//! 尚未在本包注入（`AppState::with_idmap` / `with_echo` 已就绪）——无 idmap 时 [`ActionContext`]
+//! 只接受 32 位 OpenID，虚拟号互转留给后续接线。启动期不联网（access_token 在首次调用上游时
+//! 才惰性换取）。
 
 use std::path::Path;
 use std::sync::Arc;
@@ -290,6 +293,8 @@ settings:
         RuntimeOptions {
             ws_bind: Some("127.0.0.1:0".to_owned()),
             http_bind: Some("127.0.0.1:0".to_owned()),
+            // 单测不关心热重载：临时目录在用例结束即删，别留下监听线程。
+            config_watch: false,
         }
     }
 

@@ -104,6 +104,7 @@ async fn webhook_is_also_mounted_on_forward_ws_port() {
         RuntimeOptions {
             ws_bind: Some("127.0.0.1:0".to_owned()),
             http_bind: None,
+            config_watch: false,
         },
     )
     .await

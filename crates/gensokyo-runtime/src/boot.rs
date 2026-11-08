@@ -1,8 +1,8 @@
 //! 任务树与启动器：把正向 WS / HTTP API / webhook / 反向 WS 装配成可关闭的 [`RuntimeHandle`]。
 //!
 //! 绑定地址来源（对齐 Go `main.go`）：
-//! - 正向 WS：`0.0.0.0:{port}`。Go 把 WS 挂在主服务器（`serverPort`）上；Rust 侧 M1h-a
-//!   还没有主服务器与 WebUI 路由，先独立监听，后续里程碑合并。
+//! - 正向 WS：`0.0.0.0:{port}`。Go 把 WS 挂在主服务器（`serverPort`）上；Rust 侧仍是独立
+//!   listener（WebUI 路由已并进来，Go 主服务器的其余路由暂未合并）。
 //! - HTTP API：`http_address` 原样使用（空则不启动）。
 //! - webhook（`webhook_path`）：Go 与正向 WS 共用主服务器端口，这里 merge 进上面两个
 //!   listener 的路由表（见 [`crate::webhook`] 模块文档）。
@@ -14,6 +14,10 @@
 //! - 反向 WS（`ws_address[]`）：纯出站连接，不需要监听端口；地址全为空则不启动。
 //!
 //! [`RuntimeOptions`] 可覆盖两个绑定地址：测试用 `127.0.0.1:0` 取随机端口，避免端口冲突。
+//!
+//! [`RuntimeOptions::config_watch`]（默认开）在启动时拉起 [`gensokyo_config::ConfigWatcher`]：
+//! 配置变动 → 快照热更新（热字段逐项 `info`）/ 重启项逐项 `warn` 提示需重启；监听启动失败只
+//! `warn`、不阻断启动，监听线程随 [`RuntimeHandle`] 关闭一起停止。
 //!
 //! listener 只在启动时创建：`http_address` 不是配置层的重启项，热改该字段会更新快照但
 //! 不会迁移监听端口（与 Go 只在启动时 `ListenAndServe` 一致），需要新端口请重启进程。
@@ -30,9 +34,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
+use gensokyo_config::{ConfigWatcher, ReloadOutcome, WatcherHandle};
 use gensokyo_core::{Error, Result};
 use gensokyo_webui::{WebUi, WebUiState};
 use tokio::net::TcpListener;
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
 use tokio::task::{AbortHandle, JoinHandle};
 
@@ -46,13 +52,29 @@ pub const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// WebUI 会话清理间隔：会话 TTL 是 24h，10 分钟扫一次足够，且每次只短暂持写锁。
 const WEBUI_CLEANUP_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
-/// 绑定地址覆盖；`None` 表示按配置（见模块文档）。
-#[derive(Debug, Clone, Default)]
+/// 配置重载结果的通道容量：单次事件只产出一条结果，8 足够吸收连续保存。
+const CONFIG_RELOAD_CHANNEL: usize = 8;
+
+/// 运行时覆盖项：绑定地址（`None` 表示按配置，见模块文档）与热重载开关。
+#[derive(Debug, Clone)]
 pub struct RuntimeOptions {
     /// 正向 WS 绑定地址覆盖。
     pub ws_bind: Option<String>,
     /// HTTP API 绑定地址覆盖。
     pub http_bind: Option<String>,
+    /// 是否启动 `config.yml` 热重载监听（默认 `true`；测试与嵌入场景可关）。
+    pub config_watch: bool,
+}
+
+impl Default for RuntimeOptions {
+    fn default() -> Self {
+        Self {
+            ws_bind: None,
+            http_bind: None,
+            // 手写 Default：派生会给 `false`，而生产默认要监听配置文件
+            config_watch: true,
+        }
+    }
 }
 
 /// 启动器（无状态，方法即入口）。
@@ -174,12 +196,22 @@ impl Runtime {
         // 会话清理任务只在 WebUI 挂载时存在；句柄未 `shutdown` 就 drop 时由 `Drop` 中止。
         let webui_cleanup = webui.as_ref().map(spawn_session_cleanup);
 
+        // 配置热重载：监听失败只 warn（运行期不该因配置文件监听挂掉整个进程），
+        // 成功的句柄随 `RuntimeHandle` 一起关闭。
+        let config_watch = if options.config_watch {
+            spawn_config_watch(&state)
+        } else {
+            tracing::debug!("config_watch=false，配置热重载未启动");
+            None
+        };
+
         Ok(RuntimeHandle {
             ws,
             http,
             ws_client,
             hub: state.hub().clone(),
             webui_cleanup,
+            config_watch,
         })
     }
 }
@@ -243,6 +275,107 @@ fn spawn_session_cleanup(webui: &Arc<WebUiState>) -> JoinHandle<()> {
     })
 }
 
+/// 启动配置热重载：文件监听线程 + 结果日志任务。
+///
+/// 监听启动失败只 `warn` 并返回 `None`：配置热重载是运行期增强，不该成为启动失败点；
+/// 后续配置变更需要重启进程才能生效。
+fn spawn_config_watch(state: &AppState) -> Option<ConfigWatch> {
+    let (tx, rx) = tokio::sync::mpsc::channel(CONFIG_RELOAD_CHANNEL);
+    let watcher = match ConfigWatcher::start(state.config_arc(), tx) {
+        Ok(watcher) => watcher,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "配置热重载监听启动失败，配置变更需重启进程生效"
+            );
+            return None;
+        }
+    };
+    Some(ConfigWatch {
+        watcher,
+        task: tokio::spawn(log_reload_outcomes(rx)),
+    })
+}
+
+/// 消费重载结果并落日志：热字段逐项 `info`，重启项逐项 `warn`。
+async fn log_reload_outcomes(mut rx: Receiver<ReloadOutcome>) {
+    while let Some(outcome) = rx.recv().await {
+        if matches!(outcome, ReloadOutcome::Unchanged) {
+            tracing::debug!("配置文件未变化");
+        }
+        for (level, field) in reload_log_entries(&outcome) {
+            match level {
+                ReloadLevel::Applied => tracing::info!(field, "配置已热重载，无需重启"),
+                ReloadLevel::RestartRequired => {
+                    tracing::warn!(field, "配置变更需重启生效，快照保持不变");
+                }
+            }
+        }
+    }
+}
+
+/// 重载结果的字段级日志分类（纯函数）：热字段 `Applied`、重启项 `RestartRequired`。
+///
+/// `Unchanged` 不产生条目；字段序沿用 [`ReloadOutcome`] 的升序。
+fn reload_log_entries(outcome: &ReloadOutcome) -> Vec<(ReloadLevel, &str)> {
+    match outcome {
+        ReloadOutcome::Unchanged => Vec::new(),
+        ReloadOutcome::Applied { changed } => changed
+            .iter()
+            .map(|tag| (ReloadLevel::Applied, tag.as_str()))
+            .collect(),
+        ReloadOutcome::RestartRequired { changed } => changed
+            .iter()
+            .map(|tag| (ReloadLevel::RestartRequired, tag.as_str()))
+            .collect(),
+    }
+}
+
+/// 日志级别分类：热字段走 `info`，重启项走 `warn`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReloadLevel {
+    /// 已交换快照，即时生效。
+    Applied,
+    /// 含重启项，快照未交换。
+    RestartRequired,
+}
+
+/// 配置热重载的两半：文件监听线程（阻塞句柄）+ 结果日志任务（tokio）。
+#[derive(Debug)]
+struct ConfigWatch {
+    watcher: WatcherHandle,
+    task: JoinHandle<()>,
+}
+
+/// 停止监听后等日志任务收尾的上限：监听线程正常退出后发送端随即 drop，
+/// 任务在下一轮 `recv` 立刻返回；超过该时限说明监听线程未按期退出，直接中止。
+const CONFIG_TASK_STOP_GRACE: Duration = Duration::from_secs(1);
+
+impl ConfigWatch {
+    /// 停止监听并等日志任务收尾。
+    ///
+    /// [`WatcherHandle::stop`] 在监听线程上短轮询（最长 2s），放进阻塞池执行，
+    /// 避免占住异步 worker；监听线程退出后发送端 drop，日志任务读到 `None` 自然结束。
+    async fn stop(self) {
+        let Self { watcher, task } = self;
+        if tokio::task::spawn_blocking(move || watcher.stop())
+            .await
+            .is_err()
+        {
+            tracing::warn!("配置监听线程停止任务异常退出");
+        }
+        // 监听线程未在 `stop` 的超时内退出时发送端仍存活，不能无限等它：
+        // 有界等待后直接中止，保证关闭路径不会挂住。
+        let abort = task.abort_handle();
+        if tokio::time::timeout(CONFIG_TASK_STOP_GRACE, task)
+            .await
+            .is_err()
+        {
+            abort.abort();
+        }
+    }
+}
+
 /// 一个已启动的 listener。
 struct ServerHandle {
     kind: &'static str,
@@ -270,6 +403,8 @@ pub struct RuntimeHandle {
     hub: EventHub,
     /// WebUI 会话清理任务（未挂 WebUI 时为 `None`）。
     webui_cleanup: Option<JoinHandle<()>>,
+    /// 配置热重载监听（`config_watch=false` 或监听启动失败时为 `None`）。
+    config_watch: Option<ConfigWatch>,
 }
 
 impl RuntimeHandle {
@@ -299,6 +434,12 @@ impl RuntimeHandle {
         &self.hub
     }
 
+    /// 配置热重载是否已启动（`config_watch=false` 或监听启动失败时为 `false`）。
+    #[must_use]
+    pub fn config_watch_enabled(&self) -> bool {
+        self.config_watch.is_some()
+    }
+
     /// 优雅关闭：先停反向 WS，再停止接受新连接、等待存量请求处理完，最多等
     /// [`DEFAULT_SHUTDOWN_TIMEOUT`]。
     ///
@@ -321,6 +462,13 @@ impl RuntimeHandle {
         // 会话清理是纯定时器：没有需要落盘的收尾，直接中止。
         if let Some(task) = self.webui_cleanup.take() {
             task.abort();
+        }
+
+        // 配置监听要显式 stop：监听线程等不到接收端关闭就会一直在 100ms 轮询里空转，
+        // 仅 abort 日志任务不足以让它退出。`stop` 在阻塞池里等，最多 2s。
+        if let Some(watch) = self.config_watch.take() {
+            watch.stop().await;
+            tracing::debug!("配置热重载监听已停止");
         }
 
         let mut servers: Vec<ServerHandle> = [self.ws.take(), self.http.take()]
@@ -377,6 +525,10 @@ impl RuntimeHandle {
         if let Some(task) = &self.webui_cleanup {
             task.abort();
         }
+        // 监听线程由 `WatcherHandle` 的 `Drop` 停止；这里只先停日志任务。
+        if let Some(watch) = &self.config_watch {
+            watch.task.abort();
+        }
         for server in [self.ws.as_ref(), self.http.as_ref()].into_iter().flatten() {
             server.task.abort();
         }
@@ -389,6 +541,12 @@ impl Drop for RuntimeHandle {
     fn drop(&mut self) {
         if let Some(task) = self.webui_cleanup.take() {
             task.abort();
+        }
+        if let Some(watch) = self.config_watch.take() {
+            tracing::warn!("RuntimeHandle 未 shutdown 即被 drop，已停止配置热重载监听");
+            watch.task.abort();
+            // `WatcherHandle::drop` 会停止监听线程（最多等 2s），避免线程泄漏。
+            drop(watch.watcher);
         }
         if let Some(client) = self.ws_client.take() {
             tracing::warn!("RuntimeHandle 未 shutdown 即被 drop，已中止反向 WS 客户端");
@@ -461,7 +619,9 @@ fn normalize_bind(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_bind;
+    use gensokyo_config::ReloadOutcome;
+
+    use super::{ReloadLevel, normalize_bind, reload_log_entries};
 
     #[test]
     fn bare_port_becomes_wildcard_bind() {
@@ -477,5 +637,37 @@ mod tests {
         assert_eq!(normalize_bind("[::1]:8080"), "[::1]:8080");
         assert_eq!(normalize_bind(""), "");
         assert_eq!(normalize_bind(":"), ":");
+    }
+
+    #[test]
+    fn reload_outcome_splits_hot_and_restart_fields() {
+        let applied = ReloadOutcome::Applied {
+            changed: vec!["bind_prefix".to_owned(), "nickname".to_owned()],
+        };
+        assert_eq!(
+            reload_log_entries(&applied),
+            vec![
+                (ReloadLevel::Applied, "bind_prefix"),
+                (ReloadLevel::Applied, "nickname"),
+            ],
+            "热字段全部走 info"
+        );
+
+        let restart = ReloadOutcome::RestartRequired {
+            changed: vec!["log_level".to_owned(), "port".to_owned()],
+        };
+        assert_eq!(
+            reload_log_entries(&restart),
+            vec![
+                (ReloadLevel::RestartRequired, "log_level"),
+                (ReloadLevel::RestartRequired, "port"),
+            ],
+            "重启项全部走 warn"
+        );
+
+        assert!(
+            reload_log_entries(&ReloadOutcome::Unchanged).is_empty(),
+            "无变化不产生日志条目"
+        );
     }
 }
