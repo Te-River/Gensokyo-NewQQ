@@ -14,7 +14,7 @@
 //! |----|------|------|
 //! | 文本 | `content` | 按 CQ 重新分词，`[CQ:at,qq=…]` 转 v2 的 `<@openid>`（虚拟号经 idmap 反查）；缺 `qq` 的 at 段（`[CQ:at]` / `[CQ:at ]` / `[CQ:at,foo]` / `[CQ:at,qq=]`）与反查失败的数字虚拟号都原样透传（后者只 `warn`）；`at` 后与键值两侧允许空白（`[CQ:at , qq = 1]` 照常解析）；`auto_escape = true` 时原样发送、不解析 |
 //! | `[CQ:at,qq=all]` / `[CQ:at,qq=everyone]` / 字面 `<qqbot-at-everyone />` | `<qqbot-at-everyone />` | 仅群聊，且受「每群每自然日 1 次」限制，见下节「@全员」 |
-//! | `markdown` | `markdown` + `msg_type=2` | 只取 `content`：模板字段（`template_id` / `custom_template_id`）已废弃，出站不构造；文本被丢弃、`card` 让位 |
+//! | `markdown` | `markdown` + `msg_type=2` | 只取 `content`：模板字段（`template_id` / `custom_template_id`）已废弃，出站不构造；文本被丢弃、`card` 让位；正文里的本地图片按 `oss_type=7` 换成 `qqbot-media://` 引用（[`resolve_markdown_images`]） |
 //! | `card` | `card` + `msg_type=8` | 群聊与单聊同构；`{type:"tuwen", content:{title,description,url,pic_url}}`，四字段校验见 [`compose_card`] |
 //! | 图片 / 语音 / 视频 / 文件 | `media` + `msg_type=7` | 见下节「媒体」 |
 //! | `[CQ:reply]` | `msg_id` | 虚拟号先经 idmap / echo 还原成真实消息 ID；还原失败 `1400`，不静默丢 |
@@ -100,12 +100,17 @@
 //! → `retcode 1400`；下载、上传与发送失败（[`Error::Network`] / [`Error::Upstream`]）→ `1500`。
 //! 映射在 [`crate::dispatcher`] 里完成。
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use gensokyo_actions::{
     ActionContext, ForwardRequest, MessageOut, SendRequest, SendTarget, SseRequest,
+    upload_bytes_to_media_store,
 };
 use gensokyo_core::{Error, Ob11Id, Result};
+use gensokyo_media::source::FILE_PREFIX;
+use gensokyo_media::{HostingKind, ImageKind, MediaSource, sniff_image};
+
 use gensokyo_protocol::cqcode;
 use gensokyo_protocol::event::NoticeEvent;
 use gensokyo_protocol::outbound::{InputNotifyPayload, StreamKind, StreamPayload};
@@ -462,7 +467,11 @@ pub async fn compose(
     }
 
     let rendered = music_fallback_text(&message.plan, render_text(context, message)?)?;
-    if let Some(markdown) = compose_markdown(context, &message.plan, &rendered)? {
+    if let Some(mut markdown) = compose_markdown(context, &message.plan, &rendered)? {
+        // 正文里的本地图片换成素材库引用（Go `ResolveMarkdownImages`）；失败保留原引用
+        if let Some(content) = markdown.content.take() {
+            markdown.content = Some(resolve_markdown_images(context, &content).await);
+        }
         // markdown 胜 card，文本让位：msg_type=2 只认 markdown.content
         out.content = None;
         out.msg_type = Some(msg_type::MARKDOWN);
@@ -579,6 +588,235 @@ fn render_markdown(context: &ActionContext, content: &str) -> Result<String> {
         out.push_str(&openid);
         out.push_str("\" />");
         from = start + end + 1;
+    }
+}
+
+/// Markdown 正文里的本地图片 → 官方素材库引用（Go `ResolveMarkdownImages`）。
+///
+/// 只替换 **URL**：`![alt #480px #640px](path)` 的 alt 与尺寸语法、`[text](path)` 的链接
+/// 文本、`<img>` 的其余属性都逐字节保留——与 Go 的两条正则同口径：
+///
+/// - `(!?)\[([^\]]*)\]\(([^)]+)\)`（`!?` 让普通 `[text](path)` 也参与转换）
+/// - `(?i)(<img\b[^>]*?\bsrc=)(["']?)([^"'\s>]+)([^>]*>)`
+///
+/// 分流照 Go：`http(s)://` / `data:` / `qqbot-media://` 原样；其余当本地路径读字节、嗅探
+/// 格式后上传素材库。**任一步失败保留原引用**：一张坏图片不能拖死整条消息。
+///
+/// 两遍扫描（先 markdown 链接、后 HTML img）与 Go 一致；workspace 没有 `regex` 依赖，
+/// 为两条正则引入外部依赖不值得，这里用等价的手写扫描（见 [`markdown_link_urls`] /
+/// [`html_img_urls`]）。
+async fn resolve_markdown_images(context: &ActionContext, content: &str) -> String {
+    let content = rewrite_urls(content, markdown_link_urls(content), context).await;
+    rewrite_urls(&content, html_img_urls(&content), context).await
+}
+
+/// 一处待改写的 URL 在原文里的字节区间（`[start, end)`）。
+struct UrlSpan {
+    start: usize,
+    end: usize,
+}
+
+/// 按 `spans` 逐个改写 URL；[`resolve_url`] 返回 `None` 时保留原引用。
+async fn rewrite_urls(content: &str, spans: Vec<UrlSpan>, context: &ActionContext) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut cursor = 0;
+    for span in spans {
+        out.push_str(&content[cursor..span.start]);
+        match resolve_url(context, &content[span.start..span.end]).await {
+            Some(url) => out.push_str(&url),
+            None => out.push_str(&content[span.start..span.end]),
+        }
+        cursor = span.end;
+    }
+    out.push_str(&content[cursor..]);
+    out
+}
+
+/// Markdown 链接 / 图片里 URL 的位置：`(!?)\[([^\]]*)\]\(([^)]+)\)` 的等价扫描。
+///
+/// `!?` 只是可选前缀，不改变 URL 区间，因此扫描只看 `[…](…)`：alt 到第一个 `]` 为止
+/// （字符类不含 `]`，正则无路可退），URL 从 `(` 之后到下一个 `)`，且至少一个字符。
+fn markdown_link_urls(content: &str) -> Vec<UrlSpan> {
+    let mut spans = Vec::new();
+    let mut index = 0;
+    while let Some(open) = content[index..].find('[').map(|offset| index + offset) {
+        let Some(close) = content[open + 1..].find(']').map(|offset| open + 1 + offset) else {
+            break;
+        };
+        // `](` 必须紧邻；否则正则从下一个字节重新尝试
+        if !content[close + 1..].starts_with('(') {
+            index = open + 1;
+            continue;
+        }
+        let start = close + 2;
+        let Some(end) = content[start..].find(')').map(|offset| start + offset) else {
+            break;
+        };
+        if end == start {
+            // `()` 空 URL 不满足 `[^)]+`
+            index = open + 1;
+            continue;
+        }
+        spans.push(UrlSpan { start, end });
+        index = end + 1;
+    }
+    spans
+}
+
+/// HTML `<img … src=…>` 里 URL 的位置：
+/// `(?i)(<img\b[^>]*?\bsrc=)(["']?)([^"'\s>]+)([^>]*>)` 的等价扫描。
+fn html_img_urls(content: &str) -> Vec<UrlSpan> {
+    let bytes = content.as_bytes();
+    let mut spans = Vec::new();
+    let mut index = 0;
+    while let Some(open) = find_ascii_ci(content, b"<img", index) {
+        // `<img\b`：后面紧跟单词字符（`<imgx`）不算标签
+        let after = open + 4;
+        if bytes
+            .get(after)
+            .copied()
+            .is_some_and(is_word_byte)
+        {
+            index = open + 1;
+            continue;
+        }
+        // `[^>]*?` 不跨 `>`：`src=` 只在当前标签内找，标签在第一个 `>` 处闭合
+        let Some(tag_end) = content[after..].find('>').map(|offset| after + offset) else {
+            break;
+        };
+        let Some(src) = find_src_attr(bytes, after, tag_end) else {
+            index = open + 1;
+            continue;
+        };
+        let mut start = src + 4;
+        if bytes
+            .get(start)
+            .is_some_and(|byte| *byte == b'"' || *byte == b'\'')
+        {
+            start += 1;
+        }
+        let mut end = start;
+        while let Some(byte) = bytes.get(end).copied() {
+            if byte == b'"' || byte == b'\'' || byte == b'>' || byte.is_ascii_whitespace() {
+                break;
+            }
+            end += 1;
+        }
+        if end == start {
+            // `src=""` / `src=>`：`[^"'\s>]+` 不匹配空值
+            index = open + 1;
+            continue;
+        }
+        spans.push(UrlSpan { start, end });
+        index = tag_end + 1;
+    }
+    spans
+}
+
+/// `[from, to)` 里第一个 `src=`（ASCII 大小写不敏感），要求前面是边界（`\b`）。
+fn find_src_attr(bytes: &[u8], from: usize, to: usize) -> Option<usize> {
+    // `[^>]*?` 至少要吃掉一个字符：`<imgsrc=` 里 `g` 与 `s` 之间没有边界
+    let mut index = from + 1;
+    while index + 4 <= to {
+        if bytes[index..index + 4].eq_ignore_ascii_case(b"src=")
+            && !is_word_byte(bytes[index - 1])
+        {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+/// ASCII 大小写不敏感查找（`(?i)`）。
+fn find_ascii_ci(haystack: &str, needle: &[u8], from: usize) -> Option<usize> {
+    let bytes = haystack.as_bytes();
+    let last = bytes.len().checked_sub(needle.len())?;
+    (from..=last).find(|&index| bytes[index..index + needle.len()].eq_ignore_ascii_case(needle))
+}
+
+/// 正则 `\b` / `\w` 的 ASCII 口径。
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// 一处引用 → 本地路径（Go `trimFilePrefix` + `safeLocalPath`）。
+///
+/// 安全口径与 Go 一致，**不额外加根目录白名单**：拒绝含 `..` 的路径、统一转绝对路径；
+/// 百分号解码只在 `file://` 形态下做（[`MediaSource::parse`] 已实现同一套校验，裸路径
+/// 不解码也就不存在 `%2e%2e` 绕过）。
+fn local_media_path(raw: &str) -> Option<PathBuf> {
+    if raw.starts_with(FILE_PREFIX) {
+        return match MediaSource::parse(raw) {
+            Ok(MediaSource::File(path)) => Some(path),
+            _ => None,
+        };
+    }
+    if raw.is_empty() || raw.contains("..") {
+        return None;
+    }
+    std::path::absolute(raw).ok()
+}
+
+/// 一处引用 → 可写进 Markdown 的素材库 URL；`None` 表示保留原引用。
+async fn resolve_url(context: &ActionContext, raw: &str) -> Option<String> {
+    // Go 同口径：远端地址、内联数据、已是素材引用的都原样保留（远端稳定化不在本阶段）
+    if raw.starts_with("http://")
+        || raw.starts_with("https://")
+        || raw.starts_with("data:")
+        || raw.starts_with(gensokyo_actions::MEDIA_REFERENCE_PREFIX)
+    {
+        return None;
+    }
+    // Go `ossTypeShortLivedImage()`：只有 oss_type=7（ChatGLM）走官方素材库。其余图床
+    // （4~6 / 8~10）要先经图床链换 CDN URL，deferred 尚未接入，保留原引用而不是发坏图。
+    if HostingKind::from_oss_type(context.config().snapshot().get_oss_type())
+        != Some(HostingKind::ChatGlm)
+    {
+        return None;
+    }
+    let Some(path) = local_media_path(raw) else {
+        tracing::warn!(url = %raw, "markdown 图片路径未通过安全校验，保留原引用");
+        return None;
+    };
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %err,
+                "markdown 图片读取失败，保留原引用"
+            );
+            return None;
+        }
+    };
+    let Some(kind) = sniff_image(&bytes) else {
+        tracing::warn!(path = %path.display(), "markdown 图片格式无法识别，保留原引用");
+        return None;
+    };
+    let (content_type, extension) = match kind {
+        ImageKind::Png => ("image/png", "png"),
+        ImageKind::Jpeg => ("image/jpeg", "jpg"),
+        ImageKind::Gif => ("image/gif", "gif"),
+        ImageKind::WebP => ("image/webp", "webp"),
+        // `validate_image_upload` 只收 png / jpeg / gif / webp（Go `sniffMediaImageFormat` 同）
+        ImageKind::Bmp => {
+            tracing::warn!(path = %path.display(), "markdown 图片是 BMP，素材库不收，保留原引用");
+            return None;
+        }
+    };
+    // Go `uploadImageBytesToMediaStore` 的文件名是 `<source>.<ext>`，Markdown 侧 source = "markdown"
+    let file_name = format!("markdown.{extension}");
+    match upload_bytes_to_media_store(context.api(), &bytes, &file_name, content_type).await {
+        Ok(uploaded) => Some(uploaded.url),
+        Err(err) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %err,
+                "markdown 图片上传素材库失败，保留原引用"
+            );
+            None
+        }
     }
 }
 
@@ -1035,6 +1273,10 @@ mod tests {
         StreamPayload,
     };
     use gensokyo_protocol::{MediaRef, OutboundPlan};
+    use gensokyo_qq::dto::media_image::{
+        MediaImageCompleteRequest, MediaImageCompleteResponse, MediaImagePrepareRequest,
+        MediaImagePrepareResponse,
+    };
     use gensokyo_qq::dto::{
         BotInGroupState, FileUpload, GroupInfo, GroupMember, GroupMemberList, InputNotify,
         JoinRequestList, Markdown, MediaResponse, MessageResponse, MessageToCreate, StreamSse,
@@ -1044,7 +1286,9 @@ mod tests {
     use serde_json::Value;
     use tempfile::TempDir;
 
-    use super::{DeferredDeps, execute, execute_forward, execute_sse, render_plain};
+    use super::{
+        DeferredDeps, execute, execute_forward, execute_sse, render_plain, resolve_markdown_images,
+    };
     use crate::at_everyone::SECTION;
     use crate::event_hub::EventHub;
     use crate::media::{MAX_MEDIA_BYTES, MediaRuntime};
@@ -1091,6 +1335,9 @@ mod tests {
         upload_result: Mutex<Option<Result<MediaResponse>>>,
         /// 按顺序消费的发送结果；同一条用例可以排多个（成功 / 失败）。
         send_results: Mutex<Vec<Result<MessageResponse>>>,
+        /// 素材链（prepare → PUT → complete）的注入结果：`Some(url)` = complete 返回该引用，
+        /// `None` = complete 报上游错误。按调用顺序消费，多图用例逐个排队。
+        media_results: Mutex<Vec<Option<String>>>,
     }
 
     impl FakeQqApi {
@@ -1116,6 +1363,24 @@ mod tests {
                 id: message_id.to_owned(),
                 ..MessageResponse::default()
             }))
+        }
+
+        /// 排队一次成功的素材上传，complete 返回 `url`。
+        fn with_media(self, url: &str) -> Self {
+            self.media_results
+                .lock()
+                .expect("素材槽锁未中毒")
+                .push(Some(url.to_owned()));
+            self
+        }
+
+        /// 排队一次失败的素材上传（complete 报上游业务错误）。
+        fn with_media_error(self) -> Self {
+            self.media_results
+                .lock()
+                .expect("素材槽锁未中毒")
+                .push(None);
+            self
         }
 
         fn with_send_error(self, err: Error) -> Self {
@@ -1228,6 +1493,54 @@ mod tests {
             file: FileUpload,
         ) -> QqFuture<'_, MediaResponse> {
             Box::pin(async move { self.upload(file) })
+        }
+
+        fn prepare_media_image(
+            &self,
+            _request: MediaImagePrepareRequest,
+        ) -> QqFuture<'_, MediaImagePrepareResponse> {
+            Box::pin(async {
+                Ok(MediaImagePrepareResponse {
+                    upload_id: "up-1".to_owned(),
+                    presigned_url: "https://cos.example.com/up-1".to_owned(),
+                    expires_in: 3600,
+                })
+            })
+        }
+
+        fn put_presigned_image(
+            &self,
+            _presigned_url: &str,
+            _content_type: &str,
+            bytes: Vec<u8>,
+        ) -> QqFuture<'_, String> {
+            Box::pin(async move {
+                assert!(!bytes.is_empty(), "直传字节不应为空");
+                Ok("etag-md5".to_owned())
+            })
+        }
+
+        fn complete_media_image(
+            &self,
+            _request: MediaImageCompleteRequest,
+        ) -> QqFuture<'_, MediaImageCompleteResponse> {
+            let mut results = self.media_results.lock().expect("素材槽锁未中毒");
+            assert!(!results.is_empty(), "测试未配置素材链结果");
+            let url = results.remove(0);
+            Box::pin(async move {
+                match url {
+                    Some(url) => Ok(MediaImageCompleteResponse {
+                        image_id: "img-1".to_owned(),
+                        url,
+                        ttl: 7_776_000,
+                        preview_url: "https://cos.example.com/p".to_owned(),
+                    }),
+                    None => Err(Error::Upstream {
+                        code: 40_035_007,
+                        message: "图片素材库空间不足".to_owned(),
+                    }),
+                }
+            })
         }
     }
 
@@ -3090,6 +3403,156 @@ mod tests {
             Some(10),
             "msg_seq = index + 10 的防去重原样上送"
         );
+    }
+
+    // ---- markdown 正文图片 ----
+
+    /// 最小 PNG 文件头：`sniff_image` 只看魔数，`validate_image_upload` 只看体积 / 扩展名。
+    const PNG_HEADER: &[u8] = b"\x89PNG\r\n\x1a\n";
+
+    fn write_png(dir: &TempDir, name: &str) -> String {
+        let path = dir.path().join(name);
+        std::fs::write(&path, PNG_HEADER).expect("写测试图片失败");
+        path.to_string_lossy().into_owned()
+    }
+
+    #[tokio::test]
+    async fn markdown_local_image_becomes_media_reference_and_keeps_size_syntax() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = write_png(&dir, "本地 图.png");
+        let api = Arc::new(
+            FakeQqApi::default()
+                .with_send("MSG-1")
+                .with_media("qqbot-media://image/v1/token"),
+        );
+        let (_cfg, context) = context_with_settings(Arc::clone(&api), "  oss_type: 7\n");
+        let media = no_media();
+        let plan = group_request(markdown_plan(&format!("![本地 #480px #640px]({path})")));
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("本地图片应替换成素材引用");
+
+        assert_eq!(
+            api.sent()[0]
+                .markdown
+                .as_ref()
+                .and_then(|md| md.content.as_deref()),
+            Some("![本地 #480px #640px](qqbot-media://image/v1/token)"),
+            "只换 URL，alt 与尺寸语法原样保留"
+        );
+    }
+
+    #[tokio::test]
+    async fn markdown_plain_link_and_html_img_are_rewritten() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = write_png(&dir, "a.png");
+        let api = Arc::new(
+            FakeQqApi::default()
+                .with_send("MSG-1")
+                .with_media("qqbot-media://image/v1/one")
+                .with_media("qqbot-media://image/v1/two"),
+        );
+        let (_cfg, context) = context_with_settings(Arc::clone(&api), "  oss_type: 7\n");
+        let media = no_media();
+        let plan = group_request(markdown_plan(&format!(
+            "[点我]({path}) <img src=\"{path}\" alt=\"封面\">"
+        )));
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("普通链接与 img 标签都要转换");
+
+        let expected = "[点我](qqbot-media://image/v1/one) \
+                        <img src=\"qqbot-media://image/v1/two\" alt=\"封面\">";
+        assert_eq!(
+            api.sent()[0]
+                .markdown
+                .as_ref()
+                .and_then(|md| md.content.as_deref()),
+            Some(expected),
+            "`!?` 让普通链接也转换（Go 同口径），img 只动 src"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_inline_and_media_references_are_left_untouched() {
+        let api = Arc::new(FakeQqApi::default());
+        let (_cfg, context) = context_with_settings(api, "  oss_type: 7\n");
+        for raw in [
+            "![a](https://example.com/a.png)",
+            "![a](http://example.com/a.png)",
+            "![a](data:image/png;base64,AAAA)",
+            "![a](qqbot-media://image/v1/token)",
+        ] {
+            assert_eq!(resolve_markdown_images(&context, raw).await, raw);
+        }
+    }
+
+    #[tokio::test]
+    async fn unreadable_or_rejected_images_keep_the_original_reference() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let missing = dir.path().join("missing.png").to_string_lossy().into_owned();
+
+        let api = Arc::new(FakeQqApi::default());
+        let (_cfg, context) = context_with_settings(Arc::clone(&api), "  oss_type: 7\n");
+        let raw = format!("![坏图]({missing})");
+        assert_eq!(
+            resolve_markdown_images(&context, &raw).await,
+            raw,
+            "读失败保留原引用"
+        );
+
+        let path = write_png(&dir, "b.png");
+        let api = Arc::new(FakeQqApi::default().with_media_error());
+        let (_cfg, context) = context_with_settings(api, "  oss_type: 7\n");
+        let raw = format!("![坏上传]({path})");
+        assert_eq!(
+            resolve_markdown_images(&context, &raw).await,
+            raw,
+            "上传失败保留原引用"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_image_in_one_message_is_replaced() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let first = write_png(&dir, "1.png");
+        let second = write_png(&dir, "2.png");
+        let api = Arc::new(
+            FakeQqApi::default()
+                .with_send("MSG-1")
+                .with_media("qqbot-media://image/v1/a")
+                .with_media("qqbot-media://image/v1/b"),
+        );
+        let (_cfg, context) = context_with_settings(Arc::clone(&api), "  oss_type: 7\n");
+        let media = no_media();
+        let plan = group_request(markdown_plan(&format!(
+            "![一]({first}) 和 ![二]({second})"
+        )));
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("多图应逐个替换");
+
+        assert_eq!(
+            api.sent()[0]
+                .markdown
+                .as_ref()
+                .and_then(|md| md.content.as_deref()),
+            Some("![一](qqbot-media://image/v1/a) 和 ![二](qqbot-media://image/v1/b)")
+        );
+    }
+
+    #[tokio::test]
+    async fn oss_type_other_than_seven_keeps_local_paths() {
+        // Go `ossTypeShortLivedImage()`：oss_type != 7 走图床链，deferred 尚未接入 → 原样保留
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = write_png(&dir, "a.png");
+        let api = Arc::new(FakeQqApi::default());
+        let (_cfg, context) = context(api);
+        let raw = format!("![图]({path})");
+        assert_eq!(resolve_markdown_images(&context, &raw).await, raw);
     }
 
     #[tokio::test]

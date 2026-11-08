@@ -38,7 +38,7 @@ use gensokyo_qq::media_image::{
 };
 
 use crate::params;
-use crate::qqapi::ActionContext;
+use crate::qqapi::{ActionContext, QqApi};
 use crate::util::{bad_request, failed, ok_data, params_object, upstream_error};
 
 /// 素材管理上游错误（官方 40035001~40035010）的 OneBot retcode。
@@ -81,37 +81,30 @@ pub struct MediaImageListData {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeleteMediaImageData {}
 
-/// 一次上传的本地准备结果。
+/// 一次上传的本地准备结果（校验与摘要留给 [`upload_bytes_to_media_store`]）。
 struct UploadPlan {
     /// 文件字节（PUT 直传用）。
     bytes: Vec<u8>,
-    /// prepare 请求体（含本地计算的 md5 / sha1）。
-    prepare: MediaImagePrepareRequest,
+    /// 归一后的文件名（扩展名必须与 `content_type` 一致）。
+    file_name: String,
+    /// 归一后的官方 `content_type`。
+    content_type: String,
 }
 
-/// 解析 `params` 并读出字节、归一 `file_name` / `content_type`、算摘要。
+/// 解析 `params` 并读出字节、归一 `file_name` / `content_type`。
 ///
-/// 校验顺序刻意是「读字节 → 体积 / 格式 / 扩展名 → 摘要」：超限与格式错误在算摘要之前就返回，
-/// 10MB 的非法文件不必白算一遍哈希。
+/// 体积 / 格式 / 扩展名校验与摘要计算都在 [`upload_bytes_to_media_store`] 里做一份：
+/// 本函数只负责「把 OneBot 的 `file` 变成字节 + 名字」，避免第二份校验口径。
 fn plan_upload(object: &Map<String, Value>) -> Result<UploadPlan> {
     let file = params::optional_text(object, "file")?
         .ok_or_else(|| Error::Protocol("缺少 file".to_owned()))?;
     let source = read_upload_source(&file)?;
     let content_type = resolve_content_type(object, &source)?;
     let file_name = resolve_file_name(object, &source, &content_type)?;
-    validate_image_upload(&file_name, &content_type, source.bytes.len() as u64)
-        .map_err(local_error)?;
-
-    let prepare = MediaImagePrepareRequest {
-        file_size: source.bytes.len() as u64,
-        md5: md5_hex(&source.bytes),
-        sha1: sha1_hex(&source.bytes),
-        file_name,
-        content_type,
-    };
     Ok(UploadPlan {
         bytes: source.bytes,
-        prepare,
+        file_name,
+        content_type,
     })
 }
 
@@ -229,12 +222,75 @@ fn local_error(err: gensokyo_qq::Error) -> Error {
     }
 }
 
-/// 上游业务错误 → `1401`（保留官方原码），其余错误沿用 `1500`。
+/// 参数 / 校验错误 → `1400`，上游业务错误 → `1401`（保留官方原码），其余沿用 `1500`。
+///
+/// 校验现在由 [`upload_bytes_to_media_store`] 统一负责，因此 `1400` 也从这条路径回来——
+/// 不能因为共用了上传 helper 就把「格式不支持」吞成 `1500`。
 fn media_error(request: &ActionRequest<Value>, err: &Error) -> ActionResponse<Value> {
     match err {
         Error::Upstream { .. } => failed(request, RETCODE_MEDIA_UPSTREAM, &err.to_string()),
+        Error::Protocol(_) => bad_request(request, err),
         _ => upstream_error(request, err),
     }
+}
+
+/// 素材引用的官方前缀：只有它的链接能原样写进 Markdown / 卡片。
+pub const MEDIA_REFERENCE_PREFIX: &str = "qqbot-media://";
+
+/// 把字节上传到官方素材库：`prepare` → 预签名 `PUT` 直传 → `complete`。
+///
+/// `upload_media_image` 与 deferred 的 Markdown 正文图片共用这一条链路（Go 侧同样只有
+/// `mediaImageUploadFlow` 一份）。
+///
+/// 校验顺序刻意是「体积 / 格式 / 扩展名 → 摘要 → 建链」：超限与格式错误在算摘要之前就返回，
+/// 10MB 的非法文件不必白算一遍哈希，更不该打到上游。
+///
+/// # Errors
+/// 本地校验失败 → [`Error::Protocol`]（retcode `1400`）；上游业务错误 → [`Error::Upstream`]
+/// （`1401`，保留官方原码）；传输失败、或 `complete` 返回的引用不是
+/// [`MEDIA_REFERENCE_PREFIX`] → [`Error::Network`]（`1500`）——后者的链接写进 Markdown 只会
+/// 得到一段打不开的图片，不能当成功。
+pub async fn upload_bytes_to_media_store(
+    api: &dyn QqApi,
+    bytes: &[u8],
+    file_name: &str,
+    content_type: &str,
+) -> Result<UploadMediaImageData> {
+    validate_image_upload(file_name, content_type, bytes.len() as u64).map_err(local_error)?;
+
+    let prepared = api
+        .prepare_media_image(MediaImagePrepareRequest {
+            file_size: bytes.len() as u64,
+            md5: md5_hex(bytes),
+            sha1: sha1_hex(bytes),
+            file_name: file_name.to_owned(),
+            content_type: content_type.to_owned(),
+        })
+        .await?;
+    let md5 = api
+        .put_presigned_image(&prepared.presigned_url, content_type, bytes.to_vec())
+        .await?;
+    let completed = api
+        .complete_media_image(MediaImageCompleteRequest {
+            upload_id: prepared.upload_id,
+            md5,
+        })
+        .await?;
+    if !completed.url.starts_with(MEDIA_REFERENCE_PREFIX) {
+        return Err(Error::Network(format!(
+            "素材上传完成但引用不是 {MEDIA_REFERENCE_PREFIX}: {}",
+            completed.url
+        )));
+    }
+
+    Ok(UploadMediaImageData {
+        image_id: completed.image_id,
+        url: completed.url,
+        ttl: completed.ttl,
+        preview_url: completed.preview_url,
+        file_name: file_name.to_owned(),
+        expires_in: prepared.expires_in,
+    })
 }
 
 /// `upload_media_image`：prepare → PUT 直传 → complete。
@@ -261,41 +317,12 @@ impl UploadMediaImageHandler {
         };
 
         let api = self.context.api();
-        let prepared = match api.prepare_media_image(plan.prepare.clone()).await {
-            Ok(prepared) => prepared,
-            Err(err) => return Ok(media_error(request, &err)),
-        };
-        let md5 = match api
-            .put_presigned_image(
-                &prepared.presigned_url,
-                &plan.prepare.content_type,
-                plan.bytes,
-            )
+        match upload_bytes_to_media_store(api, &plan.bytes, &plan.file_name, &plan.content_type)
             .await
         {
-            Ok(md5) => md5,
-            Err(err) => return Ok(media_error(request, &err)),
-        };
-        let completed = match api
-            .complete_media_image(MediaImageCompleteRequest {
-                upload_id: prepared.upload_id,
-                md5,
-            })
-            .await
-        {
-            Ok(completed) => completed,
-            Err(err) => return Ok(media_error(request, &err)),
-        };
-
-        let data = UploadMediaImageData {
-            image_id: completed.image_id,
-            url: completed.url,
-            ttl: completed.ttl,
-            preview_url: completed.preview_url,
-            file_name: plan.prepare.file_name,
-            expires_in: prepared.expires_in,
-        };
-        ok_data(request, &data)
+            Ok(data) => ok_data(request, &data),
+            Err(err) => Ok(media_error(request, &err)),
+        }
     }
 }
 
