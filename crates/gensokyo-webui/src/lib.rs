@@ -16,10 +16,14 @@
 //!   删档重建模板，见 [`config_api`]）。
 //! - **进程面与日志**：`GET /api/{uin}/process/status`、`DELETE /api/{uin}/process`（如实回
 //!   501：无进程守护）、`POST /api/{uin}/api`（Go 只有 `Invalid API name` 分支）、
-//!   `GET /api/{uin}/process/logs` 与 `GET /api/logs`（Go 回空数组，见 [`process`]）。
+//!   `GET /api/{uin}/process/logs` 与 `GET /api/logs`（非 WS 回 `[]`，`Upgrade: websocket`
+//!   则推送日志流：先补发环形缓冲快照再实时推送，见 [`logs`] 与 [`process`]）。
 //!
-//! **尚未交付**：`PUT /api/{uin}`（Go `HandleAppIDRequest`，前端不调用）、日志的 WebSocket
-//! 推送（需要先给 `gensokyo-bin` 的 tracing subscriber 挂采集层，超出本 crate 边界）。
+//! **尚未交付**：`PUT /api/{uin}`（Go `HandleAppIDRequest`，前端不调用）。
+//!
+//! 日志采集在 `gensokyo-bin` 的 tracing 订阅器里完成：它把每条已过滤事件推进
+//! [`logs::hub`]，WebUI 只负责读。因此本 crate 的日志路由在没有安装订阅器时（例如单测）
+//! 只是没有新事件，不会报错。
 //!
 //! 依赖方向：webui → config。路由状态 [`WebUiState`] 只持有 [`gensokyo_config::ConfigManager`]，
 //! **不依赖** runtime 的 `AppState`——否则 runtime 挂载 WebUI 路由时会形成环形依赖。
@@ -28,6 +32,7 @@ pub mod accounts;
 pub mod assets;
 pub mod auth;
 pub mod config_api;
+pub mod logs;
 pub mod process;
 pub mod router;
 pub mod session_db;

@@ -20,6 +20,7 @@ use gensokyo_storage::{BotStatsStore, EchoStore, IdMapStore};
 use crate::builtin;
 use crate::dispatcher::Dispatcher;
 use crate::event_hub::EventHub;
+use crate::hosting::HostingRuntime;
 use crate::media::MediaRuntime;
 
 /// botstats 的延迟注入单元。
@@ -41,6 +42,7 @@ pub struct AppState {
     botstats: BotStatsSlot,
     api: Option<Arc<OpenApiClient<ReqwestTransport>>>,
     media: Arc<MediaRuntime>,
+    hosting: Arc<HostingRuntime>,
     hub: EventHub,
     webui: Option<bool>,
 }
@@ -60,6 +62,7 @@ impl AppState {
             botstats: BotStatsSlot::default(),
             api: None,
             media: Arc::new(MediaRuntime::default()),
+            hosting: Arc::new(HostingRuntime::default()),
             hub: EventHub::default(),
             webui: None,
         }
@@ -145,6 +148,13 @@ impl AppState {
     #[must_use]
     pub fn with_media(mut self, media: Arc<MediaRuntime>) -> Self {
         self.media = media;
+        self
+    }
+
+    /// 覆盖上传运行时（`/uploadpicv2` 用；单测注入假传输，生产用默认惰性 HTTP 实现）。
+    #[must_use]
+    pub fn with_hosting(mut self, hosting: Arc<HostingRuntime>) -> Self {
+        self.hosting = hosting;
         self
     }
 
@@ -248,6 +258,12 @@ impl AppState {
     #[must_use]
     pub fn media(&self) -> &MediaRuntime {
         self.media.as_ref()
+    }
+
+    /// `/uploadpicv2` 的图床 / OSS 上传运行时。
+    #[must_use]
+    pub fn hosting(&self) -> &HostingRuntime {
+        self.hosting.as_ref()
     }
 
     /// OpenAPI 客户端（未注入时为 `None`）。

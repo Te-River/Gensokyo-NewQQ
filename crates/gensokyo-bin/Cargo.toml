@@ -31,9 +31,12 @@ tokio = { workspace = true, features = [
     "signal",
     "time",
 ] }
-# 日志时间戳（RFC3339）
-time.workspace = true
+# 日志时间戳（RFC3339，以及 WebUI 日志流要用的本地 12 小时制）；
+# `local-offset` 让 `OffsetDateTime::now_local` 可用，取不到时退回 UTC
+time = { workspace = true, features = ["local-offset"] }
 tracing.workspace = true
+# WebUI 日志中枢（`/api/logs` 环形缓冲 + 广播）：采集层往里投递，webui crate 负责推送
+gensokyo-webui.workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"

@@ -19,8 +19,13 @@ gensokyo-actions.workspace = true
 gensokyo-media.workspace = true
 # WebUI 静态页与 `/api` 登录路由（M3）；`disable_webui=false` 时挂进 listener
 gensokyo-webui.workspace = true
-# 正向 WS / HTTP API 服务端；`ws` 提供 WebSocket 升级
-axum = { workspace = true, features = ["ws"] }
+# 正向 WS / HTTP API 服务端；`ws` 提供 WebSocket 升级，`multipart` 解析 `/uploadpic` 的
+# `multipart/form-data`（Go `PostForm` 同时支持 urlencoded 与 multipart）
+axum = { workspace = true, features = ["ws", "multipart"] }
+# `/uploadpic` 的 `channel_temp/<md5>.<ext>` 命名（Go `getFileMd5`）
+md-5.workspace = true
+# `/uploadpic` 的 `base64Image` 字段解码（Go `base64.StdEncoding`）
+base64.workspace = true
 # webhook ed25519 验签（ring 已随 TLS 栈进树，这里只是直连）
 ring.workspace = true
 # 反向 WS 客户端：`SinkExt` / `StreamExt` 拆读写两半
@@ -38,6 +43,8 @@ futures.workspace = true
 # webhook 用例要按 Go 的 seed 规则自己派生密钥并签名
 ring.workspace = true
 tempfile = "3.27.0"
+# 路由级用例：in-process 调用 `Router`（axum 自身只提供 `serve`，`oneshot` 在 tower）
+tower = { version = "0.5", features = ["util"] }
 tokio = { workspace = true, features = [
     "io-util",
     "macros",

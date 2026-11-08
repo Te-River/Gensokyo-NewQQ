@@ -15,6 +15,19 @@ M3 的交付：把前端构建产物嵌进二进制，并提供管理台的登�
 | `GET` | `/api/checkLoginStatus` | cookie 有效 `200 {"code":0}`；否则 `401 {"code":1}` |
 | `POST` | `/api/logout` | 删除会话、清除 cookie，回 `200 {"code":0}`（未登录也回 0） |
 | `GET` | `/api/config` | 登录后返回脱敏字段；未登录 `401` |
+| `GET` | `/api/logs`、`/api/{uin}/process/logs` | `Upgrade: websocket` 时升级为日志流（见下）；否则回 `[]`（Go `getProcessLogs`） |
+
+## 日志流（P16）
+
+两条路径同语义（Go `webui/api.go:52-70`）：带 `Upgrade: websocket` 就升级成日志流
+（`mylog.WsHandlerWithDependencies`），否则按 `getProcessLogs` 回 `[]`。WS 连上后先补发
+[`logs::hub`] 环形缓冲里的最近 500 条，再实时推送新日志，每 10s 发一次 Ping。
+
+消息体是 Go `EnhancedLogEntry` 的 JSON：`{"time":"2026/NOV/08 PM 03:04:05","level":"INFO","message":"..."}`
+（`time` 为本地时间 12 小时制、整体大写；`message` 里结构化字段按 ` key=value` 追加）。
+
+采集端在 `gensokyo-bin` 的 tracing 订阅器：它和 stderr 共用同一份级别过滤，所以 WebUI
+看到的就是控制台看到的。Go 没有历史补发（连接之前的日志收不到），缓冲快照是 Rust 的扩展。
 
 ### `/api/config` 返回字段（白名单）
 
@@ -63,7 +76,6 @@ WebUI 静态资源不参与 action 热路径；同机同负载下 Rust 主链与
 
 - **会话持久化**：Go 把 cookie 写进 bbolt `cookie.db`，这里只在内存；落盘、跨重启恢复、
   持久化后的清理任务留 **M3b**。
-- **SSE 日志推送**（Go `/api/logs` 的流式日志）。
 - **监控图表**（CPU/内存/消息速率等历史曲线）。
 - **写配置**：`PATCH /api/config`（Go 写回 `config.yml` 并触发热重载）、`DELETE /api/config`。
 - 用户管理、多账号、权限分级：仍只有单个管理凭据。
@@ -75,4 +87,5 @@ cargo test -p gensokyo-webui
 ```
 
 测试用 `tower::ServiceExt::oneshot` 直接喂 `Router`，不监听端口、不访问外网；临时
-`config.yml` 写在系统临时目录，`Drop` 时删除。
+`config.yml` 写在系统临时目录，`Drop` 时删除。日志 WS 的两条用例例外：WS 握手必须在
+loopback listener 上完成（`127.0.0.1:0` + `tokio-tungstenite` 客户端），仍不出本机。

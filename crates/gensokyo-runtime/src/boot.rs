@@ -264,6 +264,10 @@ impl Runtime {
             None
         };
 
+        // `/uploadpic*` 与 `/getid`：Go 挂在主服务器 `r`，这里挂主 listener；HTTP 端口只在
+        // 主 listener 不存在时兜底（见下方 `http` 分支）。
+        let upload = crate::upload_http::router(state.clone());
+
         // 先把两个 listener 都绑好再 spawn：任一绑定失败时，已绑定的 socket 随局部变量
         // 释放关闭，不会出现「WS 已在跑、HTTP 启动失败」的半启动状态。
         let ws_listener = match &ws_target {
@@ -275,22 +279,31 @@ impl Runtime {
             None => None,
         };
 
+        // `/uploadpic*` 与 `/getid` 归主 listener（Go 的 `r`）；主 listener 不存在时才落 HTTP API
+        let upload_on_http =
+            upload_falls_back_to_http(ws_target.is_some(), http_listener.is_some());
+
         let ws = if let (Some((_, path)), Some((listener, addr))) = (ws_target, ws_listener) {
             let app = merge_webui(
                 merge_webhook(crate::ws_server::router(state.clone(), &path), &webhook),
                 &webui,
             );
+            // Go `main.go:508/523-524` 的 /getid、/uploadpic* 挂在主服务器 `r` 上
+            let app = merge_upload(app, &upload);
             Some(serve("正向 WS", listener, addr, app))
         } else {
             None
         };
         let http = http_listener.map(|(listener, addr)| {
-            serve(
-                "HTTP API",
-                listener,
-                addr,
-                http_app(&state, &webui, &webhook),
-            )
+            let app = http_app(&state, &webui, &webhook);
+            // 主 listener（WS 端口，对应 Go 始终存在的 `r`）不存在时，上传端点落到 HTTP API
+            // 端口，否则这些路由就没有监听者
+            let app = if upload_on_http {
+                merge_upload(app, &upload)
+            } else {
+                app
+            };
+            serve("HTTP API", listener, addr, app)
         });
 
         if webhook.is_some() && ws.is_none() && http.is_none() {
@@ -399,6 +412,22 @@ fn merge_webhook(app: Router, webhook: &Option<Router>) -> Router {
         Some(webhook) => app.merge(webhook.clone()),
         None => app,
     }
+}
+
+/// 把 `/uploadpic*` + `/getid` 并进 listener 的路由表。
+///
+/// 这些路由自带鉴权（`uploadAuth` / `IDMapAuthMiddleware`），必须放在 action 门之外合并：
+/// 合并进已经 `layer(action_gate)` 的 HTTP 路由表，`POST /uploadpic` 才不会被 action 吞掉。
+fn merge_upload(app: Router, upload: &Router) -> Router {
+    app.merge(upload.clone())
+}
+
+/// 上传端点是否要落到 HTTP API 端口：只有主 listener（正向 WS 端口）缺席时才兜底。
+///
+/// Go 的主服务器 `r` 永远监听 `port`，`/uploadpic*` 与 `/getid` 都挂在它上面；Rust 的主
+/// listener 由 `enable_ws_server` 决定，缺席时选 HTTP API 端口作为最近的等价物。
+fn upload_falls_back_to_http(ws_listener: bool, http_listener: bool) -> bool {
+    !ws_listener && http_listener
 }
 
 /// 把 WebUI 路由并进 WS listener；未挂载时原样返回。
@@ -806,7 +835,12 @@ fn serve(kind: &'static str, listener: TcpListener, addr: SocketAddr, app: Route
     tracing::info!(%addr, kind, "服务已启动");
     let (shutdown, shutdown_rx) = oneshot::channel::<()>();
     let task = tokio::spawn(async move {
-        let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+        // ConnectInfo 是 `/getid`「无密码只允许本地访问」与 per-IP 频控的唯一可信来源
+        let server = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
             let _ = shutdown_rx.await;
         });
         if let Err(err) = server.await {
@@ -842,7 +876,7 @@ fn normalize_bind(raw: &str) -> String {
 mod tests {
     use gensokyo_config::ReloadOutcome;
 
-    use super::{ReloadLevel, normalize_bind, reload_log_entries};
+    use super::{ReloadLevel, normalize_bind, reload_log_entries, upload_falls_back_to_http};
 
     #[test]
     fn bare_port_becomes_wildcard_bind() {
@@ -850,6 +884,16 @@ mod tests {
         assert_eq!(normalize_bind(" 0 "), "0.0.0.0:0");
         assert_eq!(normalize_bind(":5700"), "0.0.0.0:5700");
         assert_eq!(normalize_bind(" :8080 "), "0.0.0.0:8080");
+    }
+
+    #[test]
+    fn upload_routes_prefer_the_main_listener() {
+        // 主 listener 在场：只挂主 listener
+        assert!(!upload_falls_back_to_http(true, true));
+        assert!(!upload_falls_back_to_http(true, false));
+        // 主 listener 缺席：HTTP API 端口兜底；两个都没有时无处可挂
+        assert!(upload_falls_back_to_http(false, true));
+        assert!(!upload_falls_back_to_http(false, false));
     }
 
     #[test]

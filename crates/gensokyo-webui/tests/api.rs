@@ -8,10 +8,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
-use axum::http::{HeaderMap, Request, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Request, StatusCode, header};
+use futures::StreamExt as _;
 use gensokyo_config::ConfigManager;
+use gensokyo_webui::logs::{LogEntry, hub};
 use gensokyo_webui::{SESSION_DB_FILE, SESSION_TTL, SessionStore, WebUi, WebUiState};
 use serde_json::{Value, json};
+use tokio_tungstenite::tungstenite::Message as TungMessage;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tower::ServiceExt;
 
 const USERNAME: &str = "admin";
@@ -660,6 +664,151 @@ async fn log_history_is_an_empty_list() {
             "GET {path} 应回空数组，实际 {body}"
         );
     }
+}
+
+// ---- 日志 WS（P16）：Go `mylog.WsHandlerWithDependencies` ----
+
+/// 明文 `ws://` 客户端类型。
+type WsClient =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// 起 loopback listener 并返回 `ws://` 主机段；WS 握手需要真实 TCP，`oneshot` 做不到。
+async fn serve_loopback(router: &Router) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("绑定 loopback 端口失败");
+    let addr = listener.local_addr().expect("读取监听地址失败");
+    let router = router.clone();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    (format!("127.0.0.1:{}", addr.port()), handle)
+}
+
+/// 带 cookie 的 WS 握手（浏览器 WS 也自动带 cookie，Go 的中间件正是靠它鉴权）。
+async fn connect_logs(
+    addr: &str,
+    path: &str,
+    cookie: Option<&str>,
+) -> Result<WsClient, tokio_tungstenite::tungstenite::Error> {
+    let mut request = format!("ws://{addr}{path}")
+        .into_client_request()
+        .expect("构造 WS 请求失败");
+    if let Some(cookie) = cookie {
+        request.headers_mut().insert(
+            "cookie",
+            HeaderValue::from_str(cookie).expect("cookie 头非法"),
+        );
+    }
+    tokio_tungstenite::connect_async(request)
+        .await
+        .map(|(socket, _response)| socket)
+}
+
+/// 唯一标记：并行的其它日志用例也会往同一个进程级中枢投递，靠标记筛出自己的那条。
+fn log_marker(tag: &str) -> String {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    format!(
+        "p16-{tag}-{}-{nanos}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// 读到包含 `marker` 的那条日志（跳过期间其它用例的日志与心跳帧）。
+async fn read_log_containing(socket: &mut WsClient, marker: &str) -> Value {
+    loop {
+        let message = tokio::time::timeout(Duration::from_secs(10), socket.next())
+            .await
+            .unwrap_or_else(|_| panic!("等待日志 {marker} 超时"))
+            .expect("WS 在收到日志前被关闭")
+            .expect("WS 读取失败");
+        if let TungMessage::Text(text) = message {
+            let value: Value = serde_json::from_str(text.as_str()).expect("日志必须是 JSON");
+            if value["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(marker))
+            {
+                return value;
+            }
+        }
+    }
+}
+
+fn push_log(level: &str, message: &str) {
+    hub().push(LogEntry {
+        time: "2026/NOV/08 PM 03:04:05".to_owned(),
+        level: level.to_owned(),
+        message: message.to_owned(),
+    });
+}
+
+/// 日志 WS：连接先补发缓冲快照、再推实时；两条路由同语义；JSON 字段照 Go `EnhancedLogEntry`。
+#[tokio::test]
+async fn logs_ws_replays_history_then_pushes_live_entries() {
+    let app = TestApp::new(None);
+    let cookie = login_cookie(&app).await;
+    let history_marker = log_marker("history");
+    push_log("INFO", &history_marker);
+
+    let (addr, server) = serve_loopback(&app.router).await;
+    let mut socket = connect_logs(&addr, "/api/logs", Some(&cookie))
+        .await
+        .expect("已登录应能升级 WS");
+
+    let entry = read_log_containing(&mut socket, &history_marker).await;
+    let mut keys: Vec<&str> = entry
+        .as_object()
+        .expect("日志应是 JSON 对象")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["level", "message", "time"],
+        "字段照 Go EnhancedLogEntry"
+    );
+    assert_eq!(entry["time"], "2026/NOV/08 PM 03:04:05");
+    assert_eq!(entry["level"], "INFO");
+    assert_eq!(entry["message"], history_marker);
+
+    // 收到快照说明会话已订阅，此时再投递一定能收到实时推送。
+    let live_marker = log_marker("live");
+    push_log("WARN", &live_marker);
+    let live = read_log_containing(&mut socket, &live_marker).await;
+    assert_eq!(live["level"], "WARN");
+
+    // `/api/{uin}/process/logs` 与 `/api/logs` 同语义（Go `webui/api.go:52-70`）。
+    let mut second = connect_logs(&addr, &account_path("process/logs"), Some(&cookie))
+        .await
+        .expect("账号路径同样应能升级 WS");
+    let replayed = read_log_containing(&mut second, &history_marker).await;
+    assert_eq!(replayed["message"], history_marker);
+
+    server.abort();
+}
+
+/// 未登录的 WS 握手必须被拒（Go 中间件对 `/api/*` 一律校验 cookie）。
+#[tokio::test]
+async fn logs_ws_requires_login_cookie() {
+    let app = TestApp::new(None);
+    let (addr, server) = serve_loopback(&app.router).await;
+
+    let error = connect_logs(&addr, "/api/logs", None)
+        .await
+        .expect_err("未登录必须拒绝升级");
+    match error {
+        tokio_tungstenite::tungstenite::Error::Http(response) => {
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        other => panic!("期望 HTTP 401，实际 {other:?}"),
+    }
+
+    server.abort();
 }
 
 /// `POST /api/{uin}/api?name=...`：Go 的 switch 只有 `default: 400 Invalid API name`。

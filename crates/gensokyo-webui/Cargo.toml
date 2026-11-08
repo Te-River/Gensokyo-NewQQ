@@ -9,7 +9,10 @@ publish.workspace = true
 
 [dependencies]
 gensokyo-config.workspace = true
-axum.workspace = true
+# `ws`：日志流路由（`/api/logs`）用 `WebSocketUpgrade`（Go `mylog.WsHandler`）
+axum = { workspace = true, features = ["ws"] }
+# `sync`：日志广播（`broadcast`）；`time`：WS 心跳间隔
+tokio = { workspace = true, features = ["sync", "time"] }
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
@@ -21,8 +24,16 @@ redb.workspace = true
 
 [dev-dependencies]
 # 直接用 `Router` 发请求（`tower::ServiceExt::oneshot`），不监听端口、不碰外网
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = [
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "time",
+] }
 tower = { version = "0.5.3", features = ["util"] }
+# 日志 WS 用例要真实握手：loopback 起 listener，用 tungstenite 客户端连
+tokio-tungstenite.workspace = true
+futures.workspace = true
 
 [lints]
 workspace = true

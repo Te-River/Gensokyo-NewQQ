@@ -143,4 +143,6 @@ Go 侧保留一版二进制做导出（`legacy-export` → `idmap.jsonl`），Ru
 
 `log_level` 映射与 Go `mylog.GetLogLevelFromConfig` 一致：`0=debug 1=info 2=warn 3=error`，
 其它值回退 `info`。日志写 stderr，格式 `<RFC3339> <LEVEL> <target>: <message> key=value`，
-**不写日志文件**（`-local-logger` 未实现，`save_logs` 目前不生效）。
+**不写日志文件**（`-local-logger` 未实现，`save_logs` 目前不生效）。同一份已过滤事件还会推进
+`gensokyo_webui::logs::hub`（环形缓冲 500 条 + 广播），供 WebUI 的日志 WS 回放与实时推送
+（等价 Go `mylog.emitLog` → `logChannel`）。

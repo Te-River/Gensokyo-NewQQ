@@ -3,16 +3,23 @@
 //! 工作区根 `Cargo.toml` 没有声明 `tracing-subscriber`（M1j 不改根清单），这里实现一个够用的
 //! [`Subscriber`]：按级别过滤、事件写 stderr、span 只分配 id 不输出。
 //!
+//! 同一份已过滤事件还会推进 [`gensokyo_webui::logs::hub`]（环形缓冲 + 广播），供 WebUI 的
+//! 日志 WS（`/api/logs`、`/api/{uin}/process/logs`）回放与实时推送——等价 Go `mylog.emitLog`
+//! 往包级 `logChannel` 投递。两条出口共用同一个级别过滤，因此 WebUI 看到的行与 stderr 一致。
+//!
 //! 过滤规则：
 //! - `RUST_LOG` 非空时以它为准，支持 `info`、`debug,gensokyo_runtime=trace` 这类写法
 //!   （逗号分隔的 `level` 或 `target=level`，未知片段忽略）；
 //! - 否则用 `config.log_level`，映射与 Go `mylog.GetLogLevelFromConfig` 一致：
 //!   0=debug 1=info 2=warn 3=error，其它值回退 info。
+//!
+//! 时间串有两种：stderr 用 RFC3339 UTC，WebUI 走 [`log_time`]（Go `emitLog` 的本地时间格式）。
 
 use std::fmt;
 use std::io::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use gensokyo_webui::logs::{self, LogEntry};
 use tracing::field::{Field, Visit};
 use tracing::level_filters::LevelFilter;
 use tracing::span::{Attributes, Id, Record};
@@ -136,6 +143,18 @@ impl FieldVisitor {
             self.fields.push((field.name().to_owned(), value));
         }
     }
+
+    /// 拍平成一行：`<message> <key>=<value> ...`（stderr 与 WebUI 日志共用同一份正文）。
+    fn render(&self) -> String {
+        let mut body = self.message.clone().unwrap_or_default();
+        for (name, value) in &self.fields {
+            body.push(' ');
+            body.push_str(name);
+            body.push('=');
+            body.push_str(value);
+        }
+        body
+    }
 }
 
 /// 写 stderr 的订阅器。
@@ -178,21 +197,23 @@ impl Subscriber for StderrSubscriber {
         }
         let mut visitor = FieldVisitor::default();
         event.record(&mut visitor);
+        let body = visitor.render();
+
+        // WebUI 日志流：与 stderr 同一份过滤结果，等价 Go `mylog.emitLog` → `logChannel`。
+        logs::hub().push(LogEntry {
+            time: log_time(),
+            level: metadata.level().to_string(),
+            message: body.clone(),
+        });
 
         let mut stderr = std::io::stderr().lock();
         let _ = write!(
             stderr,
-            "{} {} {}: ",
+            "{} {} {}: {body}",
             timestamp(),
             metadata.level(),
             metadata.target()
         );
-        if let Some(message) = &visitor.message {
-            let _ = write!(stderr, "{message}");
-        }
-        for (name, value) in &visitor.fields {
-            let _ = write!(stderr, " {name}={value}");
-        }
         let _ = writeln!(stderr);
     }
 
@@ -208,11 +229,26 @@ fn timestamp() -> String {
         .unwrap_or_else(|_| "?".to_owned())
 }
 
+/// WebUI 日志的时间串，照 Go `mylog.emitLog`：
+/// `strings.ToUpper(time.Now().Format("2006/Jan/02 PM 03:04:05"))` → `2026/NOV/08 PM 03:04:05`。
+///
+/// Go 的 `time.Now()` 是本地时间；取不到本地偏移时退回 UTC，不让一行日志 panic。
+fn log_time() -> String {
+    let layout = time::macros::format_description!(
+        "[year]/[month repr:short]/[day] [period case:upper] [hour repr:12 padding:zero]:[minute]:[second]"
+    );
+    time::OffsetDateTime::now_local()
+        .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+        .format(layout)
+        .map(|stamp| stamp.to_ascii_uppercase())
+        .unwrap_or_else(|_| "?".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use tracing::level_filters::LevelFilter;
 
-    use super::{Filter, level_from_config, parse_level};
+    use super::{Filter, level_from_config, log_time, parse_level};
 
     #[test]
     fn config_level_matches_go_mapping() {
@@ -238,5 +274,27 @@ mod tests {
         assert_eq!(parse_level("OFF"), Some(LevelFilter::OFF));
         assert_eq!(parse_level("warning"), Some(LevelFilter::WARN));
         assert_eq!(parse_level("nonsense"), None);
+    }
+
+    #[test]
+    fn log_time_matches_go_layout() {
+        let stamp = log_time();
+        let (date, clock) = stamp.split_once(' ').expect("应有两段：日期 时间");
+        let date_parts: Vec<&str> = date.split('/').collect();
+        assert_eq!(date_parts.len(), 3, "{stamp}");
+        assert_eq!(date_parts[0].len(), 4, "四位年 {stamp}");
+        assert!(
+            date_parts[1].len() == 3 && date_parts[1].chars().all(|c| c.is_ascii_uppercase()),
+            "月份应是 Go `Jan` 的大写形 {stamp}"
+        );
+        assert_eq!(date_parts[2].len(), 2, "两位日 {stamp}");
+
+        let (period, time_of_day) = clock.split_once(' ').expect("应有 AM/PM {stamp}");
+        assert!(period == "AM" || period == "PM", "{stamp}");
+        let hms: Vec<&str> = time_of_day.split(':').collect();
+        assert_eq!(hms.len(), 3, "{stamp}");
+        let hour: u8 = hms[0].parse().expect("小时应是数字");
+        assert!((1..=12).contains(&hour), "12 小时制 {stamp}");
+        assert_eq!(hms[0].len(), 2, "小时补零 {stamp}");
     }
 }

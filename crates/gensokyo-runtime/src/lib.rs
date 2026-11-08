@@ -84,6 +84,12 @@
 //!   `<= 0` 取 300ms；失败重试 3 次、线性退避 1s×n 后丢弃）。Go 的 `StartWorker` 全仓零调用，
 //!   这里保持同构——提供完整实现与生命周期，默认不启动。
 //!
+//! # P14 上传 / idmap HTTP 端点
+//! - [`upload_http`]：`/uploadpic`（`channel_temp/<md5>.<ext>` + 静态 URL）、`/uploadpicv2`
+//!   （`oss_type` 0~10 分派到本地 / 云 OSS / 图床，回 `{url,width,height}`）与 `/getid`
+//!   （HMAC-SHA256 + ±300s 窗口；无 `lotus_password` 时仅回环可访问）。挂载位置与逐条
+//!   差异见该模块文档。
+//!
 //! # 未做项（后续里程碑）
 //! - 消息段：图片 / 语音 / 视频 / ark 卡片 / markdown / card 一律停留在文本形态，
 //!   `array_value` 不生效（细节见 [`inbound`] 模块文档）。
@@ -121,6 +127,8 @@ pub mod queue;
 /// post_url 事件上报（Go `Processor/Processor.go` 的 `PostMessageToUrls`，P5）。
 pub mod reporter;
 pub mod state;
+/// `/uploadpic` / `/uploadpicv2` / `/getid`（Go `server/uploadpic.go` + `server/getIDHandler.go`，P14）。
+pub mod upload_http;
 /// 反向 HTTP 回调（`server/webhook.go`，M1h-b）。
 pub mod webhook;
 /// 反向 WS 客户端与重连（`wsclient/`，M1h-b）。
