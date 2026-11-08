@@ -26,7 +26,7 @@
 //! | `active` / `wakeup` | 忽略 | 控制型标记，不影响本条合成；`send_private_msg_wakeup` 的
 //!   召回语义由 [`SendRequest::wakeup`] 承载，[`execute`] 置 `is_wakeup` 并强制不带回复 ID；
 //!   `[CQ:active]` 清空 `msg_id` / `event_id` 强制主动推送（见下节「被动回复身份」）；
-//!   SSM（`code:22009` 入队补发）仍未接线 |
+//!   SSM（`code:22009` 入队补发）见下节「SSM 补发」 |
 //!
 //! ## 消息体拆分与优先级
 //!
@@ -106,6 +106,20 @@
 //! `StoreCacheInMemory` 的行号双向映射），后续 `[CQ:reply,id=<虚拟号>]` 才能反查到它；
 //! 回写失败只 `warn`，不改变本次发送结果。
 //!
+//! ## SSM 补发（`code:22009`）
+//!
+//! 群聊发送失败且上游 `code == 22009`（消息被频控）时，把本次要发的消息体序列化成 JSON
+//! 放进 [`EchoStore::push_global_stack`]（Go `send_group_msg.go:483-490` 的
+//! `IsQQError(err, 22009)` 分支）；私聊**不入队**（Go `send_private_msg.go` 只记日志）。
+//!
+//! 补发要求三件事同时成立：群聊、`lazy_message_id` 开启、懒消息池取到的值不是 `"2000"`
+//! （主动推送不给补发机会，Go `send_group_msg.go:207-229`），且发生在**本条消息发送之前**
+//! （`:284-288`）。条数取配置 `AMsgRetryAsPMsg_Count`（结构体零值 0，模板给 30），只补发与本次群
+//! 相同的积压（`SendStackMessages`，`:2662-2697`）：每条覆盖 `msg_id`（懒池那个值）与
+//! `msg_seq`（每次 `NextMappingSeq` 一个新值），**不动** `event_id`；成功从队列删除，失败留在
+//! 队列里，再次 `22009` 会重新入队。删除按下标**倒序**做——Go 边遍历边正序删会跳过元素
+//! （在册缺陷，不复刻）。
+//!
 //! ## wakeup 终局回推
 //!
 //! 唤醒计划（`SendRequest::wakeup`）过了收件人还原之后的终局——成功，或合成 / 上传 /
@@ -143,7 +157,7 @@ use gensokyo_qq::dto::{
     FileUpload, InputNotify, Markdown, Media, MessageToCreate, StreamSse, file_type, msg_type,
 };
 use gensokyo_storage::EchoStore;
-use gensokyo_storage::echo::DEFAULT_MESSAGE_ID;
+use gensokyo_storage::echo::{DEFAULT_MESSAGE_ID, MessageGroupPair};
 use serde_json::Value;
 
 use crate::at_everyone::{self, Reservation};
@@ -235,6 +249,18 @@ async fn execute_inner(
     } else {
         resolve_passive(context, plan, deps, &openid)
     };
+    // SSM 补发（Go `send_group_msg.go:207-288`）：群聊、`lazy_message_id` 开启、且懒消息池取到
+    // 的不是 `"2000"` 时，先把栈里积压的同群消息补发掉，再发本条。补发用懒池那个值当被动身份
+    // ——Go 此时还没做后面那几步映射表兜底（`:291-331`）。
+    if !plan.wakeup
+        && let (SendTarget::Group(_), Some(echo)) = (&plan.target, deps.echo)
+        && context.config().snapshot().get_lazy_message_id()
+    {
+        let lazy = lazy_message_id(echo, plan, plan.target.id(), &openid);
+        if lazy != DEFAULT_MESSAGE_ID {
+            send_stack_messages(context, echo, &openid, &lazy).await;
+        }
+    }
     stamp_message(&mut primary, &passive, deps.echo);
     for extra in &mut extras {
         stamp_message(extra, &passive, deps.echo);
@@ -267,6 +293,8 @@ async fn execute_inner(
 }
 
 /// 按 target 发出单条消息，成功后回写 echo；失败原样上抛，由调用方决定回滚还是继续。
+///
+/// 群聊失败且上游是 `22009`（频控）时顺手入 SSM 队列（见模块文档「SSM 补发」）。
 async fn send_body(
     context: &ActionContext,
     target: &SendTarget,
@@ -274,7 +302,12 @@ async fn send_body(
     message: MessageToCreate,
     echo: Option<&EchoStore>,
 ) -> Result<String> {
-    let response = match target {
+    // 入队要用原始消息体，而发送会把它移走，所以群聊在发送前先序列化一份
+    let payload = match target {
+        SendTarget::Group(_) => serde_json::to_string(&message).ok(),
+        SendTarget::Private(_) => None,
+    };
+    let sent = match target {
         SendTarget::Group(_) => {
             context
                 .api()
@@ -287,9 +320,103 @@ async fn send_body(
                 .send_c2c_message(openid.to_owned(), message)
                 .await
         }
-    }?;
+    };
+    let response = match sent {
+        Ok(response) => response,
+        Err(err) => {
+            // 私聊不入队（Go `send_private_msg.go` 在该分支只记日志）
+            if let (SendTarget::Group(_), Some(echo)) = (target, echo)
+                && is_ssm_retry(&err)
+            {
+                enqueue_ssm(echo, openid, payload, &err);
+            }
+            return Err(err);
+        }
+    };
     record_sent_message(echo, &response.id);
     Ok(response.id)
+}
+
+/// 上游业务码是否是需要 SSM 补发的频控（Go `retry_policy.go` 的 `IsQQError(err, 22009)`）。
+fn is_ssm_retry(err: &Error) -> bool {
+    matches!(err, Error::Upstream { code: 22009, .. })
+}
+
+/// 把发送失败的群消息体放进 SSM 队列（Go `send_group_msg.go:483-490` 的入队分支）。
+///
+/// 队列元素只承载不解释的字符串载荷，这里存的就是 [`MessageToCreate`] 的 JSON——
+/// 补发时反序列化回来，`msg_id` / `msg_seq` 再按当时那条被动回复重写。
+fn enqueue_ssm(echo: &EchoStore, group_openid: &str, payload: Option<String>, err: &Error) {
+    let Some(payload) = payload else {
+        tracing::warn!(group = %group_openid, error = %err, "SSM 入队跳过：消息体无法序列化");
+        return;
+    };
+    echo.push_global_stack(MessageGroupPair {
+        payload: Some(payload),
+        ..MessageGroupPair::new(group_openid)
+    });
+}
+
+/// 补发 SSM 队列里积压的**本群**消息（Go `SendStackMessages`，`send_group_msg.go:2662-2697`）。
+///
+/// `count` 取配置 `AMsgRetryAsPMsg_Count`（结构体零值 0，模板给 30）；`pop` 只取副本，发送
+/// 成功才删。每条覆盖 `msg_id` / `msg_seq`（每次 [`EchoStore::next_mapping_seq`] 一个新值），**不动** `event_id`
+/// （Go 同；上游仍可能因此回报 40034025，是否刷新另议）。失败只告警留在队列里，再次 `22009`
+/// 则重新入队（Go 同——`pop` 未删除，重入队等于多留一份副本，下次补发会再试一遍）。
+///
+/// 删除按下标**倒序**做：队列在遍历期间可能被重新入队追加（只会加在尾部，不影响前面的下标），
+/// 倒序删则前面的元素下标始终有效；Go 的正序删除会跳过元素，是在册缺陷。
+async fn send_stack_messages(
+    context: &ActionContext,
+    echo: &EchoStore,
+    group_openid: &str,
+    msg_id: &str,
+) {
+    let count = usize::try_from(context.config().snapshot().get_ato_p_count()).unwrap_or(0);
+    let pairs = echo.pop_global_stack_multi(count);
+    let mut sent = Vec::new();
+    for (index, pair) in pairs.iter().enumerate() {
+        // 别的群的积压留给它自己的被动回复补发
+        if pair.group != group_openid {
+            continue;
+        }
+        let Some(mut body) = pair
+            .payload
+            .as_deref()
+            .and_then(|payload| serde_json::from_str::<MessageToCreate>(payload).ok())
+        else {
+            // 载荷是发送失败时自己写进去的，解不出来说明已损坏；留着只会每次补发都失败
+            tracing::warn!(
+                correlation_id = %pair.correlation_id,
+                "SSM 消息体缺失或无法解析，丢弃该条"
+            );
+            sent.push(index);
+            continue;
+        };
+        body.msg_seq = Some(u32::try_from(echo.next_mapping_seq(msg_id)).unwrap_or_default());
+        // Go 直接赋 `MsgID = messageid`；空值时那边靠 `omitempty` 整键消失，这里同样落 `None`
+        body.msg_id = (!msg_id.is_empty()).then(|| msg_id.to_owned());
+        match context
+            .api()
+            .send_group_message(pair.group.clone(), body)
+            .await
+        {
+            Ok(_) => sent.push(index),
+            Err(err) => {
+                tracing::warn!(
+                    correlation_id = %pair.correlation_id,
+                    error = %err,
+                    "SSM 补发失败，留在队列里等下次被动回复"
+                );
+                if is_ssm_retry(&err) {
+                    echo.push_global_stack(pair.clone());
+                }
+            }
+        }
+    }
+    for index in sent.into_iter().rev() {
+        echo.remove_from_global_stack(index);
+    }
 }
 
 /// 唤醒终局回推的 `notice_type`（Go `WakeupResponseNotice.NoticeType`）。
@@ -1581,6 +1708,7 @@ mod tests {
         JoinRequestList, Markdown, MediaResponse, MessageResponse, MessageToCreate, StreamSse,
         file_type, msg_type,
     };
+    use gensokyo_storage::echo::MessageGroupPair;
     use gensokyo_storage::{EchoStore, IdMapOptions, IdMapStore};
     use serde_json::Value;
     use tempfile::TempDir;
@@ -4314,5 +4442,293 @@ mod tests {
         let sent = api.sent();
         assert_eq!(sent.len(), 3, "三条都各打了一次上游");
         assert_eq!(sent[2].content.as_deref(), Some("第五条"), "顺序与计划一致");
+    }
+
+    // ---- SSM 补发：入队 / 触发 / 补发语义（Go send_group_msg.go:207-288 / 483-490 / 2662-2697） ----
+
+    /// 往队列里塞一条积压：载荷用真实 [`MessageToCreate`] 序列化，与生产入队同构。
+    fn push_ssm(echo: &EchoStore, group: &str, text: &str) {
+        let body = MessageToCreate {
+            content: Some(text.to_owned()),
+            ..MessageToCreate::default()
+        };
+        echo.push_global_stack(MessageGroupPair {
+            payload: Some(serde_json::to_string(&body).expect("消息体应可序列化")),
+            ..MessageGroupPair::new(group)
+        });
+    }
+
+    /// 队列里每条载荷的正文（断言顺序 / 存活情况用）。
+    fn ssm_texts(echo: &EchoStore, count: usize) -> Vec<String> {
+        echo.pop_global_stack_multi(count)
+            .iter()
+            .filter_map(|pair| pair.payload.as_deref())
+            .filter_map(|payload| serde_json::from_str::<MessageToCreate>(payload).ok())
+            .filter_map(|body| body.content)
+            .collect()
+    }
+
+    /// 补发生效所需的配置：lazy 开启 + 队列条数（`Settings::default()` 的 `ato_p_count` 是 0）。
+    const SSM_SETTINGS: &str = "  lazy_message_id: true\n  AMsgRetryAsPMsg_Count: 3\n";
+
+    #[tokio::test]
+    async fn group_22009_enqueues_the_failed_body() {
+        let api = Arc::new(FakeQqApi::default().with_send_error(Error::Upstream {
+            code: 22009,
+            message: "频控".to_owned(),
+        }));
+        let (_dir, context) = context(Arc::clone(&api));
+        let echo = EchoStore::new();
+        let media = no_media();
+        let plan = text_plan(SendTarget::Group(OPENID.to_owned()), "被频控的正文");
+
+        let err = execute(&context, &plan, &deps(&media, Some(&echo)))
+            .await
+            .expect_err("22009 仍要如实回报失败");
+
+        assert!(matches!(err, Error::Upstream { code: 22009, .. }));
+        assert_eq!(echo.global_stack_len(), 1, "失败的群消息应入队");
+        let pair = echo.pop_global_stack_multi(1).remove(0);
+        assert_eq!(pair.group, OPENID);
+        assert!(
+            pair.correlation_id.starts_with("ssm-"),
+            "关联标识: {}",
+            pair.correlation_id
+        );
+        assert!(pair.enqueue_time.is_some());
+        let body: MessageToCreate =
+            serde_json::from_str(pair.payload.as_deref().expect("payload 应是消息体 JSON"))
+                .expect("payload 应是 MessageToCreate");
+        assert_eq!(body.content.as_deref(), Some("被频控的正文"));
+    }
+
+    #[tokio::test]
+    async fn only_group_22009_enters_the_queue() {
+        // 非 22009：不入队
+        let api = Arc::new(FakeQqApi::default().with_send_error(Error::Upstream {
+            code: 1500,
+            message: "别的错".to_owned(),
+        }));
+        let (_dir, only_group) = context(Arc::clone(&api));
+        let echo = EchoStore::new();
+        let media = no_media();
+        let plan = text_plan(SendTarget::Group(OPENID.to_owned()), "正文");
+        execute(&only_group, &plan, &deps(&media, Some(&echo)))
+            .await
+            .expect_err("其他上游错误同样失败");
+        assert_eq!(echo.global_stack_len(), 0, "只有 22009 入队");
+
+        // 私聊 22009：不入队（Go `send_private_msg.go` 只记日志）
+        let api = Arc::new(FakeQqApi::default().with_send_error(Error::Upstream {
+            code: 22009,
+            message: "频控".to_owned(),
+        }));
+        let (_dir, private_context) = context(Arc::clone(&api));
+        let echo = EchoStore::new();
+        let plan = text_plan(SendTarget::Private(MEMBER_OPENID.to_owned()), "正文");
+        execute(&private_context, &plan, &deps(&media, Some(&echo)))
+            .await
+            .expect_err("私聊同样失败");
+        assert_eq!(echo.global_stack_len(), 0, "私聊不入队");
+    }
+
+    #[tokio::test]
+    async fn ssm_resent_only_for_the_current_group() {
+        let api = Arc::new(
+            FakeQqApi::default()
+                .with_send("SSM-1")
+                .with_send("SSM-2")
+                .with_send("MAIN"),
+        );
+        let (_dir, context) = echo_context(Arc::clone(&api), SSM_SETTINGS);
+        let echo = EchoStore::new();
+        echo.add_lazy_message_id(OPENID, "POOL-MSG", SystemTime::now());
+        push_ssm(&echo, OPENID, "积压一");
+        push_ssm(&echo, "OTHER-GROUP-OPENID", "别的群");
+        push_ssm(&echo, OPENID, "积压二");
+        let media = no_media();
+        let plan = text_plan(SendTarget::Group(OPENID.to_owned()), "正文");
+
+        execute(&context, &plan, &deps(&media, Some(&echo)))
+            .await
+            .expect("应发送成功");
+
+        let sent = api.sent();
+        let texts: Vec<Option<&str>> = sent.iter().map(|body| body.content.as_deref()).collect();
+        assert_eq!(
+            texts,
+            vec![Some("积压一"), Some("积压二"), Some("正文")],
+            "先补发本群积压，再发本条"
+        );
+        assert_eq!(echo.global_stack_len(), 1, "异群那条留在队列里");
+        assert_eq!(ssm_texts(&echo, 1), vec!["别的群"]);
+    }
+
+    #[tokio::test]
+    async fn ssm_consumes_increasing_msg_seq() {
+        let api = Arc::new(
+            FakeQqApi::default()
+                .with_send("SSM-1")
+                .with_send("SSM-2")
+                .with_send("MAIN"),
+        );
+        let (_dir, context) = echo_context(Arc::clone(&api), SSM_SETTINGS);
+        let echo = EchoStore::new();
+        echo.add_lazy_message_id_v2(OPENID, MEMBER_OPENID, "POOL-MSG", SystemTime::now());
+        push_ssm(&echo, OPENID, "积压一");
+        push_ssm(&echo, OPENID, "积压二");
+        let media = no_media();
+        let mut plan = text_plan(SendTarget::Group(OPENID.to_owned()), "正文");
+        plan.echo_context.user_id = Some(MEMBER_OPENID.to_owned());
+
+        execute(&context, &plan, &deps(&media, Some(&echo)))
+            .await
+            .expect("应发送成功");
+
+        let sent = api.sent();
+        let seqs: Vec<Option<u32>> = sent.iter().map(|body| body.msg_seq).collect();
+        assert_eq!(
+            seqs,
+            vec![Some(1), Some(2), Some(3)],
+            "补发与主条共用同一 msg_id，seq 逐条递增不重复"
+        );
+        let ids: Vec<Option<&str>> = sent.iter().map(|body| body.msg_id.as_deref()).collect();
+        assert_eq!(
+            ids,
+            vec![Some("POOL-MSG"), Some("POOL-MSG"), Some("POOL-MSG")]
+        );
+    }
+
+    #[tokio::test]
+    async fn ssm_success_removes_and_22009_failure_requeues() {
+        let api = Arc::new(
+            FakeQqApi::default()
+                .push_send(Err(Error::Upstream {
+                    code: 22009,
+                    message: "频控".to_owned(),
+                }))
+                .with_send("SSM-2")
+                .with_send("MAIN"),
+        );
+        let (_dir, context) = echo_context(Arc::clone(&api), SSM_SETTINGS);
+        let echo = EchoStore::new();
+        echo.add_lazy_message_id(OPENID, "POOL-MSG", SystemTime::now());
+        push_ssm(&echo, OPENID, "失败的");
+        push_ssm(&echo, OPENID, "成功的");
+        let media = no_media();
+        let plan = text_plan(SendTarget::Group(OPENID.to_owned()), "正文");
+
+        execute(&context, &plan, &deps(&media, Some(&echo)))
+            .await
+            .expect("主消息成功");
+
+        assert_eq!(
+            echo.global_stack_len(),
+            2,
+            "成功那条已移除；失败那条留在原地，另有一份重新入队的副本"
+        );
+        assert_eq!(ssm_texts(&echo, 2), vec!["失败的", "失败的"]);
+        let pairs = echo.pop_global_stack_multi(2);
+        assert_eq!(
+            pairs[0].correlation_id, pairs[1].correlation_id,
+            "重新入队保留原关联标识"
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_retry_count_skips_ssm() {
+        let api = Arc::new(FakeQqApi::default().with_send("MAIN"));
+        let (_dir, context) = echo_context(
+            Arc::clone(&api),
+            "  lazy_message_id: true\n  AMsgRetryAsPMsg_Count: 0\n",
+        );
+        let echo = EchoStore::new();
+        echo.add_lazy_message_id(OPENID, "POOL-MSG", SystemTime::now());
+        push_ssm(&echo, OPENID, "积压一");
+        push_ssm(&echo, OPENID, "积压二");
+        let media = no_media();
+        let plan = text_plan(SendTarget::Group(OPENID.to_owned()), "正文");
+
+        execute(&context, &plan, &deps(&media, Some(&echo)))
+            .await
+            .expect("应发送成功");
+
+        assert_eq!(api.sent().len(), 1, "只发本条");
+        assert_eq!(echo.global_stack_len(), 2, "队列原样保留");
+    }
+
+    #[tokio::test]
+    async fn ssm_skipped_when_lazy_off_or_active_push() {
+        // lazy 关：队列有积压也不补发
+        let api = Arc::new(FakeQqApi::default().with_send("MAIN"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let echo = EchoStore::new();
+        echo.add_lazy_message_id(OPENID, "POOL-MSG", SystemTime::now());
+        push_ssm(&echo, OPENID, "积压");
+        let media = no_media();
+        let plan = text_plan(SendTarget::Group(OPENID.to_owned()), "正文");
+        execute(&context, &plan, &deps(&media, Some(&echo)))
+            .await
+            .expect("应发送成功");
+        assert_eq!(api.sent().len(), 1, "lazy 关时不补发");
+        assert_eq!(echo.global_stack_len(), 1);
+
+        // lazy 开但懒池没有可用值（等价 "2000" 主动推送）：同样不补发
+        let api = Arc::new(FakeQqApi::default().with_send("MAIN"));
+        let (_dir, context) = echo_context(Arc::clone(&api), SSM_SETTINGS);
+        let echo = EchoStore::new();
+        push_ssm(&echo, OPENID, "积压");
+        execute(&context, &plan, &deps(&media, Some(&echo)))
+            .await
+            .expect("应发送成功");
+        assert_eq!(api.sent().len(), 1, "懒池值为 \"2000\" 时不补发");
+        assert_eq!(echo.global_stack_len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ssm_removes_every_resent_entry() {
+        let api = Arc::new(
+            FakeQqApi::default()
+                .with_send("SSM-1")
+                .with_send("SSM-2")
+                .with_send("SSM-3")
+                .with_send("MAIN"),
+        );
+        let (_dir, context) = echo_context(Arc::clone(&api), SSM_SETTINGS);
+        let echo = EchoStore::new();
+        echo.add_lazy_message_id(OPENID, "POOL-MSG", SystemTime::now());
+        for text in ["一", "二", "三"] {
+            push_ssm(&echo, OPENID, text);
+        }
+        let media = no_media();
+        let plan = text_plan(SendTarget::Group(OPENID.to_owned()), "正文");
+
+        execute(&context, &plan, &deps(&media, Some(&echo)))
+            .await
+            .expect("应发送成功");
+
+        assert_eq!(api.sent().len(), 4, "三条积压 + 本条");
+        assert_eq!(
+            echo.global_stack_len(),
+            0,
+            "三条全成功：倒序删除把每一条都删掉（正序删会漏一条）"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_echo_ssm_is_a_no_op() {
+        let api = Arc::new(FakeQqApi::default().with_send_error(Error::Upstream {
+            code: 22009,
+            message: "频控".to_owned(),
+        }));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let plan = text_plan(SendTarget::Group(OPENID.to_owned()), "正文");
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect_err("未装配 echo 时行为与接线前一致");
+
+        assert_eq!(api.sent().len(), 1);
     }
 }
