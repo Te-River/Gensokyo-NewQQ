@@ -26,7 +26,8 @@ futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["fs", "macros", "net", "rt", "sync", "time"] }
-tokio-tungstenite.workspace = true
+# 反向 WS 客户端 + QQ 网关客户端；网关走 wss://，TLS feature 只能由成员加（workspace 只声明版本）
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 tracing.workspace = true
 
 [dev-dependencies]

@@ -295,6 +295,8 @@ settings:
             http_bind: Some("127.0.0.1:0".to_owned()),
             // 单测不关心热重载：临时目录在用例结束即删，别留下监听线程。
             config_watch: false,
+            // 单测不连 QQ 网关。
+            gateway: false,
         }
     }
 

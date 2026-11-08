@@ -45,6 +45,7 @@ use std::time::Duration;
 use axum::Router;
 use gensokyo_config::{ConfigWatcher, ReloadOutcome, Settings, WatcherHandle};
 use gensokyo_core::{Error, Result};
+use gensokyo_qq::{ReqwestTransport, TokenConfig, TokenManager};
 use gensokyo_storage::EchoStore;
 use gensokyo_storage::idmap::{DEFAULT_IDENTITY_PATH, DEFAULT_MSG_PATH, IdMapOptions, IdMapStore};
 use gensokyo_webui::{WebUi, WebUiState};
@@ -54,6 +55,7 @@ use tokio::sync::oneshot;
 use tokio::task::{AbortHandle, JoinHandle};
 
 use crate::event_hub::EventHub;
+use crate::gateway::{GatewayClient, GatewayHandle, GatewayOptions};
 use crate::state::AppState;
 use crate::ws_client::{WsClient, WsClientHandle};
 
@@ -75,6 +77,8 @@ pub struct RuntimeOptions {
     pub http_bind: Option<String>,
     /// 是否启动 `config.yml` 热重载监听（默认 `true`；测试与嵌入场景可关）。
     pub config_watch: bool,
+    /// 是否启动 QQ 上游 WS 网关订阅（默认 `true`；缺凭据时自动跳过，测试可关）。
+    pub gateway: bool,
 }
 
 impl Default for RuntimeOptions {
@@ -84,6 +88,7 @@ impl Default for RuntimeOptions {
             http_bind: None,
             // 手写 Default：派生会给 `false`，而生产默认要监听配置文件
             config_watch: true,
+            gateway: true,
         }
     }
 }
@@ -258,6 +263,14 @@ impl Runtime {
             .any(|address| !address.trim().is_empty());
         let ws_client = has_ws_address.then(|| WsClient::start(state.clone()));
 
+        // QQ 上游 WS 网关是入站链的源头：凭据齐备时订阅 dispatch 事件，缺凭据只 warn。
+        let gateway = if options.gateway {
+            start_gateway(&state)
+        } else {
+            tracing::info!("gateway=false，QQ 上游 WS 网关未启动");
+            None
+        };
+
         // 会话清理任务只在 WebUI 挂载时存在；句柄未 `shutdown` 就 drop 时由 `Drop` 中止。
         let webui_cleanup = webui.as_ref().map(spawn_session_cleanup);
 
@@ -274,11 +287,42 @@ impl Runtime {
             ws,
             http,
             ws_client,
+            gateway,
             hub: state.hub().clone(),
             webui_cleanup,
             config_watch,
         })
     }
+}
+
+/// 启动 QQ 上游 WS 网关（任务 #70）。
+///
+/// 凭据齐备时用 `ReqwestTransport` + [`TokenManager`] 装配；缺 `app_id` / `client_secret`
+/// 或 TLS 传输建不起来时只 `warn` 跳过——入站链退回 webhook / 测试注入，不影响 WS/HTTP 启动。
+fn start_gateway(state: &AppState) -> Option<GatewayHandle> {
+    let settings = state.config().snapshot();
+    let app_id = settings.get_app_id();
+    let client_secret = settings.get_client_secret().trim();
+    if app_id == 0 || client_secret.is_empty() {
+        tracing::warn!(
+            "未配置 app_id/client_secret，QQ 上游 WS 网关不订阅事件（入站事件不会到达）"
+        );
+        return None;
+    }
+
+    let transport = match ReqwestTransport::new() {
+        Ok(transport) => Arc::new(transport),
+        Err(err) => {
+            tracing::warn!(error = %err, "构建 QQ HTTP 传输失败，QQ 上游 WS 网关不启动");
+            return None;
+        }
+    };
+    let token_config = TokenConfig::new(app_id.to_string(), client_secret)
+        .with_sandbox(settings.get_sandbox_mode());
+    let tokens = Arc::new(TokenManager::new(Arc::clone(&transport), token_config));
+    Some(
+        GatewayClient::new(transport, tokens, state, GatewayOptions::default()).start(),
+    )
 }
 
 /// idmap 的打开参数：AppID 参与 OpenID 的 key、`hash_id` 决定 vUIN 的派生方式、
@@ -480,6 +524,8 @@ pub struct RuntimeHandle {
     ws: Option<ServerHandle>,
     http: Option<ServerHandle>,
     ws_client: Option<WsClientHandle>,
+    /// QQ 上游 WS 网关（`gateway=false`、缺凭据或传输构建失败时为 `None`）。
+    gateway: Option<GatewayHandle>,
     hub: EventHub,
     /// WebUI 会话清理任务（未挂 WebUI 时为 `None`）。
     webui_cleanup: Option<JoinHandle<()>>,
@@ -506,6 +552,12 @@ impl RuntimeHandle {
         self.ws_client
             .as_ref()
             .map_or(0, WsClientHandle::address_count)
+    }
+
+    /// QQ 上游 WS 网关是否已启动（`gateway=false`、缺凭据或传输构建失败时为 `false`）。
+    #[must_use]
+    pub fn gateway_started(&self) -> bool {
+        self.gateway.is_some()
     }
 
     /// 事件总线：入站发布、反向 WS 订阅；外部也可订阅做旁路观测。
@@ -537,6 +589,12 @@ impl RuntimeHandle {
             let addresses = client.address_count();
             client.shutdown(limit).await;
             tracing::debug!(addresses, "反向 WS 客户端已关闭");
+        }
+
+        // QQ 网关也是出站连接：先发关闭信号再收 listener。
+        if let Some(gateway) = self.gateway.take() {
+            gateway.shutdown(limit).await;
+            tracing::debug!("QQ 上游 WS 网关已关闭");
         }
 
         // 会话清理是纯定时器：没有需要落盘的收尾，直接中止。
@@ -602,6 +660,9 @@ impl RuntimeHandle {
         if let Some(client) = &self.ws_client {
             client.abort();
         }
+        if let Some(gateway) = &self.gateway {
+            gateway.abort();
+        }
         if let Some(task) = &self.webui_cleanup {
             task.abort();
         }
@@ -631,6 +692,10 @@ impl Drop for RuntimeHandle {
         if let Some(client) = self.ws_client.take() {
             tracing::warn!("RuntimeHandle 未 shutdown 即被 drop，已中止反向 WS 客户端");
             drop(client);
+        }
+        if let Some(gateway) = self.gateway.take() {
+            tracing::warn!("RuntimeHandle 未 shutdown 即被 drop，已中止 QQ 上游 WS 网关");
+            drop(gateway);
         }
         for server in [self.ws.take(), self.http.take()].into_iter().flatten() {
             if server.task.is_finished() {

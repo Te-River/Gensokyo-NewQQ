@@ -36,6 +36,14 @@
 //!   [`inbound::Inbound`]（15 类事件，随 `cargo test` 自动跑，零 Go 依赖）。金样重生成命令、
 //!   `time` 归一化约定与新增事件类型的做法见该文件的模块文档。
 //!
+//! # 任务 #70：QQ 上游事件 WS 网关
+//! - [`gateway::GatewayClient`]：`GET /gateway/bot` → Hello → Identify/Resume → 心跳 +
+//!   dispatch 读循环；事件经 [`inbound::Inbound`] 转换后发布到 [`event_hub::EventHub`]。
+//!   op 7 / op 9 / 4009 走 resume 或重新 identify，连接失败按 1s→60s 指数退避。
+//! - [`boot::Runtime`] 在 hub / idmap / echo 装配后启动网关（`RuntimeOptions::gateway`，
+//!   默认 `true`；缺 `app_id` / `client_secret` 只 `warn` 跳过），句柄随
+//!   [`RuntimeHandle::shutdown`] 关闭、随 `Drop` 中止。
+//!
 //! # M3 WebUI 挂载
 //! - `disable_webui=false`（默认）时 [`boot::Runtime`] 建一份 [`gensokyo_webui::WebUiState`]
 //!   （配置走 `ConfigManager` 快照，热重载即时生效），把 `WebUi::router` 挂到 HTTP API 与
@@ -89,6 +97,8 @@ pub mod builtin;
 pub mod deferred;
 pub mod dispatcher;
 pub mod event_hub;
+/// QQ 上游事件 WS 网关客户端：`/gateway/bot` → Identify/Resume → dispatch（任务 #70）。
+pub mod gateway;
 pub mod http_api;
 /// QQ 事件 → OneBot 事件（`Processor/`，M1h-b）。
 pub mod inbound;
@@ -109,6 +119,7 @@ pub use boot::{DEFAULT_SHUTDOWN_TIMEOUT, Runtime, RuntimeHandle, RuntimeOptions}
 pub use deferred::DEFERRED_FIELD;
 pub use dispatcher::{Dispatcher, RETCODE_BAD_REQUEST, RETCODE_INTERNAL, RETCODE_UNKNOWN_ACTION};
 pub use event_hub::EventHub;
+pub use gateway::{GatewayClient, GatewayHandle, GatewayOptions};
 pub use inbound::Inbound;
 pub use intent::IntentPlan;
 pub use media::{FetchedMedia, MAX_MEDIA_BYTES, MediaRuntime};
