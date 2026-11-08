@@ -1,0 +1,96 @@
+# Go↔Rust 全链路 parity 审计（进行中）
+
+> 起因：用户实测发现 Rust 缺 QQ 上游事件 WS 客户端（#70 补）。用户指令：所有流程逐项过一遍，不许有盲区。
+> 本文由三域并行审计汇总：A 连接与入站 / B 出站与消息链 / C 基础设施。逐项 file:line、状态=已对齐/部分/缺失。
+
+## A. 连接与入站
+
+| 级别 | 缺口 | Go 证据 | Rust 现状 | 状态 | 规模 |
+|---|---|---|---|---|---|
+| 主干 | QQ 上游事件 WS 网关 | main.go:315,375-400；botgo/websocket/client/client.go:64-138,155-185,254-349 | 无 gateway 模块（#70 在制） | 缺失 | 1200-1800 行 |
+| 主干 | `post_url` 上报 | Processor/Processor.go:402-452 | 无运行期实现（仅配置字段） | 缺失 | 150-250 行 |
+| 功能 | 正向 WS 不下发事件 | server/wsserver.go:111-112 + Processor.go:292-330 | ws_server.rs:138-170 只收 action，无 hub 订阅 | 缺失（P4） | 120-200 行 |
+| 功能 | 反向 WS 收到 action 不 dispatch | wsclient/ws.go:249-261 | ws_client.rs:275-278 仅 debug | 缺失（P4） | 50-100 行 |
+| 安全 | webhook ed25519 签名 / op13 | server/webhook.go:94,115-120,163-193 | webhook.rs 不校验、op13 回 501 | 缺失（Critical） | 150-250 行 |
+| 功能 | union_webhook 扇出 | main.go:530,1046-1090 | 无 | 缺失 | 80-120 行 |
+| 功能 | 反向 WS TLS/代理 | ws.go:352-355 | 无 TLS/代理 | 缺失 | 30-80 行 |
+| 功能 | `array_value` 消息段 | ProcessGroupMessage.go:189-190 | inbound.rs:61-63 自述未实现 | 缺失 | 300-500 行 |
+| 功能 | `remove_at`/`convert_other_at` | message_parser.go:1679-1721,1877,1895 | 无 RevertTransformedText | 缺失 | 400-700 行 |
+| 功能 | `enable_change_word` | main.go:765-770,787-792 | 仅配置字段 | 缺失 | 待估 |
+| 功能 | `op_user_id_type`/`http_only_bot` | Processor.go:245-270,374-399 | 无 | 缺失 | 待估 |
+| 边角 | 401/403 语义 | wsserver.go:85-91；httpapi.go:28 | auth.rs 统一 401 | 部分 | 小 |
+| — | 15 类 QQ 事件转换 | main.go:746-887,889-930 | inbound.rs:282-328 | **已对齐** | — |
+| — | intents 位表 | botgo/event/register.go:100-172 | intent.rs:77-95 | **已对齐**（待 #70 消费） | — |
+
+## C. 基础设施
+
+| 级别 | 缺口 | Go 证据 | Rust 现状 | 状态 |
+|---|---|---|---|---|
+| P0 | bbolt→redb 导入器（含 UserInfo 表） | map_service.go:124；new_service.go:96；main.go:371 | 无（storage/lib.rs:5 留给后续） | 缺失 |
+| P0 | WebUI 登录路径兼容 `/api/check-login-status` | webui/api.go:47 | `/api/checkLoginStatus`（前端 404） | 不兼容 |
+| P0 | `/uploadpic`、`/uploadpicv2`、`/getid` HTTP 端点 | main.go:508,523-524；server/uploadpic.go；server/getIDHandler.go:104 | 无路由 | 缺失（/getid 安全 High） |
+| P0 | idmap 解绑/重绑定 UpdateVirtualValue*/ForceUnbindID | service.go:1405,1654,2036,2394 | grpc.rs 2 RPC unimplemented | 缺失 |
+| P1 | WebUI 余 9 路由（config 写/accounts/status/logs WS/cookie 持久化） | webui/api.go:36-134；cookie.go:15 | 仅 4 条路由、登录纯内存 | 缺失 |
+| P1 | 图床后端 4/5/6/9/10 | imagehosting/hosting.go:45-63 | 仅 ChatGlm(7)/Ukaka(8) | 部分 |
+| P1 | oss 阿里/百度/腾讯后端 | oss/{aliyun,baidu,tencent}.go | 无 | 缺失 |
+| P1 | acnode AC 自动机 | acnode/acnode.go:17-111 | 无 | 缺失 |
+| P1 | messagequeue（发送队列/限速） | messagequeue/queue.go:96-122 | 无 | 缺失 |
+| P1 | botstats + Prometheus `/metrics` | botstats/botstats.go；main.go:522,1140-1175 | builtin.rs 返回 0；无端点 | 缺失 |
+| P2 | unioncache / url 短链 / sys 全量 | unioncache/*；url/shorturl.go；sys/* | 无 / 仅 local_ip | 缺失 |
+| P2 | 视频/QR/SSRF 防护 | images/*；sys/* | media/lib.rs:108-118 未做清单 | 缺失 |
+| — | idmap 核心/echo/config/热重载 | 见审计表 | 见审计表 | **已对齐**（Rust 多 `enable_at_everyone_limit` 1 键） |
+| — | Settings 字段/accessor/restart 34 项 | structs.go 184 键；config.go:38-48 | 185 键（多 1）/ 1:1 accessor / diff.rs 34 项 | **已对齐** |
+| — | 配置自愈 ensureConfigComplete | config.go:350 | 无（仅首次模板生成） | 缺失 |
+
+## B. 出站 action 与消息链
+
+### B1-3. action 全集 / 消息链特性 / 媒体链
+
+**Action 全集**：Go 53 个唯一注册名（50 canonical + 3 别名）→ Rust **53/53 覆盖，缺失 0**；清单漂移：Rust `KNOWN_ACTIONS` 多 3 个 Go 从未注册的素材管理扩展（upload/get_list/delete_media_image），属 Rust 扩展（Medium，登记）。
+
+**消息链特性矩阵**（对齐=已对齐）：reply/echo ✓；msg_type 0/2/6/7/8 ✓；markdown/keyboard ✓；card 部分（私聊也支持=扩展；本地 pic 未上传）；input_notify ✓；stream/SSE ✓；**qqmusic 缺失**（降级分享文案，无歌曲查询/模板/键盘）；forward ✓（保留 node 媒体）；raw ✓；wakeup/active ✓；SSM ✓（仅群入队同 Go）；懒消息/2000/seq ✓；**at：AppID→BotID 未实现、add_at_group 无消费者**；auto_escape 刻意差异（Rust 尊重该字段）；array/string_ob11 ✓。
+
+**媒体链**：local/url/base64 四类 ✓；**多媒体段（无 markdown）1400（P1 修复中）**；**>5MB 分片上传缺失**；**silk 转码/图片压缩未接线**；素材链 oss_type=7 ✓；**图床 provider 仅 7/8（缺 4/5/6/9/10）**；**图床上传无重试**；**card 本地 pic_url 未上传（1400）**；markdown 内嵌图替换 ✓；unknown_* 透传 ✓。
+
+### B4. CQ 码进出站
+
+| 项 | Go | Rust | 状态 | 置信 |
+|---|---|---|---|---|
+| 转义口径 | 出站只转 `,` `]` `&`，不转 `[`（handlers/cqcode.go） | cqcode.rs:7-12,58-73 显式跟随 Go | 已对齐（刻意偏离规范） | High |
+| 参数容错 | `:` 仅 stream 认、裸片段并入前一键值 | cqcode.rs:26-47 同口径；大小写不敏感 | 已对齐 | High |
+| 未知码 | 原样保留文本 | Segment::raw_or_cq 逐字节透传 | 已对齐 | High |
+| `voice` 别名 | voice≡record | 码表有 voice，OutboundPlan 归一需运行验证 | 部分 | Medium |
+| at 顺序 | 纯 at 回退原文 | 缺 qq/反查失败原样透传 | 已对齐 | High |
+| AppID→BotID | message_parser.go:1679-1682（do_not_replace_appid） | 全仓无实现 | **缺失** | High |
+| node 出站 | CQ 管道无 outbound node | cqcode.rs:775-780 outbound:false | 已对齐 | High |
+
+### B5. 限速/队列/重试
+
+| 项 | Go | Rust | 状态 | 置信 |
+|---|---|---|---|---|
+| 发送队列 | messagequeue/queue.go:96-122（GetSendDelay≤0 取 300ms、失败 3 次线性退避） | 无全局队列；仅 forward_send_interval | **缺失** | High |
+| 令牌桶 | ratelimit.go:26-33（5qps/burst10，WaitWithTimeout 5s） | 无 | **缺失** | High |
+| 错误分类/重试 | retry_policy.go:18-30（22009/40034025/26）、默认 3 次 | 22009→SSM；40034025 无分支 | 部分 | High |
+| get_g_list_delay | config.go:2520；逐群 sleep | group_admin.rs 无 delay | **缺失** | High |
+| SSM 队列 | send_group_msg.go:483-490 | deferred.rs:297-420 | 已对齐 | High |
+
+### B6. 缺口汇总（按 severity）
+
+| Sev | 缺口 | 建议补法 | 估量 |
+|---|---|---|---|
+| High | >5MB 分片上传缺失（Rust 直接 1400） | runtime/media 补 init/分片/complete，deferred 按需切换 | 400-600 行 |
+| High | silk 转码 + 图片压缩未接线 | 复用 gensokyo-media/silk.rs + compress.rs | 200-300 行 |
+| High | qqmusic 降级为分享文案 | 歌曲查询 + markdown 模板 + 键盘（music_prefix） | 250-350 行 |
+| High | 多媒体段无 markdown 时 1400 | 照 Go 逐媒体段各发一条 | 120-200 行 |
+| High | card 本地 pic_url 未上传 | 照 resolveCardPic 接素材链 | 60-100 行 |
+| Medium | 图床 provider 仅 7/8，缺 4/5/6/9/10 | 每 provider 一个 backend（hosting trait 已有） | 500-700 行 |
+| Medium | 图床上传无重试 | 3 次 1s/2s 退避 | 40-60 行 |
+| Medium | 无发送队列/5qps/发送间隔 | runtime 全局令牌桶 + 串行队列 | 200-300 行 |
+| Medium | get_g_list_delay 缺失 | get_group_list/成员列表逐群 sleep | 30-50 行 |
+| Medium | add_at_group 无消费者、AppID→BotID 缺失 | 入站/文本渲染各补一处 | 40-60 行 |
+| Low | lib.rs:50 陈旧文档（SSM/#62 已落地仍写未接线） | 改注释 | 5 行 |
+| Low | KNOWN_ACTIONS 3 个幽灵项 | 对齐 Go 实际注册表 | 10 行 |
+
+**推荐顺序**：媒体四件套（分片、silk/压缩、多媒体拆条、card pic）→ qqmusic → 图床 provider → 队列/限速 → 其余。
+
+（本文由三分域审计汇总；A/C 表的「状态」列以 HEAD 8c69129 时点为准。）
