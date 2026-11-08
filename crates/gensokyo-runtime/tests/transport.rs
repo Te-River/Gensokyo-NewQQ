@@ -55,6 +55,15 @@ const WS_BAD_PATH: &str = r#"  port: "5700"
   http_address: ""
 "#;
 
+const WS_PUSH: &str = r#"  port: "5700"
+  enable_ws_server: true
+  ws_server_path: ws
+  ws_server_token: ""
+  http_address: ""
+  app_id: 12345
+  heart_beat_interval: 1
+"#;
+
 const HTTP_PLAIN: &str = r#"  port: "5700"
   enable_ws_server: false
   http_address: "127.0.0.1:0"
@@ -123,6 +132,8 @@ fn ws_options() -> RuntimeOptions {
         ws_bind: Some("127.0.0.1:0".to_owned()),
         http_bind: None,
         config_watch: false,
+        // 传输层用例不关心 QQ 网关：关掉避免任何出站尝试。
+        gateway: false,
     }
 }
 
@@ -133,7 +144,22 @@ async fn stop(handle: RuntimeHandle) {
         .expect("shutdown 超时");
 }
 
+/// 读下一条**非元事件**的 JSON 帧。
+///
+/// 连接建立即收到 `lifecycle/connect`，之后还会穿插心跳：用例关心的是 action 回执与
+/// 业务事件，元事件在这里统一跳过（要断言元事件请用 [`read_any_json`]）。
 async fn read_json(client: &mut Client) -> Value {
+    loop {
+        let value = read_any_json(client).await;
+        if value["post_type"] == "meta_event" {
+            continue;
+        }
+        return value;
+    }
+}
+
+/// 读下一条 JSON 帧，元事件也返回（lifecycle / 心跳断言用）。
+async fn read_any_json(client: &mut Client) -> Value {
     loop {
         match client.next().await {
             Some(Ok(TungMessage::Text(text))) => {
@@ -611,6 +637,114 @@ async fn http_requires_token_when_configured() {
 
     let (status, _) = http_request(addr, "GET", "/", "", None).await;
     assert_eq!(status, 200, "健康检查不强制 token");
+
+    stop(handle).await;
+}
+
+#[tokio::test]
+async fn ws_forward_sends_lifecycle_and_streams_hub_events_and_heartbeats() {
+    let (handle, _dir) = start(WS_PUSH, ws_options()).await;
+    let addr = handle.ws_addr().expect("WS 应已监听");
+
+    let (mut client, _) = connect_async(format!("ws://{addr}/ws"))
+        .await
+        .expect("WS 连接失败");
+
+    // 首帧必须是 lifecycle/connect（Go `server/wsserver.go` 升级后立刻发的那一条）。
+    let first = read_any_json(&mut client).await;
+    assert_eq!(first["post_type"], "meta_event");
+    assert_eq!(first["meta_event_type"], "lifecycle");
+    assert_eq!(first["sub_type"], "connect");
+    assert_eq!(first["self_id"], 12345);
+
+    handle.hub().publish(support::hub_event());
+    let event = read_json(&mut client).await;
+    assert_eq!(event["post_type"], "message", "hub 事件应推给正向 WS 客户端");
+    assert_eq!(event["raw_message"], "hub");
+
+    // heart_beat_interval=1：等一条心跳，证明连接期间持续推送元事件。
+    let mut heartbeat = None;
+    for _ in 0..3 {
+        let frame = tokio::time::timeout(Duration::from_secs(3), read_any_json(&mut client))
+            .await
+            .expect("等待心跳超时");
+        if frame["meta_event_type"] == "heartbeat" {
+            heartbeat = Some(frame);
+            break;
+        }
+    }
+    let heartbeat = heartbeat.expect("应收到 heartbeat 元事件");
+    assert_eq!(heartbeat["interval"], 1000);
+
+    drop(client);
+    stop(handle).await;
+}
+
+#[tokio::test]
+async fn ws_forward_action_dispatch_does_not_block_event_push() {
+    let (handle, _dir) = start_with_handlers(
+        WS_PLAIN,
+        ws_options(),
+        vec![("slow", Arc::new(support::Slow) as Arc<dyn Handler>)],
+    )
+    .await;
+    let addr = handle.ws_addr().expect("WS 应已监听");
+
+    let (mut client, _) = connect_async(format!("ws://{addr}/ws"))
+        .await
+        .expect("WS 连接失败");
+    assert_eq!(
+        read_any_json(&mut client).await["meta_event_type"],
+        "lifecycle"
+    );
+
+    client
+        .send(TungMessage::Text(
+            r#"{"action":"slow","echo":"slow1"}"#.into(),
+        ))
+        .await
+        .expect("发送失败");
+    // 留出读任务把 action 交给分发任务的时间，让「慢 action 正在跑」与事件推送重叠。
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    handle.hub().publish(support::hub_event());
+
+    let next = read_json(&mut client).await;
+    assert_eq!(
+        next["post_type"], "message",
+        "慢 action 未完成时事件仍应照常推送: {next:?}"
+    );
+    let receipt = read_json(&mut client).await;
+    assert_eq!(receipt["echo"], "slow1", "回执应带回原 echo");
+    assert_eq!(receipt["retcode"], 0);
+    assert_eq!(receipt["data"]["slept"], true);
+
+    drop(client);
+    stop(handle).await;
+}
+
+#[tokio::test]
+async fn ws_forward_close_frame_ends_the_connection() {
+    let (handle, _dir) = start(WS_PUSH, ws_options()).await;
+    let addr = handle.ws_addr().expect("WS 应已监听");
+
+    let (mut client, _) = connect_async(format!("ws://{addr}/ws"))
+        .await
+        .expect("WS 连接失败");
+    assert_eq!(
+        read_any_json(&mut client).await["meta_event_type"],
+        "lifecycle"
+    );
+
+    client.close(None).await.expect("发送关闭帧失败");
+    // 关闭后服务端任务应立刻结束并回一个关闭帧（`sink.close()` 会把 tungstenite 排好的
+    // 回帧刷出去），读侧只会读到 Close 或 EOF，不会挂住。
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(frame) = client.next().await {
+            assert!(frame.is_ok(), "关闭过程中不应报读错误: {frame:?}");
+        }
+    })
+    .await
+    .expect("关闭后连接应收敛");
 
     stop(handle).await;
 }

@@ -6,10 +6,16 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gensokyo_config::ConfigManager;
+use gensokyo_core::Ob11Id;
 use gensokyo_protocol::Registry;
+use gensokyo_protocol::action::{ActionRequest, ActionResponse};
+use gensokyo_protocol::event::{MessageEvent, MessageType};
+use gensokyo_protocol::{Event, Handler, HandlerFuture, MessageContent};
 use gensokyo_runtime::AppState;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -96,4 +102,42 @@ pub async fn get(addr: SocketAddr, path: &str) -> (u16, String) {
 /// 取响应 body（`\r\n\r\n` 之后的部分）。
 pub fn response_body(response: &str) -> &str {
     response.split_once("\r\n\r\n").map_or("", |(_, body)| body)
+}
+
+/// 一条可被 hub 广播的群消息事件（正向 / 反向 WS 用例共用）。
+pub fn hub_event() -> Event {
+    Event::Message(MessageEvent {
+        time: 1_700_000_000,
+        self_id: Ob11Id::num(12345),
+        message_type: MessageType::Group,
+        sub_type: Some("normal".to_owned()),
+        message_id: Ob11Id::str("M1"),
+        user_id: Ob11Id::str("U1"),
+        group_id: Some(Ob11Id::str("G1")),
+        message: MessageContent::Text("hub".to_owned()),
+        raw_message: "hub".to_owned(),
+        font: Some(0),
+        sender: None,
+        anonymous: None,
+        message_seq: None,
+        to_me: Some(true),
+        extra: Default::default(),
+    })
+}
+
+/// 慢 action（300ms）：验证分发在独立任务里跑，事件推送不等它结束。
+#[derive(Debug)]
+pub struct Slow;
+
+impl Handler for Slow {
+    fn name(&self) -> &'static str {
+        "slow"
+    }
+
+    fn handle<'a>(&'a self, request: &'a ActionRequest<Value>) -> HandlerFuture<'a> {
+        Box::pin(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            Ok(ActionResponse::ok(json!({ "slept": true })).with_echo(request.echo.clone()))
+        })
+    }
 }

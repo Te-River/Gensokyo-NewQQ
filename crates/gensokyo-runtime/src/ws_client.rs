@@ -10,7 +10,9 @@
 //!    `meta_event/heartbeat`。
 //! 3. 订阅 [`crate::event_hub::EventHub`]，把入站转换出的 OneBot 事件逐条写进同一个
 //!    WS 连接；总线积压（`Lagged`）只记日志，不阻塞发布方。
-//! 4. 连接断开立即重连；**连接失败**按指数退避（`initial_backoff` 起翻倍、
+//! 4. 收到的 OneBot action 交给 [`crate::dispatcher`] 分发，回执写回同一连接（`echo` 原样
+//!    带回，JSON 非法回 `1400`）；dispatch 在独立任务里跑，慢 action 不拖住心跳与事件推送。
+//! 5. 连接断开立即重连；**连接失败**按指数退避（`initial_backoff` 起翻倍、
 //!    `max_backoff` 封顶），累计失败超过 `reconnect_times` 后放弃该地址。
 //!    Go 是固定 5s 间隔重试，这里按需求改成指数退避。
 //!
@@ -19,8 +21,10 @@
 //!
 //! # 与 Go 的差异 / 未做项
 //!
-//! - 反向 WS 收到的 OneBot action（`send_group_msg` 等）只记 debug 日志，不 dispatch
-//!   —— 本里程碑只做出站事件推送，action 回环属于后续里程碑。
+//! - 反向 WS 收到的 OneBot action（`send_group_msg` 等）经 [`dispatch_json`] 分发，回执 JSON
+//!   写回**同一连接**（`echo` 原样带回）；解析失败回 `retcode=1400` 形状的失败响应。
+//!   与 Go 的 `go callapi.CallAPIFromDict(...)` 一致，每个 action 在独立任务里跑，
+//!   慢 action 不阻塞事件转发与心跳。
 //! - Go 的 `sendFailures` / `processFailedMessages` 已对齐：写失败且 `disable_error_chan=false`
 //!   时把原事件 JSON 入队，下一个心跳 tick 重发后**无条件清空**（重发失败的也不再重试）；
 //!   `disable_error_chan=true` 时只记日志丢弃。缓冲按地址持有、跨重连保留（同 Go 把
@@ -36,7 +40,7 @@ use futures::{SinkExt, StreamExt};
 use gensokyo_config::Settings;
 use gensokyo_protocol::Event;
 use tokio::net::TcpStream;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tokio_tungstenite::tungstenite::Message;
@@ -44,6 +48,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
+use crate::dispatcher::dispatch_json;
 use crate::inbound::Inbound;
 use crate::state::AppState;
 
@@ -55,6 +60,8 @@ pub const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_millis(200);
 pub const DEFAULT_MAX_BACKOFF: Duration = Duration::from_secs(10);
 /// 握手 `User-Agent`，与 Go 一致（部分框架按它识别 CQHttp）。
 pub const USER_AGENT: &str = "CQHttp/4.15.0";
+/// action 回执写回通道的容量（条）；分发任务在通道满时背压等待。
+pub(crate) const RECEIPT_CAPACITY: usize = 64;
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -107,16 +114,11 @@ impl WsClient {
         let reconnect_times = options.reconnect_times.unwrap_or_else(|| {
             u32::try_from(settings.get_reconnect_times().max(0)).unwrap_or(u32::MAX)
         });
-        let heartbeat = options.heartbeat_interval.unwrap_or_else(|| {
-            let seconds = settings.get_heart_beat_interval();
-            if seconds > 0 {
-                Duration::from_secs(u64::try_from(seconds).unwrap_or(30))
-            } else {
-                DEFAULT_HEARTBEAT_INTERVAL
-            }
-        });
-        // `tokio::time::interval` 不接受零间隔：调用方传 0 时退化到 1ms。
-        let heartbeat = heartbeat.max(Duration::from_millis(1));
+        let heartbeat = options
+            .heartbeat_interval
+            .unwrap_or_else(|| heartbeat_interval(&settings))
+            // `tokio::time::interval` 不接受零间隔：调用方传 0 时退化到 1ms。
+            .max(Duration::from_millis(1));
 
         let (stop, _) = watch::channel(false);
         let tasks: Vec<JoinHandle<()>> = addresses
@@ -234,6 +236,9 @@ async fn serve(
 ) -> StopReason {
     // 每次连接重新订阅：broadcast 不重放历史，写失败的事件由 `failed` 缓冲补发。
     let mut events = state.hub().subscribe();
+    let dispatcher = state.dispatcher();
+    // action 回执走独立通道：分发在 spawn 的任务里跑，慢 action 不挡住事件与心跳。
+    let (outbox, mut receipts) = mpsc::channel::<String>(RECEIPT_CAPACITY);
     let (mut sink, mut source) = socket.split();
 
     if send_event(
@@ -272,11 +277,25 @@ async fn serve(
                         return StopReason::Disconnected;
                     }
                 }
-                // 反向 WS 上的 OneBot action 属于 dispatch，本里程碑只做出站事件推送。
+                // 反向 WS 上的 OneBot action：分发结果（含 echo）写回同一连接。
                 Some(Ok(Message::Text(text))) => {
-                    tracing::debug!(bytes = text.len(), "反向 WS 收到 action，当前未处理");
+                    let dispatcher = dispatcher.clone();
+                    let outbox = outbox.clone();
+                    tokio::spawn(async move {
+                        let response =
+                            dispatch_json(dispatcher, text.as_str().as_bytes().to_vec()).await;
+                        // 连接已断时接收端已释放：回执丢弃即可（回执没有重发语义）。
+                        let _ = outbox.send(response).await;
+                    });
                 }
                 Some(Ok(_)) => {}
+            },
+            // action 回执：与事件共用同一个 sink、同一个任务串行写，帧不会交错。
+            // `outbox` 由本函数持有，通道不会关闭，所以这里只可能等到 `Some`。
+            Some(payload) = receipts.recv() => {
+                if !write_payload(&mut sink, &payload).await {
+                    return StopReason::Disconnected;
+                }
             },
             event = events.recv() => match event {
                 Ok(event) => {
@@ -342,6 +361,18 @@ where
 /// Go `config.GetDisableErrorChan()`：每次写失败现读快照，热重载即时生效。
 fn disable_error_chan(state: &AppState) -> bool {
     state.config().snapshot().get_disable_error_chan()
+}
+
+/// `heart_beat_interval` 秒 → 心跳间隔；非正数（未配置）用 [`DEFAULT_HEARTBEAT_INTERVAL`]。
+///
+/// 反向 WS 与正向 WS 共用这一份配置口径。
+pub(crate) fn heartbeat_interval(settings: &Settings) -> Duration {
+    let seconds = settings.get_heart_beat_interval();
+    if seconds > 0 {
+        Duration::from_secs(u64::try_from(seconds).unwrap_or(30))
+    } else {
+        DEFAULT_HEARTBEAT_INTERVAL
+    }
 }
 
 /// 写失败缓冲（Go `WebSocketClient.sendFailures` + `processFailedMessages`）。

@@ -1,10 +1,14 @@
 //! 正向 WS 服务端（Go `server/wsserver.go`）。
 //!
-//! 与 Go 的差异（均为 M1h-a 有意收敛）：
-//! - 连接建立后**不**发送 `meta_event/lifecycle/connect` 元事件——那属于 QQ 事件转换
-//!   （M1h-b）；先发一条非响应帧会让 `get_status` 的首帧断言变复杂。
-//! - 不维护 `WsServerClients` 共享列表：每个连接一个 axum 任务，断开即随任务结束清理
-//!   （Go 的列表只服务于主动推送，M1h-a 还没有推送路径）。
+//! 连接语义（对齐 Go `server/wsserver.go` 与 `Processor.BroadcastMessageToAll`）：
+//! - 升级成功立刻发 `meta_event/lifecycle/connect`，随后按 `heart_beat_interval` 发心跳
+//!   （Go 的正向 WS 只发 connect、不逐连接发心跳；这里按 OneBot 客户端预期补齐）；
+//! - 订阅 [`EventHub`](crate::event_hub::EventHub)，把入站事件推给**每个**已连接客户端，
+//!   等价于 Go 遍历 `WsServerClients` 逐个 `SendMessage`；
+//! - 收 action → 分发 → 回执写回同一连接；分发在独立任务里跑，与事件、心跳并行，
+//!   慢 action 不会拖住推送；
+//! - 不维护 `WsServerClients` 共享列表：hub 订阅即「连接列表」，每个连接一个 axum 任务，
+//!   断开即随任务结束清理。
 //!
 //! 鉴权与 `Origin` 校验都在升级前完成：鉴权失败回 401、`Origin` 非法回 403，握手都不会
 //! 升级为 WebSocket。`Origin` 规则对齐 Go 的 `upgrader.CheckOrigin`：没有 `Origin` 头时
@@ -20,12 +24,18 @@ use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use futures::{Sink, SinkExt, StreamExt};
 use gensokyo_core::{Error, Result};
+use gensokyo_protocol::Event;
 use serde_json::json;
+use tokio::sync::{broadcast, mpsc};
+use tokio::time::MissedTickBehavior;
 
 use crate::auth::{is_authorized, unauthorized};
 use crate::dispatcher::{Dispatcher, dispatch_json};
+use crate::inbound::Inbound;
 use crate::state::AppState;
+use crate::ws_client::{RECEIPT_CAPACITY, heartbeat_interval};
 
 /// 正向 WS 路由；`enable_ws_server` 的判定与 `path` 的校验都在 [`crate::boot::Runtime`]。
 pub(crate) fn router(state: AppState, path: &str) -> Router {
@@ -135,38 +145,108 @@ fn forbidden() -> Response {
         .into_response()
 }
 
-async fn handle_socket(mut socket: WebSocket, state: AppState) {
+async fn handle_socket(socket: WebSocket, state: AppState) {
     tracing::debug!("正向 WS 客户端已连接");
     let dispatcher: Dispatcher = state.dispatcher();
+    let inbound = Inbound::from_state(&state);
+    // 先订阅再发 connect：broadcast 不重放历史，订阅晚一步就会漏掉这段时间的事件。
+    let mut events = state.hub().subscribe();
+    let (mut sink, mut source) = socket.split();
+
+    if !send_event(&mut sink, &inbound.lifecycle_connect()).await {
+        tracing::debug!("正向 WS 发送 lifecycle 失败，连接视为断开");
+        return;
+    }
+
+    let interval = heartbeat_interval(&state.config().snapshot());
+    let interval_ms = i64::try_from(interval.as_millis()).unwrap_or(i64::MAX);
+    let mut ticker = tokio::time::interval(interval);
+    // 卡顿后不要补发一串心跳：错过的 tick 直接跳过。
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    ticker.tick().await;
+
+    // action 回执走独立通道：分发在 spawn 的任务里跑，慢 action 不挡住事件与心跳。
+    let (outbox, mut receipts) = mpsc::channel::<String>(RECEIPT_CAPACITY);
 
     loop {
-        match socket.recv().await {
-            Some(Ok(Message::Text(text))) => {
-                let response =
-                    dispatch_json(dispatcher.clone(), text.as_str().as_bytes().to_vec()).await;
-                if socket.send(Message::Text(response.into())).await.is_err() {
+        tokio::select! {
+            incoming = source.next() => match incoming {
+                Some(Ok(Message::Text(text))) => {
+                    let dispatcher = dispatcher.clone();
+                    let outbox = outbox.clone();
+                    tokio::spawn(async move {
+                        let response =
+                            dispatch_json(dispatcher, text.as_str().as_bytes().to_vec()).await;
+                        // 连接已断时接收端已释放：回执丢弃即可（回执没有重发语义）。
+                        let _ = outbox.send(response).await;
+                    });
+                }
+                // OneBot V11 只用文本帧；二进制帧忽略，避免误把媒体载荷当 action。
+                Some(Ok(Message::Binary(_))) => {
+                    tracing::debug!("忽略非文本帧");
+                }
+                Some(Ok(Message::Close(reason))) => {
+                    tracing::debug!(reason = ?reason, "客户端发送关闭帧");
+                    // tungstenite 读到 Close 后已把回帧挂在写缓冲里，只有 `close()` 会把它刷出去；
+                    // 直接 drop，或再 `send(Close)`（已处于 ClosedByPeer，会被拒），客户端都会读成
+                    // `ResetWithoutClosingHandshake`。
+                    let _ = sink.close().await;
+                    break;
+                }
+                // Ping / Pong 由 axum 自动应答。
+                Some(Ok(_)) => {}
+                Some(Err(err)) => {
+                    tracing::debug!(error = %err, "WS 读取出错");
+                    break;
+                }
+                None => break,
+            },
+            // action 回执：与事件共用同一个 sink、同一个任务串行写，帧不会交错。
+            // `outbox` 由本函数持有，通道不会关闭，所以这里只可能等到 `Some`。
+            Some(payload) = receipts.recv() => {
+                if sink.send(Message::Text(payload.into())).await.is_err() {
                     tracing::debug!("正向 WS 回写失败，连接视为断开");
                     break;
                 }
+            },
+            event = events.recv() => match event {
+                Ok(event) => {
+                    if !send_event(&mut sink, &event).await {
+                        tracing::debug!("正向 WS 推送事件失败，连接视为断开");
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(missed)) => {
+                    tracing::warn!(missed, "事件总线积压，部分事件已丢弃");
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
+            _ = ticker.tick() => {
+                if !send_event(&mut sink, &inbound.heartbeat(interval_ms)).await {
+                    tracing::debug!("正向 WS 发送心跳失败，连接视为断开");
+                    break;
+                }
             }
-            // OneBot V11 只用文本帧；二进制帧忽略，避免误把媒体载荷当 action。
-            Some(Ok(Message::Binary(_))) => {
-                tracing::debug!("忽略非文本帧");
-            }
-            Some(Ok(Message::Close(reason))) => {
-                tracing::debug!(reason = ?reason, "客户端发送关闭帧");
-                break;
-            }
-            // Ping / Pong 由 axum 自动应答。
-            Some(Ok(_)) => {}
-            Some(Err(err)) => {
-                tracing::debug!(error = %err, "WS 读取出错");
-                break;
-            }
-            None => break,
         }
     }
     tracing::debug!("正向 WS 客户端已断开");
+}
+
+/// 写一条事件，返回**连接是否仍可写**。
+///
+/// 序列化失败只记 error 并返回 `true`：没有可发的 payload，不代表连接坏了。
+async fn send_event<S>(sink: &mut S, event: &Event) -> bool
+where
+    S: Sink<Message> + Unpin,
+{
+    let text = match serde_json::to_string(event) {
+        Ok(text) => text,
+        Err(err) => {
+            tracing::error!(error = %err, "事件序列化失败，跳过该事件");
+            return true;
+        }
+    };
+    sink.send(Message::Text(text.into())).await.is_ok()
 }
 
 #[cfg(test)]

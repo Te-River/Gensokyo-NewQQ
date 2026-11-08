@@ -4,15 +4,15 @@
 
 mod support;
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use futures::StreamExt;
-use gensokyo_core::Ob11Id;
-use gensokyo_protocol::event::{MessageEvent, MessageType};
-use gensokyo_protocol::{Event, MessageContent};
+use futures::{SinkExt, StreamExt};
+use gensokyo_protocol::{Handler, Registry};
 use gensokyo_runtime::ws_client::USER_AGENT;
-use gensokyo_runtime::{WsClient, WsClientOptions};
+use gensokyo_runtime::{AppState, WsClient, WsClientOptions};
 use serde_json::Value;
+use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
@@ -25,24 +25,18 @@ fn settings_with(address: &str, extra: &str) -> String {
     )
 }
 
-fn hub_event() -> Event {
-    Event::Message(MessageEvent {
-        time: 1_700_000_000,
-        self_id: Ob11Id::num(12345),
-        message_type: MessageType::Group,
-        sub_type: Some("normal".to_owned()),
-        message_id: Ob11Id::str("M1"),
-        user_id: Ob11Id::str("U1"),
-        group_id: Some(Ob11Id::str("G1")),
-        message: MessageContent::Text("hub".to_owned()),
-        raw_message: "hub".to_owned(),
-        font: Some(0),
-        sender: None,
-        anonymous: None,
-        message_seq: None,
-        to_me: Some(true),
-        extra: Default::default(),
-    })
+/// 构造带注入 handler 的 `AppState`（内置 3 个 action + 注入项）。
+fn state_with(settings: &str, handlers: Vec<(&'static str, Arc<dyn Handler>)>) -> (AppState, TempDir) {
+    let (manager, dir) = support::config(settings);
+    let mut registry = Registry::new();
+    gensokyo_runtime::builtin::register_all(&mut registry, Arc::clone(&manager));
+    for (action, handler) in handlers {
+        assert!(
+            registry.register(action, handler).is_none(),
+            "测试 handler {action} 不应覆盖已注册的实现"
+        );
+    }
+    (AppState::new(manager, Arc::new(registry)), dir)
 }
 
 #[tokio::test]
@@ -81,7 +75,7 @@ async fn reverse_ws_receives_hub_events_and_heartbeats() {
         .expect("等待首帧超时")
         .expect("服务端未收到首帧");
 
-    state.hub().publish(hub_event());
+    state.hub().publish(support::hub_event());
 
     let seen = timeout(Duration::from_secs(5), server)
         .await
@@ -221,4 +215,138 @@ async fn handshake_uses_go_headers_and_url_token_wins_over_config() {
 
     client.shutdown(Duration::from_secs(2)).await;
     let _ = server.await;
+}
+
+#[tokio::test]
+async fn reverse_ws_dispatches_action_and_writes_receipt_back() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("绑定失败");
+    let addr = listener.local_addr().expect("读取地址失败");
+    let (ready_tx, ready_rx) = oneshot::channel();
+
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept 失败");
+        let mut socket = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("服务端握手失败");
+        let mut ready = Some(ready_tx);
+        while let Some(message) = socket.next().await {
+            let Ok(TungMessage::Text(text)) = message else {
+                break;
+            };
+            let frame: Value = serde_json::from_str(&text).expect("收到非 JSON 帧");
+            if let Some(tx) = ready.take() {
+                assert_eq!(frame["sub_type"], "connect", "首帧应为 connect 元事件");
+                socket
+                    .send(TungMessage::Text(
+                        r#"{"action":"get_version_info","echo":"e1"}"#.into(),
+                    ))
+                    .await
+                    .expect("发送 action 失败");
+                let _ = tx.send(());
+                continue;
+            }
+            if frame["echo"] == "e1" {
+                return Some(frame);
+            }
+        }
+        None
+    });
+
+    let (state, _dir) = support::state(&settings_with(&format!("ws://{addr}/ws"), ""));
+    let client = WsClient::start_with(
+        state,
+        WsClientOptions {
+            heartbeat_interval: Some(Duration::from_secs(30)),
+            ..WsClientOptions::default()
+        },
+    );
+
+    timeout(Duration::from_secs(5), ready_rx)
+        .await
+        .expect("等待首帧超时")
+        .expect("服务端未收到首帧");
+    let receipt = timeout(Duration::from_secs(5), server)
+        .await
+        .expect("等待 action 回执超时")
+        .expect("服务端任务 panic")
+        .expect("应收到 action 回执");
+
+    assert_eq!(receipt["status"], "ok");
+    assert_eq!(receipt["retcode"], 0);
+    assert_eq!(receipt["echo"], "e1", "回执应带回原 echo");
+    assert_eq!(receipt["data"]["app_name"], "gensokyo");
+
+    client.shutdown(Duration::from_secs(2)).await;
+}
+
+#[tokio::test]
+async fn reverse_ws_dispatch_does_not_block_event_forwarding() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("绑定失败");
+    let addr = listener.local_addr().expect("读取地址失败");
+    let (sent_tx, sent_rx) = oneshot::channel();
+
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept 失败");
+        let mut socket = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("服务端握手失败");
+        let mut sent = Some(sent_tx);
+        let mut frames = Vec::new();
+        while let Some(message) = socket.next().await {
+            let Ok(TungMessage::Text(text)) = message else {
+                break;
+            };
+            let frame: Value = serde_json::from_str(&text).expect("收到非 JSON 帧");
+            if let Some(tx) = sent.take() {
+                assert_eq!(frame["sub_type"], "connect", "首帧应为 connect 元事件");
+                socket
+                    .send(TungMessage::Text(
+                        r#"{"action":"slow","echo":"slow1"}"#.into(),
+                    ))
+                    .await
+                    .expect("发送 action 失败");
+                let _ = tx.send(());
+                continue;
+            }
+            if frame["post_type"] == "meta_event" {
+                continue;
+            }
+            frames.push(frame);
+            if frames.len() == 2 {
+                break;
+            }
+        }
+        frames
+    });
+
+    let (state, _dir) = state_with(
+        &settings_with(&format!("ws://{addr}/ws"), ""),
+        vec![("slow", Arc::new(support::Slow) as Arc<dyn Handler>)],
+    );
+    let client = WsClient::start_with(
+        state.clone(),
+        WsClientOptions {
+            heartbeat_interval: Some(Duration::from_secs(30)),
+            ..WsClientOptions::default()
+        },
+    );
+
+    timeout(Duration::from_secs(5), sent_rx)
+        .await
+        .expect("等待 action 发出超时")
+        .expect("服务端任务提前结束");
+    // 慢 action 已在独立任务里跑：此刻发布的事件必须绕过它先到。
+    state.hub().publish(support::hub_event());
+
+    let frames = timeout(Duration::from_secs(5), server)
+        .await
+        .expect("等待两帧超时")
+        .expect("服务端任务 panic");
+    assert_eq!(
+        frames[0]["post_type"], "message",
+        "事件不应被慢 action 挡住: {frames:?}"
+    );
+    assert_eq!(frames[1]["echo"], "slow1", "回执应带回原 echo: {frames:?}");
+
+    client.shutdown(Duration::from_secs(2)).await;
 }
