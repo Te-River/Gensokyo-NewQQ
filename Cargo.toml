@@ -42,7 +42,9 @@ tokio = "1.54.1"
 axum = "0.8.9"
 tokio-tungstenite = "0.30.0"
 tungstenite = "0.30.0"
-reqwest = "0.13.5"
+# `default-features = false` 必须上提：成员继承 workspace 依赖时不能覆写该字段
+# （Cargo ≤1.98 直接拒绝解析清单，MSRV 1.90 就卡在这里），成员只负责加 features。
+reqwest = { version = "0.13.5", default-features = false }
 
 # gRPC（M1f）：IDMapService，proto 与 Go 共享 `proto/idmap.proto`（service 全名/字段号不可变）。
 # tonic 0.14 起 prost 代码生成与运行时拆到 tonic-prost(-build)，tonic 本体只管通用 gRPC 实现；

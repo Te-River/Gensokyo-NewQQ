@@ -40,6 +40,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+  msrv:
+    name: msrv (1.90)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.90"
+      - name: Ensure webui/dist placeholder
+        shell: bash
+        run: mkdir -p webui/dist && printf '<!doctype html><title>Gensokyo WebUI</title><h1>Gensokyo WebUI</h1>' > webui/dist/index.html
+      - uses: Swatinem/rust-cache@v2
+      # MSRV 口径：只验 Cargo.toml rust-version=1.90 下可编译，跑全量测试矩阵太重，测试归 test job。
+      # 注意 `reqwest` 的 `default-features = false` 必须留在根 [workspace.dependencies]，
+      # 成员继承时覆写该字段会让 Cargo ≤1.98 拒绝解析清单，这个 job 会连清单都加载不了。
+      - run: cargo build --workspace --locked
+
   test:
     name: test (${{ matrix.os }})
     strategy:

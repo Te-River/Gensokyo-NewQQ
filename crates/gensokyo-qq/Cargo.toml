@@ -15,7 +15,7 @@ rustls.workspace = true
 webpki-root-certs.workspace = true
 rustls-webpki.workspace = true
 # 生产传输：只启用 rustls 骨架（`rustls-no-provider`），不拉 aws-lc-rs/native-tls
-reqwest = { workspace = true, default-features = false, features = [
+reqwest = { workspace = true, features = [
     "http2",
     "rustls-no-provider",
     "system-proxy",

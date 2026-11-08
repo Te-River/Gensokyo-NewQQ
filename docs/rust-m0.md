@@ -16,7 +16,7 @@ M0 只新建 Rust 工作区与 CI，**不改动任何 Go 代码**。
 ## M0 交付边界
 
 - 已建：workspace（10 库 crate + bin + xtask）、fmt/clippy/deny/audit 配置、`core`（error/ids/telemetry）、`config`（Settings + loader 骨架）、`protocol`（event/action/cqcode/outbound/registry 骨架）。
-- 未建（M1+）：MSRV 独立 job、黄金样本回放、M4 性能基线（72h 压测）。（热重载与全量配置字段、idmap/echo、四连接、媒体管线、WebUI 均已建：`ConfigWatcher`+`ConfigManager::reload` 带重启项 diff、`echo` 存储 M1e、`boot.rs` 四连接装配、`gensokyo-media`/`gensokyo-webui` crate 就位；action 实现明细见下文「里程碑状态」，接线明细以 `reports/refactor/16-official-api-audit.md` 为准。）
+- 未建（M1+）：黄金样本回放、M4 性能基线（72h 压测）。（MSRV 独立 job 已建：`.github/workflows/rust.yml` 的 `msrv` job 钉 `toolchain: "1.90"`、只跑 `cargo build --workspace --locked` 验可编译，测试矩阵仍归 `test` job。热重载与全量配置字段、idmap/echo、四连接、媒体管线、WebUI 均已建：`ConfigWatcher`+`ConfigManager::reload` 带重启项 diff、`echo` 存储 M1e、`boot.rs` 四连接装配、`gensokyo-media`/`gensokyo-webui` crate 就位；action 实现明细见下文「里程碑状态」，接线明细以 `reports/refactor/16-official-api-audit.md` 为准。）
 
 ## 里程碑状态（截至 2026-11-08，HEAD `da3fe3c`）
 
@@ -28,4 +28,4 @@ M0 只新建 Rust 工作区与 CI，**不改动任何 Go 代码**。
 - `gensokyo` 在 M0 只支持 `--version` / `version`；无子命令时打印提示并以退出码 2 结束（不假装启动成功）。
 - TLS 下限**接线**：`gensokyo-qq` 依赖 `rustls 0.23.46` / `webpki-root-certs 1.0.10` / `rustls-webpki 0.103.16`（provider 显式留空，M1 再选）；`cargo xtask check-tls-floors` 与 CI `tls-floors` job 断言 `Cargo.lock` 不低于下限；`deny.toml` 同时禁 `openssl`、`openssl-sys`。
 - CQ 转义口径**跟随 Go 而非规范**：出站只转 `,` `]` `&`，不转 `[`（OneBot v11 规范要求转 `[`）；入站 `unescape` 仍接受 `&#91;`。M1 勿"修正"为转 `[`，否则黄金样本整串不匹配。
-- 待 M1 校准：MSRV job 与 build matrix 按实际依赖重新校准（M1d 已按实际依赖校准为 **1.90**：`redb 4.4.0` 需 1.90、`time 0.3.55` 需 1.88，M0 不放假的 MSRV job）；`dtolnay/rust-toolchain` 无 `1.99.1` tag，工作流用 `@master` + `toolchain: 1.99.1` 输入钉版本。
+- MSRV 定档 **1.90**（按实际依赖校准：`redb 4.4.0` 需 1.90、`time 0.3.55` 需 1.88），CI `msrv` job 钉 `toolchain: "1.90"` 只跑 `cargo build --workspace --locked`，本地 1.90.0 全量实编已通过（测试矩阵归 `test` job）；前置条件是 `reqwest` 的 `default-features = false` 必须留在根 `[workspace.dependencies]`——成员继承时覆写该字段会让 Cargo ≤1.98 拒绝解析清单，MSRV 直接失效；build matrix 其余目标仍待按实际依赖复核；`dtolnay/rust-toolchain` 无 `1.99.1` tag，工作流用 `@master` + `toolchain: 1.99.1` 输入钉版本。

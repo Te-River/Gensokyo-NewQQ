@@ -11,7 +11,7 @@ publish.workspace = true
 # 生产传输：只启用 rustls 骨架（`rustls-no-provider`），不拉 aws-lc-rs/native-tls。
 # provider（ring / aws-lc-rs）由二进制侧选择并经 `HttpTransport::with_provider` 注入，
 # 与 gensokyo-qq 的 `ReqwestTransport` 同一套 seam（M0 设计 §9.1 的 provider 留白）。
-reqwest = { workspace = true, default-features = false, features = [
+reqwest = { workspace = true, features = [
     "http2",
     "rustls-no-provider",
     "system-proxy",
