@@ -15,7 +15,14 @@ gensokyo-qq.workspace = true
 gensokyo-storage.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# 逐群节流（get_group_list）要异步计时；tokio 已在 workspace 依赖里，且 "time"
+# 特性已被 runtime/config/media/webui 在二进制构建中启用，这里只是复用
+tokio = { workspace = true, features = ["time"] }
 tracing.workspace = true
+
+[dev-dependencies]
+# 节流用例要带时间驱动的 runtime（crate 内 testing::block_on 是 noop waker，驱动不了计时器）
+tokio = { workspace = true, features = ["rt", "time"] }
 
 [lints]
 workspace = true

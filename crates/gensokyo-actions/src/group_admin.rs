@@ -45,6 +45,7 @@
 //! - **`set_group_card` 不解析参数**：与 Go 一致，无论参数如何都回固定失败回执。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -322,8 +323,16 @@ impl GetGroupListHandler {
         };
 
         let string_mode = self.context.string_ob11();
+        // 逐群节流间隔（毫秒）：与 Go `config.GetGroupListDelay()` 同口径，每个请求读
+        // 一次当前快照，热重载即时生效；非正数表示不节流
+        let delay_ms = self.context.config().snapshot().get_get_group_list_delay();
         let mut data: Vec<GroupInfo> = Vec::new();
-        for section in sections {
+        for (index, section) in sections.into_iter().enumerate() {
+            // Go 是「每群处理完等一个间隔，最后一群后不等」；这里把同样的等待放在下一次
+            // 迭代开头——总等待仍是 N-1 次，且被跳过的群（continue）不会绕过节流
+            if index > 0 && delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(delay_ms.unsigned_abs())).await;
+            }
             // 32 位形态直接是 group_openid，其余按虚拟号反查；失败跳过该群（相对 Go
             // 留空字段行更干净，见模块文档「刻意的差异」）
             let openid = if is_openid(&section) {
@@ -430,19 +439,23 @@ mod tests {
         WHOLE_BAN_MESSAGE,
     };
     use crate::handler::RETCODE_BAD_REQUEST;
+    use crate::qqapi::ActionContext;
     use crate::qqapi::KickResult;
     use crate::testing::{
-        Call, block_on, context, context_with_idmap, failed, ok_data, request,
+        Call, FakeQqApi, block_on, context, context_with_idmap, failed, ok_data, request,
         request_without_params,
     };
     use crate::util::RETCODE_UPSTREAM;
+    use gensokyo_config::{ConfigManager, ReloadOutcome};
     use gensokyo_core::Error;
     use gensokyo_protocol::Handler;
     use gensokyo_protocol::Status;
     use gensokyo_qq::GroupInfo as QqGroupInfo;
     use gensokyo_storage::{IdMapOptions, IdMapStore};
+    use std::future::Future;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
 
     const GROUP: &str = "0123456789abcdef0123456789abcdef";
     const GROUP2: &str = "bbbbccccddddeeeeffff000011112222";
@@ -875,5 +888,173 @@ mod tests {
         assert_eq!(retcode, RETCODE_BAD_REQUEST);
         assert_eq!(data, None);
         assert!(api.calls().is_empty());
+    }
+
+    // ---- 逐群节流（Go `get_g_list_delay`）----
+
+    /// 写一份带 `get_g_list_delay` 的最小配置。
+    fn write_delay_config(path: &std::path::Path, delay_ms: i64) {
+        std::fs::write(
+            path,
+            format!("string_ob11: true\napp_id: 102001234\nget_g_list_delay: {delay_ms}\n"),
+        )
+        .expect("写临时 config.yml 失败");
+    }
+
+    /// 带自定义 `get_g_list_delay` 的配置快照 + 配置文件路径（热重载用例要改写它）。
+    fn delay_config(delay_ms: i64, tag: &str) -> (Arc<ConfigManager>, std::path::PathBuf) {
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "gensokyo-actions-delay-{tag}-{}-{}.yml",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::SeqCst)
+        ));
+        write_delay_config(&path, delay_ms);
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载临时 config.yml 失败"));
+        (manager, path)
+    }
+
+    /// 带 idmap、配置快照由调用方给定的上下文。
+    fn context_with_config(
+        manager: Arc<ConfigManager>,
+        store: Arc<IdMapStore>,
+    ) -> (Arc<ActionContext>, Arc<FakeQqApi>) {
+        let api = Arc::new(FakeQqApi::default());
+        let context = Arc::new(ActionContext::new(api.clone(), manager).with_idmap(store));
+        (context, api)
+    }
+
+    /// 注册 `count` 个 32 位形态的群（`0000…0000`、`0000…0001`…，与枚举顺序一致）。
+    fn registry_with(prefix: &str, count: u32) -> (std::path::PathBuf, Arc<IdMapStore>, Vec<String>) {
+        let (dir, store) = fresh_store(prefix);
+        let ids: Vec<String> = (0..count).map(|i| format!("{i:032x}")).collect();
+        for openid in &ids {
+            store.write_config(openid, "type", "group").expect("写注册");
+        }
+        (dir, store, ids)
+    }
+
+    /// 按顺序给替身排好每个群的 `info` 成功应答。
+    fn enqueue_group_infos(api: &FakeQqApi, ids: &[String]) {
+        let mut slot = api.group_info.lock().expect("群信息槽锁未中毒");
+        for openid in ids {
+            slot.push_back(Ok(qq_group(openid, "测试群", "简介", 7)));
+        }
+    }
+
+    /// 带时间驱动的单线程 runtime：`testing::block_on` 用 noop waker，驱动不了计时器。
+    fn block_on_timed<F: Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("构建单线程 runtime 失败")
+            .block_on(future)
+    }
+
+    /// 跑一次 `get_group_list`，返回（响应 data 行数, 耗时）。
+    fn timed_group_list(
+        handler: &GetGroupListHandler,
+        api: &FakeQqApi,
+        ids: &[String],
+    ) -> (usize, Duration) {
+        enqueue_group_infos(api, ids);
+        let started = Instant::now();
+        let response = block_on_timed(handler.handle(&request("get_group_list", json!({}))))
+            .expect("handler 不应返回 Err");
+        let elapsed = started.elapsed();
+        let data = ok_data(response);
+        (data.as_array().expect("data 应为数组").len(), elapsed)
+    }
+
+    #[test]
+    fn group_list_waits_once_between_each_pair_of_groups() {
+        let (dir, store, ids) = registry_with("delay-gaps", 3);
+        let (manager, config_path) = delay_config(50, "gaps");
+        let (context, api) = context_with_config(manager, store);
+        let handler = GetGroupListHandler::new(context);
+
+        let (rows, elapsed) = timed_group_list(&handler, &api, &ids);
+        assert_eq!(rows, 3);
+        // N 群 = N-1 次间隔：3 群至少要等 2 × 50ms
+        assert!(
+            elapsed >= Duration::from_millis(100),
+            "3 群应有 2 次 50ms 间隔，实际 {elapsed:?}"
+        );
+        drop(handler);
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn group_list_does_not_wait_after_the_last_group() {
+        let (dir, store, ids) = registry_with("delay-last", 1);
+        let (manager, config_path) = delay_config(100, "last");
+        let (context, api) = context_with_config(manager, store);
+        let handler = GetGroupListHandler::new(context);
+
+        let (rows, elapsed) = timed_group_list(&handler, &api, &ids);
+        assert_eq!(rows, 1);
+        // 只有一群时最后一群后不等：真要等就是 100ms 起
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "最后一群后不应等待，实际 {elapsed:?}"
+        );
+        drop(handler);
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn group_list_with_zero_delay_never_sleeps() {
+        let (dir, store, ids) = registry_with("delay-zero", 3);
+        let (manager, config_path) = delay_config(0, "zero");
+        let (context, api) = context_with_config(manager, store);
+        let handler = GetGroupListHandler::new(context);
+
+        let (rows, elapsed) = timed_group_list(&handler, &api, &ids);
+        assert_eq!(rows, 3);
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "delay = 0 时不得等待，实际 {elapsed:?}"
+        );
+        drop(handler);
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn group_list_delay_follows_the_current_snapshot() {
+        let (dir, store, ids) = registry_with("delay-reload", 2);
+        let (manager, config_path) = delay_config(0, "reload");
+        // 配置管理器与上下文共享同一份快照：reload 换快照后 handler 立即可见
+        let (context, api) = context_with_config(Arc::clone(&manager), store);
+        let handler = GetGroupListHandler::new(context);
+
+        let (rows, fast) = timed_group_list(&handler, &api, &ids);
+        assert_eq!(rows, 2);
+        assert!(
+            fast < Duration::from_millis(50),
+            "改写前 delay = 0 不应等待，实际 {fast:?}"
+        );
+
+        // `get_g_list_delay` 不在重启项里：reload 直接交换快照
+        write_delay_config(&config_path, 50);
+        match manager.reload().expect("热重载失败") {
+            ReloadOutcome::Applied { changed } => assert!(
+                changed.contains(&"get_g_list_delay".to_owned()),
+                "变更字段应含 get_g_list_delay: {changed:?}"
+            ),
+            other => panic!("get_g_list_delay 不是重启项，应即时生效，实际 {other:?}"),
+        }
+
+        let (rows, slow) = timed_group_list(&handler, &api, &ids);
+        assert_eq!(rows, 2);
+        assert!(
+            slow >= Duration::from_millis(50),
+            "2 群在 delay = 50ms 下应等待一次，实际 {slow:?}"
+        );
+        drop(handler);
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
