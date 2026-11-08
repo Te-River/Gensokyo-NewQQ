@@ -16,7 +16,7 @@ M0 只新建 Rust 工作区与 CI，**不改动任何 Go 代码**。
 ## M0 交付边界
 
 - 已建：workspace（10 库 crate + bin + xtask）、fmt/clippy/deny/audit 配置、`core`（error/ids/telemetry）、`config`（Settings + loader 骨架）、`protocol`（event/action/cqcode/outbound/registry 骨架）。
-- 未建（M1+）：热重载与全量配置字段、idmap/echo、四连接、媒体管线、WebUI、MSRV 独立 job、黄金样本回放。（原列于此的 **action 实现已建**，见下文「里程碑状态」；接线明细以 `reports/refactor/16-official-api-audit.md` 为准。）
+- 未建（M1+）：MSRV 独立 job、黄金样本回放、M4 性能基线（72h 压测）。（热重载与全量配置字段、idmap/echo、四连接、媒体管线、WebUI 均已建：`ConfigWatcher`+`ConfigManager::reload` 带重启项 diff、`echo` 存储 M1e、`boot.rs` 四连接装配、`gensokyo-media`/`gensokyo-webui` crate 就位；action 实现明细见下文「里程碑状态」，接线明细以 `reports/refactor/16-official-api-audit.md` 为准。）
 
 ## 里程碑状态（截至 2026-11-08，HEAD `da3fe3c`）
 
