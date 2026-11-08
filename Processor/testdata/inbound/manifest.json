@@ -1,0 +1,123 @@
+{
+  "generator": "go test -tags goldengen ./Processor -run TestGoldenGen",
+  "shape": "每个 <event>.json 为按紧凑 JSON 字典序排序的上报数组，元素是一条 OneBot V11 事件 payload",
+  "events": [
+    {
+      "event": "GROUP_AT_MESSAGE_CREATE",
+      "handler": "GroupATMessageEventHandler",
+      "process": "ProcessGroupMessage",
+      "payloads": 1
+    },
+    {
+      "event": "GROUP_MESSAGE_CREATE",
+      "handler": "GroupMessageEventHandler",
+      "process": "ProcessGroupNormalMessage",
+      "payloads": 1
+    },
+    {
+      "event": "C2C_MESSAGE_CREATE",
+      "handler": "C2CMessageEventHandler",
+      "process": "ProcessC2CMessage",
+      "payloads": 1
+    },
+    {
+      "event": "GROUP_MEMBER_ADD",
+      "handler": "GroupMemberAddEventHandler",
+      "process": "ProcessGroupMember(GROUP_MEMBER_ADD)",
+      "payloads": 1
+    },
+    {
+      "event": "GROUP_MEMBER_REMOVE",
+      "handler": "GroupMemberRemoveEventHandler",
+      "process": "ProcessGroupMember(GROUP_MEMBER_REMOVE)",
+      "payloads": 1
+    },
+    {
+      "event": "GROUP_JOIN_REQUEST",
+      "handler": "GroupJoinRequestEventHandler",
+      "process": "ProcessGroupJoinRequest",
+      "payloads": 1
+    },
+    {
+      "event": "INTERACTION_CREATE",
+      "handler": "InteractionHandler",
+      "process": "ProcessInlineSearch",
+      "payloads": 1
+    },
+    {
+      "event": "FRIEND_ADD",
+      "handler": "FriendAddEventHandler",
+      "process": "ProcessFriendAdd",
+      "payloads": 2
+    },
+    {
+      "event": "FRIEND_DEL",
+      "handler": "FriendDelEventHandler",
+      "process": "ProcessFriendDel",
+      "payloads": 1
+    },
+    {
+      "event": "GROUP_ADD_ROBOT",
+      "handler": "GroupAddRobotEventHandler",
+      "process": "ProcessGroupAddBot",
+      "payloads": 2
+    },
+    {
+      "event": "GROUP_DEL_ROBOT",
+      "handler": "GroupDelRobotEventHandler",
+      "process": "ProcessGroupDelBot",
+      "payloads": 1
+    },
+    {
+      "event": "GROUP_MSG_REJECT",
+      "handler": "GroupMsgRejectHandler",
+      "process": "ProcessGroupMsgReject",
+      "payloads": 1
+    },
+    {
+      "event": "GROUP_MSG_RECEIVE",
+      "handler": "GroupMsgReceiveHandler",
+      "process": "ProcessGroupMsgRecive",
+      "payloads": 1
+    },
+    {
+      "event": "C2C_MSG_REJECT",
+      "handler": "C2CMsgRejectHandler",
+      "process": "ProcessC2CMsgReject",
+      "payloads": 1
+    },
+    {
+      "event": "C2C_MSG_RECEIVE",
+      "handler": "C2CMsgReceiveHandler",
+      "process": "ProcessC2CMsgReceive",
+      "payloads": 1
+    }
+  ],
+  "config": {
+    "app_id": 12345,
+    "arch_mode": "legacy",
+    "array": false,
+    "auto_put_interaction": false,
+    "enable_ws_server": false,
+    "hash_id": true,
+    "http_address": "",
+    "native_ob11": true,
+    "op_user_id_type": "vuin",
+    "string_ob11": true,
+    "two_way_echo": false,
+    "webhook_path": "",
+    "ws_address": []
+  },
+  "normalize": [
+    "键名为 time 的字段一律置 0：构造时取 time.Now()，不可复现（含由输入时间戳派生的事件也一并归零）",
+    "上报数组按紧凑 JSON 字典序排序：多条上报由独立 goroutine 广播，到达顺序不确定",
+    "输入信封为固定字面量（见 goldengen 生成器源码），不含任何运行时采样值",
+    "idmap 虚拟 ID 走模板默认 hash_id=true 的哈希派生，与分配顺序无关，空 cwd 下每次一致"
+  ],
+  "notes": [
+    "只复刻 main.go handler 内的 Process* 调用；handler 层副作用（runWithTimer / botstats / acnode.CheckWordIN）不在金样范围",
+    "ReadyHandler / ErrorNotifyHandler 不产出 OneBot 事件，未纳入",
+    "string_ob11=false（数字 ID 模式）需要真实 idmap 分配且编号不可预置，留第二批",
+    "p.Api / p.Apiv2 为 nil：本批事件类型在纯文本入参下不会触达 QQ OpenAPI"
+  ]
+}

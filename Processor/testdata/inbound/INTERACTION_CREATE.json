@@ -1,0 +1,32 @@
+[
+  {
+    "data": {
+      "chat_type": 1,
+      "data": {
+        "name": "button",
+        "resolved": {
+          "button_data": "cmd_1",
+          "button_id": "BTN_1",
+          "feature_id": "FEATURE_1",
+          "message_id": "MSG_AT_1",
+          "user_id": "USER_OPENID_1"
+        },
+        "type": 1
+      },
+      "event_id": "EVENT_INTERACTION_1",
+      "group_member_openid": "USER_OPENID_1",
+      "group_openid": "GROUP_OPENID_1",
+      "id": "INTERACTION_1",
+      "scene": "group",
+      "timestamp": "2024-01-01T00:00:00+08:00",
+      "type": 11
+    },
+    "group_id": 815200455,
+    "notice_type": "interaction",
+    "post_type": "notice",
+    "self_id": 12345,
+    "sub_type": "create",
+    "time": 0,
+    "user_id": 851510584
+  }
+]

@@ -1,0 +1,15 @@
+[
+  {
+    "group_id": 815200455,
+    "message": "[CQ:member,type=remove,group_id=815200455,user_id=574163972]",
+    "notice_type": "group_decrease",
+    "operator_id": 0,
+    "post_type": "notice",
+    "real_group_id": "GROUP_OPENID_1",
+    "real_user_id": "USER_OPENID_2",
+    "self_id": 12345,
+    "sub_type": "leave",
+    "time": 0,
+    "user_id": 574163972
+  }
+]

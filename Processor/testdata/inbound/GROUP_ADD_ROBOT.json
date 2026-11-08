@@ -1,0 +1,23 @@
+[
+  {
+    "comment": "",
+    "flag": "",
+    "group_id": 761461862,
+    "post_type": "request",
+    "request_type": "group",
+    "self_id": 12345,
+    "sub_type": "invite",
+    "time": 0,
+    "user_id": 767949667
+  },
+  {
+    "group_id": 761461862,
+    "notice_type": "group_increase",
+    "operator_id": 0,
+    "post_type": "notice",
+    "self_id": 12345,
+    "sub_type": "invite",
+    "time": 0,
+    "user_id": 767949667
+  }
+]

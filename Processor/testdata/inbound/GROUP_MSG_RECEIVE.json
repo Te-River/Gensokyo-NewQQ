@@ -1,0 +1,17 @@
+[
+  {
+    "data": {
+      "event_id": "EVENT_MSG_RECEIVE_1",
+      "group_openid": "GROUP_OPENID_5",
+      "op_member_openid": "USER_OPENID_5",
+      "timestamp": 1704067200
+    },
+    "group_id": 761461862,
+    "notice_type": "group_receive",
+    "post_type": "notice",
+    "self_id": 12345,
+    "sub_type": "create",
+    "time": 0,
+    "user_id": 767949667
+  }
+]

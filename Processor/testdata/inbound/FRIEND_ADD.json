@@ -1,0 +1,20 @@
+[
+  {
+    "comment": "callback_data_1",
+    "flag": "EVENT_FRIEND_ADD_1",
+    "post_type": "request",
+    "request_type": "friend",
+    "self_id": 12345,
+    "time": 0,
+    "user_id": 470887252
+  },
+  {
+    "notice_type": "friend_add",
+    "post_type": "notice",
+    "scene": 1,
+    "scene_param": "callback_data_1",
+    "self_id": 12345,
+    "time": 0,
+    "user_id": 470887252
+  }
+]

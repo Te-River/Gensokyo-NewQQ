@@ -1,0 +1,9 @@
+[
+  {
+    "notice_type": "friend_decrease",
+    "post_type": "notice",
+    "self_id": 12345,
+    "time": 0,
+    "user_id": 470887252
+  }
+]

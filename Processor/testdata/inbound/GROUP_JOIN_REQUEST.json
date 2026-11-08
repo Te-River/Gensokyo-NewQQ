@@ -1,0 +1,16 @@
+[
+  {
+    "auto_approved": null,
+    "auto_approved_bool": false,
+    "comment": "let me in",
+    "flag": "JOIN_REQUEST_1",
+    "group_id": 815200455,
+    "post_type": "request",
+    "request_type": "group",
+    "self_id": 12345,
+    "sub_type": "add",
+    "time": 0,
+    "user_id": 926190640,
+    "username": "applicant"
+  }
+]

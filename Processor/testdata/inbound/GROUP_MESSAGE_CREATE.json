@@ -1,0 +1,26 @@
+[
+  {
+    "font": 0,
+    "group_id": "GROUP_OPENID_1",
+    "is_full_group_message": true,
+    "message": "hello group",
+    "message_id": "MSG_FULL_1",
+    "message_seq": 0,
+    "message_type": "group",
+    "platform": "qq",
+    "post_type": "message",
+    "raw_message": "hello group",
+    "self_id": 12345,
+    "sender": {
+      "level": "0",
+      "nickname": "tester",
+      "role": "member",
+      "sex": "0",
+      "tiny_id": "",
+      "user_id": 0
+    },
+    "sub_type": "normal",
+    "time": 0,
+    "user_id": "USER_OPENID_1"
+  }
+]

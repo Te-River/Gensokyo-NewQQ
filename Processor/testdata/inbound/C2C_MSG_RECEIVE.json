@@ -1,0 +1,9 @@
+[
+  {
+    "notice_type": "c2c_msg_receive",
+    "post_type": "notice",
+    "self_id": 12345,
+    "time": 0,
+    "user_id": 56913457
+  }
+]
