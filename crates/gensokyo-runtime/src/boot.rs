@@ -17,6 +17,11 @@
 //! 跟随 [`gensokyo_config::Settings::get_ramdom_seq`]）并启动清理线程，供入站喂懒 message_id
 //! 池、出站回写 msg_id 映射（Go 侧 echo 同样是启动期全局单例）。
 //!
+//! 紧接着是 `Runtime::attach_idmap`：状态里没有 idmap 时按配置打开身份库 / 消息库，挂进状态与
+//! [`gensokyo_actions::ActionContext`]，入站虚拟 ID 与 `send_*` 的虚拟号反查才可用（Go 侧
+//! `idmap.InitializeDB` 同样是启动期全局单例）。打开失败只 `warn`：Go 在同样情形 `Fatalf`
+//! 退出，这里选择降级——入站回退原始 OpenID、虚拟号反查报 `1500`，比进程起不来好排查。
+//!
 //! [`RuntimeOptions`] 可覆盖两个绑定地址：测试用 `127.0.0.1:0` 取随机端口，避免端口冲突。
 //!
 //! [`RuntimeOptions::config_watch`]（默认开）在启动时拉起 [`gensokyo_config::ConfigWatcher`]：
@@ -38,9 +43,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use gensokyo_config::{ConfigWatcher, ReloadOutcome, WatcherHandle};
+use gensokyo_config::{ConfigWatcher, ReloadOutcome, Settings, WatcherHandle};
 use gensokyo_core::{Error, Result};
 use gensokyo_storage::EchoStore;
+use gensokyo_storage::idmap::{DEFAULT_IDENTITY_PATH, DEFAULT_MSG_PATH, IdMapOptions, IdMapStore};
 use gensokyo_webui::{WebUi, WebUiState};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::Receiver;
@@ -102,6 +108,43 @@ impl Runtime {
         state.with_echo(Arc::new(echo))
     }
 
+    /// 生产装配：未注入 idmap 时按配置打开两个库，并挂进状态与 [`gensokyo_actions::ActionContext`]。
+    ///
+    /// Go 侧 idmap 是启动期全局单例（`idmap.InitializeDB`，打开失败直接 `Fatalf`）；这里失败
+    /// 只 warn、不阻断启动，降级面见 [`Runtime::attach_idmap_with`]。已注入时原样返回，测试与
+    /// 嵌入场景可复用同一份存储。
+    fn attach_idmap(state: AppState) -> AppState {
+        let options = idmap_options(&state.config().snapshot());
+        Self::attach_idmap_with(state, options)
+    }
+
+    /// [`Runtime::attach_idmap`] 的实现主体（测试用它注入临时路径）。
+    fn attach_idmap_with(state: AppState, options: IdMapOptions) -> AppState {
+        if state.idmap().is_some() {
+            return state;
+        }
+        let store = match IdMapStore::open(options) {
+            Ok(store) => Arc::new(store),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "idmap 打开失败，虚拟号互转不可用（入站回退原始 OpenID）"
+                );
+                return state;
+            }
+        };
+        // handler 捕获的是注册时的 `Arc<ActionContext>`，换 idmap 只能整份重建再重注册；
+        // 生产路径的注册集（内置 3 + `gensokyo_actions::register_all`）因此保持不变。
+        let state = state.with_idmap(Arc::clone(&store));
+        match state.actions_arc() {
+            Some(actions) => {
+                let actions = Arc::new(actions.as_ref().clone().with_idmap(store));
+                state.with_action_context(actions)
+            }
+            None => state,
+        }
+    }
+
     /// 按当前配置快照启动全部启用的 listener。
     ///
     /// # Errors
@@ -117,6 +160,7 @@ impl Runtime {
     /// 同 [`Runtime::start`]。
     pub async fn start_with(state: AppState, options: RuntimeOptions) -> Result<RuntimeHandle> {
         let state = Self::attach_echo(state);
+        let state = Self::attach_idmap(state);
         let settings = state.config().snapshot();
 
         // 注册表在 `AppState` 装配时创建（内置 3 个 + `gensokyo_actions::register_all`）；
@@ -235,6 +279,21 @@ impl Runtime {
             config_watch,
         })
     }
+}
+
+/// idmap 的打开参数：AppID 参与 OpenID 的 key、`hash_id` 决定 vUIN 的派生方式、
+/// `idmap_isolation` 开启时带 `uin` 前缀（对齐 Go `uinPrefix`）。
+///
+/// 路径没有配置项，用 `gensokyo_storage::idmap::DEFAULT_*`——与 Go 一样落在工作目录，
+/// 只是扩展名 / 文件格式不同（redb vs bbolt），见该 crate 的差异清单。
+fn idmap_options(settings: &Settings) -> IdMapOptions {
+    let mut options = IdMapOptions::new(DEFAULT_IDENTITY_PATH, DEFAULT_MSG_PATH)
+        .with_app_id(settings.get_app_id().to_string())
+        .with_hash_id(settings.get_hash_id());
+    if settings.get_idmap_isolation() {
+        options = options.with_uin(settings.get_uin().to_string());
+    }
+    options
 }
 
 /// 把 webhook 路由并进 listener 的路由表；没配 `webhook_path` 时原样返回。
@@ -713,5 +772,173 @@ mod tests {
         let state = Runtime::attach_echo(state);
         let kept = state.echo_arc().expect("echo 仍在");
         assert!(Arc::ptr_eq(&injected, &kept), "已注入时不应被替换");
+    }
+
+    /// 生产启动路径（`Runtime::start_with` 的第二步）按配置装配 idmap，且不覆盖已注入的实例。
+    #[test]
+    fn attach_idmap_injects_store_once() {
+        use std::sync::Arc;
+
+        use gensokyo_config::ConfigManager;
+        use gensokyo_storage::idmap::IdMapOptions;
+
+        use super::Runtime;
+        use crate::state::AppState;
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nsettings: {}\n").expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let options = IdMapOptions::new(dir.path().join("id.redb"), dir.path().join("msg.redb"))
+            .with_app_id("102000001");
+
+        let state = Runtime::attach_idmap_with(
+            AppState::with_builtin_handlers(Arc::clone(&manager)),
+            options.clone(),
+        );
+        let injected = state.idmap_arc().expect("启动路径应自动装配 idmap");
+
+        let state = Runtime::attach_idmap_with(state, options);
+        let kept = state.idmap_arc().expect("idmap 仍在");
+        assert!(Arc::ptr_eq(&injected, &kept), "已注入时不应被替换");
+    }
+
+    /// 打开失败只降级为「无 idmap」：不 panic、不阻断启动（Go 在同样情形 `Fatalf`）。
+    #[test]
+    fn attach_idmap_failure_keeps_state_without_idmap() {
+        use std::sync::Arc;
+
+        use gensokyo_config::ConfigManager;
+        use gensokyo_storage::idmap::IdMapOptions;
+
+        use super::Runtime;
+        use crate::state::AppState;
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nsettings: {}\n").expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        // 父目录不存在：redb 建库失败，走 warn 降级分支。
+        let missing = dir.path().join("missing");
+        let options = IdMapOptions::new(missing.join("id.redb"), missing.join("msg.redb"))
+            .with_app_id("102000001");
+
+        let state = Runtime::attach_idmap_with(AppState::with_builtin_handlers(manager), options);
+        assert!(
+            state.idmap().is_none(),
+            "打开失败不应 panic，应降级为无 idmap"
+        );
+    }
+
+    /// `hash_id` 随配置打开：vUIN 走 MD5 派生（9~18 位）且同 OpenID 稳定。
+    #[test]
+    fn attach_idmap_hash_id_follows_settings() {
+        use std::sync::Arc;
+
+        use gensokyo_config::ConfigManager;
+
+        use super::Runtime;
+        use crate::state::AppState;
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(
+            &path,
+            "version: 1\nsettings:\n  app_id: 102000001\n  hash_id: true\n",
+        )
+        .expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+
+        let mut options = super::idmap_options(&manager.snapshot());
+        assert_eq!(options.app_id, "102000001");
+        assert!(options.hash_id, "hash_id 应随配置打开");
+        options.identity_path = dir.path().join("id.redb");
+        options.msg_path = dir.path().join("msg.redb");
+
+        let state = Runtime::attach_idmap_with(AppState::with_builtin_handlers(manager), options);
+        let store = state.idmap_arc().expect("idmap 应已装配");
+        let openid = "0123456789abcdef0123456789abcdef";
+        let (_, first) = store.retrieve_virtual_value(openid).expect("分配 vUIN");
+        let (_, again) = store.retrieve_virtual_value(openid).expect("命中 vUIN");
+        assert_eq!(first, again, "同一 OpenID 的 vUIN 必须稳定");
+        assert!(
+            first.to_string().len() >= 9,
+            "hash_id 模式的 vUIN 是 9~18 位派生值，不应是顺序递增的 1: {first}"
+        );
+    }
+
+    /// 已装配的 `ActionContext` 一并拿到 idmap，虚拟号反查可用。
+    #[test]
+    fn attach_idmap_reaches_action_context() {
+        use std::sync::Arc;
+
+        use gensokyo_actions::{ActionContext, QqApi};
+        use gensokyo_config::ConfigManager;
+        use gensokyo_qq::{
+            Error as QqError, HttpRequest, HttpResponse, HttpTransport, OpenApiClient,
+            Result as QqResult, TokenConfig, TokenManager,
+        };
+        use gensokyo_storage::idmap::IdMapOptions;
+
+        use super::Runtime;
+        use crate::state::AppState;
+
+        /// 所有请求都直接失败的传输层：证明装配路径不触网。
+        #[derive(Debug)]
+        struct OfflineTransport;
+
+        impl HttpTransport for OfflineTransport {
+            fn request(
+                &self,
+                _req: HttpRequest,
+            ) -> impl std::future::Future<Output = QqResult<HttpResponse>> + Send {
+                std::future::ready(Err(QqError::Transport("测试环境不联网".to_owned())))
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nsettings:\n  app_id: 102000001\n")
+            .expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+
+        let transport = Arc::new(OfflineTransport);
+        let tokens = Arc::new(TokenManager::new(
+            Arc::clone(&transport),
+            TokenConfig::new("102000001", "s3cret"),
+        ));
+        let api = Arc::new(OpenApiClient::new(transport, tokens));
+        let context = Arc::new(ActionContext::new(
+            api as Arc<dyn QqApi>,
+            Arc::clone(&manager),
+        ));
+        let state = AppState::with_actions(manager, context);
+        assert!(
+            state
+                .actions()
+                .expect("应有 ActionContext")
+                .idmap()
+                .is_none(),
+            "装配前 ActionContext 不应有 idmap"
+        );
+
+        let options = IdMapOptions::new(dir.path().join("id.redb"), dir.path().join("msg.redb"))
+            .with_app_id("102000001");
+        let state = Runtime::attach_idmap_with(state, options);
+        let store = state.idmap_arc().expect("idmap 应已装配");
+        let openid = "0123456789abcdef0123456789abcdef";
+        let (_, vuin) = store.retrieve_virtual_value(openid).expect("分配 vUIN");
+
+        let context = state.actions().expect("ActionContext 应随状态保留");
+        assert!(
+            context.idmap().is_some(),
+            "ActionContext 应拿到同一份 idmap"
+        );
+        assert_eq!(
+            context
+                .resolve_openid("user_id", &vuin.to_string(), "user_openid")
+                .expect("虚拟号应能反查"),
+            openid
+        );
     }
 }

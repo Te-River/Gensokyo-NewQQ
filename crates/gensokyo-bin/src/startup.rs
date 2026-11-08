@@ -12,10 +12,10 @@
 //!    [`DEFAULT_SHUTDOWN_TIMEOUT`] 优雅关闭（热重载监听随运行时句柄一起停止）。
 //!
 //! 现状：反向 WS、webhook 与 WebUI 都在 `gensokyo_runtime::boot` 装配；配置热重载经
-//! [`RuntimeOptions::config_watch`]（默认开）接线，监听失败只 `warn`、不阻断启动。idmap / echo
-//! 尚未在本包注入（`AppState::with_idmap` / `with_echo` 已就绪）——无 idmap 时 [`ActionContext`]
-//! 只接受 32 位 OpenID，虚拟号互转留给后续接线。启动期不联网（access_token 在首次调用上游时
-//! 才惰性换取）。
+//! [`RuntimeOptions::config_watch`]（默认开）接线，监听失败只 `warn`、不阻断启动。idmap 与 echo
+//! 也在 `boot` 的启动第一步装配（`Runtime::attach_idmap` / `attach_echo`）：idmap 打开失败只
+//! `warn`，此时入站回退原始 OpenID、虚拟号互转不可用；成功时 [`ActionContext`] 与入站共用同一份
+//! 存储。启动期不联网（access_token 在首次调用上游时才惰性换取）。
 
 use std::path::Path;
 use std::sync::Arc;
@@ -488,7 +488,9 @@ settings:
     }
 
     #[test]
-    fn credentials_wire_action_context_without_idmap() {
+    fn credentials_wire_action_context_with_idmap() {
+        use gensokyo_storage::{IdMapOptions, IdMapStore};
+
         let manager = config_manager(CREDENTIALED);
         let tokens = token_config(&manager.snapshot()).expect("凭据齐全应可装配");
         assert_eq!(tokens.app_id(), "102000001");
@@ -500,8 +502,33 @@ settings:
             "sandbox_mode=false 应走正式基址"
         );
         assert!(
-            context.idmap().is_none(),
-            "M1j 不装配 idmap：只接受 32 位 OpenID"
+            !context.string_ob11(),
+            "string_ob11 默认 false：ID 走数字形态"
+        );
+
+        // 生产装配在 `Runtime::attach_idmap` 里补 idmap；这里按同一口径（配置 app_id / hash_id）
+        // 直接构造，验证虚拟号能反查回 OpenID。库落在临时目录，不污染工作目录。
+        let dir = tempfile::tempdir().expect("临时目录");
+        let store = Arc::new(
+            IdMapStore::open(
+                IdMapOptions::new(
+                    dir.path().join("openid-map.redb"),
+                    dir.path().join("msgid-map.redb"),
+                )
+                .with_app_id("102000001")
+                .with_hash_id(manager.snapshot().get_hash_id()),
+            )
+            .expect("打开 idmap"),
+        );
+        let openid = "0123456789abcdef0123456789abcdef";
+        let (_, vuin) = store.retrieve_virtual_value(openid).expect("分配 vUIN");
+        let context = Arc::new(context.as_ref().clone().with_idmap(Arc::clone(&store)));
+        assert!(context.idmap().is_some(), "装配后虚拟号可反查");
+        assert_eq!(
+            context
+                .resolve_openid("user_id", &vuin.to_string(), "user_openid")
+                .expect("虚拟号应反查到 OpenID"),
+            openid
         );
 
         let state = AppState::with_actions(manager, context);

@@ -18,8 +18,9 @@
 //! - 配置热重载经 [`gensokyo_runtime::RuntimeOptions::config_watch`]（默认开）接线：文件变动后
 //!   热字段逐项 `info`、重启项逐项 `warn`（需重启生效）；监听启动失败只 `warn`，不阻断启动，
 //!   监听线程随运行时句柄关闭一起停止。
-//! - idmap / echo 仍未在本二进制注入（`AppState::with_idmap` / `with_echo` 已就绪，留给后续
-//!   里程碑）：虚拟号互转不可用，`ActionContext` 只接受 32 位 OpenID。
+//! - idmap 与 echo 由 `gensokyo_runtime::boot` 的启动第一步装配（`Runtime::attach_idmap` /
+//!   `attach_echo`）：idmap 打开失败只 `warn`（Go 同样情形会退出），此时入站回退原始 OpenID、
+//!   虚拟号互转不可用；成功时 `ActionContext` 与入站共用同一份存储。
 //! - 启动期**不联网**（access_token 在首次调用上游时才惰性换取）。
 //!
 //! 退出码与 CLI 细节见 `crates/gensokyo-bin/README.md`。

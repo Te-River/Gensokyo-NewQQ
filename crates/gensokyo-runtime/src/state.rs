@@ -4,6 +4,9 @@
 //! （[`gensokyo_actions::ActionContext`]）、idmap / echo / OpenAPI 是 M1h-b（入站事件）与
 //! M1i（`send_*`）才需要的句柄，用 builder 选择性注入，缺省 `None`。
 //! 这样 M1h-a 的传输层可以单独测试，不必先把存储与上游客户端装配起来。
+//!
+//! 生产路径由 `gensokyo_runtime::boot` 的 `Runtime::attach_idmap` / `attach_echo` 兜底注入
+//! （状态里已有则原样保留）；这里的 builder 仍可覆盖，嵌入与测试场景可注入自己的实例。
 
 use std::sync::Arc;
 

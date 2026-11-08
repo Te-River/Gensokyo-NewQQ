@@ -12,9 +12,10 @@ M1j 起把运行时装配成一个能按 `config.yml` 启动的二进制。**不
    `false`），安装失败只 `warn`、不 panic。
 4. 装配 `AppState`：
    - **有 QQ 凭据**（`app_id != 0` 且 `client_secret` 非空白）：`ReqwestTransport::new()` →
-     `TokenManager` → `OpenApiClient`（`sandbox_mode` 决定基址）→ `ActionContext`（**不注入
-     idmap**）→ `AppState::with_actions`，并挂上 `with_api`。注册表 = 内置 3 个 +
-     `gensokyo-actions` 的 `IMPLEMENTED_ACTIONS`（75 个）+ 3 个别名 = **81 个 action 名**（随实现增长）。
+     `TokenManager` → `OpenApiClient`（`sandbox_mode` 决定基址）→ `ActionContext`（idmap 由
+     `Runtime::attach_idmap` 在启动时补上）→ `AppState::with_actions`，并挂上 `with_api`。
+     注册表 = 内置 3 个 + `gensokyo-actions` 的 `IMPLEMENTED_ACTIONS`（75 个）+ 3 个别名 =
+     **81 个 action 名**（随实现增长）。
    - **无凭据，或 TLS 传输构建失败**：`warn` 后走 `AppState::with_builtin_handlers`
      （`get_status` / `get_version_info` / `get_login_info`，共 **3 个**）。
 5. `Runtime::start`：按配置装配四种连接与热重载监听
@@ -46,7 +47,7 @@ Ctrl-C，并打一条 `warn`。
 | 凭据齐全，但 rustls provider 缺失或 `ReqwestTransport::new()` 失败 | `warn 构建 QQ HTTP 传输失败…`，同样降级为 3 个 | 同上；启动不失败 |
 | 凭据齐全且客户端构建成功 | 81 个 action 名 | 启动期**不联网**；access_token 在首次调用上游时才换取；凭据无效应表现为 action 错误 `1500` |
 | `token`（机器人令牌）非空但 `client_secret` 为空 | 视为未配置 | OpenAPI v2 用 `app_id` + `client_secret` 换 access_token，`token` 不参与鉴权 |
-| 未装配 idmap（二进制现状） | `ActionContext` 无 idmap（runtime 已支持 `AppState::with_idmap`） | 只接受 32 位 OpenID；虚拟号形式的 `group_id` / `user_id` 会被拒（`1400`） |
+| idmap 打开失败（路径不可写 / redb 建库失败） | `warn idmap 打开失败…`，启动继续（Go 同样情形会 `Fatalf`） | 入站回退原始 OpenID；虚拟号形式的 `group_id` / `user_id` 反查报 `1500` |
 
 凭据只做**非空**校验，不验证真伪：首启生成的模板带着
 `app_id: 12345` / `client_secret: "<YOUR_CLIENT_SECRET>"`，因此新装机器会走「有凭据」路径，
@@ -71,9 +72,9 @@ Ctrl-C，并打一条 `warn`。
 
 - **不连接 QQ 网关**（WebSocket）：不发 `meta_event/lifecycle/connect`；入站事件转换能力在
   `gensokyo-runtime` 内已实现，二进制暂不建立网关会话。
-- **idmap / echo 未注入**：`AppState::with_idmap` / `with_echo` 以及入站转换、deferred 回写都
-  已就绪，二进制暂不打开存储；因此虚拟号互转不可用，`get_login_info` 只回显配置值，不代表
-  QQ 登录态。
+- **idmap / echo 已注入**：`Runtime::attach_idmap` / `attach_echo` 在启动第一步按配置装配
+  （工作目录下的 `openid-map.redb` / `msgid-map.redb`），打开失败只 `warn`。`get_login_info`
+  仍只回显配置值，不代表 QQ 登录态。
 - **维护类 CLI 开关未实现**：`tidy` / `clean_ids` / `del_ids` / `del_cache` / `compaction` /
   `-m` / `-local-logger` 打印「未实现」并以退出码 2 结束（见下表）。
 
