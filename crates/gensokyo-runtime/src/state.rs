@@ -188,6 +188,12 @@ impl AppState {
         self.echo.as_deref()
     }
 
+    /// echo 句柄的 `Arc`（[`crate::inbound::Inbound`] 要持有）。
+    #[must_use]
+    pub fn echo_arc(&self) -> Option<Arc<EchoStore>> {
+        self.echo.clone()
+    }
+
     /// deferred 的媒体下载器。
     #[must_use]
     pub fn media(&self) -> &MediaRuntime {

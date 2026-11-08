@@ -59,6 +59,8 @@
 //!   换 `file_info`（单条上限 5MB，细节见 [`media`]）。
 //! - 发送成功的 `message_id` 回写 `EchoStore`（行号双向映射，Go `StoreCacheInMemory`）；
 //!   `[CQ:reply]` 的虚拟号经 idmap / echo 还原成真实消息 ID。
+//! - 入站消息事件喂 echo 懒 message_id 池（群 / 群 × 用户两个维度）与 msg_id / msg_type /
+//!   event_id 映射，echo 由 [`boot::Runtime`] 启动时按配置装配（见 [`inbound`] 模块文档）。
 //! - 失败分档：请求侧问题（媒体来源 / 大小 / 类型、reply 无法还原、不支持的段）`1400`，
 //!   其余（未装配 `ActionContext`、下载 / 上传 / 上游失败）`1500`。
 //!

@@ -13,6 +13,10 @@
 //!   会话清理是个 10 分钟定时任务，随 [`RuntimeHandle`] 一起停。
 //! - 反向 WS（`ws_address[]`）：纯出站连接，不需要监听端口；地址全为空则不启动。
 //!
+//! 启动的第一步是 `Runtime::attach_echo`：状态里没有 echo 时按配置建一份（`ramdom_seq`
+//! 跟随 [`gensokyo_config::Settings::get_ramdom_seq`]）并启动清理线程，供入站喂懒 message_id
+//! 池、出站回写 msg_id 映射（Go 侧 echo 同样是启动期全局单例）。
+//!
 //! [`RuntimeOptions`] 可覆盖两个绑定地址：测试用 `127.0.0.1:0` 取随机端口，避免端口冲突。
 //!
 //! [`RuntimeOptions::config_watch`]（默认开）在启动时拉起 [`gensokyo_config::ConfigWatcher`]：
@@ -36,6 +40,7 @@ use std::time::Duration;
 use axum::Router;
 use gensokyo_config::{ConfigWatcher, ReloadOutcome, WatcherHandle};
 use gensokyo_core::{Error, Result};
+use gensokyo_storage::EchoStore;
 use gensokyo_webui::{WebUi, WebUiState};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::Receiver;
@@ -82,6 +87,21 @@ impl Default for RuntimeOptions {
 pub struct Runtime;
 
 impl Runtime {
+    /// 生产装配：未注入 echo 时按配置创建一个挂进状态（Go 侧 echo 是启动期全局单例）。
+    ///
+    /// 存储只占内存（懒消息池 / seq / SSM 队列 / msg_id 映射），不落盘；已注入时原样返回，
+    /// 测试与嵌入场景可复用同一份存储。清理线程启动失败只 warn：过期映射不清理只影响内存。
+    fn attach_echo(state: AppState) -> AppState {
+        if state.echo().is_some() {
+            return state;
+        }
+        let echo = EchoStore::new().with_ramdom_seq(state.config().snapshot().get_ramdom_seq());
+        if let Err(err) = echo.start_cleanup_routine() {
+            tracing::warn!(error = %err, "echo 清理线程启动失败，映射不会定期清理");
+        }
+        state.with_echo(Arc::new(echo))
+    }
+
     /// 按当前配置快照启动全部启用的 listener。
     ///
     /// # Errors
@@ -96,6 +116,7 @@ impl Runtime {
     /// # Errors
     /// 同 [`Runtime::start`]。
     pub async fn start_with(state: AppState, options: RuntimeOptions) -> Result<RuntimeHandle> {
+        let state = Self::attach_echo(state);
         let settings = state.config().snapshot();
 
         // 注册表在 `AppState` 装配时创建（内置 3 个 + `gensokyo_actions::register_all`）；
@@ -669,5 +690,28 @@ mod tests {
             reload_log_entries(&ReloadOutcome::Unchanged).is_empty(),
             "无变化不产生日志条目"
         );
+    }
+
+    /// 生产启动路径（`Runtime::start_with` 的第一步）按配置装配 echo，且不覆盖已注入的实例。
+    #[test]
+    fn attach_echo_injects_store_once() {
+        use std::sync::Arc;
+
+        use gensokyo_config::ConfigManager;
+
+        use super::Runtime;
+        use crate::state::AppState;
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nsettings: {}\n").expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+
+        let state = Runtime::attach_echo(AppState::with_builtin_handlers(Arc::clone(&manager)));
+        let injected = state.echo_arc().expect("启动路径应自动装配 echo");
+
+        let state = Runtime::attach_echo(state);
+        let kept = state.echo_arc().expect("echo 仍在");
+        assert!(Arc::ptr_eq(&injected, &kept), "已注入时不应被替换");
     }
 }

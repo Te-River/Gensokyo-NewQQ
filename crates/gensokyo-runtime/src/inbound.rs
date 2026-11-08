@@ -1,8 +1,12 @@
 //! QQ 事件 → OneBot V11 事件（Go `Processor/`）。
 //!
 //! 入站转换只做「协议翻译」：把 QQ 机器人平台推送的 `d` 负载（以及 `t` 事件名）变成
-//! [`gensokyo_protocol::Event`]，不碰 echo 映射、框架指令、黑白名单、被动转主动等
+//! [`gensokyo_protocol::Event`]，不碰框架指令、黑白名单、被动转主动等
 //! [`Processor`](https://github.com/hoshinonyaruko/gensokyo) 里的业务逻辑。
+//!
+//! 除把群注册进 idmap 外，唯一的副作用是喂 echo（[`Inbound::with_echo`]）：消息事件写懒
+//! message_id 池与 msg_id / msg_type 映射，入群类事件写 event_id，供出站解析被动回复凭据；
+//! 未装配 echo 时静默跳过，绝不阻断事件上报。
 //!
 //! # 已覆盖事件
 //!
@@ -81,7 +85,7 @@ use gensokyo_protocol::event::{
 };
 use gensokyo_protocol::{Event, Extra, MessageContent};
 use gensokyo_qq::dto::interaction::Interaction;
-use gensokyo_storage::IdMapStore;
+use gensokyo_storage::{EchoStore, IdMapStore};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -214,22 +218,37 @@ enum GroupMemberFlavor {
 pub struct Inbound {
     config: Arc<ConfigManager>,
     idmap: Option<Arc<IdMapStore>>,
+    echo: Option<Arc<EchoStore>>,
 }
 
 impl Inbound {
     /// 用配置与可选 idmap 构造。
     #[must_use]
     pub fn new(config: Arc<ConfigManager>, idmap: Option<Arc<IdMapStore>>) -> Self {
-        Self { config, idmap }
+        Self {
+            config,
+            idmap,
+            echo: None,
+        }
     }
 
-    /// 从 [`AppState`] 取配置与 idmap（webhook 每个请求现构造，Arc 克隆开销可忽略）。
+    /// 从 [`AppState`] 取配置、idmap 与 echo（webhook 每个请求现构造，Arc 克隆开销可忽略）。
     #[must_use]
     pub fn from_state(state: &AppState) -> Self {
         Self {
             config: state.config_arc(),
             idmap: state.idmap_arc(),
+            echo: state.echo_arc(),
         }
+    }
+
+    /// 挂上 echo 存储：消息事件入站时喂懒 message_id 池与 msg_id / event_id 映射。
+    ///
+    /// 未挂载时入站照常上报（池是「被动回复凭据」的加速层，不是上报的前置条件）。
+    #[must_use]
+    pub fn with_echo(mut self, echo: Arc<EchoStore>) -> Self {
+        self.echo = Some(echo);
+        self
     }
 
     /// 机器人自身 ID（`use_uin ? uin : app_id`）。
@@ -426,6 +445,79 @@ impl Inbound {
         }
     }
 
+    /// 群消息喂 echo（Go `ProcessGroupMessage.go:283-302`、`ProcessGroupNormalMessage.go:262-273`）。
+    ///
+    /// 数字形态用虚拟号做键；`string_action` 时再补一份原始 OpenID 键（Go string 分支只写后者）。
+    /// echo 是内存表、没有失败路径；未装配时静默跳过，绝不影响事件上报。
+    fn feed_group_echo(
+        &self,
+        settings: &Settings,
+        payload: &QqMessage,
+        group_id: &Ob11Id,
+        user_id: &Ob11Id,
+        message_id: &Ob11Id,
+    ) {
+        let Some(echo) = self.echo.as_deref() else {
+            return;
+        };
+        let app_id = settings.get_app_id().to_string();
+        let now = SystemTime::now();
+        let raw_user = payload.author.as_ref().map_or("", |author| author.id.as_str());
+
+        // 懒 message_id 池：群维度 + 群 × 用户维度（被动回复复用同一 msg_id）。
+        let group_key = group_id.to_string();
+        echo.add_lazy_message_id(&group_key, &payload.id, now);
+        echo.add_lazy_message_id_v2(&group_key, &user_id.to_string(), &payload.id, now);
+        if settings.get_string_action() && group_key != payload.group_id {
+            echo.add_lazy_message_id(&payload.group_id, &payload.id, now);
+            echo.add_lazy_message_id_v2(&payload.group_id, raw_user, &payload.id, now);
+        }
+
+        // msg_id / msg_type 映射：数字形态用虚拟群号 / 群 × 用户做键。Go 的
+        // `AddMsgID(app_id, s, …)` 那一路用的是 botgo 全局序列号（`client.GetGlobalS()`），
+        // Rust 侧没有该计数器，这里用上报的数字 message_id 顶替——客户端回传的正是它。
+        if let Some(s) = message_id.as_i64() {
+            echo.add_msg_id(&app_id, s, &payload.id);
+            echo.add_msg_type(&app_id, s, "group");
+        }
+        if let (Some(group), Some(user)) = (group_id.as_i64(), user_id.as_i64()) {
+            echo.add_msg_id(&app_id, group, &payload.id);
+            echo.add_msg_id_v2(&app_id, group, user, &payload.id);
+            echo.add_msg_type(&app_id, group, "group");
+        }
+    }
+
+    /// 私聊消息喂 echo（Go `ProcessC2CMessage.go:164-174,213-218`）。
+    ///
+    /// Go 私聊只有 v1 懒池槽，键放虚拟用户号（string 形态放原始 OpenID），没有 v2 维度。
+    fn feed_private_echo(
+        &self,
+        settings: &Settings,
+        payload: &QqMessage,
+        user_id: &Ob11Id,
+        message_id: &Ob11Id,
+    ) {
+        let Some(echo) = self.echo.as_deref() else {
+            return;
+        };
+        let app_id = settings.get_app_id().to_string();
+        let raw_user = payload.author.as_ref().map_or("", |author| author.id.as_str());
+        let numeric = user_id.as_i64();
+
+        echo.add_lazy_message_id(&user_id.to_string(), &payload.id, SystemTime::now());
+        if let Some(s) = message_id.as_i64() {
+            echo.add_msg_id(&app_id, s, &payload.id);
+            echo.add_msg_type(&app_id, s, "group_private");
+        }
+        if let Some(user) = numeric {
+            echo.add_msg_id(&app_id, user, &payload.id);
+            echo.add_msg_type(&app_id, user, "group_private");
+        } else if !raw_user.is_empty() {
+            // Go string 形态：`AddMsgIDv3(AppIDString, data.Author.ID, data.ID)`。
+            echo.add_msg_id_v3(&app_id, raw_user, &payload.id);
+        }
+    }
+
     fn group_message(
         &self,
         settings: &Settings,
@@ -487,14 +579,16 @@ impl Inbound {
 
         let message_id = self.message_id(settings, &payload.id);
         let group_id = self.ob11_id(settings, &payload.group_id);
+        let user_id = self.ob11_id(settings, user_raw);
         self.register_group(&group_id);
+        self.feed_group_echo(settings, &payload, &group_id, &user_id, &message_id);
         Ok(Event::Message(MessageEvent {
             time: timestamp_of(payload.timestamp.as_ref()),
             self_id: Ob11Id::num(self.self_id_of(settings)),
             message_type: MessageType::Group,
             sub_type: Some("normal".to_owned()),
             message_id,
-            user_id: self.ob11_id(settings, user_raw),
+            user_id,
             group_id: Some(group_id),
             message: MessageContent::Text(payload.content.clone()),
             raw_message: payload.content,
@@ -538,13 +632,15 @@ impl Inbound {
         };
 
         let message_id = self.message_id(settings, &payload.id);
+        let user_id = self.ob11_id(settings, user_raw);
+        self.feed_private_echo(settings, &payload, &user_id, &message_id);
         Ok(Event::Message(MessageEvent {
             time: timestamp_of(payload.timestamp.as_ref()),
             self_id: Ob11Id::num(self.self_id_of(settings)),
             message_type: MessageType::Private,
             sub_type: Some("friend".to_owned()),
             message_id,
-            user_id: self.ob11_id(settings, user_raw),
+            user_id,
             group_id: None,
             message: MessageContent::Text(payload.content.clone()),
             raw_message: payload.content,
@@ -566,6 +662,17 @@ impl Inbound {
         let time = timestamp_of(payload.timestamp.as_ref());
         let group_id = self.vuid(&payload.group_openid);
         self.register_group(&group_id);
+        // Go `echo.AddEvnetID(app_id, 虚拟群号, event_id)`（ProcessGroupAddBot.go:157）
+        if !payload.event_id.is_empty()
+            && let Some(echo) = self.echo.as_deref()
+        {
+            let app_id = settings.get_app_id().to_string();
+            if let Some(group) = group_id.as_i64() {
+                echo.add_event_id(&app_id, group, &payload.event_id);
+            } else {
+                echo.add_event_id_v2(&app_id, &payload.group_openid, &payload.event_id);
+            }
+        }
         let user_id = self.vuid(&payload.op_member_openid);
         let extra = self.enhanced_extra(settings, &payload.op_member_openid, &payload.group_openid);
 
@@ -841,6 +948,14 @@ impl Inbound {
                 payload.event_id.as_str()
             };
             if !event_id.is_empty() {
+                // Go `echo.AddEvnetIDv2(app_id, 原始 group_openid, event_id)`（ProcessGroupMember.go:67-71）
+                if let Some(echo) = self.echo.as_deref() {
+                    echo.add_event_id_v2(
+                        &settings.get_app_id().to_string(),
+                        &payload.group_openid,
+                        event_id,
+                    );
+                }
                 extra.insert("event_id".to_owned(), Value::String(event_id.to_owned()));
             }
         }
@@ -1203,7 +1318,7 @@ mod tests {
     use std::sync::Arc;
 
     use gensokyo_config::ConfigManager;
-    use gensokyo_storage::{IdMapOptions, IdMapStore};
+    use gensokyo_storage::{EchoStore, IdMapOptions, IdMapStore};
 
     use super::Inbound;
 
@@ -1285,5 +1400,160 @@ mod tests {
                 .expect("群应已注册"),
             "group"
         );
+    }
+
+    fn c2c_payload() -> serde_json::Value {
+        json!({
+            "id": "m-c2c",
+            "content": "hi",
+            "author": {"id": "u0123456789abcdef0123456789abcdef"}
+        })
+    }
+
+    /// 群消息入站喂 echo：懒池两个维度 + msg_id / msg_type 映射（Go 群消息路径）。
+    #[test]
+    fn group_message_feeds_echo_pool_and_msg_maps() {
+        use gensokyo_protocol::Event;
+        use gensokyo_storage::echo::{echo_key, echo_key_v2};
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nsettings: {}\n").expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let store = test_store(dir.path());
+        let echo = Arc::new(EchoStore::new());
+        let inbound =
+            Inbound::new(Arc::clone(&manager), Some(Arc::clone(&store))).with_echo(Arc::clone(&echo));
+
+        let events = inbound
+            .convert("GROUP_AT_MESSAGE_CREATE", Some(&group_at_payload()), None)
+            .expect("群消息应可转换");
+        let Event::Message(message) = &events[0] else {
+            panic!("GROUP_AT_MESSAGE_CREATE 应转成群消息");
+        };
+        let app_id = manager.snapshot().get_app_id().to_string();
+        let group = message.group_id.clone().expect("群消息应带 group_id");
+        let group_num = group.as_i64().expect("有 idmap 时应为数字形态");
+        let user_num = message.user_id.as_i64().expect("有 idmap 时应为数字形态");
+
+        assert_eq!(echo.get_lazy_messages_id(&group.to_string()), "m-1", "群维度懒池");
+        assert_eq!(
+            echo.get_lazy_messages_id_v2(&group.to_string(), &message.user_id.to_string()),
+            "m-1",
+            "群 × 用户维度懒池"
+        );
+        assert_eq!(
+            echo.get_msg_id_by_key(&echo_key(&app_id, group_num)),
+            "m-1",
+            "虚拟群号 → 真实 msg_id"
+        );
+        assert_eq!(
+            echo.get_msg_id_by_key(&echo_key_v2(&app_id, group_num, user_num)),
+            "m-1",
+            "群 × 用户 → 真实 msg_id"
+        );
+        assert_eq!(
+            echo.get_message_type_by_group_id_v2(&app_id, &group.to_string()),
+            "group"
+        );
+        let msg_num = message.message_id.as_i64().expect("有 idmap 时应为数字形态");
+        assert_eq!(echo.get_msg_id_by_key(&echo_key(&app_id, msg_num)), "m-1");
+    }
+
+    /// C2C 入站只喂 v1 槽（Go `ProcessC2CMessage.go:171` 无 v2 维度），键为虚拟用户号。
+    #[test]
+    fn c2c_message_feeds_echo_v1_slot_only() {
+        use gensokyo_protocol::Event;
+        use gensokyo_storage::echo::{echo_key, DEFAULT_MESSAGE_ID};
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nsettings: {}\n").expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let store = test_store(dir.path());
+        let echo = Arc::new(EchoStore::new());
+        let inbound =
+            Inbound::new(Arc::clone(&manager), Some(Arc::clone(&store))).with_echo(Arc::clone(&echo));
+
+        let events = inbound
+            .convert("C2C_MESSAGE_CREATE", Some(&c2c_payload()), None)
+            .expect("私聊消息应可转换");
+        let Event::Message(message) = &events[0] else {
+            panic!("C2C_MESSAGE_CREATE 应转成私聊消息");
+        };
+        let app_id = manager.snapshot().get_app_id().to_string();
+        let user = message.user_id.to_string();
+        let user_num = message.user_id.as_i64().expect("有 idmap 时应为数字形态");
+
+        assert_eq!(echo.get_lazy_messages_id(&user), "m-c2c", "私聊复用 v1 槽");
+        assert_eq!(echo.get_msg_id_by_key(&echo_key(&app_id, user_num)), "m-c2c");
+        assert_eq!(
+            echo.get_lazy_messages_id_v2(&user, &user),
+            DEFAULT_MESSAGE_ID,
+            "私聊不写 v2 维度"
+        );
+    }
+
+    /// 入群 / 邀请入群把 event_id 写进 echo（Go `ProcessGroupMember.go:67`、`ProcessGroupAddBot.go:157`）。
+    #[test]
+    fn group_events_feed_echo_event_id() {
+        use gensokyo_protocol::Event;
+        use gensokyo_storage::echo::{echo_key_event_id, echo_key_event_id_v2};
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nsettings: {}\n").expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let store = test_store(dir.path());
+        let echo = Arc::new(EchoStore::new());
+        let inbound =
+            Inbound::new(Arc::clone(&manager), Some(Arc::clone(&store))).with_echo(Arc::clone(&echo));
+        let app_id = manager.snapshot().get_app_id().to_string();
+        let group_openid = "g0123456789abcdef0123456789abcdef";
+
+        let member_add = json!({
+            "event_id": "ev-member",
+            "group_openid": group_openid,
+            "member_openid": "u0123456789abcdef0123456789abcdef"
+        });
+        let events = inbound
+            .convert("GROUP_MEMBER_ADD", Some(&member_add), None)
+            .expect("入群事件应可转换");
+        assert!(matches!(events[0], Event::Notice(_)));
+        assert_eq!(
+            echo.get_event_id_by_key(&echo_key_event_id_v2(&app_id, group_openid)),
+            "ev-member"
+        );
+
+        let add_bot = json!({
+            "event_id": "ev-invite",
+            "group_openid": group_openid,
+            "op_member_openid": "u0123456789abcdef0123456789abcdef"
+        });
+        let _ = inbound
+            .convert("GROUP_ADD_ROBOT", Some(&add_bot), None)
+            .expect("邀请入群事件应可转换");
+        let (_, group_num) = store
+            .retrieve_virtual_value(group_openid)
+            .expect("群应有虚拟号");
+        assert_eq!(
+            echo.get_event_id_by_key(&echo_key_event_id(&app_id, group_num)),
+            "ev-invite"
+        );
+    }
+
+    /// 未装配 echo 时入站照常上报（池写入静默跳过，不 panic）。
+    #[test]
+    fn convert_without_echo_store_still_reports() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nsettings: {}\n").expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let inbound = Inbound::new(manager, None);
+
+        let events = inbound
+            .convert("GROUP_AT_MESSAGE_CREATE", Some(&group_at_payload()), None)
+            .expect("群消息应可转换");
+        assert_eq!(events.len(), 1);
     }
 }
