@@ -157,7 +157,7 @@ impl Dispatcher {
         if let Some(data) = deferred {
             // 计划只是 handler → runtime 的内部握手载荷，不能泄漏给客户端。
             let echo = response.echo.clone();
-            response = match self.run_deferred(data).await {
+            response = match self.run_deferred(data, echo.as_ref()).await {
                 Ok(outcome) => ActionResponse::ok(outcome).with_echo(echo),
                 Err((retcode, message)) => failure(retcode, message, echo),
             };
@@ -176,9 +176,12 @@ impl Dispatcher {
     /// `forward` → [`crate::deferred::execute_forward`]（合并转发逐条重发）、其余 →
     /// [`crate::deferred::execute`] 单条。返回的 JSON 即给客户端的 `data`。
     ///
+    /// `echo` 是请求回执原值：规划层看不到它，这里补进单条计划的
+    /// [`gensokyo_actions::EchoContext::echo_key`]（Go `message.Echo` 直接当 `msg_id` 键查表）。
+    ///
     /// 未装配 [`ActionContext`]、计划反序列化失败都算服务端问题（`1500`）；消息侧问题由
     /// [`crate::deferred::execute`] 的 [`CoreError`] 决定。
-    async fn run_deferred(&self, data: Value) -> Result<Value, (i32, String)> {
+    async fn run_deferred(&self, data: Value, echo: Option<&Value>) -> Result<Value, (i32, String)> {
         let Some(context) = self.actions.as_ref() else {
             return Err((
                 RETCODE_INTERNAL,
@@ -212,7 +215,11 @@ impl Dispatcher {
                 .map_err(|err| (deferred_retcode(&err), err.to_string()))?;
             return Ok(json!({ "message_id": message_id }));
         }
-        let plan: SendRequest = serde_json::from_value(data).map_err(bad_plan)?;
+        let mut plan: SendRequest = serde_json::from_value(data).map_err(bad_plan)?;
+        // 规划层拿不到请求回执，这里补进去：Go 用 `message.Echo` 的字符串形态查 `msg_id` 表
+        if plan.echo_context.echo_key.is_none() {
+            plan.echo_context.echo_key = echo.and_then(Value::as_str).map(str::to_owned);
+        }
         let message_id = crate::deferred::execute(context, &plan, &deps)
             .await
             .map_err(|err| (deferred_retcode(&err), err.to_string()))?;

@@ -21,10 +21,11 @@
 //! 该 `data` 只是 handler → runtime 的内部握手载荷：runtime 注册这些 action 后，用
 //! `serde_json::from_value::<SendRequest>(data)` 还原计划并接管真正的发送（媒体上传 →
 //! `MessageToCreate` → echo / 懒消息回写），最终回给 OneBot 客户端的是发送结果，
-//! **不会把计划本身直接回给客户端**。反序列化只读 `target` / `message`，`deferred` 等未知字段
-//! 被忽略；[`MessageOut::plan`] 的段数组按 [`OutboundPlan::from_segments`] 还原，段里的文本 /
-//! `at` 折回 [`MessageOut::text`]（见 [`MessageOut::from_parts`]）。echo 不进计划：由 handler
-//! 在响应层原样回传。
+//! **不会把计划本身直接回给客户端**。反序列化只读 `target` / `message` / `echo_context`，
+//! `deferred` 等未知字段被忽略；[`MessageOut::plan`] 的段数组按 [`OutboundPlan::from_segments`]
+//! 还原，段里的文本 / `at` 折回 [`MessageOut::text`]（见 [`MessageOut::from_parts`]）。echo 不回传
+//! 进计划本体：请求回执的字符串形态由分发器补进 [`EchoContext::echo_key`]，供 runtime 查
+//! `msg_id` 表（Go `GetMsgIDByKey(echoStr)`）。
 //!
 //! # 与协议类型（`gensokyo_protocol::action`）的关系
 //!
@@ -65,8 +66,10 @@
 //! # 未做项（M1i 明确不做）
 //!
 //! - 媒体上传：本地文件 → 图床 / 群 / C2C 上传、语音转 silk、`file_info` 回填。
-//! - SSM（`code:22009` 失败入队）与主动消息（`messageID == "2000"`）。
-//! - idmap 虚拟 ID ↔ OpenID 映射、echo 懒消息表：都需要存储，留给 runtime。
+//! - SSM（`code:22009` 失败入队）、idmap 虚拟 ID ↔ OpenID 映射、echo 懒消息表与
+//!   `messageID == "2000"` 的主动推送分支：都需要存储 / 网络，落在 `gensokyo-runtime` 的
+//!   deferred 执行链（见 `deferred::resolve_passive`）；本层只把查询所需的键
+//!   （[`EchoContext`]）随计划带过去。
 //! - `send_private_msg` 的 `group_id`（群临时会话的群上下文）：协议类型能解析，但计划只按
 //!   `user_id` 规划、不落 [`SendTarget`]，群上下文由 runtime 决定。
 
@@ -114,6 +117,30 @@ impl SendTarget {
         match self {
             Self::Group(id) | Self::Private(id) => id,
         }
+    }
+}
+
+/// 被动回复上下文：客户端原样传入、runtime 查懒消息池 / echo 映射表时另外需要的键。
+///
+/// 收件人本身已在 [`SendTarget`] 里（群号 / 用户号原样文本），这里只补两样推导不出来的：
+/// 群聊可选的 `user_id`（懒消息池 v2 与「群 × 用户」`msg_id` 键的第二维）和请求回执 `echo`
+/// 的字符串形态（Go 直接拿 `message.Echo` 当 `msg_id` 键查表）。两者缺省即「没有上下文」，
+/// 旧载荷照常解析。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EchoContext {
+    /// 群聊可选 `user_id`（客户端原样文本）；`null` / 空串 / `"0"` 视为没有用户上下文。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    /// 请求 `echo` 的字符串形态（非字符串形态不参与查表）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub echo_key: Option<String>,
+}
+
+impl EchoContext {
+    /// 两项都缺省时整个键不落盘（配合 `skip_serializing_if`）。
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.user_id.is_none() && self.echo_key.is_none()
     }
 }
 
@@ -226,6 +253,9 @@ pub struct SendRequest {
     /// 并强制不带 `msg_id` / `event_id`（Go 的互斥语义，主动召回永远不是被动回复）。
     #[serde(default)]
     pub wakeup: bool,
+    /// 被动回复上下文（懒消息池 / echo 键查表用）；缺省即「按主动推送处理」。
+    #[serde(default, skip_serializing_if = "EchoContext::is_empty")]
+    pub echo_context: EchoContext,
 }
 
 /// `send_group_msg`（含别名 `send_to_group`）的参数规划。
@@ -246,6 +276,11 @@ pub fn plan_send_group_msg(params: &Value) -> Result<SendRequest> {
             target: SendTarget::Group(parsed.group_id.to_string()),
             message: message_out(&parsed.message, auto_escape)?,
             wakeup: false,
+            // 群聊的 user_id 不参与收件人判定，只作为懒消息池 / 群 × 用户 msg_id 键的上下文
+            echo_context: EchoContext {
+                user_id: user_context(object),
+                echo_key: None,
+            },
         });
     }
 
@@ -257,12 +292,30 @@ pub fn plan_send_group_msg(params: &Value) -> Result<SendRequest> {
             target: SendTarget::Private(parsed.user_id.to_string()),
             message: message_out(&parsed.message, auto_escape)?,
             wakeup: false,
+            echo_context: EchoContext::default(),
         });
     }
 
     Err(Error::Protocol(
         "缺少 group_id（群聊）或 user_id（群临时会话）".to_owned(),
     ))
+}
+
+/// 群聊可选的 `user_id` 上下文：`null` / 空串 / `"0"` / 非 ID 形态都算「没有用户上下文」
+/// （对齐 Go 的 `UserID != nil && != "" && != "0"` 判定；取不到就当主动推送）。
+fn user_context(object: &Map<String, Value>) -> Option<String> {
+    match object.get("user_id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) if text.is_empty() || text == "0" => None,
+        Some(Value::String(text)) => Some(text.clone()),
+        // `42.0` 这类整值浮点按 Go 的 `FormatFloat('f', 0)` 归一；非整值当没有上下文
+        Some(Value::Number(number)) => normalized_number("user_id", number)
+            .ok()
+            .and_then(|normalized| normalized.as_i64())
+            .filter(|id| *id != 0)
+            .map(|id| id.to_string()),
+        Some(_) => None,
+    }
 }
 
 /// `send_private_msg`（含 `send_private_msg_wakeup` 的规划部分）的参数规划。
@@ -283,6 +336,8 @@ pub fn plan_send_private_msg(params: &Value) -> Result<SendRequest> {
         target: SendTarget::Private(parsed.user_id.to_string()),
         message: message_out(&parsed.message, auto_escape)?,
         wakeup: false,
+        // 收件人本身就是用户号，没有额外的群上下文
+        echo_context: EchoContext::default(),
     })
 }
 
@@ -594,6 +649,8 @@ fn plan_forward(params: &Value, limit: i64, to_group: bool) -> Result<ForwardReq
                 target: target.clone(),
                 message,
                 wakeup: false,
+                // 转发没有「群 × 用户」的被动上下文，只按群维度的懒消息池走
+                echo_context: EchoContext::default(),
             },
         });
     }
@@ -948,6 +1005,37 @@ mod tests {
         let both = plan_send_group_msg(&json!({"group_id": 1, "user_id": 42, "message": "hi"}))
             .expect("两者同时出现应规划成功");
         assert_eq!(both.target, SendTarget::Group("1".to_owned()));
+    }
+
+    #[test]
+    fn group_user_id_becomes_echo_context() {
+        let planned = plan_send_group_msg(&json!({"group_id": 1, "user_id": 42, "message": "hi"}))
+            .expect("应规划成功");
+        assert_eq!(
+            planned.echo_context.user_id.as_deref(),
+            Some("42"),
+            "群聊的 user_id 只作为被动回复上下文"
+        );
+
+        // Go 的判定：nil / 空串 / "0" 都算「没有用户上下文」
+        for empty in [json!(null), json!(""), json!(0), json!(0.0)] {
+            let planned =
+                plan_send_group_msg(&json!({"group_id": 1, "user_id": empty, "message": "hi"}))
+                    .expect("应规划成功");
+            assert_eq!(planned.echo_context.user_id, None, "{empty} 应视为无上下文");
+        }
+    }
+
+    #[test]
+    fn old_plan_payload_without_echo_context_still_parses() {
+        // echo 上下文是后加的字段：旧握手载荷（没有 echo_context）必须照常还原
+        let data = json!({
+            "target": {"group": "100"},
+            "message": {"text": "hi", "auto_escape": false, "plan": []},
+            "wakeup": false
+        });
+        let planned: SendRequest = serde_json::from_value(data).expect("旧载荷应能还原");
+        assert!(planned.echo_context.is_empty());
     }
 
     #[test]

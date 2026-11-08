@@ -153,10 +153,10 @@ pub use qqapi::{
 };
 pub use register::register_all;
 pub use send::{
-    ForwardParseFailure, ForwardPlan, ForwardRequest, MessageOut, SendRequest, SendTarget,
-    SseRequest, plan_send_group_forward_msg, plan_send_group_msg, plan_send_group_msg_raw,
-    plan_send_msg, plan_send_private_forward_msg, plan_send_private_msg, plan_send_private_msg_sse,
-    plan_send_private_msg_wakeup,
+    EchoContext, ForwardParseFailure, ForwardPlan, ForwardRequest, MessageOut, SendRequest,
+    SendTarget, SseRequest, plan_send_group_forward_msg, plan_send_group_msg,
+    plan_send_group_msg_raw, plan_send_msg, plan_send_private_forward_msg, plan_send_private_msg,
+    plan_send_private_msg_sse, plan_send_private_msg_wakeup,
 };
 pub use system::{
     CleanCacheHandler, CodeData, CookiesData, CredentialsData, CsrfTokenData, GetCookiesHandler,

@@ -25,7 +25,8 @@
 //! | `unknown` / `unknown_image` / `unknown_record` | 不支持 | `1400`（请求侧段类型），不静默丢 |
 //! | `active` / `wakeup` | 忽略 | 控制型标记，不影响本条合成；`send_private_msg_wakeup` 的
 //!   召回语义由 [`SendRequest::wakeup`] 承载，[`execute`] 置 `is_wakeup` 并强制不带回复 ID；
-//!   `[CQ:active]` 主动推送标记仍未接线（SSM / 懒消息不在本阶段） |
+//!   `[CQ:active]` 清空 `msg_id` / `event_id` 强制主动推送（见下节「被动回复身份」）；
+//!   SSM（`code:22009` 入队补发）仍未接线 |
 //!
 //! ## 消息体拆分与优先级
 //!
@@ -83,6 +84,22 @@
 //!   `unknown_*` 回退口径）；
 //! - 不压缩 / 不转码：原字节直传。
 //!
+//! ## 被动回复身份与 msg_seq
+//!
+//! 每条计划的 `msg_id` / `event_id` 由 [`resolve_passive`] 按 Go `send_group_msg.go:207-331`
+//! / `send_private_msg.go:319-355` 的先后顺序一次性定好，主条与后续媒体条共用同一份
+//! （`send_group_msg.go:801` 的媒体循环用同一个 `messageID`）：懒消息池（群有 `user_id`
+//! 上下文查 v2、否则 v1；私聊只有 v1）→ 请求 `echo` 当键查 `msg_id` 表 → 收件人键查表 →
+//! 群「无用户上下文」清空 → `[CQ:active]` 双清 → `"2000"` 回填 `event_id`。`string_ob11`
+//! 决定 `event_id` 查虚拟号键还是真实 OpenID 键（群；私聊恒用真实 OpenID）。未装配
+//! [`EchoStore`] 时整段跳过，行为与接线前一致。
+//!
+//! 每条实际发出的消息再取一个 `msg_seq`：键就是解析出的 `msg_id`、用**递增**版
+//! [`EchoStore::next_mapping_seq`]（Go `IncrementMappingSeq(messageID)`）。同一回复链的多段
+//! 回复复用同一 `msg_id`，seq 连续递增才不会撞 `40054005` 去重（Issue #19）；`msg_id` 与
+//! `event_id` 始终二选一（有 `msg_id` 就不带 `event_id`，`[CQ:reply]` 反查出的真实 ID 同样
+//! 优先于被动 `msg_id`）。
+//!
 //! ## echo 回写
 //!
 //! 发送成功后把上游 `message_id` 写进 [`EchoStore::store_cache_in_memory`]（Go
@@ -126,6 +143,7 @@ use gensokyo_qq::dto::{
     FileUpload, InputNotify, Markdown, Media, MessageToCreate, StreamSse, file_type, msg_type,
 };
 use gensokyo_storage::EchoStore;
+use gensokyo_storage::echo::DEFAULT_MESSAGE_ID;
 use serde_json::Value;
 
 use crate::at_everyone::{self, Reservation};
@@ -209,6 +227,17 @@ async fn execute_inner(
         for extra in &mut extras {
             extra.is_wakeup = true;
         }
+    }
+    // 被动回复身份（`msg_id` / `event_id`）与逐条 `msg_seq`：Go 在发送前一次性定好，主条与
+    // 后续媒体条共用同一份（`send_group_msg.go:801` 的媒体循环用同一个 messageID）。
+    let passive = if plan.wakeup {
+        Passive::default()
+    } else {
+        resolve_passive(context, plan, deps, &openid)
+    };
+    stamp_message(&mut primary, &passive, deps.echo);
+    for extra in &mut extras {
+        stamp_message(extra, &passive, deps.echo);
     }
     // 先占当天的 @全员 名额再发送：并发两条 @全员 只有一条能占住。标签只可能在首条
     // （正文在 markdown 条），后续媒体条没有正文。
@@ -466,6 +495,175 @@ fn record_sent_message(echo: Option<&EchoStore>, message_id: &str) {
             error = %err,
             "deferred 发送成功后写 echo 缓存失败"
         );
+    }
+}
+
+/// 被动回复身份：Go `send_group_msg.go:207-331` / `send_private_msg.go:319-355` 解析出的
+/// `messageID` / `eventID`，对同一次发送的每条消息生效。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Passive {
+    /// 被动回复的 `msg_id`（懒消息池 / echo 映射表的命中值）；`None` 即主动推送。
+    msg_id: Option<String>,
+    /// 主动消息的 `event_id`；与 `msg_id` 互斥（有前者就不带后者）。
+    event_id: Option<String>,
+}
+
+/// 按 Go 的先后顺序确定本次发送的 `msg_id` / `event_id`（语义见 [`Passive`]）。
+///
+/// 顺序（群 / 私聊同构，差异逐条标注）：
+/// 1. 懒消息池：群有 `user_id` 上下文查 v2，否则 v1；私聊只有 v1（Go `GetLazyMessagesId*`）。
+/// 2. 池里没命中 → 请求 `echo` 当键查 `msg_id` 表（Go `GetMsgIDByKey(echoStr)`）。
+/// 3. 仍空 → 「群 × 用户」/ 收件人键查表（Go `GetMessageIDByUseridAndGroupid` /
+///    `GetMessageIDByUseridOrGroupid`）。
+/// 4. 群特例：没有 `user_id` 上下文（Rust 侧也没有 CQ 派生的 `event_id`）时，缓存里的
+///    `msg_id` 已过期 → 清空走主动推送（Go `send_group_msg.go:308-312`）。
+/// 5. `[CQ:active]` 标记：`msg_id` / `event_id` 双清（强制主动推送）。
+/// 6. 结果是 `"2000"`：`msg_id` 清空、回填可用的 `event_id`，尽量不消耗主动次数。
+///
+/// 未装配 echo（[`DeferredDeps::echo`] 为 `None`）时整段跳过，行为与接线前一致。
+fn resolve_passive(
+    context: &ActionContext,
+    plan: &SendRequest,
+    deps: &DeferredDeps<'_>,
+    openid: &str,
+) -> Passive {
+    let Some(echo) = deps.echo else {
+        return Passive::default();
+    };
+    let settings = context.config().snapshot();
+    let app_id = settings.get_app_id().to_string();
+    let given = plan.target.id();
+    let user = plan.echo_context.user_id.as_deref();
+    let group = matches!(plan.target, SendTarget::Group(_));
+
+    let mut msg_id = String::new();
+    if settings.get_lazy_message_id() {
+        msg_id = lazy_message_id(echo, plan, given, openid);
+    }
+    if msg_id.is_empty()
+        && let Some(key) = plan.echo_context.echo_key.as_deref()
+    {
+        msg_id = echo.get_msg_id_by_key(key);
+    }
+    if msg_id.is_empty() {
+        msg_id = match (group, user) {
+            // 群 × 用户：入站按虚拟号写键，客户端传的也正是它；原始 OpenID 兜底一次
+            (true, Some(user)) => first_message_id(
+                echo,
+                &[
+                    format!("{app_id}_{given}_{user}"),
+                    format!("{app_id}_{openid}_{user}"),
+                ],
+            ),
+            _ => first_message_id(
+                echo,
+                &[format!("{app_id}_{given}"), format!("{app_id}_{openid}")],
+            ),
+        };
+    }
+    if group && !msg_id.is_empty() && user.is_none() {
+        msg_id.clear();
+    }
+
+    // `[CQ:active]`：强制主动推送。Go 私聊把这一步放在 "2000" 分支之后，但主动标记本来就会
+    // 连 `event_id` 一起清空，先后顺序的最终结果相同。
+    let active = plan
+        .message
+        .plan
+        .active
+        .as_ref()
+        .is_some_and(|active| active.active);
+    let mut event_id = String::new();
+    if active {
+        msg_id.clear();
+    } else if msg_id == DEFAULT_MESSAGE_ID {
+        msg_id.clear();
+        event_id = event_id_for(
+            echo,
+            &app_id,
+            group,
+            given,
+            openid,
+            settings.get_string_ob11(),
+        );
+    }
+
+    Passive {
+        msg_id: (!msg_id.is_empty()).then_some(msg_id),
+        event_id: (!event_id.is_empty()).then_some(event_id),
+    }
+}
+
+/// 按顺序取第一个非空的 `msg_id` 表值（键已含 `app_id` 前缀）。
+fn first_message_id(echo: &EchoStore, keys: &[String]) -> String {
+    keys.iter()
+        .map(|key| echo.get_msg_id_by_key(key))
+        .find(|id| !id.is_empty())
+        .unwrap_or_default()
+}
+
+/// 懒消息池取值：群有 `user_id` 上下文查 v2、否则 v1；私聊只有 v1。
+///
+/// 池按客户端可见的 ID 写键（虚拟号；`string_action` 时再补原始 OpenID 键），所以先用调用方
+/// 传来的原样 ID，没命中且它与真实 OpenID 不同时再试一次。
+fn lazy_message_id(echo: &EchoStore, plan: &SendRequest, given: &str, openid: &str) -> String {
+    let user = plan.echo_context.user_id.as_deref();
+    let group = matches!(plan.target, SendTarget::Group(_));
+    let lookup = |key: &str| match (group, user) {
+        (true, Some(user)) => echo.get_lazy_messages_id_v2(key, user),
+        _ => echo.get_lazy_messages_id(key),
+    };
+    let id = lookup(given);
+    if id != DEFAULT_MESSAGE_ID || openid == given {
+        return id;
+    }
+    lookup(openid)
+}
+
+/// Go `GetEventIDByUseridOrGroupid{,-v2}`：群按 `string_ob11` 选键（关闭时先虚拟号、再原始
+/// OpenID 兜底），私聊一律用真实 OpenID（Go 那边已先把 `user_id` 反查成 OpenID，`IsOpenID`
+/// 恒真，等价于 v2 分支）。
+fn event_id_for(
+    echo: &EchoStore,
+    app_id: &str,
+    group: bool,
+    given: &str,
+    openid: &str,
+    string_ob11: bool,
+) -> String {
+    let mut keys = Vec::with_capacity(2);
+    if group && !string_ob11 && given != openid {
+        keys.push(format!("{app_id}_{given}"));
+    }
+    keys.push(format!("{app_id}_{openid}"));
+    keys.iter()
+        .map(|key| echo.get_event_id_by_key(key))
+        .find(|id| !id.is_empty())
+        .unwrap_or_default()
+}
+
+/// 把被动身份写到一条待发消息上，并给它分一个 `msg_seq`。
+///
+/// - `msg_id` 已存在（`[CQ:reply]` 反查出的真实消息 ID）时不覆盖，并清掉 `event_id`
+///   （Go 的「二选一」：回复分支写 `MsgID` 后紧跟 `EventID = ""`）。
+/// - `msg_seq` 用**递增**版（Go `IncrementMappingSeq(messageID)`），键就是解析出的 `msg_id`：
+///   同一回复链的多段回复复用同一 `msg_id`，seq 连续递增才不会撞 40054005（Issue #19）。
+///   自带 `msg_seq` 的形态（流式分片按自己的序号走）保持原值。
+fn stamp_message(body: &mut MessageToCreate, passive: &Passive, echo: Option<&EchoStore>) {
+    if body.msg_id.is_none() {
+        body.msg_id.clone_from(&passive.msg_id);
+    }
+    if body.msg_id.is_some() {
+        body.event_id = None;
+    } else if body.event_id.is_none() {
+        body.event_id.clone_from(&passive.event_id);
+    }
+    let Some(echo) = echo else {
+        return;
+    };
+    if body.msg_seq.is_none() {
+        let key = passive.msg_id.as_deref().unwrap_or_default();
+        body.msg_seq = Some(u32::try_from(echo.next_mapping_seq(key)).unwrap_or_default());
     }
 }
 
@@ -1359,19 +1557,19 @@ fn unsupported_segment(plan: &OutboundPlan) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
     use gensokyo_actions::{
-        ActionContext, ForwardParseFailure, ForwardPlan, ForwardRequest, MessageOut, QqApi,
-        QqFuture, SendRequest, SendTarget, SseRequest,
+        ActionContext, EchoContext, ForwardParseFailure, ForwardPlan, ForwardRequest, MessageOut,
+        QqApi, QqFuture, SendRequest, SendTarget, SseRequest,
     };
     use gensokyo_config::ConfigManager;
     use gensokyo_core::{Error, Ob11Id, Result};
     use gensokyo_media::{BoxFuture, FetchRequest, Fetcher, MediaTransport, TransportResponse};
     use gensokyo_protocol::Event;
     use gensokyo_protocol::outbound::{
-        CardFields, CardPayload, InputNotifyPayload, KeyboardPayload, MarkdownPayload, StreamKind,
-        StreamPayload,
+        ActiveKind, CardFields, CardPayload, InputNotifyPayload, KeyboardPayload, MarkdownPayload,
+        StreamKind, StreamPayload,
     };
     use gensokyo_protocol::{MediaRef, OutboundPlan};
     use gensokyo_qq::dto::media_image::{
@@ -1694,6 +1892,7 @@ mod tests {
                 auto_escape: false,
             },
             wakeup: false,
+            echo_context: EchoContext::default(),
         }
     }
 
@@ -3641,6 +3840,273 @@ mod tests {
             Some(10),
             "msg_seq = index + 10 的防去重原样上送"
         );
+    }
+
+    // ---- 被动回复身份：懒消息池 / "2000" / msg_seq（Go send_group_msg.go:207-331） ----
+
+    /// 带 echo 的上下文：`app_id` 显式给出，echo 键要用它拼。
+    fn echo_context(api: Arc<FakeQqApi>, settings: &str) -> (TempDir, ActionContext) {
+        context_with_settings(api, &format!("  app_id: 10001\n{settings}"))
+    }
+
+    #[tokio::test]
+    async fn lazy_pool_hit_becomes_the_passive_msg_id() {
+        let api = Arc::new(FakeQqApi::default().with_send("OUT-1"));
+        let (_dir, context) = echo_context(Arc::clone(&api), "  lazy_message_id: true\n");
+        let echo = EchoStore::new();
+        echo.add_lazy_message_id_v2(OPENID, MEMBER_OPENID, "POOL-MSG", SystemTime::now());
+        let media = no_media();
+        let mut plan = text_plan(SendTarget::Group(OPENID.to_owned()), "正文");
+        plan.echo_context.user_id = Some(MEMBER_OPENID.to_owned());
+
+        execute(&context, &plan, &deps(&media, Some(&echo)))
+            .await
+            .expect("懒池命中应发送成功");
+
+        let sent = api.sent();
+        assert_eq!(
+            sent[0].msg_id.as_deref(),
+            Some("POOL-MSG"),
+            "群 × 用户懒池的命中值就是 msg_id"
+        );
+        assert_eq!(sent[0].event_id, None, "msg_id 与 event_id 二选一");
+        assert_eq!(sent[0].msg_seq, Some(1), "首条 msg_seq 从 1 起");
+    }
+
+    #[tokio::test]
+    async fn group_without_user_context_drops_the_cached_msg_id() {
+        let api = Arc::new(FakeQqApi::default().with_send("OUT-1"));
+        let (_dir, context) = echo_context(Arc::clone(&api), "  lazy_message_id: true\n");
+        let echo = EchoStore::new();
+        echo.add_lazy_message_id(OPENID, "POOL-MSG", SystemTime::now());
+        let media = no_media();
+        // 客户端没传 user_id：Go 认为缓存的 msg_id 已过期，清空后按主动推送发
+        let plan = text_plan(SendTarget::Group(OPENID.to_owned()), "主动");
+
+        execute(&context, &plan, &deps(&media, Some(&echo)))
+            .await
+            .expect("应发送成功");
+
+        assert_eq!(api.sent()[0].msg_id, None, "无用户上下文时不带缓存 msg_id");
+    }
+
+    #[tokio::test]
+    async fn empty_lazy_pool_backfills_event_id_in_both_string_modes() {
+        for string_ob11 in [false, true] {
+            let api = Arc::new(FakeQqApi::default().with_send("OUT-1"));
+            let (_dir, context) = echo_context(
+                Arc::clone(&api),
+                &format!("  lazy_message_id: true\n  string_ob11: {string_ob11}\n"),
+            );
+            let (_idmap_dir, idmap) = idmap_store();
+            let context = context.with_idmap(Arc::clone(&idmap));
+            // 客户端拿虚拟群号发消息，真实群 OpenID 由 idmap 反查
+            let virtual_group = idmap
+                .retrieve_virtual_value(OPENID)
+                .expect("分配虚拟群号")
+                .1;
+            let echo = EchoStore::new();
+            if string_ob11 {
+                // string_ob11 打开：直接按真实 OpenID 键查（Go 的 v2 分支）
+                echo.add_event_id_v2("10001", OPENID, "EV-STRING");
+            } else {
+                // 关闭：先按虚拟号键查（Go 的 v1 分支）
+                echo.add_event_id("10001", virtual_group, "EV-LEGACY");
+            }
+            let media = no_media();
+            let mut plan = text_plan(SendTarget::Group(virtual_group.to_string()), "主动");
+            plan.echo_context.user_id = Some(MEMBER_OPENID.to_owned());
+
+            execute(&context, &plan, &deps(&media, Some(&echo)))
+                .await
+                .expect("应发送成功");
+
+            let sent = api.sent();
+            assert_eq!(sent[0].msg_id, None, "「2000」分支必须清空 msg_id");
+            let expected = if string_ob11 { "EV-STRING" } else { "EV-LEGACY" };
+            assert_eq!(
+                sent[0].event_id.as_deref(),
+                Some(expected),
+                "string_ob11={string_ob11} 时回填对应键的 event_id"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn private_empty_lazy_pool_backfills_event_id_by_raw_openid() {
+        let api = Arc::new(FakeQqApi::default().with_send("OUT-1"));
+        let (_dir, context) = echo_context(Arc::clone(&api), "  lazy_message_id: true\n");
+        let (_idmap_dir, idmap) = idmap_store();
+        let context = context.with_idmap(Arc::clone(&idmap));
+        let virtual_user = idmap.retrieve_virtual_value(OPENID).expect("分配虚拟号").1;
+        let echo = EchoStore::new();
+        echo.add_event_id_v2("10001", OPENID, "EV-C2C");
+        let media = no_media();
+        let plan = text_plan(SendTarget::Private(virtual_user.to_string()), "主动");
+
+        execute(&context, &plan, &deps(&media, Some(&echo)))
+            .await
+            .expect("应发送成功");
+
+        let sent = api.sent();
+        assert_eq!(sent[0].msg_id, None, "私聊「2000」也清空 msg_id");
+        assert_eq!(
+            sent[0].event_id.as_deref(),
+            Some("EV-C2C"),
+            "私聊按真实 OpenID 键回填 event_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_echo_key_is_looked_up_for_the_passive_msg_id() {
+        let api = Arc::new(FakeQqApi::default().with_send("OUT-1"));
+        let (_dir, context) = echo_context(Arc::clone(&api), "");
+        let echo = EchoStore::new();
+        echo.add_msg_id_v3("10001", "ECHO-KEY", "MSG-FROM-ECHO");
+        let media = no_media();
+        let mut plan = text_plan(SendTarget::Private(OPENID.to_owned()), "回复");
+        // Go 拿请求 `echo` 原样当键查表（`GetMsgIDByKey(echoStr)`，不再加前缀）
+        plan.echo_context.echo_key = Some("10001_ECHO-KEY".to_owned());
+
+        execute(&context, &plan, &deps(&media, Some(&echo)))
+            .await
+            .expect("应发送成功");
+
+        assert_eq!(
+            api.sent()[0].msg_id.as_deref(),
+            Some("MSG-FROM-ECHO"),
+            "echo 字符串当键查到的就是 msg_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_marker_clears_msg_id_and_event_id() {
+        let api = Arc::new(FakeQqApi::default().with_send("OUT-1"));
+        let (_dir, context) = echo_context(Arc::clone(&api), "");
+        let echo = EchoStore::new();
+        echo.add_msg_id_v3("10001", "ECHO-KEY", "MSG-FROM-ECHO");
+        echo.add_event_id_v2("10001", OPENID, "EV-1");
+        let media = no_media();
+        let mut plan = text_plan(SendTarget::Private(OPENID.to_owned()), "[CQ:active] 强制主动");
+        plan.echo_context.echo_key = Some("10001_ECHO-KEY".to_owned());
+        plan.message.plan.active = Some(ActiveKind {
+            active: true,
+            ..ActiveKind::default()
+        });
+
+        execute(&context, &plan, &deps(&media, Some(&echo)))
+            .await
+            .expect("应发送成功");
+
+        let sent = api.sent();
+        assert_eq!(sent[0].msg_id, None, "[CQ:active] 必须清 msg_id");
+        assert_eq!(sent[0].event_id, None, "[CQ:active] 必须清 event_id");
+    }
+
+    #[tokio::test]
+    async fn same_chain_replies_increment_msg_seq_on_one_msg_id() {
+        let api = Arc::new(
+            FakeQqApi::default()
+                .with_send("OUT-1")
+                .with_send("OUT-2"),
+        );
+        let (_dir, context) = echo_context(Arc::clone(&api), "");
+        let echo = EchoStore::new();
+        echo.add_msg_id_v3("10001", "CHAIN", "SAME-MSG");
+        let media = no_media();
+        let mut plan = text_plan(SendTarget::Private(OPENID.to_owned()), "第一段");
+        plan.echo_context.echo_key = Some("10001_CHAIN".to_owned());
+
+        for _ in 0..2 {
+            execute(&context, &plan, &deps(&media, Some(&echo)))
+                .await
+                .expect("应发送成功");
+        }
+
+        let sent = api.sent();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0].msg_id.as_deref(), Some("SAME-MSG"));
+        assert_eq!(sent[1].msg_id.as_deref(), Some("SAME-MSG"));
+        assert_eq!(sent[0].msg_seq, Some(1), "同一 msg_id 上 seq 递增");
+        assert_eq!(
+            sent[1].msg_seq,
+            Some(2),
+            "同链第二段必须换 seq，否则撞 40054005（Issue #19）"
+        );
+    }
+
+    #[tokio::test]
+    async fn media_extras_get_their_own_msg_seq() {
+        let api = Arc::new(
+            FakeQqApi::default()
+                .with_send("MSG-MD")
+                .with_send("MSG-IMG"),
+        );
+        let (_dir, context) = echo_context(Arc::clone(&api), "");
+        let echo = EchoStore::new();
+        echo.add_msg_id_v3("10001", "CHAIN", "SAME-MSG");
+        let media = no_media();
+        let mut plan = group_request(OutboundPlan {
+            images: vec![MediaRef::Unknown("FILE-1".to_owned())],
+            ..markdown_plan("# 标题")
+        });
+        plan.echo_context.echo_key = Some("10001_CHAIN".to_owned());
+        plan.echo_context.user_id = Some(MEMBER_OPENID.to_owned());
+
+        execute(&context, &plan, &deps(&media, Some(&echo)))
+            .await
+            .expect("markdown + 媒体应发送成功");
+
+        let sent = api.sent();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0].msg_id.as_deref(), Some("SAME-MSG"));
+        assert_eq!(
+            sent[1].msg_id.as_deref(),
+            Some("SAME-MSG"),
+            "媒体条与正文条共用同一被动 msg_id"
+        );
+        assert_eq!(sent[0].msg_seq, Some(1));
+        assert_eq!(sent[1].msg_seq, Some(2), "媒体条各自再取一个 seq");
+    }
+
+    #[tokio::test]
+    async fn wakeup_keeps_msg_id_and_event_id_off_even_with_echo_pooled() {
+        let api = Arc::new(FakeQqApi::default().with_send("OUT-1"));
+        let (_dir, context) = echo_context(Arc::clone(&api), "  lazy_message_id: true\n");
+        let echo = EchoStore::new();
+        echo.add_lazy_message_id(OPENID, "POOL-MSG", SystemTime::now());
+        echo.add_event_id_v2("10001", OPENID, "EV-1");
+        let media = no_media();
+        let mut plan = text_plan(SendTarget::Private(OPENID.to_owned()), "召回");
+        plan.wakeup = true;
+
+        execute(&context, &plan, &deps(&media, Some(&echo)))
+            .await
+            .expect("召回应发送成功");
+
+        let sent = api.sent();
+        assert!(sent[0].is_wakeup, "召回标记必须落体");
+        assert_eq!(sent[0].msg_id, None, "召回与 msg_id 互斥");
+        assert_eq!(sent[0].event_id, None, "召回与 event_id 互斥");
+    }
+
+    #[tokio::test]
+    async fn without_echo_nothing_is_stamped() {
+        let api = Arc::new(FakeQqApi::default().with_send("OUT-1"));
+        let (_dir, context) = echo_context(Arc::clone(&api), "  lazy_message_id: true\n");
+        let media = no_media();
+        let mut plan = text_plan(SendTarget::Group(OPENID.to_owned()), "正文");
+        plan.echo_context.user_id = Some(MEMBER_OPENID.to_owned());
+        plan.echo_context.echo_key = Some("ECHO-KEY".to_owned());
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("未装配 echo 也应正常发送");
+
+        let sent = api.sent();
+        assert_eq!(sent[0].msg_id, None);
+        assert_eq!(sent[0].event_id, None);
+        assert_eq!(sent[0].msg_seq, None, "未装配 echo 时行为零变化");
     }
 
     // ---- markdown 正文图片 ----
