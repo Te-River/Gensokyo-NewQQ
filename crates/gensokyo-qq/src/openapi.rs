@@ -10,7 +10,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::dto::{
-    ApprovalJoinRequest, BatchRemoveMembersRequest, BatchRemoveMembersResponse,
+    ApprovalJoinRequest, BatchRemoveMembersRequest, BatchRemoveMembersResponse, BotUser,
     CreateJoinApprovalStrategyRequest, CreateJoinApprovalStrategyResponse, CreatePanelRequest,
     CreatePanelResponse, FileUpload, GenerateUrlLink, GenerateUrlLinkRequest,
     JoinApprovalStrategyList, MediaResponse, MemberBlacklistList, MemberBlacklistRequest,
@@ -87,6 +87,16 @@ impl<T: HttpTransport> OpenApiClient<T> {
     #[must_use]
     pub fn token_manager(&self) -> &TokenManager<T> {
         &self.tokens
+    }
+
+    /// 当前机器人信息（`GET /users/@me`，对齐 botgo v2 `Me`）。
+    ///
+    /// Go 用它取机器人真实 ID（`main.go:254` 的 `api.Me` → `main.go:304` 的
+    /// `handlers.BotID = me.ID`），再用于 AppID⇄BotID 文本替换。该路径在 botgo 里
+    /// v1 / v2 同址（`openapi/v1/resource.go:43` / `v2/resource.go:82`），这里沿用
+    /// 同一个基址与鉴权头，不另开客户端。
+    pub async fn me(&self) -> Result<BotUser> {
+        self.get_json("/users/@me").await
     }
 
     /// 发送群消息（`POST /v2/groups/{group_openid}/messages`）。

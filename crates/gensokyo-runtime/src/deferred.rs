@@ -138,6 +138,7 @@
 //! → `retcode 1400`；下载、上传与发送失败（[`Error::Network`] / [`Error::Upstream`]）→ `1500`。
 //! 映射在 [`crate::dispatcher`] 里完成。
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Once;
 use std::time::Duration;
@@ -1558,6 +1559,54 @@ fn music_fallback_text(plan: &OutboundPlan, rendered: String) -> Result<String> 
     })
 }
 
+/// 正文里的 `AppID → BotID`（Go `transformMessageTextAt` / `transformMessageTextAtNoGroupID`，
+/// `message_parser.go:1669-1683` / `:1704-1718`）。
+///
+/// OneBot 客户端用 `app_id` 认机器人，QQ 上游要的是真实 ID，所以正文里以 `app_id` 写的
+/// 纯文本在发送前换成 BotID（频道 bot 需要「自己 at 自己」的场景靠它）。CQ 码区间整段跳过
+/// （Go 用 `[CQ:[^\]]*]` 占位再还原），否则 `[CQ:at,qq=<app_id>]` 这类参数会被改写。
+///
+/// `do_not_replace_appid` 为真、BotID 未取到、或 BotID 与 AppID 相同时原样返回。`auto_escape`
+/// 的正文不进这里（[`render_text`] 先返回），保持「原样发送」的既有口径。
+fn replace_app_id<'a>(context: &ActionContext, text: &'a str) -> Cow<'a, str> {
+    let settings = context.config().snapshot();
+    if settings.get_do_not_replace_appid() {
+        return Cow::Borrowed(text);
+    }
+    let app_id = settings.get_app_id().to_string();
+    let Some(bot_id) = context
+        .bot_id()
+        .filter(|id| !id.is_empty() && *id != app_id.as_str())
+    else {
+        return Cow::Borrowed(text);
+    };
+    if !text.contains(&app_id) {
+        return Cow::Borrowed(text);
+    }
+    Cow::Owned(replace_outside_cq_codes(text, &app_id, bot_id))
+}
+
+/// 只替换 CQ 码之外的 `needle`，CQ 码逐字节原样保留。
+///
+/// 等价 Go 的占位符方案（`cqAnyRe` = `\[CQ:[^\]]*\]`）：未闭合的 `[CQ:` 在 Go 里不算 CQ 码，
+/// 这里同样按普通文本处理，不把其后整段当成码。
+fn replace_outside_cq_codes(text: &str, needle: &str, replacement: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("[CQ:") {
+        out.push_str(&rest[..start].replace(needle, replacement));
+        let code = &rest[start..];
+        let Some(close) = code.find(']') else {
+            out.push_str(&code.replace(needle, replacement));
+            return out;
+        };
+        out.push_str(&code[..=close]);
+        rest = &code[close + 1..];
+    }
+    out.push_str(&rest.replace(needle, replacement));
+    out
+}
+
 /// 文本主体 → v2 `content`：`[CQ:at,qq=…]` 转 `<@openid>`，`qq=all` / `everyone` 转 @全员标签，
 /// 缺 `qq` 的 at 段与其余 CQ 码保持原样。
 ///
@@ -1572,7 +1621,8 @@ fn render_text(context: &ActionContext, message: &MessageOut) -> Result<String> 
         return Ok(message.text.clone());
     }
 
-    let text = message.text.as_str();
+    let text = replace_app_id(context, &message.text);
+    let text: &str = text.as_ref();
     let mut out = String::with_capacity(text.len());
     let mut from = 0;
     while let Some(start) = at_everyone::find_at_code(text, from) {
@@ -3660,6 +3710,105 @@ mod tests {
             Some(expected.as_str()),
             "参数齐备的空白写法要反查，裸 at 段（带空白）仍原样透传"
         );
+    }
+
+    // ---- AppID ⇄ BotID ----
+
+    /// 正文里的 AppID 换成 BotID，群聊与私聊同一口径（Go 两条 `transformMessageTextAt*`）。
+    #[tokio::test]
+    async fn text_replaces_app_id_with_bot_id_for_group_and_private() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1").with_send("MSG-2"));
+        let (_dir, context) = context_with_settings(Arc::clone(&api), "  app_id: 102001234\n");
+        let context = context.with_bot_id("2633000001");
+        let media = no_media();
+
+        for target in [
+            SendTarget::Group(OPENID.to_owned()),
+            SendTarget::Private(OPENID.to_owned()),
+        ] {
+            let plan = text_plan(target, "机器人 102001234 在线");
+            execute(&context, &plan, &deps(&media, None))
+                .await
+                .expect("文本消息应发送成功");
+        }
+
+        let sent = api.sent();
+        assert_eq!(sent.len(), 2, "群聊与私聊各一条");
+        for body in &sent {
+            assert_eq!(body.content.as_deref(), Some("机器人 2633000001 在线"));
+        }
+    }
+
+    /// CQ 码区间不受替换影响（Go 先占位再 `ReplaceAll`）。
+    #[tokio::test]
+    async fn text_does_not_replace_app_id_inside_cq_codes() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context_with_settings(Arc::clone(&api), "  app_id: 102001234\n");
+        let context = context.with_bot_id("2633000001");
+        let media = no_media();
+        let plan = text_plan(
+            SendTarget::Group(OPENID.to_owned()),
+            "102001234 [CQ:at,qq=102001234] 102001234",
+        );
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("CQ 段内的数字不应触发替换");
+
+        assert_eq!(
+            api.sent()[0].content.as_deref(),
+            // `[CQ:at,qq=102001234]` 参数逐字保留；未装配 idmap 时反查失败，码原文透传
+            Some("2633000001 [CQ:at,qq=102001234] 2633000001")
+        );
+    }
+
+    /// `do_not_replace_appid` 打开时正文逐字透传。
+    #[tokio::test]
+    async fn do_not_replace_appid_keeps_text_verbatim() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context_with_settings(
+            Arc::clone(&api),
+            "  app_id: 102001234\n  do_not_replace_appid: true\n",
+        );
+        let context = context.with_bot_id("2633000001");
+        let media = no_media();
+        let plan = text_plan(
+            SendTarget::Group(OPENID.to_owned()),
+            "机器人 102001234 在线",
+        );
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("开关打开时也应发送成功");
+
+        assert_eq!(
+            api.sent()[0].content.as_deref(),
+            Some("机器人 102001234 在线")
+        );
+    }
+
+    /// BotID 缺失或与 AppID 相同时是空操作（Go 用空串守卫，相等替换本就无变化）。
+    #[tokio::test]
+    async fn missing_or_equal_bot_id_keeps_app_id() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1").with_send("MSG-2"));
+        let (_dir, context) = context_with_settings(Arc::clone(&api), "  app_id: 102001234\n");
+        let media = no_media();
+
+        for context in [context.clone(), context.with_bot_id("102001234")] {
+            let plan = text_plan(
+                SendTarget::Group(OPENID.to_owned()),
+                "机器人 102001234 在线",
+            );
+            execute(&context, &plan, &deps(&media, None))
+                .await
+                .expect("BotID 缺失时也应发送成功");
+        }
+
+        let sent = api.sent();
+        assert_eq!(sent.len(), 2);
+        for body in &sent {
+            assert_eq!(body.content.as_deref(), Some("机器人 102001234 在线"));
+        }
     }
 
     #[tokio::test]

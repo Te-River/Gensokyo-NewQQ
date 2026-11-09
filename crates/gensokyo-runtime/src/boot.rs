@@ -29,6 +29,12 @@
 //! （[`DEFAULT_BOTSTATS_PATH`]；Go 侧 `botstats.InitializeDB`，`main.go:272`）。打开失败只
 //! `warn`——当日收发计数不落盘、`get_status` 统计字段报 0，`/metrics` 的内存计数照常。
 //!
+//! 最后是 `Runtime::attach_bot_id`：装配了 QQ 客户端时向 `GET /users/@me` 取机器人真实 ID
+//! （Go `main.go:254` 的 `api.Me` → `main.go:304` 的 `handlers.BotID = me.ID`），注入状态与
+//! [`gensokyo_actions::ActionContext`]，入站 BotID→AppID、出站 AppID→BotID 的正文替换才生效。
+//! 这是启动期唯一一次主动联网（含换 access_token）；失败只 `warn`，BotID 缺失时两侧都不替换
+//! （Go 取不到 `Me` 时进 `nologin` 分支，整段初始化都跳过）。
+//!
 //! [`RuntimeOptions`] 可覆盖两个绑定地址：测试用 `127.0.0.1:0` 取随机端口，避免端口冲突。
 //!
 //! [`RuntimeOptions::config_watch`]（默认开）在启动时拉起 [`gensokyo_config::ConfigWatcher`]：
@@ -188,6 +194,44 @@ impl Runtime {
         }
     }
 
+    /// 启动装配：向 `GET /users/@me` 取机器人真实 ID 并注入状态与
+    /// [`gensokyo_actions::ActionContext`]（Go `main.go:254` 的 `api.Me` → `main.go:304`）。
+    ///
+    /// 未装配 QQ 客户端（无凭据）时不发请求；取失败只 `warn`：BotID 缺失时入站 / 出站都
+    /// 不做 AppID⇄BotID 替换（Go 取不到 `Me` 时进 `nologin` 分支，整段初始化都跳过）。
+    /// 已注入时原样返回。
+    async fn attach_bot_id(state: AppState) -> AppState {
+        if state.bot_id().is_some() {
+            return state;
+        }
+        let Some(api) = state.api() else {
+            return state;
+        };
+        match api.me().await {
+            Ok(me) => {
+                tracing::info!(bot_id = %me.id, "已获取机器人 ID");
+                Self::inject_bot_id(state, &me.id)
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "获取机器人 ID 失败，文本不做 AppID⇄BotID 替换");
+                state
+            }
+        }
+    }
+
+    /// 把 BotID 写进状态并重建 [`gensokyo_actions::ActionContext`]：handler 捕获的是注册时的
+    /// `Arc`，与 [`Runtime::attach_idmap_with`] 同一处理方式。
+    fn inject_bot_id(state: AppState, bot_id: &str) -> AppState {
+        let state = state.with_bot_id(bot_id);
+        match state.actions_arc() {
+            Some(actions) => {
+                let actions = Arc::new(actions.as_ref().clone().with_bot_id(bot_id));
+                state.with_action_context(actions)
+            }
+            None => state,
+        }
+    }
+
     /// 按当前配置快照启动全部启用的 listener。
     ///
     /// # Errors
@@ -207,6 +251,7 @@ impl Runtime {
         let state = Self::attach_echo(state);
         let state = Self::attach_idmap(state);
         let state = Self::attach_botstats(state);
+        let state = Self::attach_bot_id(state).await;
         let settings = state.config().snapshot();
 
         // 注册表在 `AppState` 装配时创建（内置 3 个 + `gensokyo_actions::register_all`）；
@@ -1216,6 +1261,72 @@ mod tests {
                 .resolve_openid("user_id", &vuin.to_string(), "user_openid")
                 .expect("虚拟号应能反查"),
             openid
+        );
+    }
+
+    /// BotID 注入要同时落进状态与 `ActionContext`：出站正文替换读的是后者。
+    #[test]
+    fn inject_bot_id_reaches_state_and_action_context() {
+        use std::sync::Arc;
+
+        use gensokyo_actions::{ActionContext, QqApi};
+        use gensokyo_config::ConfigManager;
+        use gensokyo_qq::{
+            Error as QqError, HttpRequest, HttpResponse, HttpTransport, OpenApiClient,
+            Result as QqResult, TokenConfig, TokenManager,
+        };
+
+        use super::Runtime;
+        use crate::state::AppState;
+
+        /// 所有请求都直接失败的传输层：装配路径不触网。
+        #[derive(Debug)]
+        struct OfflineTransport;
+
+        impl HttpTransport for OfflineTransport {
+            fn request(
+                &self,
+                _req: HttpRequest,
+            ) -> impl std::future::Future<Output = QqResult<HttpResponse>> + Send {
+                std::future::ready(Err(QqError::Transport("测试环境不联网".to_owned())))
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nsettings:\n  app_id: 102000001\n")
+            .expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let transport = Arc::new(OfflineTransport);
+        let tokens = Arc::new(TokenManager::new(
+            Arc::clone(&transport),
+            TokenConfig::new("102000001", "s3cret"),
+        ));
+        let api = Arc::new(OpenApiClient::new(transport, tokens));
+        let context = Arc::new(ActionContext::new(
+            api as Arc<dyn QqApi>,
+            Arc::clone(&manager),
+        ));
+        let state = AppState::with_actions(manager, context);
+        assert!(state.bot_id().is_none(), "装配前状态里不应有 BotID");
+        assert!(
+            state
+                .actions()
+                .expect("应有 ActionContext")
+                .bot_id()
+                .is_none(),
+            "装配前 ActionContext 不应有 BotID"
+        );
+
+        let state = Runtime::inject_bot_id(state, "2633000001");
+        assert_eq!(state.bot_id(), Some("2633000001"));
+        assert_eq!(
+            state
+                .actions()
+                .expect("ActionContext 应随状态保留")
+                .bot_id(),
+            Some("2633000001"),
+            "出站替换读的是 ActionContext 里的 BotID"
         );
     }
 }

@@ -24,9 +24,12 @@
 //!   保存 / 拼 URL 逻辑（省掉一跳），成功响应完全一致。
 //! - `oss_type=0` 且 `lotus=true && !lotus_without_uploadpic` 时 Go 转发给远端 lotus 图床；
 //!   Rust 未移植 lotus 出站，返回 500 并说明原因（不伪造成功）。
-//! - `getid` 的复合键类型（8~12、14）与 5/18/19 依赖 bbolt 迁移期数据结构，Rust idmap
-//!   未提供，回 **501**；其余类型与 Go 同码同形状。Go 的 `switch` 无 `default`，未知 type
-//!   返回 **200 空响应体**，此处照抄。
+//! - `getid` 的 5、12、14、18、19 依赖 bbolt 迁移期数据结构，Rust idmap 未提供，回 **501**；
+//!   复合键类型 8~11 由本地 `IdMapStore` 两次单键调用组合实现（与 gRPC 服务端同一套语义），
+//!   其余类型与 Go 同码同形状。Go 的 `switch` 无 `default`，未知 type 返回 **200 空响应体**，
+//!   此处照抄。
+//! - `getid` 恒挂载：Go 在 lotus gRPC 接管 idmap 时不注册该路由，但 Rust 侧 gRPC 服务端尚未
+//!   装配，照搬会让远端 lotus 调用整条消失（见 [`router`]）。
 //! - `/uploadpicv2` 的宽高：Go 对 0~3 按 URL 再下载一次取尺寸；这里统一读内存里的文件头
 //!   （`gensokyo_media::image_size`），少一次网络往返，结果对同一张图一致。
 //! - 图床短签名外链的 302→直链解析属 P7 的口径（`gensokyo_media::hosting` 未做），v2 复用
@@ -35,7 +38,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
-use std::sync::{LazyLock, Mutex, PoisonError};
+use std::sync::{LazyLock, Mutex, Once, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{
@@ -49,6 +52,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use gensokyo_config::Settings;
 use gensokyo_media::{HostingKind, ImageKind, OssKind, image_size, sniff_image};
+use gensokyo_storage::{IdMapStore, StorageError};
 use md5::{Digest, Md5};
 use serde_json::json;
 
@@ -64,21 +68,31 @@ const CHANNEL_TEMP: &str = "./channel_temp";
 /// `getid` 签名时间窗口：Go `±300s`。
 const TIMESTAMP_WINDOW: i64 = 300;
 
-/// 三条路由。`getid` 的注册条件对齐 Go `main.go:507`（lotus gRPC 接管 idmap 时不注册）。
+/// 三条路由。`/getid` 恒挂载：Go `main.go:507` 在 lotus gRPC 接管 idmap 时不注册它，但本仓库
+/// 的 gRPC 服务端尚未装配（`gensokyo-bin` 不引用 `idmap/grpc`），照搬会让远端 lotus 的
+/// 8~11 调用整条消失，因此这里只在 lotus gRPC 配置下 warn 一次；等 gRPC 服务端接线后恢复
+/// 该条件即可。
 pub(crate) fn router(state: AppState) -> Router {
-    let mut router = Router::new()
+    let settings = state.config().snapshot();
+    if settings.get_lotus() && settings.get_lotus_grpc() {
+        warn_grpc_idmap_unavailable();
+    }
+    Router::new()
         .route("/uploadpic", post(upload_pic))
         .route("/uploadpicv2", post(upload_pic_v2))
-        .layer(DefaultBodyLimit::max(MAX_FORM_BYTES));
-    if mount_getid(state.config().snapshot().as_ref()) {
-        router = router.route("/getid", get(get_id));
-    }
-    router.with_state(state)
+        .route("/getid", get(get_id))
+        .layer(DefaultBodyLimit::max(MAX_FORM_BYTES))
+        .with_state(state)
 }
 
-/// Go `initLotusGrpc(lotus, lotusGrpc, port)` 成功时不注册 `/getid`。
-fn mount_getid(settings: &Settings) -> bool {
-    !(settings.get_lotus() && settings.get_lotus_grpc())
+/// `lotus_grpc` 打开但本进程没有 gRPC idmap 服务端：`/getid` 照常挂载，日志说明原因（一次）。
+fn warn_grpc_idmap_unavailable() {
+    static WARNED: Once = Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            "lotus_grpc=true 但 Rust 侧尚未装配 gRPC idmap 服务端；/getid 保持挂载以承接远端调用"
+        );
+    });
 }
 
 // ---------------------------------------------------------------- /uploadpic
@@ -356,8 +370,50 @@ async fn get_id(State(state): State<AppState>, request: Request) -> Response {
                 Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
             }
         }
-        8 => subid_required(&pairs, 8),
-        9 => subid_required(&pairs, 9),
+        8 => {
+            let subid = first(&pairs, "subid").unwrap_or("");
+            if subid.is_empty() {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "subid parameter is required for type 8",
+                );
+            }
+            let Some(idmap) = state.idmap() else {
+                return idmap_missing();
+            };
+            // Go `StoreIDv2Pro`：两次独立的 `StoreIDv2`（v2 无复合键）。
+            let row = match idmap.retrieve_virtual_value(id) {
+                Ok((_, row)) => row,
+                Err(err) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+            };
+            let sub_row = match idmap.retrieve_virtual_value(subid) {
+                Ok((_, row)) => row,
+                Err(err) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+            };
+            Json(json!({ "row": row, "subRow": sub_row })).into_response()
+        }
+        9 => {
+            let subid = first(&pairs, "subid").unwrap_or("");
+            if subid.is_empty() {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "subid parameter is required for type 9",
+                );
+            }
+            let Some(idmap) = state.idmap() else {
+                return idmap_missing();
+            };
+            // Go `RetrieveRowByIDv2Pro`：两次独立的 `RetrieveRowByIDv2`。
+            let row = match retrieve_row(idmap, id) {
+                Ok(row) => row,
+                Err(err) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+            };
+            let sub_row = match retrieve_row(idmap, subid) {
+                Ok(row) => row,
+                Err(err) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+            };
+            Json(json!({ "id": row, "subid": sub_row })).into_response()
+        }
         10 => {
             let subid = first(&pairs, "subid").unwrap_or("");
             if id.is_empty() || subid.is_empty() {
@@ -366,7 +422,23 @@ async fn get_id(State(state): State<AppState>, request: Request) -> Response {
                     "id and subid parameters are required for type 10",
                 );
             }
-            unsupported(type_value)
+            let Some(idmap) = state.idmap() else {
+                return idmap_missing();
+            };
+            // Go `RetrieveVirtualValuev2Pro`：两次 `RetrieveVirtualValuev2`（只查不分配）。
+            let first_value = match idmap.lookup_virtual_value(id) {
+                Ok(value) => value,
+                Err(err) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+            };
+            let second_value = match idmap.lookup_virtual_value(subid) {
+                Ok(value) => value,
+                Err(err) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+            };
+            Json(json!({
+                "firstValue": first_value.to_string(),
+                "secondValue": second_value.to_string(),
+            }))
+            .into_response()
         }
         11 => {
             let subid = first(&pairs, "subid").unwrap_or("");
@@ -376,13 +448,29 @@ async fn get_id(State(state): State<AppState>, request: Request) -> Response {
                     "id and subid parameters are required for type 11",
                 );
             }
-            if id.parse::<i64>().is_err() {
+            let Ok(first) = id.parse::<i64>() else {
                 return json_error(StatusCode::BAD_REQUEST, "Invalid input values idOrRow");
-            }
-            if subid.parse::<i64>().is_err() {
+            };
+            let Ok(second) = subid.parse::<i64>() else {
                 return json_error(StatusCode::BAD_REQUEST, "Invalid input values subid");
-            }
-            unsupported(type_value)
+            };
+            let Some(idmap) = state.idmap() else {
+                return idmap_missing();
+            };
+            // Go `RetrieveRealValuesv2Pro`：两次 `retrieveIdentity`（vUIN → 身份串）。
+            let first_real = match idmap.retrieve_row_by_id(first) {
+                Ok(real) => real,
+                Err(err) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+            };
+            let second_real = match idmap.retrieve_row_by_id(second) {
+                Ok(real) => real,
+                Err(err) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+            };
+            Json(json!({
+                "firstRealValue": first_real,
+                "secondRealValue": second_real,
+            }))
+            .into_response()
         }
         12 => {
             for param in [
@@ -474,14 +562,13 @@ fn retrieve_by_row(state: &AppState, id: &str) -> Response {
     }
 }
 
-fn subid_required(pairs: &[(String, String)], type_value: i64) -> Response {
-    if first(pairs, "subid").unwrap_or("").is_empty() {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            format!("subid parameter is required for type {type_value}"),
-        );
+/// `getid` 复合键的 vUIN 反查：非十进制按「查不到」处理（Go `RetrieveRowByIDv2` 的解析错误
+/// 在 handler 里同样落到 500）。
+fn retrieve_row(idmap: &IdMapStore, raw: &str) -> Result<String, StorageError> {
+    match raw.parse::<i64>() {
+        Ok(row) => idmap.retrieve_row_by_id(row),
+        Err(_) => Err(StorageError::NotFound(format!("vUIN {raw}"))),
     }
-    unsupported(type_value)
 }
 
 fn unsupported(type_value: i64) -> Response {
@@ -1311,7 +1398,11 @@ mod tests {
                 400,
                 "subid parameter is required for type 8",
             ),
-            ("/getid?type=9&subid=1", 501, "type=9"),
+            (
+                "/getid?type=9",
+                400,
+                "subid parameter is required for type 9",
+            ),
             (
                 "/getid?type=10&id=1",
                 400,
@@ -1352,17 +1443,98 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn getid_route_is_registered_unless_lotus_grpc_takes_over() {
+    async fn getid_pro_types_pair_two_single_keys() {
         let directory = TempDir::new().expect("临时目录");
-        let without = AppState::with_builtin_handlers(manager(&directory, "  server_dir: x\n"));
-        let (status, _) = call(router(without), get_request("/getid?type=", LOCAL_PEER)).await;
-        assert_eq!(status, 400, "未接管时应注册 /getid");
+        let state = AppState::with_builtin_handlers(manager(&directory, "  server_dir: example.com\n"))
+            .with_idmap(idmap(&directory));
 
+        // 8：群真实 ID + 用户真实 ID → 两个 vUIN（Go `StoreIDv2Pro`）
+        let (status, body) = call(
+            router(state.clone()),
+            get_request("/getid?type=8&id=openid:group&subid=openid:member", LOCAL_PEER),
+        )
+        .await;
+        assert_eq!(status, 200, "{body:?}");
+        let group_row = body["row"].as_i64().expect("row");
+        let member_row = body["subRow"].as_i64().expect("subRow");
+
+        // 重复调用命中同一对 vUIN（Go `StoreIDv2` 的查不到才分配）
+        let (status, body) = call(
+            router(state.clone()),
+            get_request("/getid?type=8&id=openid:group&subid=openid:member", LOCAL_PEER),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body["row"].as_i64(), Some(group_row));
+        assert_eq!(body["subRow"].as_i64(), Some(member_row));
+
+        // 9：两个 vUIN → 两个真实 ID（Go `RetrieveRowByIDv2Pro`）
+        let (status, body) = call(
+            router(state.clone()),
+            get_request(
+                &format!("/getid?type=9&id={group_row}&subid={member_row}"),
+                LOCAL_PEER,
+            ),
+        )
+        .await;
+        assert_eq!(status, 200, "{body:?}");
+        assert_eq!(body["id"], "openid:group");
+        assert_eq!(body["subid"], "openid:member");
+
+        // 10：两个真实 ID → 两个 vUIN 字符串（Go `RetrieveVirtualValuev2Pro`，只查不分配）
+        let (status, body) = call(
+            router(state.clone()),
+            get_request(
+                "/getid?type=10&id=openid:group&subid=openid:member",
+                LOCAL_PEER,
+            ),
+        )
+        .await;
+        assert_eq!(status, 200, "{body:?}");
+        assert_eq!(body["firstValue"], group_row.to_string());
+        assert_eq!(body["secondValue"], member_row.to_string());
+
+        // 11：两个 vUIN → 两个真实 ID（Go `RetrieveRealValuesv2Pro`）
+        let (status, body) = call(
+            router(state.clone()),
+            get_request(
+                &format!("/getid?type=11&id={group_row}&subid={member_row}"),
+                LOCAL_PEER,
+            ),
+        )
+        .await;
+        assert_eq!(status, 200, "{body:?}");
+        assert_eq!(body["firstRealValue"], "openid:group");
+        assert_eq!(body["secondRealValue"], "openid:member");
+
+        // 查不到一律 500（Go 把 err 直接映射成 500，不是 404）
+        for uri in [
+            format!("/getid?type=9&id=999999&subid={member_row}"),
+            "/getid?type=10&id=openid:missing&subid=openid:member".to_owned(),
+            format!("/getid?type=11&id=999999&subid={member_row}"),
+        ] {
+            let (status, body) = call(router(state.clone()), get_request(&uri, LOCAL_PEER)).await;
+            assert_eq!(status, 500, "{uri} → {body:?}");
+            assert!(
+                body["error"].as_str().is_some_and(|text| !text.is_empty()),
+                "{uri} → {body:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn getid_route_stays_mounted_even_with_lotus_grpc() {
+        let directory = TempDir::new().expect("临时目录");
+        let plain = AppState::with_builtin_handlers(manager(&directory, "  server_dir: x\n"));
+        let (status, _) = call(router(plain), get_request("/getid?type=", LOCAL_PEER)).await;
+        assert_eq!(status, 400, "默认应注册 /getid");
+
+        // Rust 侧没有 gRPC idmap 服务端：照常挂载，否则远端 lotus 调用会静默消失
         let grpc = AppState::with_builtin_handlers(manager(
             &directory,
             "  server_dir: x\n  lotus: true\n  lotus_grpc: true\n",
         ));
-        let (status, _) = call(router(grpc), get_request("/getid?type=1", LOCAL_PEER)).await;
-        assert_eq!(status, 404, "lotus gRPC 接管时不应注册 /getid");
+        let (status, _) = call(router(grpc), get_request("/getid?type=", LOCAL_PEER)).await;
+        assert_eq!(status, 400, "lotus_grpc 配置下同样挂载 /getid");
     }
 }

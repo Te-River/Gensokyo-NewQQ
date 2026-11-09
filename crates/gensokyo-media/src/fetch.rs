@@ -87,14 +87,7 @@ impl HttpTransport {
     /// 二进制需先安装 provider，例如（`rustls` 启用 `ring` feature 后）：
     /// `rustls::crypto::ring::default_provider().install_default().ok();`
     pub fn new() -> Result<Self> {
-        let provider = CryptoProvider::get_default().ok_or_else(|| {
-            Error::Transport(
-                "未安装 rustls CryptoProvider；二进制需先调用 \
-                 rustls::crypto::<provider>::default_provider().install_default()"
-                    .to_owned(),
-            )
-        })?;
-        Self::with_provider(Arc::clone(provider))
+        Self::with_provider(require_provider()?)
     }
 
     /// 使用调用方注入的 rustls provider 构建客户端（`rustls-no-provider` 语义）。
@@ -104,14 +97,15 @@ impl HttpTransport {
 
     /// 使用已构建好的 rustls 配置（便于复用平台校验器）。
     pub fn with_client_config(config: ClientConfig) -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .tls_backend_preconfigured(config)
-            .connect_timeout(CONNECT_TIMEOUT)
-            // 总超时按请求走：不同媒体大小差异大，统一用 reqwest 客户端超时会互相拖累
-            .user_agent(concat!("gensokyo-media/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|err| Error::Transport(format!("构建 reqwest 客户端失败: {err}")))?;
-        Ok(Self { client })
+        Ok(Self {
+            client: build_client(config, true)?,
+        })
+    }
+
+    /// 不跟随重定向的客户端：短签名直链解析要逐跳手动跟随才能逐跳做 SSRF 校验，
+    /// 重定向不能交给 `reqwest` 自动处理。provider 口径与 [`Self::new`] 相同。
+    pub(crate) fn no_redirect_client() -> Result<reqwest::Client> {
+        build_client(rustls_config(require_provider()?)?, false)
     }
 
     /// 复用外部已配置好的 `reqwest::Client`（TLS / 代理由调用方决定）。
@@ -426,6 +420,32 @@ async fn write_all_and_flush(file: &mut tokio::fs::File, bytes: &[u8]) -> Result
     file.write_all(bytes).await?;
     file.flush().await?;
     Ok(())
+}
+
+/// 进程级 rustls provider（由二进制安装）。
+fn require_provider() -> Result<Arc<CryptoProvider>> {
+    CryptoProvider::get_default().cloned().ok_or_else(|| {
+        Error::Transport(
+            "未安装 rustls CryptoProvider；二进制需先调用 \
+             rustls::crypto::<provider>::default_provider().install_default()"
+                .to_owned(),
+        )
+    })
+}
+
+/// 构建 `reqwest` 客户端；`follow_redirects = false` 时由调用方逐跳驱动重定向。
+fn build_client(config: ClientConfig, follow_redirects: bool) -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
+        .tls_backend_preconfigured(config)
+        .connect_timeout(CONNECT_TIMEOUT)
+        // 总超时按请求走：不同媒体大小差异大，统一用 reqwest 客户端超时会互相拖累
+        .user_agent(concat!("gensokyo-media/", env!("CARGO_PKG_VERSION")));
+    if !follow_redirects {
+        builder = builder.redirect(reqwest::redirect::Policy::none());
+    }
+    builder
+        .build()
+        .map_err(|err| Error::Transport(format!("构建 reqwest 客户端失败: {err}")))
 }
 
 /// 用 `webpki-root-certs` 的内置根证书构建 rustls 配置（与 gensokyo-qq 同一套根证书）。

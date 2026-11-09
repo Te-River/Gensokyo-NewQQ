@@ -58,10 +58,12 @@
 //!
 //! # 未做项
 //!
-//! - 消息段：图片 / 语音 / 视频 / ark 卡片 / markdown / card 一律停留在文本形态，
-//!   `array_value` 不生效（`message` 恒为字符串形态，且没有 `foundItems` 解析：
-//!   出站方向的 markdown/card/媒体分片属于 `handlers/` 的职责）；`[CQ:at]` 反解
-//!   （Go `RevertTransformedText`）未做。
+//! - 消息段：`array_value = true` 时 `message` 按 CQ 解析成段数组（text / at / 其余入站码，
+//!   见 [`reported_message`]），但图片 / 语音 / 视频 / ark 卡片段仍未生成——Go
+//!   `ConvertToSegmentedMessage` 从 `attachments` / `msg_elements` 取图与事件段，这里没有
+//!   那条数据通路。`<@OpenID>` mention 反解（Go `RevertTransformedText` /
+//!   `ConvertToSegmentedMessage` 的 at 分支、`remove_at` 剥离）同样未做——其中的
+//!   BotID→AppID 还原已单独实现（见 [`bot_id_to_app_id`]）。
 //! - `global_group_msg_rre_to_message` / `global_c2c_msg_switch_to_message`（`true` 时 Go 把
 //!   这些开关事件「伪装成 message」的业务转换，`ConvertGroupRejectToMessage` 等）未做：
 //!   两个开关打开时这里仍只上报 notice。
@@ -74,7 +76,6 @@
 //! - `auto_put_interaction` / `put_interaction_except`（自动回 `PutInteraction`）、
 //!   `union_id` 切换与 idmap-pro：回调的 `id` 原样留在 `data.id`，由客户端自己回应。
 //! - `MESSAGE_AUDIT_*`、`FORUM_*`、`AUDIO_*` 与频道 `GUILD_*`。
-//! - `union_webhook` 扇出（见 [`crate`] 文档）。
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -82,10 +83,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use gensokyo_config::{ConfigManager, Settings};
 use gensokyo_core::telemetry::metrics;
 use gensokyo_core::{Ob11Id, acnode};
+use gensokyo_protocol::cqcode::{self, code_spec};
 use gensokyo_protocol::event::{
     HeartbeatStatus, MessageEvent, MessageType, MetaEvent, NoticeEvent, RequestEvent, Sender,
 };
-use gensokyo_protocol::{Event, Extra, MessageContent};
+use gensokyo_protocol::{Event, Extra, MessageContent, Segment};
 use gensokyo_qq::dto::interaction::Interaction;
 use gensokyo_storage::{BotStatsStore, EchoStore, IdMapStore};
 use serde::Deserialize;
@@ -215,13 +217,15 @@ enum GroupMemberFlavor {
     Remove,
 }
 
-/// 入站转换器：配置快照 + 可选 idmap / echo / botstats。
+/// 入站转换器：配置快照 + 可选 idmap / echo / botstats / BotID。
 #[derive(Debug, Clone)]
 pub struct Inbound {
     config: Arc<ConfigManager>,
     idmap: Option<Arc<IdMapStore>>,
     echo: Option<Arc<EchoStore>>,
     botstats: Option<Arc<BotStatsStore>>,
+    /// 机器人真实 ID（`GET /users/@me`）；`None` 时正文不做 BotID→AppID 还原。
+    bot_id: Option<Arc<str>>,
 }
 
 impl Inbound {
@@ -233,10 +237,11 @@ impl Inbound {
             idmap,
             echo: None,
             botstats: None,
+            bot_id: None,
         }
     }
 
-    /// 从 [`AppState`] 取配置、idmap、echo 与 botstats（webhook 每个请求现构造，Arc 克隆开销可忽略）。
+    /// 从 [`AppState`] 取配置、idmap、echo、botstats 与 BotID（webhook 每个请求现构造，Arc 克隆开销可忽略）。
     #[must_use]
     pub fn from_state(state: &AppState) -> Self {
         Self {
@@ -244,6 +249,7 @@ impl Inbound {
             idmap: state.idmap_arc(),
             echo: state.echo_arc(),
             botstats: state.botstats_arc(),
+            bot_id: state.bot_id_arc(),
         }
     }
 
@@ -253,6 +259,15 @@ impl Inbound {
     #[must_use]
     pub fn with_echo(mut self, echo: Arc<EchoStore>) -> Self {
         self.echo = Some(echo);
+        self
+    }
+
+    /// 挂上机器人真实 ID（`GET /users/@me`，Go `main.go:304` 的 `handlers.BotID`）。
+    ///
+    /// 未挂载时正文原样上报（对齐 Go 取不到 `Me` 时的降级）。
+    #[must_use]
+    pub fn with_bot_id(mut self, bot_id: impl Into<Arc<str>>) -> Self {
+        self.bot_id = Some(bot_id.into());
         self
     }
 
@@ -619,7 +634,10 @@ impl Inbound {
         let user_id = self.ob11_id(settings, user_raw);
         self.register_group(&group_id);
         self.feed_group_echo(settings, &payload, &group_id, &user_id, &message_id);
-        let content = reported_group_content(settings, payload.content, flavor);
+        let content = bot_id_to_app_id(settings, payload.content, self.bot_id.as_deref());
+        let raw_message = reported_group_content(settings, &content, flavor);
+        // 数组形态解析未加 `add_at_group` 前缀的正文（`string_form` 只给字符串形态用）。
+        let message = reported_message(settings, &content, &raw_message);
         Ok(Event::Message(MessageEvent {
             time: timestamp_of(payload.timestamp.as_ref()),
             self_id: Ob11Id::num(self.self_id_of(settings)),
@@ -628,8 +646,8 @@ impl Inbound {
             message_id,
             user_id,
             group_id: Some(group_id),
-            message: MessageContent::Text(content.clone()),
-            raw_message: content,
+            message,
+            raw_message,
             font: Some(0),
             sender: Some(sender),
             anonymous: None,
@@ -672,6 +690,8 @@ impl Inbound {
         let message_id = self.message_id(settings, &payload.id);
         let user_id = self.ob11_id(settings, user_raw);
         self.feed_private_echo(settings, &payload, &user_id, &message_id);
+        let content = bot_id_to_app_id(settings, payload.content, self.bot_id.as_deref());
+        let message = reported_message(settings, &content, &content);
         Ok(Event::Message(MessageEvent {
             time: timestamp_of(payload.timestamp.as_ref()),
             self_id: Ob11Id::num(self.self_id_of(settings)),
@@ -680,8 +700,8 @@ impl Inbound {
             message_id,
             user_id,
             group_id: None,
-            message: MessageContent::Text(payload.content.clone()),
-            raw_message: payload.content,
+            message,
+            raw_message: content,
             font: Some(0),
             sender: Some(sender),
             anonymous: None,
@@ -1128,11 +1148,67 @@ impl Inbound {
 /// 再补一次就是重复 @（Go `ProcessGroupMessage.go:154-157`）。单聊不适用。
 ///
 /// 不去重：Go 也不去重，且全量消息里的 @bot 更早的入站阶段已被剥离，重复分支走不到。
-fn reported_group_content(settings: &Settings, content: String, flavor: GroupFlavor) -> String {
+fn reported_group_content(settings: &Settings, content: &str, flavor: GroupFlavor) -> String {
     if flavor != GroupFlavor::Full || !settings.get_add_at_group() {
-        return content;
+        return content.to_owned();
     }
     format!("[CQ:at,qq={}] {content}", settings.get_app_id())
+}
+
+/// 上报 `message` 字段：`array_value` 打开时按 CQ 解析成消息段数组，否则用字符串形态。
+///
+/// 两种形态读的正文不同：Go 字符串路径上报 `messageText`（含 `add_at_group` 前缀，
+/// `ProcessGroupNormalMessage.go:148-150` / `:176`），数组路径的
+/// `ConvertToSegmentedMessage` 则直接回读 `data.Content`（`handlers/message_parser.go:2182`），
+/// 前缀不进段数组。`content` 传原始正文，`string_form` 传字符串形态（不含前缀时两者相同）。
+/// 段名不在入站码表（[`code_spec`] 查无此项或 `inbound` 为假，例如用户手打的 `[CQ:remove,…]`）
+/// 时折回 text 原文，不向客户端交出它不认识的段；相邻 text 段合并成一段，
+/// 与 Go 文本段「连续切片」的粒度一致。
+fn reported_message(settings: &Settings, content: &str, string_form: &str) -> MessageContent {
+    if !settings.get_array_value() {
+        return MessageContent::Text(string_form.to_owned());
+    }
+    let mut segments: Vec<Segment> = Vec::new();
+    for segment in cqcode::parse(content) {
+        match code_spec(&segment.kind) {
+            Some(spec) if spec.inbound && !segment.is_text() => segments.push(segment),
+            // `raw_or_cq` 保留码段原始字节：解析失败的码本就在 text 段里，未知段名也按原文折回
+            _ => push_text_segment(&mut segments, segment.raw_or_cq().as_ref()),
+        }
+    }
+    MessageContent::Array(segments)
+}
+
+/// 追加文本段并合并相邻文本（空串不落段）。
+fn push_text_segment(segments: &mut Vec<Segment>, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(last) = segments.last_mut().filter(|segment| segment.is_text()) {
+        let merged = format!("{}{text}", last.get("text").unwrap_or_default());
+        *last = Segment::text(merged);
+        return;
+    }
+    segments.push(Segment::text(text));
+}
+
+/// 入站正文 `BotID → AppID`（Go `RevertTransformedText` 的第一步，
+/// `message_parser.go:1850-1854`；消息段路径同口径 `:2236-2240`）。
+///
+/// QQ 事件正文的 `<@!BotID>` 带的是机器人真实 ID，而 OneBot 侧的自身标识是 `app_id`
+/// （`self_id` 与 `add_at_group` 的前缀都用它），不还原客户端就认不出 @bot。
+/// BotID 未取到或与 AppID 相同时原样返回——Go 用空串守卫（`BotID != ""`）防的是空串
+/// 替换把正文逐字符穿插打散，这里连「相等」也一起跳过（相等替换本就是空操作）。
+///
+/// 与 Go 的差异：Go 只在 `disable_error_chan=false` 时走 `RevertTransformedText`
+/// （群聊两条路径 `ProcessGroupNormalMessage.go:110-113` / `ProcessGroupMessage.go:119`，
+/// C2C 无条件），这里不跟这个开关——本仓的 `disable_error_chan` 只表示统计/错误通道开关。
+fn bot_id_to_app_id(settings: &Settings, content: String, bot_id: Option<&str>) -> String {
+    let app_id = settings.get_app_id().to_string();
+    let Some(bot_id) = bot_id.filter(|id| !id.is_empty() && *id != app_id.as_str()) else {
+        return content;
+    };
+    content.replace(bot_id, &app_id)
 }
 
 /// 入站敏感词过滤：只改写三个消息事件的 `content` 与 `author.username`
@@ -1484,6 +1560,76 @@ mod tests {
                 .expect("群应已注册"),
             "group"
         );
+    }
+
+    /// 入站正文 BotID → AppID（Go `RevertTransformedText` 的 `message_parser.go:1850-1854`）：
+    /// 群聊与私聊同一口径，否则客户端认不出 @bot（`self_id` 用的是 AppID）。
+    #[test]
+    fn bot_id_in_content_is_reported_as_app_id() {
+        use gensokyo_protocol::{Event, MessageContent};
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "app_id: 102001234\n").expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let store = test_store(dir.path());
+        let inbound = Inbound::new(manager, Some(store)).with_bot_id("2633000001");
+
+        let mut group = group_at_payload();
+        group["content"] = json!("<@!2633000001> 你好");
+        let events = inbound
+            .convert("GROUP_AT_MESSAGE_CREATE", Some(&group), None)
+            .expect("群消息应可转换");
+        let Event::Message(message) = &events[0] else {
+            panic!("GROUP_AT_MESSAGE_CREATE 应转成群消息");
+        };
+        let MessageContent::Text(text) = &message.message else {
+            panic!("群消息正文应为文本");
+        };
+        assert_eq!(text, "<@!102001234> 你好");
+        assert_eq!(message.raw_message, "<@!102001234> 你好", "两条同源");
+
+        let private = json!({
+            "id": "m-2",
+            "content": "<@!2633000001> 你好",
+            "author": {"id": "u0123456789abcdef0123456789abcdef"}
+        });
+        let events = inbound
+            .convert("C2C_MESSAGE_CREATE", Some(&private), None)
+            .expect("C2C 消息应可转换");
+        let Event::Message(message) = &events[0] else {
+            panic!("C2C_MESSAGE_CREATE 应转成私聊消息");
+        };
+        let MessageContent::Text(text) = &message.message else {
+            panic!("私聊正文应为文本");
+        };
+        assert_eq!(text, "<@!102001234> 你好");
+    }
+
+    /// BotID 缺失时正文逐字透传（Go 的 `BotID != ""` 守卫：空串替换会打散正文）。
+    #[test]
+    fn missing_bot_id_keeps_content_verbatim() {
+        use gensokyo_protocol::{Event, MessageContent};
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "app_id: 102001234\n").expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let store = test_store(dir.path());
+        let inbound = Inbound::new(manager, Some(store));
+
+        let mut group = group_at_payload();
+        group["content"] = json!("<@!2633000001> 你好");
+        let events = inbound
+            .convert("GROUP_AT_MESSAGE_CREATE", Some(&group), None)
+            .expect("群消息应可转换");
+        let Event::Message(message) = &events[0] else {
+            panic!("GROUP_AT_MESSAGE_CREATE 应转成群消息");
+        };
+        let MessageContent::Text(text) = &message.message else {
+            panic!("群消息正文应为文本");
+        };
+        assert_eq!(text, "<@!2633000001> 你好");
     }
 
     /// `add_at_group` 只给全量群消息补 `[CQ:at,qq=<appid>]`（Go `ProcessGroupNormalMessage.go:148-150`）。

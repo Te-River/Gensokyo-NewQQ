@@ -16,6 +16,7 @@ use crate::hosting::transport::{
     HostingTransport, USER_AGENT, USER_AGENT_HEADER, UploadBody, UploadMethod, UploadRequest,
 };
 use crate::hosting::{DEFAULT_UPLOAD_TIMEOUT, HostingBackend, check_url};
+use crate::redirect::{self, RedirectProbe};
 use crate::sniff::{self, ImageKind};
 
 /// 上传端点。
@@ -57,6 +58,7 @@ pub fn plan(filename: &str, data: &[u8]) -> ChatGlmPlan {
 pub struct ChatGlmBackend {
     transport: Arc<dyn HostingTransport>,
     timeout: Duration,
+    probe: Arc<dyn RedirectProbe>,
 }
 
 impl ChatGlmBackend {
@@ -66,6 +68,7 @@ impl ChatGlmBackend {
         Self {
             transport,
             timeout: DEFAULT_UPLOAD_TIMEOUT,
+            probe: Arc::new(redirect::LazyHttpProbe),
         }
     }
 
@@ -73,6 +76,13 @@ impl ChatGlmBackend {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// 覆写直链解析的网络出口（测试用，避免真实出网）。
+    #[cfg(test)]
+    pub(crate) fn with_probe(mut self, probe: Arc<dyn RedirectProbe>) -> Self {
+        self.probe = probe;
         self
     }
 }
@@ -115,6 +125,16 @@ impl HostingBackend for ChatGlmBackend {
             .path_str(&["result", "file_url"])
             .ok_or_else(|| Error::HostingResponse("ChatGLM 响应缺少 result.file_url".to_owned()))?;
         check_url(file_url, "ChatGLM")?;
+        // 短签名外链（约 30 分钟）交给 QQ 会转存失败：先解析 302 末跳直链。
+        // 解析失败不阻断发送——保留原链并告警，由调用方/平台自行拉取。
+        if redirect::is_short_lived_image_url(file_url) {
+            match redirect::resolve_redirect(self.probe.as_ref(), file_url).await {
+                Some(direct) => return Ok(direct),
+                None => {
+                    tracing::warn!(url = file_url, "ChatGLM 短签名外链解析直链失败，保留原链接")
+                }
+            }
+        }
         Ok(file_url.to_owned())
     }
 }
@@ -127,6 +147,7 @@ mod tests {
     use crate::error::Error;
     use crate::hosting::HostingBackend;
     use crate::hosting::fixtures::{FakeTransport, parse_multipart};
+    use crate::redirect::fixtures::FakeProbe;
 
     const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0DIHDR\x00\x00\x02\x80\x00\x00\x01\xE0\x08\x06\x00\x00\x00";
     const OK: &str = r#"{"code":0,"result":{"file_url":"https://chatglm.cn/files/abc.png"}}"#;
@@ -145,7 +166,9 @@ mod tests {
     #[tokio::test]
     async fn uploads_file_as_multipart_and_returns_file_url() {
         let transport = Arc::new(FakeTransport::new().respond(200, OK));
+        // 短签名解析单独测，这里用未预置响应的探测器把上传逻辑与解析解耦
         let url = ChatGlmBackend::new(transport.clone())
+            .with_probe(Arc::new(FakeProbe::new()))
             .upload(PNG, "shot.jpg")
             .await
             .expect("上传成功");
@@ -221,5 +244,51 @@ mod tests {
                 "{body} → {error}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn resolves_short_lived_link_to_direct_url() {
+        let transport = Arc::new(FakeTransport::new().respond(200, OK));
+        let probe = FakeProbe::new()
+            .respond(
+                "https://chatglm.cn/files/abc.png",
+                302,
+                Some("https://oss.example.com/a.png?sig=1"),
+            )
+            .respond("https://oss.example.com/a.png?sig=1", 200, None);
+        let url = ChatGlmBackend::new(transport)
+            .with_probe(Arc::new(probe))
+            .upload(PNG, "a.png")
+            .await
+            .expect("上传成功");
+        assert_eq!(url, "https://oss.example.com/a.png?sig=1");
+    }
+
+    #[tokio::test]
+    async fn keeps_short_lived_link_when_resolution_fails() {
+        let transport = Arc::new(FakeTransport::new().respond(200, OK));
+        // 未预置响应 → 探测失败 → 保留原短链，不阻断发送
+        let probe = Arc::new(FakeProbe::new());
+        let url = ChatGlmBackend::new(transport)
+            .with_probe(probe.clone())
+            .upload(PNG, "a.png")
+            .await
+            .expect("解析失败不阻断发送");
+        assert_eq!(url, "https://chatglm.cn/files/abc.png");
+        assert_eq!(probe.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn leaves_ordinary_urls_unresolved() {
+        let ordinary = r#"{"code":0,"result":{"file_url":"https://example.com/files/a.png"}}"#;
+        let transport = Arc::new(FakeTransport::new().respond(200, ordinary));
+        let probe = Arc::new(FakeProbe::new());
+        let url = ChatGlmBackend::new(transport)
+            .with_probe(probe.clone())
+            .upload(PNG, "a.png")
+            .await
+            .expect("上传成功");
+        assert_eq!(url, "https://example.com/files/a.png");
+        assert!(probe.calls().is_empty(), "普通 URL 不应触发解析");
     }
 }

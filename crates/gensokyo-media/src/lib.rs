@@ -33,6 +33,14 @@
 //! - [`hosting::HostingTransport`]：上传递出口（POST / PUT / GET），生产实现复用
 //!   [`fetch::HttpTransport`] 的 `reqwest::Client`，测试用 Fake 断言 multipart。
 //!
+//! ## P25：短签名外链直链解析
+//! - [`redirect::resolve_redirect`]：把 ChatGLM 等短签名外链的 302 解析为末跳直链
+//!   （只读响应头、手动逐跳跟随、**每跳** SSRF 校验、最多 5 跳 / 整链 5s）。
+//! - [`redirect::is_short_lived_image_url`]：`chatglm.cn` 及其子域的边界判定（Go
+//!   `IsShortLivedImageURL`）。
+//! - [`hosting::ChatGlmBackend`] 上传成功后自动解析一次；解析失败保留原短链并告警，
+//!   不阻断发送。
+//!
 //! ## M2c：图片压缩
 //! - [`compress::compress_image`]：解码 JPEG / PNG / WebP → 长边超过
 //!   [`compress::DEFAULT_MAX_SIDE`]（1024）时等比缩放 → 按质量阶梯编码；有体积目标时取**第一个**
@@ -53,9 +61,10 @@
 //! - 临时 PCM 落在 `<os temp>/gensokyo-silk/`，成功与失败都由 `Drop` 清理。
 //!
 //! # 与 Go 的差异（M2a）
-//! - **SSRF / 重定向 / 私网拦截**：Go `internal/application/media/fetcher.go` 有
-//!   `checkSSRF`（DNS 解析 + 私网/回环拒绝）与 `MaxRedirects`。本 crate **不做**这些，
-//!   `reqwest` 默认跟随最多 10 次重定向；SSRF 属于接入层的策略，M2a 不落地（见未做项）。
+//! - **SSRF / 重定向 / 私网拦截（下载路径）**：Go `internal/application/media/fetcher.go` 有
+//!   `checkSSRF`（DNS 解析 + 私网/回环拒绝）与 `MaxRedirects`。本 crate 的下载路径 **不做**
+//!   这些，`reqwest` 默认跟随最多 10 次重定向；SSRF 属于接入层的策略，M2a 不落地（见未做项）。
+//!   短签名外链的直链解析是例外：P25 的 [`redirect`] 逐跳手动跟随并做 SSRF 校验。
 //! - **落盘策略**：Go `FetchToTempFile` 在 `threshold` 以下走内存、以上才写临时文件并返回
 //!   `path=""`；本 crate 不做阈值分流：URL 与内联 base64 一律写临时文件并返回路径，用
 //!   [`Fetched::bytes`] 表达字节数（不把内容复制进返回值），`file://` 直接复用原路径、不复制。
@@ -121,7 +130,7 @@
 //! - 视频处理（抽帧 / 转码 / 体积压缩）。
 //! - 上传到 QQ（`/v2/.../files` 的 `file_data` / 分片上传）——由 `gensokyo-qq` + actions 负责。
 //! - QR 码生成。
-//! - SSRF 防护、重定向次数限制、DNS 私网拦截。
+//! - 下载路径的 SSRF 防护、重定向次数限制、DNS 私网拦截（短签名外链直链解析已有，见 [`redirect`]）。
 
 pub mod compress;
 pub mod data_uri;
@@ -130,6 +139,7 @@ pub mod fetch;
 pub mod hosting;
 pub mod image;
 pub mod oss;
+pub mod redirect;
 pub mod silk;
 pub mod sniff;
 pub mod source;
@@ -153,6 +163,9 @@ pub use hosting::{
 pub use image::image_size;
 pub use oss::{
     AliyunOssConfig, BaiduBosConfig, OssConfig, OssKind, TencentCosConfig, upload as oss_upload,
+};
+pub use redirect::{
+    LazyHttpProbe, ProbeResponse, RedirectProbe, is_short_lived_image_url, resolve_redirect,
 };
 pub use silk::{CommandRunner, DEFAULT_SAMPLE_RATE, ProcessOutput, ProcessRunner, SilkCodec};
 pub use sniff::{ImageKind, sniff_content_type, sniff_image};

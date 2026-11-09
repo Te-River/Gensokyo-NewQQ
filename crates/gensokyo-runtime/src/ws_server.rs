@@ -31,7 +31,7 @@ use serde_json::json;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::MissedTickBehavior;
 
-use crate::auth::{is_authorized, unauthorized};
+use crate::auth::{incorrect_token, is_authorized, missing_token, provided_token};
 use crate::dispatcher::{Dispatcher, dispatch_json};
 use crate::inbound::Inbound;
 use crate::state::AppState;
@@ -109,15 +109,15 @@ async fn ws_handler(
     ws: WebSocketUpgrade,
 ) -> Response {
     let settings = state.config().snapshot();
-    if !is_authorized(
-        settings.get_ws_server_token(),
-        &headers,
-        params.get("access_token").map(String::as_str),
-    ) {
-        let has_token =
-            params.contains_key("access_token") || headers.contains_key("authorization");
-        tracing::warn!(has_token, "正向 WS 鉴权失败，拒绝升级");
-        return unauthorized();
+    let query_token = params.get("access_token").map(String::as_str);
+    if !is_authorized(settings.get_ws_server_token(), &headers, query_token) {
+        // 对齐 Go `server/wsserver.go:85-94`：没给 token 是 401，给了但不匹配是 403。
+        if provided_token(&headers, query_token).is_none() {
+            tracing::warn!("正向 WS 缺少 token，拒绝升级");
+            return missing_token();
+        }
+        tracing::warn!("正向 WS token 不正确，拒绝升级");
+        return incorrect_token();
     }
 
     // 非法字节的 Origin 不可能命中白名单（Go 侧同样匹配不到前缀），按拒绝处理。

@@ -60,6 +60,26 @@ async fn sends_text_group_message_with_auth_headers() {
 }
 
 #[tokio::test]
+async fn me_reads_bot_id_from_users_me() {
+    let (transport, _clock, client) = setup();
+    transport.push_response(token_response("tok", 7200));
+    transport.push_response(ok_json(
+        r#"{"id":"2633000001","username":"bot","bot":true}"#,
+    ));
+
+    let me = client.me().await.unwrap();
+    assert_eq!(me.id, "2633000001", "只取机器人自身 ID");
+
+    let requests = transport.requests();
+    assert_eq!(requests.len(), 2, "先换 token 再请求 /users/@me");
+    let request = &requests[1];
+    assert_eq!(request.method, HttpMethod::Get);
+    // botgo v1 / v2 的 Me 都是 `/users/@me`，沿用客户端基址，不走 v2 前缀
+    assert_eq!(request.url, "https://api.bot.qq.com/users/@me");
+    assert_eq!(request.header("Authorization"), Some("QQBot tok"));
+}
+
+#[tokio::test]
 async fn serializes_markdown_message() {
     let (transport, _clock, client) = setup();
     transport.push_response(token_response("tok", 7200));

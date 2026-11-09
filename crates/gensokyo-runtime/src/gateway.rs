@@ -1,4 +1,5 @@
-//! QQ 上游事件 WebSocket 网关客户端（Go `botgo/websocket/client` + `botgo/sessions/local`）。
+//! QQ 上游事件 WebSocket 网关客户端（Go `botgo/websocket/client` + `botgo/sessions/local`
+//! + `botgo/sessions/multi`）。
 //!
 //! 入站链的源头：主动连 QQ 网关、按 `text_intent` 订阅 intent 位，把 dispatch 事件交给
 //! [`crate::inbound::Inbound`] 转成 OneBot 事件后发布到 [`crate::event_hub::EventHub`]。
@@ -24,11 +25,15 @@
 //! - **API 域**：`botgo/openapi/v2/resource.go:7-8` 已把正式与沙箱统一为 `api.bot.qq.com`，
 //!   因此 `sandbox_mode` 不再切换域名（与 botgo 一致）；[`GatewayOptions::api_base`] 只给
 //!   测试与自定义网关用。
-//! - **分片**：Go 只在 `shard_count == 1` 时把网关建议的 `shards` 覆盖成 `shard_num`
-//!   （`main.go:375-377`），其余情况用配置的 `shard_count` / `shard_id`（`StartSingle`）。
-//!   这里同样以配置为准：`shard_count > 1` → `[shard_id, shard_count]`；否则
-//!   `[0, shard_num]`（默认 `[0,1]`，单连接收全量事件）。**本进程只跑一个分片**，
-//!   多分片需要多开进程（Go 的 `multi.NewShardManager` 未搬）。
+//! - **分片**：照搬 Go `main.go:375-399` 的两条路。`shard_count == 1` 时把 `shard_num`
+//!   当本进程要跑的分片数：`> 1` 就起 N 个连接、每个 Identify `[i, N]`（Go
+//!   `multi.NewShardManager`），`== 1` 是 `[0, 1]` 单连接收全量事件；`shard_count > 1`
+//!   时只跑配置指定的 `[shard_id, shard_count]`（Go `StartSingle`），其余分片要另开进程。
+//!   网关建议的 `shards` 只打日志，不覆盖配置。
+//! - **启动节流**：多分片按 `session_start_limit.max_concurrency` 算启动间隔
+//!   （Go `manager.CalcInterval`：2s 窗口四舍五入，最少 1s，`0` 当 1），第 i 个分片延迟
+//!   `i × 间隔` 再连；单分片不延迟——Go 的 local 管理器也会 sleep 一个间隔，这里保留
+//!   #70 的「即连」语义，避免单连接启动凭空多等。
 //! - **鉴权失败**：连续 3 次鉴权失败（4004 / op 9 `d=false`）后停止重连并报错，对齐
 //!   botgo `maxAuthFailCount`（`client.go:29`）；Go fork 的「整轮重试」未搬。
 //! - 不处理 `t=RESUMED`（Inbound 视作未知事件忽略），与 botgo 只特判 READY 一致。
@@ -41,6 +46,7 @@ use std::time::Duration;
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
 use gensokyo_config::{ConfigManager, Settings};
+use gensokyo_protocol::{Event, Extra, parse_id};
 use gensokyo_qq::{HttpRequest, HttpTransport, TokenManager};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -143,13 +149,16 @@ struct GatewayInfo {
     session_start_limit: SessionStartLimit,
 }
 
-/// 连接频控信息（只用于启动日志，botgo `dto.SessionStartLimit`）。
+/// 连接频控信息（启动日志 + 多分片启动节流，botgo `dto.SessionStartLimit`）。
 #[derive(Debug, Default, Deserialize)]
 struct SessionStartLimit {
     #[serde(default)]
     total: i64,
     #[serde(default)]
     remaining: i64,
+    /// 每 2s 允许建立的连接数（Go `manager.CalcInterval`）。
+    #[serde(default)]
+    max_concurrency: i64,
 }
 
 /// 网关帧信封（botgo `dto.WSPayload`）。
@@ -236,6 +245,10 @@ pub struct GatewayClient<T: HttpTransport> {
     hub: EventHub,
     inbound: Inbound,
     options: GatewayOptions,
+    /// 多分片时本实例固定的分片；`None` 表示每次 identify 按配置现算（单分片）。
+    shard: Option<Shard>,
+    /// 启动序号（多分片节流的倍数）；单分片恒 0。
+    index: u32,
 }
 
 impl<T: HttpTransport> fmt::Debug for GatewayClient<T> {
@@ -243,6 +256,21 @@ impl<T: HttpTransport> fmt::Debug for GatewayClient<T> {
         f.debug_struct("GatewayClient")
             .field("options", &self.options)
             .finish_non_exhaustive()
+    }
+}
+
+impl<T: HttpTransport> Clone for GatewayClient<T> {
+    fn clone(&self) -> Self {
+        Self {
+            transport: Arc::clone(&self.transport),
+            tokens: Arc::clone(&self.tokens),
+            config: Arc::clone(&self.config),
+            hub: self.hub.clone(),
+            inbound: self.inbound.clone(),
+            options: self.options.clone(),
+            shard: self.shard,
+            index: self.index,
+        }
     }
 }
 
@@ -262,18 +290,70 @@ impl<T: HttpTransport + 'static> GatewayClient<T> {
             hub: state.hub().clone(),
             inbound: Inbound::from_state(state),
             options,
+            shard: None,
+            index: 0,
         }
     }
 
     /// 起一个后台任务跑网关；返回关闭句柄。
+    ///
+    /// 单分片一个任务；多分片（`shard_count == 1` 且 `shard_num > 1`）每个分片一个任务，
+    /// 句柄统一关闭（Go `multi.NewShardManager().StartAllShards`）。
     #[must_use]
     pub fn start(self) -> GatewayHandle {
+        let settings = self.config.snapshot();
+        let shard = resolve_shard(&settings);
+        // Go `main.go:375-399`：只有 `shard_count == 1` 才由本进程把 `shard_num` 展开成
+        // N 个分片；`shard_count > 1` 是 `StartSingle`，只连 `[shard_id, shard_count]`。
+        let local = if settings.get_shard_count() > 1 {
+            1
+        } else {
+            shard.count
+        };
+        if local <= 1 {
+            let (stop, task) = self.spawn_task();
+            return GatewayHandle {
+                stops: vec![stop],
+                tasks: vec![task],
+            };
+        }
+
+        tracing::info!(
+            shards = local,
+            "按 shard_num 启动多分片网关，每个分片一个连接"
+        );
+        let capacity = usize::try_from(local).unwrap_or(0);
+        let mut handle = GatewayHandle {
+            stops: Vec::with_capacity(capacity),
+            tasks: Vec::with_capacity(capacity),
+        };
+        for index in 0..local {
+            let shard = Shard {
+                id: index,
+                count: local,
+            };
+            let ordinal = u32::try_from(index).unwrap_or(u32::MAX);
+            let (stop, task) = self.shard_client(shard, ordinal).spawn_task();
+            handle.stops.push(stop);
+            handle.tasks.push(task);
+        }
+        handle
+    }
+
+    /// 派生一个固定分片与启动序号的实例（多分片用）。
+    fn shard_client(&self, shard: Shard, index: u32) -> Self {
+        Self {
+            shard: Some(shard),
+            index,
+            ..self.clone()
+        }
+    }
+
+    /// 起一个后台任务跑网关；返回 (关闭信号, 任务句柄)。
+    fn spawn_task(self) -> (oneshot::Sender<()>, JoinHandle<()>) {
         let (stop, stopped) = oneshot::channel();
         let task = tokio::spawn(async move { self.run(stopped).await });
-        GatewayHandle {
-            stop: Some(stop),
-            task,
-        }
+        (stop, task)
     }
 
     /// 外层重连循环：取接入点 → 连接 → 按 [`SessionEnd`] 决定 resume / 重新 identify。
@@ -284,6 +364,8 @@ impl<T: HttpTransport + 'static> GatewayClient<T> {
         let mut session_id: Option<String> = None;
         let mut last_seq: Option<i64> = None;
         let mut auth_failures = 0_u32;
+        // 多分片的首次连接延迟：间隔要等 `/gateway/bot` 给出 max_concurrency 才算得出来。
+        let mut start_delay: Option<Duration> = None;
 
         loop {
             if gateway_url.is_none() {
@@ -301,6 +383,10 @@ impl<T: HttpTransport + 'static> GatewayClient<T> {
                             "已获取 QQ 网关接入点"
                         );
                         self.log_shard(info.shards);
+                        start_delay = Some(
+                            calc_start_interval(info.session_start_limit.max_concurrency)
+                                .saturating_mul(self.index),
+                        );
                         gateway_url = Some(info.url);
                     }
                     Err(err) => {
@@ -316,6 +402,14 @@ impl<T: HttpTransport + 'static> GatewayClient<T> {
             let Some(url) = gateway_url.clone() else {
                 continue;
             };
+
+            // Go `multi.StartAllShards` 按 `CalcInterval` 的间隔逐个拉起分片。
+            if let Some(delay) = start_delay.take()
+                && !delay.is_zero()
+                && !sleep_or_stop(&mut stop, delay).await
+            {
+                return;
+            }
 
             match self
                 .session(&url, session_id.clone(), last_seq, &mut stop)
@@ -430,7 +524,7 @@ impl<T: HttpTransport + 'static> GatewayClient<T> {
                 true,
             ),
             None => {
-                let shard = resolve_shard(&self.config.snapshot());
+                let shard = self.resolved_shard();
                 (
                     json!({
                         "op": OP_IDENTIFY,
@@ -624,10 +718,12 @@ impl<T: HttpTransport + 'static> GatewayClient<T> {
 
     /// dispatch → [`Inbound::convert_json`] → [`EventHub`]。
     fn publish_dispatch(&self, raw: &str, kind: &str) {
+        let mode = self.config.snapshot().get_op_userid_type().to_owned();
         match self.inbound.convert_json(raw.as_bytes()) {
             Ok(events) => {
                 let published = events.len();
-                for event in events {
+                for mut event in events {
+                    apply_op_userid_type(&mut event, &mode);
                     self.hub.publish(event);
                 }
                 tracing::debug!(kind, published, "QQ 网关事件已发布");
@@ -702,15 +798,24 @@ impl<T: HttpTransport + 'static> GatewayClient<T> {
             .to_owned()
     }
 
+    /// 本实例的分片：多分片时固定，否则每次按当前配置快照现算（热重载即时生效）。
+    fn resolved_shard(&self) -> Shard {
+        self.shard
+            .unwrap_or_else(|| resolve_shard(&self.config.snapshot()))
+    }
+
     /// 启动时分片取舍的日志（Go `main.go:319-324` 打印网关建议）。
     fn log_shard(&self, suggested: i64) {
-        let shard = resolve_shard(&self.config.snapshot());
+        let shard = self.resolved_shard();
         tracing::info!(
             shard_id = shard.id,
             shard_count = shard.count,
             suggested,
             "QQ 网关注册分片"
         );
+        if self.shard.is_some() {
+            return;
+        }
         if shard.count > 1 {
             tracing::warn!(
                 shard_id = shard.id,
@@ -726,41 +831,127 @@ impl<T: HttpTransport + 'static> GatewayClient<T> {
     }
 }
 
+/// Go `Processor.applyOpUserIDType`（`Processor/Processor.go:245-270`）：按 `op_userid_type`
+/// 把上报里的 `user_id` / `group_id` 换成 `real_user_id` / `real_group_id`。
+///
+/// - `vuin`：原样上报虚拟 ID；
+/// - `ruin`：仅当真实 ID 以 `ruin-` 开头（Go 先 `strings.ToLower`）才替换；
+/// - 其它（默认 `openid`）：真实 ID 非空就替换。
+///
+/// Go 在每次广播前对事件 map 调用；Rust 的事件是类型化的，所以在两个发布点（网关 dispatch、
+/// webhook）发布前改写同一份事件，语义等价。只动 `user_id` / `group_id`，不动
+/// `operator_id` / `target_id`。
+pub(crate) fn apply_op_userid_type(event: &mut Event, mode: &str) {
+    let mode = mode.trim();
+    if mode == "vuin" {
+        return;
+    }
+    let ruin_only = mode == "ruin";
+
+    // Go `replace(field, realField)`：真实 ID 非空且满足 ruin 前缀才替换。
+    fn real(extra: &Extra, key: &str, ruin_only: bool) -> Option<gensokyo_core::Ob11Id> {
+        let raw = extra.get(key)?.as_str()?;
+        if raw.is_empty() || (ruin_only && !raw.to_lowercase().starts_with("ruin-")) {
+            return None;
+        }
+        Some(parse_id(raw))
+    }
+
+    match event {
+        Event::Message(message) | Event::MessageSent(message) => {
+            if let Some(user) = real(&message.extra, "real_user_id", ruin_only) {
+                message.user_id = user;
+                // `sender.user_id` 跟随 `user_id`（Go 的 `sender["user_id"] = user_id`）；
+                // 未发生替换时 sender 保持原样，避免把 string_ob11 下恒为 0 的 sender 改掉。
+                if let Some(sender) = message.sender.as_mut() {
+                    sender.user_id = Some(message.user_id.clone());
+                }
+            }
+            if let Some(group) = real(&message.extra, "real_group_id", ruin_only) {
+                message.group_id = Some(group);
+            }
+        }
+        Event::Notice(notice) => {
+            if let Some(user) = real(&notice.extra, "real_user_id", ruin_only) {
+                notice.user_id = Some(user);
+            }
+            if let Some(group) = real(&notice.extra, "real_group_id", ruin_only) {
+                notice.group_id = Some(group);
+            }
+        }
+        Event::Request(request) => {
+            if let Some(user) = real(&request.extra, "real_user_id", ruin_only) {
+                request.user_id = Some(user);
+            }
+            if let Some(group) = real(&request.extra, "real_group_id", ruin_only) {
+                request.group_id = Some(group);
+            }
+        }
+        Event::MetaEvent(_) | Event::Unknown => {}
+    }
+}
+
 /// 关闭句柄：`shutdown` 有界等待，`abort` 立即中止，`Drop` 兜底中止。
+///
+/// 多分片时持有一组任务，关闭/中止对每个分片都生效。
 #[derive(Debug)]
 pub struct GatewayHandle {
-    stop: Option<oneshot::Sender<()>>,
-    task: JoinHandle<()>,
+    stops: Vec<oneshot::Sender<()>>,
+    tasks: Vec<JoinHandle<()>>,
 }
 
 impl GatewayHandle {
-    /// 网关任务是否已结束（正常退出或出错退出）。
+    /// 网关任务是否已全部结束（正常退出或出错退出）。
     #[must_use]
     pub fn is_finished(&self) -> bool {
-        self.task.is_finished()
+        self.tasks.iter().all(JoinHandle::is_finished)
     }
 
     /// 发关闭信号并等待任务退出；超时则强制中止。
     pub async fn shutdown(mut self, limit: Duration) {
-        if let Some(stop) = self.stop.take() {
+        for stop in self.stops.drain(..) {
             let _ = stop.send(());
         }
-        if tokio::time::timeout(limit, &mut self.task).await.is_err() {
-            self.task.abort();
+        let wait = async {
+            for task in &mut self.tasks {
+                let _ = task.await;
+            }
+        };
+        let timed_out = tokio::time::timeout(limit, wait).await.is_err();
+        if timed_out {
+            for task in &self.tasks {
+                task.abort();
+            }
             tracing::warn!(?limit, "QQ 网关客户端未在时限内退出，已强制中止");
         }
     }
 
     /// 立即中止（不等关闭信号）。
     pub fn abort(&self) {
-        self.task.abort();
+        for task in &self.tasks {
+            task.abort();
+        }
     }
 }
 
 impl Drop for GatewayHandle {
     fn drop(&mut self) {
-        self.task.abort();
+        for task in &self.tasks {
+            task.abort();
+        }
     }
+}
+
+/// 分片启动间隔（Go `manager.CalcInterval`：`max_concurrency` 个连接分摊 2s 窗口，
+/// 四舍五入到秒、最少 1s；`0` 按 1 处理）。
+fn calc_start_interval(max_concurrency: i64) -> Duration {
+    let concurrency = if max_concurrency > 0 {
+        max_concurrency
+    } else {
+        1
+    };
+    let seconds = 2.0_f64 / concurrency as f64;
+    Duration::from_secs((seconds.round() as u64).max(1))
 }
 
 /// 分片配置：以配置为准，网关建议的 `shards` 只打日志（Go `main.go:375-399`）。
@@ -897,7 +1088,9 @@ fn truncate(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{GatewayInfo, heartbeat_interval, is_auth_failure, resolve_shard};
+    use super::{GatewayInfo, calc_start_interval, heartbeat_interval, is_auth_failure, resolve_shard};
+    use gensokyo_protocol::Event;
+    use serde_json::json;
     use std::time::Duration;
 
     #[test]
@@ -946,5 +1139,79 @@ mod tests {
             super::Shard { id: 0, count: 3 },
             "shard_count=1 时按 shard_num 覆盖（Go main.go:377）"
         );
+    }
+
+    #[test]
+    fn shard_start_interval_matches_go_calc_interval() {
+        assert_eq!(calc_start_interval(0), Duration::from_secs(2), "0 按 1 处理");
+        assert_eq!(calc_start_interval(1), Duration::from_secs(2));
+        assert_eq!(calc_start_interval(2), Duration::from_secs(1));
+        assert_eq!(calc_start_interval(3), Duration::from_secs(1), "round(2/3)=1");
+        assert_eq!(calc_start_interval(8), Duration::from_secs(1), "最少 1s");
+    }
+
+    fn group_message_event(real_user_id: &str) -> Event {
+        serde_json::from_value(json!({
+            "post_type": "message",
+            "time": 1,
+            "self_id": 100,
+            "message_type": "group",
+            "message_id": 9,
+            "user_id": 200,
+            "group_id": 300,
+            "message": "hi",
+            "raw_message": "hi",
+            "sender": { "user_id": 200, "nickname": "n" },
+            "real_user_id": real_user_id,
+            "real_group_id": "GROUP-REAL"
+        }))
+        .expect("构造消息事件")
+    }
+
+    #[test]
+    fn op_userid_type_rewrites_ids_in_three_modes() {
+        // vuin：开关关闭，原样上报虚拟 ID
+        let mut event = group_message_event("OPENID");
+        super::apply_op_userid_type(&mut event, "vuin");
+        let value = serde_json::to_value(&event).expect("序列化");
+        assert_eq!(value["user_id"], 200);
+        assert_eq!(value["group_id"], 300);
+        assert_eq!(value["sender"]["user_id"], 200);
+
+        // openid（默认）：真实 ID 直接替换，sender.user_id 跟随
+        let mut event = group_message_event("OPENID");
+        super::apply_op_userid_type(&mut event, "openid");
+        let value = serde_json::to_value(&event).expect("序列化");
+        assert_eq!(value["user_id"], "OPENID");
+        assert_eq!(value["group_id"], "GROUP-REAL");
+        assert_eq!(value["sender"]["user_id"], "OPENID");
+
+        // ruin：只认 ruin- 前缀（这里 real_user_id 不带前缀，保持虚拟 ID）
+        let mut event = group_message_event("OPENID");
+        super::apply_op_userid_type(&mut event, "ruin");
+        let value = serde_json::to_value(&event).expect("序列化");
+        assert_eq!(value["user_id"], 200, "非 ruin- 前缀不替换");
+        assert_eq!(value["group_id"], 300, "group 前缀同样判定");
+
+        let mut event = group_message_event("RUIN-ABC");
+        super::apply_op_userid_type(&mut event, "ruin");
+        let value = serde_json::to_value(&event).expect("序列化");
+        assert_eq!(value["user_id"], "RUIN-ABC", "前缀大小写不敏感");
+    }
+
+    #[test]
+    fn op_userid_type_leaves_native_events_untouched() {
+        let mut event: Event = serde_json::from_value(json!({
+            "post_type": "meta_event",
+            "time": 1,
+            "self_id": 100,
+            "meta_event_type": "lifecycle",
+            "sub_type": "connect",
+            "real_user_id": "OPENID"
+        }))
+        .expect("构造元事件");
+        let before = serde_json::to_value(&event).expect("序列化");
+        super::apply_op_userid_type(&mut event, "openid");
+        assert_eq!(serde_json::to_value(&event).expect("序列化"), before);
     }
 }

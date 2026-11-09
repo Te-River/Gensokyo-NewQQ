@@ -16,7 +16,8 @@
 //! [`RuntimeOptions::config_watch`]（默认开）接线，监听失败只 `warn`、不阻断启动。idmap 与 echo
 //! 也在 `boot` 的启动第一步装配（`Runtime::attach_idmap` / `attach_echo`）：idmap 打开失败只
 //! `warn`，此时入站回退原始 OpenID、虚拟号互转不可用；成功时 [`ActionContext`] 与入站共用同一份
-//! 存储。启动期不联网（access_token 在首次调用上游时才惰性换取）。
+//! 存储。启动期只联网一次（`GET /users/@me` 取机器人 ID，见 `Runtime::attach_bot_id`，
+//! 失败只 `warn`），其余 access_token 在首次调用上游时才惰性换取。
 
 use std::path::Path;
 use std::sync::Arc;

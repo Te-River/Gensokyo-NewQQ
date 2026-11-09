@@ -178,21 +178,16 @@ async fn read_any_json(client: &mut Client) -> Value {
     }
 }
 
-fn assert_unauthorized(err: tokio_tungstenite::tungstenite::Error) {
+fn assert_handshake_status(
+    err: tokio_tungstenite::tungstenite::Error,
+    expected: u16,
+    note: &str,
+) {
     match err {
         tokio_tungstenite::tungstenite::Error::Http(response) => {
-            assert_eq!(response.status(), 401, "期望握手返回 401");
+            assert_eq!(response.status().as_u16(), expected, "{note}");
         }
-        other => panic!("期望 HTTP 401，实际: {other:?}"),
-    }
-}
-
-fn assert_forbidden(err: tokio_tungstenite::tungstenite::Error) {
-    match err {
-        tokio_tungstenite::tungstenite::Error::Http(response) => {
-            assert_eq!(response.status(), 403, "期望握手返回 403（Origin 被拒）");
-        }
-        other => panic!("期望 HTTP 403，实际: {other:?}"),
+        other => panic!("期望 HTTP {expected}（{note}），实际: {other:?}"),
     }
 }
 
@@ -315,11 +310,11 @@ async fn ws_rejects_bad_tokens_and_answers_invalid_json_with_1400() {
     let err = connect_async(format!("ws://{addr}/ws"))
         .await
         .expect_err("缺少 token 应被拒");
-    assert_unauthorized(err);
+    assert_handshake_status(err, 401, "缺少 token 应回 401");
     let err = connect_async(format!("ws://{addr}/ws?access_token=wrong"))
         .await
         .expect_err("错误 token 应被拒");
-    assert_unauthorized(err);
+    assert_handshake_status(err, 403, "错误 token 应回 403");
 
     let (mut query_client, _) = connect_async(format!("ws://{addr}/ws?access_token=s3cret"))
         .await
@@ -373,8 +368,16 @@ async fn ws_origin_allows_loopback_and_rejects_foreign_hosts() {
         .expect("发送失败");
     assert_eq!(read_json(&mut localhost).await["retcode"], 0);
 
-    assert_forbidden(connect_origin_err(addr, "http://evil.example").await);
-    assert_forbidden(connect_origin_err(addr, "https://127.0.0.1.evil.example").await);
+    assert_handshake_status(
+        connect_origin_err(addr, "http://evil.example").await,
+        403,
+        "非回环 Origin 应回 403",
+    );
+    assert_handshake_status(
+        connect_origin_err(addr, "https://127.0.0.1.evil.example").await,
+        403,
+        "伪造回环前缀应回 403",
+    );
 
     drop((loopback, localhost));
     stop(handle).await;
@@ -392,7 +395,11 @@ async fn ws_origin_whitelists_server_dir() {
         .expect("发送失败");
     assert_eq!(read_json(&mut client).await["retcode"], 0);
 
-    assert_forbidden(connect_origin_err(addr, "https://other.example.com").await);
+    assert_handshake_status(
+        connect_origin_err(addr, "https://other.example.com").await,
+        403,
+        "server_dir 不匹配的 Origin 应回 403",
+    );
 
     drop(client);
     stop(handle).await;
@@ -620,10 +627,10 @@ async fn http_requires_token_when_configured() {
     let payload = r#"{"action":"get_status"}"#;
 
     let (status, _) = http_request(addr, "POST", "/get_status", payload, None).await;
-    assert_eq!(status, 401, "缺少 token 应回 401");
+    assert_eq!(status, 403, "缺少 token 应回 403（Go httpapi 从不回 401）");
     let (status, _) =
         http_request(addr, "POST", "/get_status", payload, Some("Bearer wrong")).await;
-    assert_eq!(status, 401, "错误 token 应回 401");
+    assert_eq!(status, 403, "错误 token 应回 403");
 
     let (status, body) =
         http_request(addr, "POST", "/get_status", payload, Some("Bearer s3cret")).await;

@@ -6,6 +6,7 @@ mod support;
 
 use gensokyo_core::Ob11Id;
 use gensokyo_protocol::Event;
+use gensokyo_protocol::MessageContent;
 use gensokyo_protocol::event::MessageType;
 use gensokyo_runtime::Inbound;
 use serde_json::{Value, json};
@@ -589,4 +590,170 @@ fn unknown_or_incomplete_events_yield_nothing() {
             .convert("GROUP_AT_MESSAGE_CREATE", Some(&json!("oops")), None)
             .is_err()
     );
+}
+
+/// 段数组模式（`array_value = true`）：`string_ob11` 只决定 ID 类型，不改变消息形态。
+fn array_settings(string_ob11: bool) -> String {
+    format!(
+        "  app_id: 12345\n  string_ob11: {string_ob11}\n  native_ob11: true\n  array: true\n  enable_ws_server: false\n  http_address: \"\"\n"
+    )
+}
+
+fn message_payload(content: &str) -> Value {
+    json!({
+        "id": "M1",
+        "group_id": "G1",
+        "content": content,
+        "timestamp": "1700000000",
+        "author": {"id": "U1", "username": "alice"}
+    })
+}
+
+/// 转换一条群消息，拆出 `message` 段数组（JSON 形态）并带上 `raw_message`。
+fn segments_of(settings: &str, content: &str) -> (Vec<Value>, String) {
+    let (inbound, _dir) = inbound(settings);
+    let events = inbound
+        .convert(
+            "GROUP_AT_MESSAGE_CREATE",
+            Some(&message_payload(content)),
+            None,
+        )
+        .expect("转换失败");
+    let Event::Message(message) = &events[0] else {
+        panic!("应为 message 事件，实得 {events:?}");
+    };
+    let MessageContent::Array(segments) = &message.message else {
+        panic!("array_value=true 应上报段数组，实得 {:?}", message.message);
+    };
+    (
+        segments
+            .iter()
+            .map(|segment| serde_json::to_value(segment).expect("段序列化失败"))
+            .collect(),
+        message.raw_message.clone(),
+    )
+}
+
+#[test]
+fn array_value_parses_plain_text_into_text_segment() {
+    let (segments, raw) = segments_of(&array_settings(true), "hi");
+    assert_eq!(
+        segments,
+        vec![json!({"type": "text", "data": {"text": "hi"}})]
+    );
+    assert_eq!(raw, "hi", "raw_message 恒为字符串");
+}
+
+#[test]
+fn array_value_parses_at_and_multiple_segments() {
+    let (segments, raw) = segments_of(&array_settings(true), "a[CQ:at,qq=10086]b[CQ:face,id=1]c");
+    assert_eq!(
+        segments,
+        vec![
+            json!({"type": "text", "data": {"text": "a"}}),
+            json!({"type": "at", "data": {"qq": "10086"}}),
+            json!({"type": "text", "data": {"text": "b"}}),
+            json!({"type": "face", "data": {"id": "1"}}),
+            json!({"type": "text", "data": {"text": "c"}}),
+        ]
+    );
+    assert_eq!(raw, "a[CQ:at,qq=10086]b[CQ:face,id=1]c");
+}
+
+#[test]
+fn array_value_degrades_unknown_codes_to_text() {
+    // `bogus` 不在码表；`remove` 是出站专用（inbound=false）。两者都折回 text 原文，
+    // 且相邻 text 合并成一段（与 Go 文本段「连续切片」的粒度一致）。
+    let content = "a[CQ:bogus,foo=1]b[CQ:remove,user_id=9]c";
+    let (segments, raw) = segments_of(&array_settings(true), content);
+    assert_eq!(
+        segments,
+        vec![json!({"type": "text", "data": {"text": content}})]
+    );
+    assert_eq!(raw, content);
+}
+
+#[test]
+fn array_value_off_keeps_string_message() {
+    let (inbound, _dir) = inbound(BASE);
+    let events = inbound
+        .convert(
+            "GROUP_AT_MESSAGE_CREATE",
+            Some(&message_payload("hi")),
+            None,
+        )
+        .expect("转换失败");
+    let Event::Message(message) = &events[0] else {
+        panic!("应为 message 事件，实得 {events:?}");
+    };
+    let MessageContent::Text(text) = &message.message else {
+        panic!(
+            "array_value 关闭时应为字符串形态，实得 {:?}",
+            message.message
+        );
+    };
+    assert_eq!(text, "hi");
+    assert_eq!(message.raw_message, "hi");
+}
+
+#[test]
+fn add_at_group_prefix_only_reaches_raw_message_in_array_mode() {
+    let settings = format!("{}  add_at_group: true\n", array_settings(true));
+    let (inbound, _dir) = inbound(&settings);
+    let events = inbound
+        .convert("GROUP_MESSAGE_CREATE", Some(&message_payload("hi")), None)
+        .expect("转换失败");
+    let Event::Message(message) = &events[0] else {
+        panic!("应为 message 事件，实得 {events:?}");
+    };
+    assert_eq!(message.raw_message, "[CQ:at,qq=12345] hi");
+    let MessageContent::Array(segments) = &message.message else {
+        panic!("array_value=true 应上报段数组，实得 {:?}", message.message);
+    };
+    let segments: Vec<Value> = segments
+        .iter()
+        .map(|segment| serde_json::to_value(segment).expect("段序列化失败"))
+        .collect();
+    assert_eq!(
+        segments,
+        vec![json!({"type": "text", "data": {"text": "hi"}})],
+        "Go 数组路径读 data.Content，add_at_group 前缀不进 message"
+    );
+}
+
+#[test]
+fn array_value_is_independent_of_string_ob11() {
+    for string_ob11 in [true, false] {
+        let (segments, _raw) = segments_of(&array_settings(string_ob11), "hi[CQ:at,qq=7]");
+        assert_eq!(
+            segments,
+            vec![
+                json!({"type": "text", "data": {"text": "hi"}}),
+                json!({"type": "at", "data": {"qq": "7"}}),
+            ],
+            "string_ob11={string_ob11} 时消息段形态不变"
+        );
+    }
+}
+
+#[test]
+fn array_value_applies_to_private_message() {
+    let (inbound, _dir) = inbound(&array_settings(true));
+    let events = inbound
+        .convert(
+            "C2C_MESSAGE_CREATE",
+            Some(&json!({
+                "id": "M2",
+                "content": "x[CQ:at,qq=7]",
+                "timestamp": "1700000000",
+                "author": {"id": "U1"}
+            })),
+            None,
+        )
+        .expect("转换失败");
+    let Event::Message(message) = &events[0] else {
+        panic!("应为 message 事件，实得 {events:?}");
+    };
+    assert!(message.message.is_array(), "单聊同样走段数组");
+    assert_eq!(message.raw_message, "x[CQ:at,qq=7]");
 }

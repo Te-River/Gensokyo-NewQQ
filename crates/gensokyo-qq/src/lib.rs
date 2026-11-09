@@ -9,10 +9,11 @@
 //!   可覆盖 token 端点（等价 Go `develop_access_token_dir`）。
 //! - [`http::HttpTransport`]：所有请求的唯一出口；生产实现
 //!   [`http::ReqwestTransport`]（reqwest + rustls），测试实现只需一个记录请求的 fake。
-//! - [`openapi::OpenApiClient`]：群 / C2C 发消息、群 / C2C 上传文件，以及
-//!   [`group`] 中的群管理子集。
+//! - [`openapi::OpenApiClient`]：群 / C2C 发消息、群 / C2C 上传文件、机器人自身信息
+//!   （`GET /users/@me`），以及 [`group`] 中的群管理子集。
 //! - [`media_image`]：素材管理（prepare → PUT 直传 → complete，外加列表 / 删除）。
-//! - [`dto`]：`MessageToCreate`、`MessageResponse`、`MediaResponse` 与群管理结构。
+//! - [`dto`]：`MessageToCreate`、`MessageResponse`、`MediaResponse`、群管理结构与
+//!   机器人自身信息（`BotUser`）。
 //!
 //! # 与 botgo 的差异
 //! - **token 刷新**：botgo 启动后台 goroutine 定时刷新；本 crate 不创建 runtime，改为
@@ -40,7 +41,7 @@
 //! - openid 拼进 URL 前按 RFC 3986 path segment 编码。
 //!
 //! # 未实现端点
-//! - WebSocket / gateway、`/gateway/bot`、`/users/@me`。
+//! - WebSocket / gateway 与 `/gateway/bot`。
 //! - 频道（guild / channel）与私信频道（DM）全套接口。
 //! - 消息撤回、流式消息、`input_notify` / `card` 的强类型模型（可用
 //!   [`dto::MessageToCreate::with_extra`] 透传）。

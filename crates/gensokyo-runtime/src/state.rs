@@ -38,6 +38,7 @@ pub struct AppState {
     registry: Arc<Registry>,
     actions: Option<Arc<ActionContext>>,
     idmap: Option<Arc<IdMapStore>>,
+    bot_id: Option<Arc<str>>,
     echo: Option<Arc<EchoStore>>,
     botstats: BotStatsSlot,
     api: Option<Arc<OpenApiClient<ReqwestTransport>>>,
@@ -58,6 +59,7 @@ impl AppState {
             registry,
             actions: None,
             idmap: None,
+            bot_id: None,
             echo: None,
             botstats: BotStatsSlot::default(),
             api: None,
@@ -141,6 +143,16 @@ impl AppState {
     #[must_use]
     pub fn with_api(mut self, api: Arc<OpenApiClient<ReqwestTransport>>) -> Self {
         self.api = Some(api);
+        self
+    }
+
+    /// 注入机器人真实 ID（`GET /users/@me`，Go `main.go:304` 的 `handlers.BotID`）。
+    ///
+    /// 未注入时入站 / 出站都不做 AppID⇄BotID 文本替换；与 Go 取不到 `Me` 时的
+    /// 降级口径一致。
+    #[must_use]
+    pub fn with_bot_id(mut self, bot_id: impl Into<Arc<str>>) -> Self {
+        self.bot_id = Some(bot_id.into());
         self
     }
 
@@ -228,6 +240,18 @@ impl AppState {
     #[must_use]
     pub fn idmap_arc(&self) -> Option<Arc<IdMapStore>> {
         self.idmap.clone()
+    }
+
+    /// 机器人真实 ID（未取到时 `None`：不做 AppID⇄BotID 文本替换）。
+    #[must_use]
+    pub fn bot_id(&self) -> Option<&str> {
+        self.bot_id.as_deref()
+    }
+
+    /// 机器人真实 ID 的 `Arc`（[`crate::inbound::Inbound`] 要持有）。
+    #[must_use]
+    pub fn bot_id_arc(&self) -> Option<Arc<str>> {
+        self.bot_id.clone()
     }
 
     /// echo 句柄（未注入时为 `None`）。

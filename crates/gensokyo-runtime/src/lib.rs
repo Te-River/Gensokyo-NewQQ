@@ -91,11 +91,11 @@
 //!   差异见该模块文档。
 //!
 //! # 未做项（后续里程碑）
-//! - 消息段：图片 / 语音 / 视频 / ark 卡片 / markdown / card 一律停留在文本形态，
-//!   `array_value` 不生效（细节见 [`inbound`] 模块文档）。
+//! - 消息段：`array_value` 已生效（`message` 按 CQ 解析成段数组），但图片 / 语音 /
+//!   视频 / ark 卡片段仍不生成（细节见 [`inbound`] 模块文档）。
 //! - `INTERACTION_CREATE`、`MESSAGE_AUDIT_*`、`FORUM_*`、`AUDIO_*`、频道 `GUILD_*` 未转换。
-//! - webhook 的 ed25519 签名校验与 `op=13` 回调校验（workspace 无 ed25519 依赖），
-//!   `union_webhook` 扇出亦未做。
+//! - webhook 的 ed25519 签名校验与 `op=13` 回调校验已实现（ring 直连边），
+//!   `union_webhook` 罚壳扇出亦已实现（P17：异步转发、敏感头过滤、5s 超时）
 //! - 具体 `send_*` / 群管理 action（M1i）。
 //!   群管理其余端点仍属后续里程碑。
 //! - deferred 的媒体片段级能力：markdown / keyboard / card / music / stream / input_notify

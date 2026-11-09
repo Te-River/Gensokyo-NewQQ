@@ -16,11 +16,12 @@
 | 功能 | 反向 WS TLS/代理 | ws.go:352-355 | 无 TLS/代理 | 缺失 | 30-80 行 |
 | 功能 | `array_value` 消息段 | ProcessGroupMessage.go:189-190 | inbound.rs:61-63 自述未实现 | 缺失 | 300-500 行 |
 | 功能 | `remove_at`/`convert_other_at` | message_parser.go:1679-1721,1877,1895 | 无 RevertTransformedText | 缺失 | 400-700 行 |
-| 功能 | `enable_change_word` | main.go:765-770,787-792 | 仅配置字段 | 缺失 | 待估 |
+| 功能 | `enable_change_word` | main.go:765-770,787-792 | inbound/send 均接 acnode 开关（P8；审计时表项已过期） | **已对齐** | — |
 | 功能 | `add_at_group` 消费者 | ProcessGroupNormalMessage.go:148-150（**入站上报**变换，非出站） | inbound.rs reported_group_content（全量群消息加 `[CQ:at,qq=AppID]`，与 Go 同点） | **已对齐（W2，待提交）** | — |
 | 功能 | AppID→BotID | message_parser.go:1669-1683（需 `/users/@me` 的 BotID 注入） | 缺 BotID 来源（Go main.go:254/304），暂缓 | 缺失 | 中 |
-| 功能 | `op_user_id_type`/`http_only_bot` | Processor.go:245-270,374-399 | 无 | 缺失 | 待估 |
-| 边角 | 401/403 语义 | wsserver.go:85-91；httpapi.go:28 | auth.rs 统一 401 | 部分 | 小 |
+| 功能 | `op_user_id_type` | Processor.go:245-270（调用点 :293,311,334） | gateway.rs `apply_op_userid_type`（网关 dispatch / webhook 发布前改写；vuin/ruin/其余三态 + sender 跟随） | **已对齐（P24）** | — |
+| 功能 | `http_only_bot` | Processor.go:374-399（全 WS 失败时补 downtime 回复） | 仅配置字段，无 downtime 回退 | 缺失 | 待估 |
+| 边角 | 401/403 语义 | wsserver.go:85-94；httpapi.go:23-31 | auth.rs：WS 缺 token 401 `Missing token` / 错 token 403 `Incorrect token`；HTTP API 一律 403 `鉴权失败` | **已对齐（P24）** | — |
 | — | 15 类 QQ 事件转换 | main.go:746-887,889-930 | inbound.rs:282-328 | **已对齐** | — |
 | — | intents 位表 | botgo/event/register.go:100-172 | intent.rs:77-95 | **已对齐**（待 #70 消费） | — |
 
@@ -30,13 +31,15 @@
 |---|---|---|---|---|
 | P0 | bbolt→redb 导入器（含 UserInfo 表） | map_service.go:124；new_service.go:96；main.go:371 | G1 `legacy-export`（`2c7f058`）+ R1 importer（JSONL v1、幂等/冲突/校验/自动导入） | **已对齐（待提交）** |
 | P0 | WebUI 登录路径兼容 `/api/check-login-status` | webui/api.go:47 | 双路径并存同 handler + login isLoggedIn 契约 | **已对齐（P6a）** |
-| P0 | `/uploadpic`、`/uploadpicv2`、`/getid` HTTP 端点 | main.go:508,523-524；server/uploadpic.go；server/getIDHandler.go:104 | 无路由 | 缺失（/getid 安全 High） |
+| P0 | `/uploadpic`、`/uploadpicv2`、`/getid` HTTP 端点 | main.go:508,523-524；server/uploadpic.go；server/getIDHandler.go:104,203-267 | upload_http.rs（10 用例；getid 1~4/6/7/8~11/13/15/16 同码同形，5/12/14/18/19 依赖 bbolt 迁移期结构回 501） | **已对齐（P14/P24；gRPC 装配前 /getid 恒挂载）** |
+| P1 | oss 阿里/百度/腾讯后端 | oss/{aliyun,baidu,tencent}.go | media/oss/（0~3 直传 + deferred 分派；审核开关 fail-closed） | **已对齐（P13）** |
+| P1 | botstats + Prometheus `/metrics` | botstats/botstats.go；main.go:522,1140-1175 | botstats.rs redb + GET /metrics + sent/received 打点（P12/P12b） | **已对齐** |
+| P1 | WebUI logs WS | webui/api.go:52-70；mylog WsHandler | logs.rs 环形缓冲 + WS（快照+实时+登录 401） | **已对齐（P16）** |
 | P0 | idmap 解绑/重绑定 UpdateVirtualValue*/ForceUnbindID | service.go:1405,1654,2036,2394 | grpc.rs 2 RPC unimplemented | 缺失 |
 | P1 | WebUI 余 9 路由（config 写/accounts/status/logs WS/cookie 持久化） | webui/api.go:36-134；cookie.go:15 | P6a+P6b：config 三方法/accounts/status/process/status/cookie.redb；余 logs WS 与 PUT /api/{uin} | **大部分对齐（待提交；logs WS 在册）** |
 | P1 | 图床后端 4/5/6/9/10 | imagehosting/hosting.go:45-63 | 仅 ChatGlm(7)/Ukaka(8) | 部分 |
-| P1 | oss 阿里/百度/腾讯后端 | oss/{aliyun,baidu,tencent}.go | 无 | 缺失 |
 | P1 | acnode AC 自动机 | acnode/acnode.go:17-111 | core/acnode.rs（手写 AC、IN/OUT 双接入、词表回写） | **已对齐（P8，待提交）** |
-| P1 | messagequeue（发送队列/限速） | messagequeue/queue.go:96-122 | queue.rs（令牌桶+重试；Go 队列本身为死代码，SendQueue 同构未默认启用） | **已对齐（P10，待提交）** |
+| P1 | messagequeue（发送队列/限速） | messagequeue/queue.go:96-122 | queue.rs（令牌桶+重试，限速可注入；Go 队列死代码） | **已对齐（P10/P10b）** |
 | P1 | botstats + Prometheus `/metrics` | botstats/botstats.go；main.go:522,1140-1175 | builtin.rs 返回 0；无端点 | 缺失 |
 | P2 | unioncache / url 短链 / sys 全量 | unioncache/*；url/shorturl.go；sys/* | 无 / 仅 local_ip | 缺失 |
 | P2 | 视频/QR/SSRF 防护 | images/*；sys/* | media/lib.rs:108-118 未做清单 | 缺失 |

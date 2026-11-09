@@ -7,7 +7,7 @@
 //! - `GET /` 未挂 WebUI 时同样回健康检查文本；挂 WebUI 后 `/` 归前端首页，探活固定走
 //!   `/health`（见下文「挂 WebUI 后的优先级」）；
 //! - `http_access_token` 非空时，`Authorization: Bearer <token>` 或 `?access_token=` 必须匹配，
-//!   失败回 401；
+//!   否则 **403** `{"error":"鉴权失败"}`（Go `httpapi/httpapi.go:23-31` 从不回 401）；
 //! - 非 `POST` 的 action 请求回 405。
 //!
 //! 与 Go 的差异：Go 在 `NoRoute` 里按路径分派 `/send_group_msg` 等专用 handler，并支持 GET
@@ -37,7 +37,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use serde_json::json;
 
-use crate::auth::{is_authorized, unauthorized};
+use crate::auth::is_authorized;
 use crate::dispatcher::dispatch_json;
 use crate::state::AppState;
 
@@ -146,11 +146,20 @@ async fn dispatch_action(
         params.get("access_token").map(String::as_str),
     ) {
         tracing::debug!("HTTP API 鉴权失败");
-        return unauthorized();
+        return auth_failed();
     }
 
     let response = dispatch_json(state.dispatcher(), body.to_vec()).await;
     ([(header::CONTENT_TYPE, "application/json")], response).into_response()
+}
+
+/// Go `httpapi/httpapi.go:23-31`：缺 token 与 token 错都是 403，从不回 401。
+fn auth_failed() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        axum::Json(json!({ "error": "鉴权失败" })),
+    )
+        .into_response()
 }
 
 /// 优先级判据：`POST` 且不落在 WebUI 的 `/api` 前缀下才是 action。

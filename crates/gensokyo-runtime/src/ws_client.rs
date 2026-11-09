@@ -30,23 +30,31 @@
 //!   `disable_error_chan=true` 时只记日志丢弃。缓冲按地址持有、跨重连保留（同 Go 把
 //!   `sendFailures` 挂在 `WebSocketClient` 上）；与 Go 一样**没有容量上限**，长时间断线
 //!   会持续占用内存。
-//! - 不支持 `wss://`：workspace 的 `tokio-tungstenite` 未开 TLS feature，也没有走
-//!   `ProxyFromEnvironment`；`ws://` 之外的地址会在 dial 阶段报错并按退避重试。
+//! - 代理：对齐 Go `websocket.Dialer{Proxy: http.ProxyFromEnvironment}`——`ws://` 读
+//!   `HTTP_PROXY`、`wss://` 读 `HTTPS_PROXY`（大写优先），`localhost` / 回环 IP 永远直连
+//!   （Go `httpproxy` 硬规则），`NO_PROXY` 命中时直连。代理一律走
+//!   HTTP `CONNECT` 隧道（`tokio-tungstenite` 0.30 无内置 proxy API），`wss://` 的 TLS 在隧道
+//!   上完成。未实现：SOCKS5 代理、`NO_PROXY` 的 CIDR 写法、userinfo 的 percent-decode。
 //! - `launch_reconnect_times`（启动阶段单独的重试上限）未区分，统一用 `reconnect_times`。
 
 use std::time::Duration;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use futures::{SinkExt, StreamExt};
 use gensokyo_config::Settings;
 use gensokyo_protocol::Event;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::HeaderValue;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
+use tokio_tungstenite::tungstenite::http::{HeaderValue, Request, Uri};
+use tokio_tungstenite::{
+    MaybeTlsStream, WebSocketStream, client_async_tls_with_config, connect_async,
+};
 
 use crate::dispatcher::dispatch_json;
 use crate::inbound::Inbound;
@@ -62,6 +70,10 @@ pub const DEFAULT_MAX_BACKOFF: Duration = Duration::from_secs(10);
 pub const USER_AGENT: &str = "CQHttp/4.15.0";
 /// action 回执写回通道的容量（条）；分发任务在通道满时背压等待。
 pub(crate) const RECEIPT_CAPACITY: usize = 64;
+/// 代理 `CONNECT` 握手超时，对齐 Go `websocket.Dialer.HandshakeTimeout`。
+const PROXY_CONNECT_TIMEOUT: Duration = Duration::from_secs(45);
+/// `CONNECT` 应答头的字节上限：对端不回 CRLFCRLF 时不能无限读。
+const MAX_CONNECT_RESPONSE: usize = 8 * 1024;
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -423,6 +435,9 @@ impl FailedMessages {
 }
 
 /// 建连；token 非空时带 `Authorization: Token <token>`（Go 同款）。
+///
+/// 代理按环境变量选（Go `websocket.Dialer{Proxy: http.ProxyFromEnvironment}`）：命中时先向
+/// 代理发 HTTP `CONNECT` 建隧道，WS 握手（`wss://` 的 TLS）在隧道里完成。
 async fn dial(address: &str, token: &str, self_id: i64) -> Result<Socket, String> {
     let mut request = address
         .into_client_request()
@@ -443,10 +458,261 @@ async fn dial(address: &str, token: &str, self_id: i64) -> Result<Socket, String
         );
     }
 
-    let (socket, _response) = connect_async(request)
+    let proxy = proxy_for(&ProxyEnv::from_env(), request.uri())
+        .map_err(|err| format!("代理配置无效（{address}）: {err}"))?;
+    match proxy {
+        Some(proxy) => connect_tunneled(request, &proxy)
+            .await
+            .map_err(|err| format!("经代理 {} 连接 {address} 失败: {err}", proxy.address)),
+        None => {
+            let (socket, _response) = connect_async(request)
+                .await
+                .map_err(|err| format!("连接 {address} 失败: {err}"))?;
+            Ok(socket)
+        }
+    }
+}
+
+/// 代理环境变量（Go `http.ProxyFromEnvironment` 的输入；只认这三个，无 `ALL_PROXY`）。
+#[derive(Debug, Default, Clone)]
+struct ProxyEnv {
+    http: Option<String>,
+    https: Option<String>,
+    no_proxy: Option<String>,
+}
+
+impl ProxyEnv {
+    /// 现读环境变量：大写优先（Go `getEnvAny` 同序），空值视为未设置。
+    fn from_env() -> Self {
+        Self {
+            http: env_var("HTTP_PROXY", "http_proxy"),
+            https: env_var("HTTPS_PROXY", "https_proxy"),
+            no_proxy: env_var("NO_PROXY", "no_proxy"),
+        }
+    }
+}
+
+fn env_var(upper: &str, lower: &str) -> Option<String> {
+    [upper, lower]
+        .into_iter()
+        .find_map(|name| std::env::var(name).ok().filter(|v| !v.trim().is_empty()))
+}
+
+/// 代理终点：`address` 直接交给 `TcpStream::connect`（IPv6 保留方括号）。
+#[derive(Debug, Clone)]
+struct ProxyEndpoint {
+    address: String,
+    /// userinfo 的 Base64（`Proxy-Authorization: Basic ...`）；无 userinfo 为 `None`。
+    authorization: Option<String>,
+}
+
+impl ProxyEndpoint {
+    /// 解析 `http://[user:pass@]host[:port]`；缺省 scheme 为 `http`、缺省端口为 8080。
+    ///
+    /// 与 Go 一致：非 `http` 协议（SOCKS5）直接报错，不静默降级成直连。
+    fn parse(raw: &str) -> Result<Self, String> {
+        let raw = raw.trim();
+        let (scheme, rest) = raw.split_once("://").unwrap_or(("http", raw));
+        if !scheme.eq_ignore_ascii_case("http") {
+            return Err(format!(
+                "不支持的代理协议 {scheme}（仅支持 http:// CONNECT 代理）"
+            ));
+        }
+        let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+        if !path.is_empty() {
+            return Err(format!("代理 URL 不应带路径: {raw}"));
+        }
+        let (userinfo, authority) = authority.rsplit_once('@').unwrap_or(("", authority));
+        let (host, port) = split_host_port(authority)?;
+        // Go 的 Basic 凭据是 `user:password`；只给用户名时补上冒号。
+        let authorization = (!userinfo.is_empty()).then(|| {
+            let credentials = if userinfo.contains(':') {
+                userinfo.to_owned()
+            } else {
+                format!("{userinfo}:")
+            };
+            BASE64.encode(credentials)
+        });
+        Ok(Self {
+            address: format!("{host}:{port}"),
+            authorization,
+        })
+    }
+}
+
+/// 拆 `host[:port]`（IPv6 用 `[...]`），缺省端口 8080（Go `httpproxy` 同款）。
+fn split_host_port(authority: &str) -> Result<(String, u16), String> {
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (host, tail) = rest
+            .split_once(']')
+            .ok_or_else(|| format!("代理 URL 的 IPv6 地址非法: {authority}"))?;
+        let port = match tail.strip_prefix(':') {
+            Some(port) => port
+                .parse()
+                .map_err(|_| format!("代理端口非法: {port}"))?,
+            None => 8080,
+        };
+        return Ok((format!("[{host}]"), port));
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) => Ok((
+            host.to_owned(),
+            port.parse().map_err(|_| format!("代理端口非法: {port}"))?,
+        )),
+        None => Ok((authority.to_owned(), 8080)),
+    }
+}
+
+/// 按 URL scheme 选代理：`ws` → `HTTP_PROXY`、`wss` → `HTTPS_PROXY`（Go `httpproxy` 把
+/// `ws`/`wss` 归一成 `http`/`https` 后再查表），`NO_PROXY` 命中时直连。
+fn proxy_for(env: &ProxyEnv, uri: &Uri) -> Result<Option<ProxyEndpoint>, String> {
+    let (raw, default_port) = match uri.scheme_str() {
+        Some("ws") => (env.http.as_deref(), 80),
+        Some("wss") => (env.https.as_deref(), 443),
+        // 其他 scheme 交给 `connect_async` 报错，不去猜代理。
+        _ => (None, 0),
+    };
+    let Some(raw) = raw else { return Ok(None) };
+    let host = uri
+        .host()
+        .ok_or_else(|| format!("WS 地址缺少主机名: {uri}"))?;
+    // Go `httpproxy` 的硬规则：localhost / 回环 IP 永远直连，与 `NO_PROXY` 无关。
+    if is_loopback(host) {
+        tracing::debug!(host, "目标为回环地址，反向 WS 直连");
+        return Ok(None);
+    }
+    if bypass_no_proxy(
+        env.no_proxy.as_deref().unwrap_or_default(),
+        host,
+        uri.port_u16().unwrap_or(default_port),
+    ) {
+        tracing::debug!(host, "NO_PROXY 命中，反向 WS 直连");
+        return Ok(None);
+    }
+    ProxyEndpoint::parse(raw).map(Some)
+}
+
+/// Go `httpproxy` 的本机绕行判定：`localhost`（不分大小写）或回环 IP。
+fn is_loopback(host: &str) -> bool {
+    let host = host.trim_matches(['[', ']']);
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// `NO_PROXY` 匹配（Go `httpproxy` 的子集）：`*` 全绕行；条目支持 `host`、`.suffix`、
+/// `host:port`。未实现 CIDR / IP 段写法。
+fn bypass_no_proxy(no_proxy: &str, host: &str, port: u16) -> bool {
+    let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    no_proxy
+        .split([',', ' '])
+        .filter(|entry| !entry.is_empty())
+        .any(|entry| {
+            if entry == "*" {
+                return true;
+            }
+            // 末段是纯数字才算端口，避免把裸 IPv6 的 `::1` 当端口拆开。
+            let (entry_host, entry_port) = match entry.rsplit_once(':') {
+                Some((entry_host, entry_port))
+                    if !entry_port.is_empty()
+                        && entry_port.bytes().all(|byte| byte.is_ascii_digit()) =>
+                {
+                    (entry_host, entry_port.parse::<u16>().ok())
+                }
+                _ => (entry, None),
+            };
+            if entry_port.is_some_and(|entry_port| entry_port != port) {
+                return false;
+            }
+            let entry_host = entry_host
+                .trim_start_matches('.')
+                .trim_matches(['[', ']'])
+                .to_ascii_lowercase();
+            !entry_host.is_empty()
+                && (host == entry_host || host.ends_with(&format!(".{entry_host}")))
+        })
+}
+
+/// `CONNECT` 的目标（`host:port`，端口沿用 tungstenite 的 ws=80 / wss=443 约定）。
+fn target_authority(uri: &Uri) -> Result<String, String> {
+    let authority = uri
+        .authority()
+        .ok_or_else(|| format!("WS 地址缺少主机: {uri}"))?;
+    if authority.port_u16().is_some() {
+        return Ok(authority.as_str().to_owned());
+    }
+    let default = match uri.scheme_str() {
+        Some("ws") => 80,
+        Some("wss") => 443,
+        other => return Err(format!("不支持的 WS scheme: {other:?}")),
+    };
+    Ok(format!("{authority}:{default}"))
+}
+
+/// 经 HTTP 代理建 WS：`CONNECT` 建隧道后把裸 TCP 交给 tungstenite 做 WS 握手；
+/// `wss://` 由 `client_async_tls_with_config` 的缺省 connector（webpki 根）在隧道上叠 TLS。
+async fn connect_tunneled(request: Request<()>, proxy: &ProxyEndpoint) -> Result<Socket, String> {
+    let target = target_authority(request.uri())?;
+    let mut stream = tokio::time::timeout(PROXY_CONNECT_TIMEOUT, TcpStream::connect(&proxy.address))
         .await
-        .map_err(|err| format!("连接 {address} 失败: {err}"))?;
+        .map_err(|_| format!("连接代理 {} 超时", proxy.address))?
+        .map_err(|err| format!("连接代理 {} 失败: {err}", proxy.address))?;
+
+    let mut head = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n");
+    if let Some(authorization) = &proxy.authorization {
+        head.push_str(&format!("Proxy-Authorization: Basic {authorization}\r\n"));
+    }
+    head.push_str("\r\n");
+    tokio::time::timeout(PROXY_CONNECT_TIMEOUT, stream.write_all(head.as_bytes()))
+        .await
+        .map_err(|_| "写 CONNECT 请求超时".to_owned())?
+        .map_err(|err| format!("写 CONNECT 请求失败: {err}"))?;
+
+    let status = tokio::time::timeout(PROXY_CONNECT_TIMEOUT, read_connect_status(&mut stream))
+        .await
+        .map_err(|_| "读 CONNECT 应答超时".to_owned())??;
+    if status != 200 {
+        return Err(format!("代理对 CONNECT {target} 返回 {status}"));
+    }
+
+    let (socket, _response) = client_async_tls_with_config(request, stream, None, None)
+        .await
+        .map_err(|err| format!("代理隧道上 WS 握手失败: {err}"))?;
     Ok(socket)
+}
+
+/// 读 `CONNECT` 应答头，返回状态码。逐字节读到 CRLFCRLF：代理不会在 WS 请求前主动发数据，
+/// 这样不会把隧道里的后续字节读进本函数的缓冲。
+async fn read_connect_status(stream: &mut TcpStream) -> Result<u16, String> {
+    let mut head = Vec::with_capacity(128);
+    let mut byte = [0u8; 1];
+    loop {
+        let read = stream
+            .read(&mut byte)
+            .await
+            .map_err(|err| format!("读 CONNECT 应答失败: {err}"))?;
+        if read == 0 {
+            return Err("代理在 CONNECT 应答前关闭连接".to_owned());
+        }
+        head.push(byte[0]);
+        if head.ends_with(b"\r\n\r\n") {
+            break;
+        }
+        if head.len() > MAX_CONNECT_RESPONSE {
+            return Err(format!("CONNECT 应答头超过 {MAX_CONNECT_RESPONSE} 字节"));
+        }
+    }
+    let text = std::str::from_utf8(&head).map_err(|_| "CONNECT 应答不是合法 UTF-8".to_owned())?;
+    text.split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .ok_or_else(|| {
+            format!(
+                "CONNECT 应答缺少状态码: {}",
+                text.lines().next().unwrap_or_default()
+            )
+        })
 }
 
 /// 与 Go 一致：URL 上的 `access_token` 覆盖 `ws_token[index]`。
@@ -557,7 +823,10 @@ impl Drop for WsClientHandle {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_HEARTBEAT_INTERVAL, FailedMessages, access_token_from_uri, send_event};
+    use super::{
+        DEFAULT_HEARTBEAT_INTERVAL, FailedMessages, ProxyEnv, ProxyEndpoint, access_token_from_uri,
+        connect_tunneled, proxy_for, send_event,
+    };
     use std::pin::Pin;
     use std::task::{Context, Poll};
     use std::time::Duration;
@@ -566,7 +835,9 @@ mod tests {
     use gensokyo_core::Ob11Id;
     use gensokyo_protocol::Event;
     use gensokyo_protocol::event::MetaEvent;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
     #[test]
     fn access_token_query_param_is_parsed() {
@@ -695,5 +966,110 @@ mod tests {
         assert!(!send_event(&mut sink, &heartbeat_event(), &mut failed, false).await);
         assert!(failed.entries.is_empty(), "成功路径不应缓冲");
         assert_eq!(sink.sent.len(), 1);
+    }
+
+    #[test]
+    fn proxy_is_selected_by_scheme_and_no_proxy() {
+        let env = ProxyEnv {
+            http: Some("http://127.0.0.1:7890".to_owned()),
+            https: Some("http://user:pw@127.0.0.1:7891".to_owned()),
+            no_proxy: Some("localhost, .example.com, 10.0.0.1:9000".to_owned()),
+        };
+        let endpoint = |url: &str| {
+            proxy_for(&env, &url.parse().expect("URI 解析失败"))
+                .expect("代理配置非法")
+                .map(|endpoint| endpoint.address)
+        };
+
+        assert_eq!(
+            endpoint("ws://bot.example.org/ws").as_deref(),
+            Some("127.0.0.1:7890")
+        );
+        assert_eq!(
+            endpoint("wss://bot.example.org/ws").as_deref(),
+            Some("127.0.0.1:7891")
+        );
+        // NO_PROXY：精确主机 / 后缀 / host:port
+        assert_eq!(endpoint("ws://localhost:9000/ws"), None);
+        assert_eq!(endpoint("wss://a.example.com/ws"), None);
+        assert_eq!(endpoint("ws://10.0.0.1:9000/ws"), None);
+        // 端口不匹配时不绕行
+        assert!(endpoint("ws://10.0.0.1:9001/ws").is_some());
+
+        // 未配置代理 → 直连
+        assert!(
+            proxy_for(&ProxyEnv::default(), &"wss://a.b/ws".parse().expect("URI"))
+                .expect("未配置代理不应报错")
+                .is_none()
+        );
+        // 非 http 代理（SOCKS5）→ 报错，不静默直连
+        let socks = ProxyEnv {
+            https: Some("socks5://127.0.0.1:1080".to_owned()),
+            ..ProxyEnv::default()
+        };
+        assert!(proxy_for(&socks, &"wss://a.b/ws".parse().expect("URI")).is_err());
+    }
+
+    /// Go `http.ProxyFromEnvironment` 对 loopback 永远直连：即使配了代理且 `NO_PROXY` 未覆盖。
+    #[test]
+    fn loopback_targets_bypass_proxy_without_no_proxy() {
+        let env = ProxyEnv {
+            http: Some("http://127.0.0.1:7890".to_owned()),
+            https: Some("http://127.0.0.1:7890".to_owned()),
+            no_proxy: None,
+        };
+        let endpoint =
+            |url: &str| proxy_for(&env, &url.parse().expect("URI 解析失败")).expect("代理配置非法");
+
+        assert!(endpoint("ws://localhost:8081/ws").is_none());
+        assert!(endpoint("wss://LOCALHOST/ws").is_none());
+        assert!(endpoint("ws://127.0.0.1:8081/ws").is_none());
+        assert!(endpoint("ws://[::1]:8081/ws").is_none());
+        assert!(endpoint("wss://bot.example.org/ws").is_some());
+    }
+
+    /// 本地 mock 代理：断言 CONNECT 请求行、回 200，再在同一连接上完成 WS 握手，
+    /// 证明隧道与后续握手确实共用同一条流。
+    #[tokio::test]
+    async fn connect_tunneled_sends_connect_and_handshakes_over_the_tunnel() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("绑定 mock 代理失败");
+        let proxy_address = listener.local_addr().expect("mock 代理地址");
+        let proxy = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            loop {
+                stream.read_exact(&mut byte).await.expect("读 CONNECT");
+                head.push(byte[0]);
+                if head.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let head = String::from_utf8(head).expect("CONNECT 头不是 UTF-8");
+            assert!(
+                head.starts_with("CONNECT 127.0.0.1:9 HTTP/1.1\r\n"),
+                "CONNECT 请求行: {head}"
+            );
+            stream
+                .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                .await
+                .expect("写 200");
+            tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("隧道上的 WS 握手失败");
+        });
+
+        let request = "ws://127.0.0.1:9/ws"
+            .into_client_request()
+            .expect("构造请求");
+        let endpoint =
+            ProxyEndpoint::parse(&format!("http://{proxy_address}")).expect("解析代理 URL");
+        let socket = connect_tunneled(request, &endpoint)
+            .await
+            .expect("隧道建连失败");
+        drop(socket);
+        proxy.await.expect("mock 代理任务 panic");
     }
 }

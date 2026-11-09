@@ -4,8 +4,8 @@
 //! 否则 `Authorization: Bearer <token>`（兼容 `Token <token>` 与裸 token 值）或
 //! `?access_token=<token>` 任一匹配即通过。
 //!
-//! Go 对「缺失 token」回 401、「错误 token」回 403；M1h-a 按 OneBot 客户端习惯统一回
-//! 401（`status` 只在 401/403 间选一个，客户端都按鉴权失败处理）。
+//! 与 Go 一致区分两档：**没有** token 回 401 `Missing token`，token 不匹配回 403
+//! `Incorrect token`（`server/wsserver.go:85-94`）。
 
 use axum::Json;
 use axum::http::header::AUTHORIZATION;
@@ -44,20 +44,49 @@ pub(crate) fn is_authorized(
         || header_token(headers).is_some_and(|token| token == expected)
 }
 
-/// 统一的 401 响应。
-pub(crate) fn unauthorized() -> Response {
+/// Go `server/wsserver.go:63-79` 的 token 提取：`Authorization` 头**非空**时只看头
+/// （`Bearer ` / `Token ` 前缀剥掉，裸值直接用），头为空才回落到 `?access_token=`。
+///
+/// 返回 `None` 即 Go 的 `token == ""`——用于把「没给 token」（401）与「给错了」（403）分开。
+/// 与 [`header_token`] 不同：这里不 trim，`Bearer `（前缀后为空）按「没给」算，与 Go 的
+/// `TrimPrefix` 后 `token == ""` 一致。
+pub(crate) fn provided_token<'a>(
+    headers: &'a HeaderMap,
+    query_token: Option<&'a str>,
+) -> Option<&'a str> {
+    let token = match headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .filter(|raw| !raw.is_empty())
+    {
+        Some(raw) => raw
+            .strip_prefix("Token ")
+            .or_else(|| raw.strip_prefix("Bearer "))
+            .unwrap_or(raw),
+        None => query_token.unwrap_or(""),
+    };
+    (!token.is_empty()).then_some(token)
+}
+
+/// 401：配置了 token 但请求没给（Go `Missing token`）。
+pub(crate) fn missing_token() -> Response {
     (
         StatusCode::UNAUTHORIZED,
-        Json(json!({ "error": "鉴权失败" })),
+        Json(json!({ "error": "Missing token" })),
     )
         .into_response()
+}
+
+/// 403：给了 token 但不匹配（Go `Incorrect token`）。
+pub(crate) fn incorrect_token() -> Response {
+    (StatusCode::FORBIDDEN, Json(json!({ "error": "Incorrect token" }))).into_response()
 }
 
 #[cfg(test)]
 mod tests {
     use axum::http::{HeaderMap, HeaderValue};
 
-    use super::{header_token, is_authorized};
+    use super::{header_token, is_authorized, provided_token};
 
     fn headers_with(value: &'static str) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -93,5 +122,20 @@ mod tests {
             &headers_with("Bearer wrong"),
             Some("wrong")
         ));
+    }
+
+    #[test]
+    fn provided_token_distinguishes_missing_from_wrong() {
+        // 没给 token：401 分支
+        assert_eq!(provided_token(&HeaderMap::new(), None), None);
+        assert_eq!(provided_token(&HeaderMap::new(), Some("")), None);
+        // 给了错 token：403 分支
+        assert_eq!(provided_token(&HeaderMap::new(), Some("wrong")), Some("wrong"));
+        assert_eq!(
+            provided_token(&headers_with("Bearer wrong"), None),
+            Some("wrong")
+        );
+        // 头存在但剥完为空的通知按「没给」处理（Go token == ""）
+        assert_eq!(provided_token(&headers_with("Bearer "), Some("s3cret")), None);
     }
 }

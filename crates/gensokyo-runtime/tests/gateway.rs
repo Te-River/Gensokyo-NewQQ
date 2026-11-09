@@ -33,6 +33,7 @@ const SETTINGS: &str = r#"  app_id: 12345
 #[derive(Debug)]
 struct FakeTransport {
     gateway_url: String,
+    max_concurrency: i64,
     requests: Mutex<Vec<HttpRequest>>,
 }
 
@@ -40,8 +41,15 @@ impl FakeTransport {
     fn new(gateway_url: String) -> Self {
         Self {
             gateway_url,
+            max_concurrency: 1,
             requests: Mutex::new(Vec::new()),
         }
+    }
+
+    /// `/gateway/bot` 的 `session_start_limit.max_concurrency`（决定多分片启动间隔）。
+    fn with_max_concurrency(mut self, max_concurrency: i64) -> Self {
+        self.max_concurrency = max_concurrency;
+        self
     }
 
     fn last_gateway_request(&self) -> HttpRequest {
@@ -68,7 +76,7 @@ impl HttpTransport for FakeTransport {
                         "total": 1000,
                         "remaining": 999,
                         "reset_after": 0,
-                        "max_concurrency": 1,
+                        "max_concurrency": self.max_concurrency,
                     },
                 })
                 .to_string(),
@@ -419,6 +427,108 @@ async fn runtime_skips_gateway_when_disabled_or_without_credentials() {
     .expect("启动运行时失败");
     assert!(!handle.gateway_started(), "缺凭据不应启动网关");
     stop(handle).await;
+}
+
+const MULTI_SETTINGS: &str = r#"  app_id: 12345
+  shard_num: 2
+  enable_ws_server: false
+  http_address: ""
+  text_intent: ["GroupATMessageEventHandler"]
+"#;
+
+#[tokio::test]
+async fn multi_shard_identifies_each_connection_with_its_shard() {
+    let (listener, url) = bind().await;
+    let server = tokio::spawn(async move {
+        let mut sockets = Vec::new();
+        let mut identifies = Vec::new();
+        for _ in 0..2 {
+            let (stream, _) = listener.accept().await.expect("accept 失败");
+            let mut socket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("mock 网关握手失败");
+            send(&mut socket, hello(30_000)).await;
+            identifies.push(recv_json(&mut socket).await);
+            send(&mut socket, ready("S-MULTI")).await;
+            sockets.push(socket);
+        }
+        // 连接留在 socket 里返回，测试断言完成前不主动断开（否则客户端会重连干扰断言）。
+        (identifies, sockets)
+    });
+
+    let (state, _dir) = support::state(MULTI_SETTINGS);
+    let transport = Arc::new(FakeTransport::new(url).with_max_concurrency(8));
+    let handle = client(&state, transport, options("http://mock")).start();
+
+    let (identifies, _sockets) = timeout(Duration::from_secs(10), server)
+        .await
+        .expect("两个分片未在时限内连上")
+        .expect("mock 网关 panic");
+    assert_eq!(identifies.len(), 2, "shard_num=2 应开两条连接");
+    let mut shards: Vec<(i64, i64)> = identifies
+        .iter()
+        .map(|identify| {
+            assert_eq!(identify["op"], 2, "每个分片都要发 Identify");
+            let shard = identify["d"]["shard"].as_array().expect("shard 不是数组");
+            (
+                shard[0].as_i64().expect("shard id 不是整数"),
+                shard[1].as_i64().expect("shard 数不是整数"),
+            )
+        })
+        .collect();
+    shards.sort_unstable();
+    assert_eq!(shards, vec![(0, 2), (1, 2)], "各分片 Identify 的 shard=[id,count]");
+
+    handle.shutdown(Duration::from_secs(2)).await;
+}
+
+#[tokio::test]
+async fn multi_shard_shutdown_closes_every_connection() {
+    let (listener, url) = bind().await;
+    let (connected_tx, connected_rx) = oneshot::channel();
+    let (closed_tx, closed_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut sockets = Vec::new();
+        for _ in 0..2 {
+            let (stream, _) = listener.accept().await.expect("accept 失败");
+            let mut socket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("mock 网关握手失败");
+            send(&mut socket, hello(30_000)).await;
+            let _identify = recv_json(&mut socket).await;
+            send(&mut socket, ready("S-DOWN")).await;
+            sockets.push(socket);
+        }
+        let _ = connected_tx.send(());
+
+        let mut drains = Vec::new();
+        for mut socket in sockets {
+            drains.push(tokio::spawn(async move {
+                while socket.next().await.is_some() {}
+            }));
+        }
+        for drain in drains {
+            let _ = drain.await;
+        }
+        let _ = closed_tx.send(());
+    });
+
+    let (state, _dir) = support::state(MULTI_SETTINGS);
+    let transport = Arc::new(FakeTransport::new(url).with_max_concurrency(8));
+    let handle = client(&state, transport, options("http://mock")).start();
+    timeout(Duration::from_secs(10), connected_rx)
+        .await
+        .expect("两个分片未在时限内连上")
+        .expect("mock 网关提前退出");
+
+    timeout(Duration::from_secs(5), handle.shutdown(Duration::from_secs(3)))
+        .await
+        .expect("关闭信号未能让多分片网关退出");
+    timeout(Duration::from_secs(5), closed_rx)
+        .await
+        .expect("关闭后两条连接都应有 close 帧")
+        .expect("mock 网关提前退出");
+    let _ = server.await;
 }
 
 async fn stop(handle: RuntimeHandle) {

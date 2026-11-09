@@ -38,6 +38,10 @@
 //! - **状态码**：ChatGLM/COS/Nature/Bilibili 只认 200（等同 Go）；Ukaka/星野 认 `< 300`
 //!   （等同 Go）；签名请求 Go 不查状态码，这里要求 200；QQ频道 Go 完全不查，这里要求 2xx。
 //! - **URL 校验**：Go 只判空；本 crate 还要求返回的是 `http(s)` 绝对地址。
+//! - **短签名外链**：ChatGLM 上传成功后若结果命中 `chatglm.cn`（短签名域），先用
+//!   [`crate::redirect`] 解析 302 末跳直链；解析失败保留原短链并告警，不阻断发送。
+//!   Go 在同一位置解析失败时回退本地公网 URL 上传（`localUploadBehavior`），本 crate
+//!   这一层没有本地上传出口，降级语义交给调用方。
 //! - **文件名**：与 Go `ensureExt` 一致按嗅探结果修正扩展名，并额外去掉目录部分与控制字符
 //!   （避免把客户端本地路径写进对象 key / `Content-Disposition`）。
 //! - **COS / Nature 的签名**：与 Go 逐字节一致（[`qcloud`] 一份实现，Go 在两个文件里各抄一份）。

@@ -4,12 +4,14 @@
 //! - [`group`]：群管理结构（`botgo/dto/group.go`、`group_member.go`）。
 //! - [`panel`]：指令面板 / 自定义菜单（`botgo/dto/panel.go`、`menu.go`）。
 //! - [`media_image`]：素材管理结构（官方 2026-10 素材管理端点族）。
+//! - [`user`]：机器人自身信息（`botgo/dto/user.go`，`GET /users/@me`）。
 
 pub mod group;
 pub mod interaction;
 pub mod media_image;
 pub mod message;
 pub mod panel;
+pub mod user;
 
 pub use group::{
     ApprovalJoinRequest, AutoApprovedInfo, BatchRemoveMembersRequest, BatchRemoveMembersResponse,
@@ -35,3 +37,4 @@ pub use panel::{
     PanelItem, PanelList, PanelRecord, PanelRecordDetail, PanelTargetRequest, PutMenuRequest,
     SubMenuItem, UpdatePanelRequest, VersionResponse,
 };
+pub use user::BotUser;

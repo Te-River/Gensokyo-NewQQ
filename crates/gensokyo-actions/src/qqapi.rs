@@ -1064,16 +1064,18 @@ pub struct ActionContext {
     api: Arc<dyn QqApi>,
     config: Arc<ConfigManager>,
     idmap: Option<Arc<IdMapStore>>,
+    bot_id: Option<Arc<str>>,
 }
 
 impl ActionContext {
-    /// 构造（无 idmap）。
+    /// 构造（无 idmap、无 bot ID）。
     #[must_use]
     pub fn new(api: Arc<dyn QqApi>, config: Arc<ConfigManager>) -> Self {
         Self {
             api,
             config,
             idmap: None,
+            bot_id: None,
         }
     }
 
@@ -1106,6 +1108,19 @@ impl ActionContext {
     #[must_use]
     pub fn idmap(&self) -> Option<&IdMapStore> {
         self.idmap.as_deref()
+    }
+
+    /// 挂上机器人真实 ID（`GET /users/@me`，Go `main.go:304` 的 `handlers.BotID`）。
+    #[must_use]
+    pub fn with_bot_id(mut self, bot_id: impl Into<Arc<str>>) -> Self {
+        self.bot_id = Some(bot_id.into());
+        self
+    }
+
+    /// 机器人真实 ID（未取到时 `None`：出站正文不做 AppID→BotID 替换）。
+    #[must_use]
+    pub fn bot_id(&self) -> Option<&str> {
+        self.bot_id.as_deref()
     }
 
     /// ID 文本 → 上游 OpenID：32 位 OpenID 直通，其余按虚拟号经 idmap 反查。

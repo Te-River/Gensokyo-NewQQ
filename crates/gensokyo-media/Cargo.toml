@@ -19,8 +19,8 @@ reqwest = { workspace = true, features = [
 rustls.workspace = true
 webpki-root-certs.workspace = true
 thiserror.workspace = true
-# fs：下载落盘；time：总超时；io-util：AsyncWriteExt
-tokio = { workspace = true, features = ["fs", "io-util", "time"] }
+# fs：下载落盘；time：总超时；io-util：AsyncWriteExt；rt：spawn_blocking（短签名直链解析的 DNS）
+tokio = { workspace = true, features = ["fs", "io-util", "time", "rt"] }
 # base64：data URI / base64:// 编解码（Engine 配置见 data_uri.rs）
 base64.workspace = true
 # tracing：临时文件写失败且清理失败时的告警（fetch.rs 的 write_temp）
