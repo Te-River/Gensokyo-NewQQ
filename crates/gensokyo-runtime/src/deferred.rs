@@ -21,7 +21,7 @@
 //! | `keyboard` | `keyboard` | 与 text / markdown / card 同发，不改变 `msg_type`（Go `applyGroupMarkdownKeyboard` 口径）；`data` 必须是 JSON 对象，否则 `1400` |
 //! | `input_notify` | `input_notify` + `msg_type=6` | 仅单聊；不承载正文 / 媒体，与其它内容同条出现 `1400` |
 //! | `stream` | `stream` + `msg_type=2` | 仅单聊；正文进 `markdown.content`，`stream.state` 取 1（start / mid）/ 10（finish），见 [`compose_stream`] |
-//! | `music` / `qqmusic` | `content` | Go 是「markdown 模板 + 键盘」，Rust 侧没有歌曲信息查询与 `music_prefix` 配置，降级成分享文案，不伪造音乐卡片 |
+//! | `music` / `qqmusic` | `markdown` + `keyboard` + `msg_type=2` | 取第一首：查 QQ 音乐歌曲详情（Go `FetchSongDetail`，走媒体下载 seam）→ 原生 markdown（封面 `T002R180x180M000{album_mid}.jpg` + 曲名 / 歌手）→ 键盘「立刻播放 / 我也要点歌」（第二个按钮的 `data` 是 `music_prefix` + 空格）；查询失败降级成分享文案并 `warn`（Go 直接丢整条消息） |
 //! | `unknown` / `unknown_image` / `unknown_record` | 不支持 | `1400`（请求侧段类型），不静默丢 |
 //! | `active` / `wakeup` | 忽略 | 控制型标记，不影响本条合成；`send_private_msg_wakeup` 的
 //!   召回语义由 [`SendRequest::wakeup`] 承载，[`execute`] 置 `is_wakeup` 并强制不带回复 ID；
@@ -45,7 +45,10 @@
 //! `key == "markdown"` 时补 reply，`:815`、`send_private_msg.go:625`）。
 //! `input_notify`（`msg_type=6`）与 `stream`（`msg_type=2` + `stream`）则**独占**整条消息：
 //! 它们带不了正文 / 媒体，与其它内容同条出现一律 `1400`，而不是丢掉另一部分。
-//! `music` 降级成正文，与 markdown / card 同条出现同样 `1400`（正文会让位，分享文案会丢）。
+//! `music` 自成一条消息（Go 在 foundItems 循环里单独发 `qqmusic`）：与 markdown / card / 媒体
+//! 同条出现时，主消息照旧按上面的优先级选，音乐另起一条跟在后面，不参与让位。只有音乐一条时
+//! 它就是主消息；此时再带独立 `[CQ:keyboard]` 会与音乐自带键盘抢同一个字段（Go 另发一条），
+//! Rust 侧 `1400` 而不是静默丢用户键盘。
 //!
 //! ## @全员 与 @用户
 //!
@@ -88,6 +91,16 @@
 //! - **本地 / base64 来源**先做发送前处理（Go 条件，URL 来源原样）：图片按
 //!   `image_sizelimit`（KB，`0` = 不压缩）压缩；语音不是 AMR / SILK 时经 `ffmpeg` + `pts`
 //!   转码（工具缺失报 1500）；视频 / 文件不处理。
+//!
+//! ## QQ 音乐
+//!
+//! `[CQ:music,type=qq,id=…]` / `qqmusic` 只取第一首（Go `foundItems["qqmusic"][0]`），先 GET
+//! `u.y.qq.com` 的 `get_song_detail_yqq`（URL 与 Go `FetchSongDetail` 一致，响应上限 2MB），
+//! 读 `songinfo.data.track_info` 的 `mid` / `name` / `singer[0].name` / `album.mid`。请求失败
+//! 或曲目不存在只降级成「分享一首 QQ 音乐：{id}」正文并 `warn`：Go 在这里返回 nil、整条消息
+//! 被丢掉，Rust 保留分享落点。模板消息（`custom_template_id` + `params`）已按出站口径废弃，
+//! 音乐卡片改用等价的**原生 markdown**：封面图 + 曲名 / 歌手两行（对应 Go 的 `img_url` 与
+//! `text_end`），封面尺寸取 CDN 固定的 180x180。
 //!
 //! ## 被动回复身份与 msg_seq
 //!
@@ -166,7 +179,7 @@ use gensokyo_qq::dto::{
 };
 use gensokyo_storage::EchoStore;
 use gensokyo_storage::echo::{DEFAULT_MESSAGE_ID, MessageGroupPair};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::at_everyone::{self, Reservation};
 use crate::event_hub::EventHub;
@@ -910,7 +923,19 @@ pub async fn compose(
             .map(|body| (body, Vec::new()));
     }
 
-    let rendered = music_fallback_text(&message.plan, render_text(context, message)?)?;
+    let mut rendered = render_text(context, message)?;
+    // QQ 音乐：先查曲目再拼消息（Go `parseQQMuiscMDData`）。查询失败只降级成分享文案
+    // （Go 那边返回 nil、整条消息被丢掉），并 `warn` 留下线索。
+    let mut music = None;
+    if let Some(id) = message.plan.qqmusic.first() {
+        match compose_music(context, deps, id).await {
+            Ok(body) => music = Some(body),
+            Err(err) => {
+                tracing::warn!(music = %id, error = %err, "QQ 音乐查询失败，降级为分享文案");
+                rendered = music_share_text(&rendered, id);
+            }
+        }
+    }
     if let Some(mut markdown) = compose_markdown(context, &message.plan, &rendered)? {
         // 正文里的本地图片换引用（Go `ResolveMarkdownImages`）；失败保留原引用
         if let Some(content) = markdown.content.take() {
@@ -921,8 +946,9 @@ pub async fn compose(
         out.msg_type = Some(msg_type::MARKDOWN);
         out.markdown = Some(markdown);
         out.keyboard = compose_keyboard(&message.plan)?;
-        // 其余媒体各一条 msg_type=7：单条消息只有一个 media 槽，只能拆
-        let extras = compose_media_extras(context, target, openid, &message.plan, deps).await?;
+        // 其余媒体各一条 msg_type=7：单条消息只有一个 media 槽，只能拆；音乐同样自成一条
+        let mut extras: Vec<MessageToCreate> = music.into_iter().collect();
+        extras.extend(compose_media_extras(context, target, openid, &message.plan, deps).await?);
         return Ok((out, extras));
     }
     if let Some(card) = compose_card(context, deps.hosting, &message.plan, &rendered).await? {
@@ -933,22 +959,42 @@ pub async fn compose(
         out.keyboard = compose_keyboard(&message.plan)?;
         // 卡片胜出只改本轮消息体：Go 的 card 分支（`send_group_msg.go:742-783`）之后
         // foundItems 循环照旧把每个媒体段各发一条（`:787-802`）
-        let extras = compose_media_extras(context, target, openid, &message.plan, deps).await?;
+        let mut extras: Vec<MessageToCreate> = music.into_iter().collect();
+        extras.extend(compose_media_extras(context, target, openid, &message.plan, deps).await?);
         return Ok((out, extras));
     }
     if !rendered.is_empty() {
         out.content = Some(rendered);
     }
     out.keyboard = compose_keyboard(&message.plan)?;
+    let mut music_bodies = Vec::new();
+    if out.content.is_none() {
+        // 只有音乐时它自己就是主消息（Go 的 qqmusic 分支：msg_type=2 + 自带键盘）。独立
+        // `[CQ:keyboard]` 与音乐键盘抢同一个字段（Go 会另发一条），这里明确拒绝而不是静默丢
+        if let Some(body) = music.take() {
+            if !message.plan.keyboard.is_empty() {
+                return Err(Error::Protocol(
+                    "[CQ:music] 不能同时带 [CQ:keyboard]：音乐消息自带播放 / 点歌按钮".to_owned(),
+                ));
+            }
+            out.msg_type = Some(msg_type::MARKDOWN);
+            out.markdown = body.markdown;
+            out.keyboard = body.keyboard;
+        }
+    } else {
+        // 有正文时音乐另起一条（Go 先发文本条，再在 foundItems 循环里发音乐条）
+        music_bodies.extend(music);
+    }
     // 单条消息只有一个 media 槽：多段媒体一段一条（Go 的 foundItems 循环把每个 URL 单独
     // 塞进 `singleItem` 再发一条，`send_group_msg.go:787-802`）。首段留在本条（正文 / 键盘
-    // 都挂在这里），其余各自成条；单段时后续为空，行为与拆条前一致
+    // 都挂在这里），其余各自成条；纯媒体时它就是主消息，音乐已占主消息时媒体全部另起
     let mut bodies = compose_media_extras(context, target, openid, &message.plan, deps).await?;
-    if !bodies.is_empty() {
+    if !bodies.is_empty() && (out.content.is_some() || out.markdown.is_none()) {
         out.media = bodies.remove(0).media;
         out.msg_type = Some(msg_type::RICH_MEDIA);
     }
-    Ok((out, bodies))
+    music_bodies.extend(bodies);
+    Ok((out, music_bodies))
 }
 
 /// 计划里是否有任何媒体段。
@@ -1467,10 +1513,11 @@ fn compose_input_notify(
         || !plan.markdown.is_empty()
         || !plan.card.is_empty()
         || !plan.keyboard.is_empty()
+        || !plan.qqmusic.is_empty()
         || has_media(plan)
     {
         return Err(Error::Protocol(
-            "[CQ:input_notify] 必须单独成条：msg_type=6 不承载正文 / 媒体 / markdown / 卡片 / 键盘"
+            "[CQ:input_notify] 必须单独成条：msg_type=6 不承载正文 / 媒体 / markdown / 卡片 / 键盘 / 音乐"
                 .to_owned(),
         ));
     }
@@ -1507,10 +1554,11 @@ fn compose_stream(
     if !plan.markdown.is_empty()
         || !plan.card.is_empty()
         || !plan.keyboard.is_empty()
+        || !plan.qqmusic.is_empty()
         || has_media(plan)
     {
         return Err(Error::Protocol(
-            "[CQ:stream] 不能与 markdown / 卡片 / 键盘 / 媒体同条发送（流式消息自带正文与 msg_type=2）"
+            "[CQ:stream] 不能与 markdown / 卡片 / 键盘 / 音乐 / 媒体同条发送（流式消息自带正文与 msg_type=2）"
                 .to_owned(),
         ));
     }
@@ -1551,28 +1599,136 @@ fn compose_stream(
     Ok(out)
 }
 
-/// `[CQ:music]` / `qqmusic` → 正文分享文案（Go「markdown 模板 + 键盘」的降级形态）。
+/// QQ 音乐歌曲详情响应上限：2MB（Go `maxQQMusicResponseBytes = 2 << 20`）。
+const QQ_MUSIC_MAX_RESPONSE_BYTES: usize = 2 << 20;
+
+/// 专辑封面 CDN 前缀（Go `parseQQMuiscMDData` 的 `T002R180x180M000` 拼接）。
+const QQ_MUSIC_COVER_PREFIX: &str = "https://y.gtimg.cn/music/photo_new/T002R180x180M000";
+
+/// 专辑封面尺寸：`T002R180x180M000` 这一档固定 180x180（Go 现查 `GetImageDimensions`，结果
+/// 相同但多一次网络请求；这里直接取 CDN 固定的尺寸）。
+const QQ_MUSIC_COVER_SIZE_PX: u32 = 180;
+
+/// 播放页跳转前缀（Go `jumpURL`，中间拼 `track_info.mid`）。
+const QQ_MUSIC_JUMP_PREFIX: &str = "https://i.y.qq.com/v8/playsong.html?platform=11&appshare=android_qq&appversion=10030010&hosteuin=oKnlNenz7i-s7c**&songmid=";
+
+/// 播放页跳转后缀。
+const QQ_MUSIC_JUMP_SUFFIX: &str = "&type=0&appsongtype=1&_wv=1&source=qq&ADTAG=qfshare";
+
+/// `songinfo.data.track_info` 里出站要用的字段（Go 用 gjson 逐字段取，缺失按空串）。
+struct MusicTrack {
+    mid: String,
+    name: String,
+    singer: String,
+    album_mid: String,
+}
+
+/// `[CQ:music,type=qq,id=…]` → `msg_type=2` 的 markdown + 键盘（Go `parseQQMuiscMDData`）。
 ///
-/// Go 会去 QQ 音乐查曲目，再拼模板 markdown 与「立刻播放 / 我也要点歌」键盘；Rust 侧既没有
-/// 歌曲信息查询，也没有 `music_prefix` 配置，凭空拼键盘等于伪造卡片，因此只降级成一行文案，
-/// 并保留曲目 id 不丢信息。只取第一首（与 Go `foundItems["qqmusic"][0]` 同口径）。
-/// 与 markdown / card 同条出现 `1400`：那两条路径会让正文让位，分享文案会被静默丢掉。
-fn music_fallback_text(plan: &OutboundPlan, rendered: String) -> Result<String> {
-    let Some(id) = plan.qqmusic.first() else {
-        return Ok(rendered);
-    };
-    if !plan.markdown.is_empty() || !plan.card.is_empty() {
-        return Err(Error::Protocol(
-            "[CQ:music] 不能与 markdown / card 同条发送：分享文案走正文，markdown / 卡片会让正文让位"
-                .to_owned(),
-        ));
+/// 查询经 [`DeferredDeps::media`] 的下载 seam（生产是 `gensokyo_media::HttpTransport`，单测
+/// 注入假传输），失败由调用方降级成分享文案。只取第一首，与 Go
+/// `foundItems["qqmusic"][0]` 同口径。
+async fn compose_music(
+    context: &ActionContext,
+    deps: &DeferredDeps<'_>,
+    id: &str,
+) -> Result<MessageToCreate> {
+    let track = fetch_music_track(deps, id).await?;
+    let settings = context.config().snapshot();
+    Ok(MessageToCreate {
+        msg_type: Some(msg_type::MARKDOWN),
+        markdown: Some(Markdown::content(music_markdown(&track))),
+        keyboard: Some(music_keyboard(&track.mid, settings.get_music_prefix())),
+        ..MessageToCreate::default()
+    })
+}
+
+/// 查 QQ 音乐歌曲详情（Go `FetchSongDetail` + `QQMusicSongInfo`）。
+///
+/// 字段缺失按空串（gjson 口径），只有 `track_info` 不存在才算「歌曲不存在」。
+async fn fetch_music_track(deps: &DeferredDeps<'_>, id: &str) -> Result<MusicTrack> {
+    let url = format!(
+        "https://u.y.qq.com/cgi-bin/musicu.fcg?format=json&inCharset=utf8&outCharset=utf-8&notice=0&platform=yqq.json&needNewCode=0&data={{\"comm\":{{\"ct\":24,\"cv\":0}},\"songinfo\":{{\"method\":\"get_song_detail_yqq\",\"param\":{{\"song_type\":0,\"song_mid\":\"\",\"song_id\":{id}}},\"module\":\"music.pf_song_detail_svr\"}}}}"
+    );
+    let fetched = deps.media.fetch(&MediaRef::Url(url)).await?;
+    if fetched.bytes.len() > QQ_MUSIC_MAX_RESPONSE_BYTES {
+        return Err(Error::Network(format!(
+            "QQ 音乐响应超过 {QQ_MUSIC_MAX_RESPONSE_BYTES} 字节"
+        )));
     }
+    let value: Value = serde_json::from_slice(&fetched.bytes)
+        .map_err(|err| Error::Network(format!("QQ 音乐响应不是合法 JSON: {err}")))?;
+    let Some(track) = value.pointer("/songinfo/data/track_info") else {
+        return Err(Error::Network(
+            "QQ 音乐没有返回 track_info（歌曲不存在）".to_owned(),
+        ));
+    };
+    let field = |path: &str| {
+        track
+            .pointer(path)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    Ok(MusicTrack {
+        mid: field("/mid"),
+        name: field("/name"),
+        singer: field("/singer/0/name"),
+        album_mid: field("/album/mid"),
+    })
+}
+
+/// 曲目 → 原生 markdown：封面 + 曲名 / 歌手（对应 Go 模板的 `img_url` + `text_end`）。
+fn music_markdown(track: &MusicTrack) -> String {
+    let size = QQ_MUSIC_COVER_SIZE_PX;
+    let cover = format!("{QQ_MUSIC_COVER_PREFIX}{}.jpg", track.album_mid);
+    format!(
+        "![图片 #{size}px #{size}px]({cover})\r{}\r{}",
+        track.name, track.singer
+    )
+}
+
+/// 音乐键盘（Go `createMusicKeyboard`）：两个按钮同处一行。
+///
+/// 按钮结构逐字段照 Go `keyboard.Button` 的序列化结果（`anchor` / `enter` / `reply` 是 Go
+/// 结构的零值常量，照样带）；第二个按钮是指令类型，`data` = `music_prefix` + 空格，用户点一下
+/// 就能接着输入歌名。
+fn music_keyboard(mid: &str, music_prefix: &str) -> Value {
+    let jump = format!("{QQ_MUSIC_JUMP_PREFIX}{mid}{QQ_MUSIC_JUMP_SUFFIX}");
+    let button = |label: &str, visited: &str, kind: u32, data: &str| {
+        json!({
+            "render_data": {"label": label, "visited_label": visited, "style": 1},
+            "action": {
+                "type": kind,
+                "permission": {"type": 2},
+                "data": data,
+                "unsupport_tips": "请升级新版手机QQ",
+                "anchor": 0,
+                "enter": false,
+                "reply": false
+            }
+        })
+    };
+    json!({
+        "content": {
+            "rows": [{
+                "buttons": [
+                    button("立刻播放", "已播放", 0, &jump),
+                    button("我也要点歌", "再次点歌", 2, &format!("{music_prefix} ")),
+                ]
+            }]
+        }
+    })
+}
+
+/// 查询失败时的降级正文：分享文案接在正文之后（Go 在这里整条丢弃）。
+fn music_share_text(rendered: &str, id: &str) -> String {
     let share = format!("分享一首 QQ 音乐：{id}");
-    Ok(if rendered.is_empty() {
+    if rendered.is_empty() {
         share
     } else {
         format!("{rendered}\n{share}")
-    })
+    }
 }
 
 /// 正文里的 `AppID → BotID`（Go `transformMessageTextAt` / `transformMessageTextAtNoGroupID`，
@@ -2058,7 +2214,6 @@ mod tests {
     use gensokyo_media::{
         HostingTransport, UploadMethod, UploadRequest, UploadResponse,
     };
-    use gensokyo_protocol::Event;
     use gensokyo_protocol::outbound::{
         ActiveKind, CardFields, CardPayload, InputNotifyPayload, KeyboardPayload, MarkdownPayload,
         StreamKind, StreamPayload,
@@ -3537,51 +3692,197 @@ mod tests {
 
     // ---- music ----
 
-    #[tokio::test]
-    async fn music_falls_back_to_share_text() {
-        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
-        let (_dir, context) = context(Arc::clone(&api));
-        let media = no_media();
-        let plan = request(
-            SendTarget::Private(OPENID.to_owned()),
-            OutboundPlan {
-                qqmusic: vec!["003OUlho2HcRHC".to_owned()],
-                ..OutboundPlan::default()
-            },
-        );
+    /// `get_song_detail_yqq` 的最小响应（字段口径同 Go `track_info`）。
+    const MUSIC_JSON: &str = r#"{"songinfo":{"data":{"track_info":{"mid":"003OUlho2HcRHC","name":"晴天","singer":[{"name":"周杰伦"}],"album":{"mid":"000MkMni19ClKG"}}}}}"#;
 
-        execute(&context, &plan, &deps(&media, None))
-            .await
-            .expect("音乐分享应降级成文本发出");
+    fn music_json_media(body: &str) -> MediaRuntime {
+        MediaRuntime::with_transport(Arc::new(FakeTransport::new(body.as_bytes())))
+    }
 
-        let sent = api.sent();
-        assert_eq!(
-            sent[0].content.as_deref(),
-            Some("分享一首 QQ 音乐：003OUlho2HcRHC"),
-            "不伪造音乐卡片，只发分享文案"
-        );
-        assert_eq!(sent[0].msg_type, None, "降级后是普通文本消息");
+    fn music_plan() -> SendRequest {
+        group_request(OutboundPlan {
+            qqmusic: vec!["003OUlho2HcRHC".to_owned()],
+            ..OutboundPlan::default()
+        })
     }
 
     #[tokio::test]
-    async fn music_with_markdown_is_a_request_error() {
-        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+    async fn music_is_queried_and_sent_as_markdown_with_keyboard() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-MUSIC"));
         let (_dir, context) = context(Arc::clone(&api));
-        let media = no_media();
+        let media = music_json_media(MUSIC_JSON);
+        let plan = music_plan();
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("音乐应查曲目后发送 markdown");
+
+        let sent = api.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].msg_type, Some(msg_type::MARKDOWN));
+        assert_eq!(sent[0].content, None, "markdown 消息的 content 必须为空");
+        assert_eq!(
+            sent[0]
+                .markdown
+                .as_ref()
+                .and_then(|markdown| markdown.content.as_deref()),
+            Some(
+                "![图片 #180px #180px](https://y.gtimg.cn/music/photo_new/T002R180x180M000000MkMni19ClKG.jpg)\r晴天\r周杰伦"
+            )
+        );
+        // 键盘逐字段照 Go `createMusicKeyboard`；配置缺省时 music_prefix 是空串，data 仍带那个空格
+        assert_eq!(
+            sent[0].keyboard,
+            Some(serde_json::json!({
+                "content": {"rows": [{"buttons": [
+                    {
+                        "render_data": {"label": "立刻播放", "visited_label": "已播放", "style": 1},
+                        "action": {
+                            "type": 0,
+                            "permission": {"type": 2},
+                            "data": "https://i.y.qq.com/v8/playsong.html?platform=11&appshare=android_qq&appversion=10030010&hosteuin=oKnlNenz7i-s7c**&songmid=003OUlho2HcRHC&type=0&appsongtype=1&_wv=1&source=qq&ADTAG=qfshare",
+                            "unsupport_tips": "请升级新版手机QQ",
+                            "anchor": 0,
+                            "enter": false,
+                            "reply": false
+                        }
+                    },
+                    {
+                        "render_data": {"label": "我也要点歌", "visited_label": "再次点歌", "style": 1},
+                        "action": {
+                            "type": 2,
+                            "permission": {"type": 2},
+                            "data": " ",
+                            "unsupport_tips": "请升级新版手机QQ",
+                            "anchor": 0,
+                            "enter": false,
+                            "reply": false
+                        }
+                    }
+                ]}]}
+            }))
+        );
+    }
+
+    #[tokio::test]
+    async fn music_keyboard_uses_configured_prefix() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-MUSIC"));
+        let (_dir, context) = context_with_settings(Arc::clone(&api), "  music_prefix: 点歌\n");
+        let media = music_json_media(MUSIC_JSON);
+
+        execute(&context, &music_plan(), &deps(&media, None))
+            .await
+            .expect("音乐应发送成功");
+
+        let sent = api.sent();
+        let keyboard = sent[0].keyboard.as_ref().expect("音乐消息必须带键盘");
+        assert_eq!(
+            keyboard.pointer("/content/rows/0/buttons/1/action/data"),
+            Some(&serde_json::json!("点歌 "))
+        );
+    }
+
+    #[tokio::test]
+    async fn music_query_failure_falls_back_to_share_text() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-TEXT"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = music_json_media("not json");
+        let plan = music_plan();
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("查询失败仍应发出分享文案");
+
+        let sent = api.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0].content.as_deref(),
+            Some("分享一首 QQ 音乐：003OUlho2HcRHC"),
+            "查询失败保留原降级文案"
+        );
+        assert_eq!(sent[0].msg_type, None, "降级后是普通文本消息");
+        assert_eq!(sent[0].keyboard, None, "降级后不伪造键盘");
+    }
+
+    #[tokio::test]
+    async fn music_with_markdown_is_sent_as_a_second_message() {
+        let api = Arc::new(
+            FakeQqApi::default()
+                .with_send("MSG-MD")
+                .with_send("MSG-MUSIC"),
+        );
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = music_json_media(MUSIC_JSON);
         let plan = group_request(OutboundPlan {
             qqmusic: vec!["003OUlho2HcRHC".to_owned()],
-            markdown: vec![
-                MarkdownPayload::from_json(r##"{"content":"# 标题"}"##).expect("markdown 载荷"),
-            ],
-            ..OutboundPlan::default()
+            ..markdown_plan("# 标题")
         });
+
+        let message_id = execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("markdown 与音乐应各成一条（Go foundItems 循环口径）");
+
+        assert_eq!(message_id, "MSG-MUSIC", "回执取最后一条（音乐条）");
+        let sent = api.sent();
+        assert_eq!(sent.len(), 2, "markdown 一条 + 音乐一条");
+        assert_eq!(sent[0].msg_type, Some(msg_type::MARKDOWN));
+        assert_eq!(
+            sent[0]
+                .markdown
+                .as_ref()
+                .and_then(|markdown| markdown.content.as_deref()),
+            Some("# 标题"),
+            "markdown 仍是主消息"
+        );
+        assert_eq!(sent[1].msg_type, Some(msg_type::MARKDOWN));
+        assert!(
+            sent[1]
+                .markdown
+                .as_ref()
+                .and_then(|markdown| markdown.content.as_deref())
+                .is_some_and(|content| content.contains("晴天")),
+            "音乐另起一条，不被 markdown 吞掉"
+        );
+        assert!(sent[1].keyboard.is_some(), "音乐条自带键盘");
+    }
+
+    #[tokio::test]
+    async fn music_with_card_sends_card_then_music() {
+        let api = Arc::new(
+            FakeQqApi::default()
+                .with_send("MSG-CARD")
+                .with_send("MSG-MUSIC"),
+        );
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = music_json_media(MUSIC_JSON);
+        let mut plan = group_request(card_plan());
+        plan.message.plan.qqmusic = vec!["003OUlho2HcRHC".to_owned()];
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("卡片与音乐应各成一条");
+
+        let sent = api.sent();
+        assert_eq!(sent.len(), 2, "卡片一条 + 音乐一条");
+        assert_eq!(sent[0].msg_type, Some(msg_type::CARD));
+        assert_eq!(sent[1].msg_type, Some(msg_type::MARKDOWN));
+        assert!(sent[1].keyboard.is_some(), "音乐条自带键盘");
+    }
+
+    #[tokio::test]
+    async fn music_only_with_cq_keyboard_is_a_request_error() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-MUSIC"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = music_json_media(MUSIC_JSON);
+        let mut plan = music_plan();
+        plan.message.plan.keyboard = keyboard_plan(r#"{"content":{"rows":[]}}"#).keyboard;
 
         let err = execute(&context, &plan, &deps(&media, None))
             .await
-            .expect_err("音乐与 markdown 同条必须报错");
+            .expect_err("纯音乐 + 独立 [CQ:keyboard] 应拒绝（两者抢同一个键盘字段）");
 
         assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
-        assert!(api.sent().is_empty(), "混用不应发送");
+        assert!(api.sent().is_empty(), "被拒绝的消息不应发送");
     }
 
     #[tokio::test]
@@ -4758,9 +5059,12 @@ mod tests {
     // ---- R4a：wakeup 终局 notice 回推（对齐 Go sendWakeupNotice）----
 
     /// 把总线收到的第一条事件序列化成 JSON 供逐键断言。
-    async fn first_event_json(events: &mut tokio::sync::broadcast::Receiver<Arc<Event>>) -> Value {
+    async fn first_event_json(
+        events: &mut tokio::sync::broadcast::Receiver<Arc<crate::event_hub::PublishedEvent>>,
+    ) -> Value {
         let event = events.recv().await.expect("终局应收到一条 notice");
-        serde_json::to_value(&*event).expect("notice 应可序列化")
+        // 断言发布时序列化的字节（WS/post_url 实际发出的那份），不是再序列化一遍。
+        serde_json::from_str(event.json()).expect("notice 应可序列化")
     }
 
     /// wakeup 成功：JSON 与 Go `WakeupResponseNotice` 逐键一致，且只推一次。

@@ -5,9 +5,10 @@
 pub mod acnode;
 pub mod error;
 pub mod ids;
+pub mod net;
 pub mod sys;
 pub mod telemetry;
 
 pub use error::{Error, Result};
 pub use ids::Ob11Id;
-pub use sys::local_ip;
+pub use sys::{SystemInfo, executable_name, local_ip};

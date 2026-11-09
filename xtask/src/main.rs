@@ -3,6 +3,7 @@
 //! - `build`：release 构建 + 产物复制到 `release/`（见 `docs/rust-build.md`）。
 //! - `check-tls-floors`：TLS 依赖下限断言。
 //! - `bench`：同步微基准（见 `docs/rust-perf.md`）。
+//! - `pgo`：Profile-Guided Optimization 流水线（见 `docs/rust-perf.md` §7）。
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -14,6 +15,7 @@ use clap::{Parser, Subcommand};
 
 mod bench;
 mod build;
+mod pgo;
 
 /// TLS 组件安全下限（design §9.1；RustSec-2026-0382/0383 / CVE-2026-111943）。
 const TLS_FLOORS: &[(&str, Version)] = &[
@@ -163,6 +165,8 @@ enum Xtask {
         #[arg(long, default_value_t = bench::DEFAULT_ITERS)]
         iters: u64,
     },
+    /// PGO：插桩构建 → 跑负载 → merge → profile-use 重建 → 前后对比（docs/rust-perf.md §7）。
+    Pgo(pgo::PgoArgs),
 }
 
 fn main() -> Result<()> {
@@ -175,6 +179,7 @@ fn main() -> Result<()> {
             check_tls_floors(&lock_path)?;
         }
         Xtask::Bench { iters } => bench::run(iters)?,
+        Xtask::Pgo(args) => pgo::run(args)?,
     }
 
     Ok(())

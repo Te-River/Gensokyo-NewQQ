@@ -13,6 +13,7 @@
 //! | 身份 ↔ vUIN | `openid-map.db` | `openid-map.redb` |
 //! | 消息 ID ↔ 虚拟 ID | `msgid-map.db` | `msgid-map.redb` |
 //! | 当日收发消息统计 | `botstats.db` | `bot-stats.redb` |
+//! | 短链 | `gensokyo.db`（bucket `shortURLs`） | `short-urls.redb` |
 //!
 //! 路径由 [`IdMapOptions`] 指定；文件格式本身与 bbolt 不同（redb 有自己的页格式），
 //! 但**表名、key 与 value 的字节编码与 Go 保持一致**，[`importer`] 因此可以逐行搬运。
@@ -71,6 +72,13 @@
 //!   [`IdMapStore::delete_config`]，供 gRPC `WriteConfigV2` 等使用）；`UserInfo`（表名
 //!   `user_info`）由 M1e 的导入器补上，目前只有导入入口，`StoreUserInfo` / `ListAllUsers`
 //!   尚未暴露（没有调用方）。
+//! - **批量写**：Go 每个 `StoreIDv2` / `StoreMsgID` / `WriteConfigv2` 各自一次写事务（一次
+//!   fsync）；[`IdMapStore::with_write_batch`] 把一次事件内的多次写入收进同一个事务。成功
+//!   路径逐键结果与 Go 一致，只有提交次数变少；失败路径是整批回滚（Go 保留失败点之前的写入）。
+//! - **读路径热查询缓存**：`lookup_virtual_value` / `retrieve_row_by_id` 带进程内有界 LRU
+//!   （`DEFAULT_LOOKUP_CACHE_CAPACITY` 条、TTL `DEFAULT_LOOKUP_CACHE_TTL`，可配 0 关闭）。
+//!   写入提交后精确失效，关闭时行为与不缓存完全相同——Go 没有这层缓存，但它不影响任何可观测
+//!   结果（详见 `idmap/lookup_cache.rs` 的模块文档）。
 //!
 //! # 并发
 //!
@@ -82,6 +90,10 @@ pub mod botstats;
 mod error;
 pub mod idmap;
 pub mod importer;
+/// 短链库与纯函数（Go `url/shorturl.go`）。
+pub mod short_url;
+/// `id ↔ union_openid` 双向映射（Go `unioncache/`）。
+pub mod union_cache;
 
 pub use botstats::{BotStats, BotStatsStore, DEFAULT_BOTSTATS_PATH};
 pub use echo::{Clock, EchoStore, MessageGroupPair, MessageScene};
@@ -89,9 +101,23 @@ pub use error::StorageError;
 pub use idmap::grpc::{IdMapClient, IdMapService};
 pub use idmap::{IdMapOptions, IdMapStore, USER_NAME_SWEEP_THRESHOLD};
 pub use importer::{ImportError, ImportOptions, ImportReport, OnVuinConflict};
+pub use short_url::{
+    DEFAULT_SHORT_URL_PATH, ShortUrlStore, UrlRejection, is_malicious, redirect_target,
+    short_url_link, validate_url,
+};
+pub use union_cache::UnionCache;
+
+/// 小写十六进制编码（`importer` 的 `end.sha256` 校验与 `short_url` 的短码共用）。
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        // `fmt::Write for String` 不会失败，忽略返回值即可
+        let _ = write!(text, "{byte:02x}");
+    }
+    text
+}
 
 /// 消息 ID 懒加载 / msg_seq / SSM 补发队列 / REFIDX 等进程内映射（Go `echo/`）。
 pub mod echo;
-
-/// 联合缓存（`unioncache/`），后续里程碑落地。
-pub mod union_cache {}

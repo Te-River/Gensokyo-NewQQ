@@ -20,6 +20,11 @@ pub enum StorageError {
     /// 数据损坏或非法入参（整数字段不是 8 字节、非法 UTF-8、空消息 ID、空 AppID 等）。
     #[error("数据损坏: {0}")]
     Corrupt(String),
+    /// 有界重试耗尽（短链随机码连续冲突，见 `short_url::MAX_RANDOM_ATTEMPTS`）。
+    ///
+    /// Go 对应路径是无界 `for {}`；这里宁可报错也不挂住进程。
+    #[error("重试耗尽: {0}")]
+    RetriesExhausted(String),
     /// redb 原生错误（打开库、事务、表、提交；含底层 IO 错误）。
     #[error("redb 错误: {0}")]
     Redb(#[from] redb::Error),

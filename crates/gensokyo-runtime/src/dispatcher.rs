@@ -27,6 +27,8 @@
 //! 每条消息不再额外经一次 `spawn_blocking` 线程池调度；handler 需要上游 I/O 时自己 await。
 //! panic 隔离用 `futures::FutureExt::catch_unwind`，并把 `handle` 的**调用本身**一起包进被
 //! 捕获的 future——在构造 future 时 panic 与在 poll 时 panic 同样回 1500。
+//! 注意：release 构建是 `panic = "abort"`，`catch_unwind` 在 abort 口径下不生效，这里的隔离
+//! 退化为**进程退出**（含 SSM / echo / 延迟队列的内存态）；运维后果见 `docs/rust-build.md`。
 
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -436,6 +438,8 @@ mod tests {
         assert_eq!(response.status, gensokyo_protocol::action::Status::Failed);
     }
 
+    // 本用例跑在 dev/test（unwind）口径；release 的 panic=abort 下 catch_unwind 不生效，
+    // handler panic 会直接退出进程（含 SSM / echo / 延迟队列的内存态，见 docs/rust-build.md）。
     #[tokio::test]
     async fn handler_panic_is_isolated_as_1500() {
         let response = dispatcher()

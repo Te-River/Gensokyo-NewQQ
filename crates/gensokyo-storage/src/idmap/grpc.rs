@@ -686,6 +686,7 @@ fn status(err: StorageError) -> Status {
     match err {
         StorageError::NotFound(_) | StorageError::Expired(_) => Status::not_found(message),
         StorageError::Corrupt(_) => Status::invalid_argument(message),
+        StorageError::RetriesExhausted(_) => Status::resource_exhausted(message),
         StorageError::Redb(_) => Status::internal(message),
     }
 }

@@ -293,6 +293,8 @@ fn write_identities(
             .map_err(rb)?;
     }
     txn.commit().map_err(rb)?;
+    // 导入绕过了 IdMapStore 的写路径（直连库句柄），读路径缓存必须整片失效
+    store.invalidate_lookup_cache();
     Ok(())
 }
 

@@ -39,16 +39,16 @@
 | P1 | botstats + Prometheus `/metrics` | botstats/botstats.go；main.go:522,1140-1175 | botstats.rs redb + GET /metrics + sent/received 打点（P12/P12b） | **已对齐** |
 | P1 | WebUI logs WS | webui/api.go:52-70；mylog WsHandler | logs.rs 环形缓冲 + WS（快照+实时+登录 401） | **已对齐（P16）** |
 | P0 | idmap 解绑/重绑定 UpdateVirtualValue*/ForceUnbindID | service.go:1405,1654,2036,2394 | grpc.rs 2 RPC unimplemented | 缺失 |
-| P1 | WebUI 余 9 路由（config 写/accounts/status/logs WS/cookie 持久化） | webui/api.go:36-134；cookie.go:15 | P6a+P6b：config 三方法/accounts/status/process/status/cookie.redb；余 logs WS 与 PUT /api/{uin} | **大部分对齐（待提交；logs WS 在册）** |
-| P1 | 图床后端 4/5/6/9/10 | imagehosting/hosting.go:45-63 | 仅 ChatGlm(7)/Ukaka(8) | 部分 |
-| P1 | acnode AC 自动机 | acnode/acnode.go:17-111 | core/acnode.rs（手写 AC、IN/OUT 双接入、词表回写） | **已对齐（P8，待提交）** |
+| P1 | WebUI 余 9 路由（config 写/accounts/status/logs WS/cookie 持久化） | webui/api.go:36-134；cookie.go:15 | P6a+P6b+P16：config 三方法/accounts/status/process/status/cookie.redb/logs WS（环形缓冲+实时推送） | **已对齐（P16）** |
+| P1 | 图床后端 4/5/6/9/10 | imagehosting/hosting.go:45-63 | 4~10 全量 backend（P7）+ oss_type 分派接线（P11） | **已对齐** |
+| P1 | acnode AC 自动机 | acnode/acnode.go:17-111 | core/acnode.rs（手写 AC、IN/OUT 双接入、词表回写） | **已对齐（P8）** |
 | P1 | messagequeue（发送队列/限速） | messagequeue/queue.go:96-122 | queue.rs（令牌桶+重试，限速可注入；Go 队列死代码） | **已对齐（P10/P10b）** |
-| P1 | botstats + Prometheus `/metrics` | botstats/botstats.go；main.go:522,1140-1175 | builtin.rs 返回 0；无端点 | 缺失 |
-| P2 | unioncache / url 短链 / sys 全量 | unioncache/*；url/shorturl.go；sys/* | 无 / 仅 local_ip | 缺失 |
+| P1 | botstats + Prometheus `/metrics` | botstats/botstats.go；main.go:522,1140-1175 | builtin.rs 6 指标 + `/metrics` + redb 统计 + received 打点（P12/P12b） | **已对齐** |
+| P2 | unioncache / url 短链 / sys 全量 | unioncache/*；url/shorturl.go；sys/* | union_cache.rs 1:1 双向缓存；short_url.rs redb 库 + 校验/301/恶意判定（HTTP 路由待接线 P36）；sys executable_name/SystemInfo（重启类不可移植，已文档化） | **库已对齐（P30）/接线待 P36** |
 | P2 | 视频/QR/SSRF 防护 | images/*；sys/* | media/lib.rs:108-118 未做清单 | 缺失 |
 | — | idmap 核心/echo/config/热重载 | 见审计表 | 见审计表 | **已对齐**（Rust 多 `enable_at_everyone_limit` 1 键） |
 | — | Settings 字段/accessor/restart 34 项 | structs.go 184 键；config.go:38-48 | 185 键（多 1）/ 1:1 accessor / diff.rs 34 项 | **已对齐** |
-| — | 配置自愈 ensureConfigComplete | config.go:350 | 无（仅首次模板生成） | 缺失 |
+| — | 配置自愈 ensureConfigComplete | config.go:350 | config/complete.rs 文本补键回写（幂等/已有行零字节改动/块内注释带回/tmp+rename）；启动调用待接线（P36） | **已实现（P30）/接线待 P36** |
 
 ## B. 出站 action 与消息链
 
@@ -56,9 +56,9 @@
 
 **Action 全集**：Go 53 个唯一注册名（50 canonical + 3 别名）→ Rust **53/53 覆盖，缺失 0**；清单漂移：Rust `KNOWN_ACTIONS` 多 3 个 Go 从未注册的素材管理扩展（upload/get_list/delete_media_image），属 Rust 扩展（Medium，登记）。
 
-**消息链特性矩阵**（对齐=已对齐）：reply/echo ✓；msg_type 0/2/6/7/8 ✓；markdown/keyboard ✓；card 部分（私聊也支持=扩展；本地 pic 未上传）；input_notify ✓；stream/SSE ✓；**qqmusic 缺失**（降级分享文案，无歌曲查询/模板/键盘）；forward ✓（保留 node 媒体）；raw ✓；wakeup/active ✓；SSM ✓（仅群入队同 Go）；懒消息/2000/seq ✓；**at：AppID→BotID 未实现、add_at_group 无消费者**；auto_escape 刻意差异（Rust 尊重该字段）；array/string_ob11 ✓。
+**消息链特性矩阵**（对齐=已对齐）：reply/echo ✓；msg_type 0/2/6/7/8 ✓；markdown/keyboard ✓；card 部分（私聊也支持=扩展；本地 pic ✓ P29a）；input_notify ✓；stream/SSE ✓；qqmusic ✓（P29b：查询→markdown+键盘，失败回退分享文案）；forward ✓（保留 node 媒体）；raw ✓；wakeup/active ✓；SSM ✓（仅群入队同 Go）；懒消息/2000/seq ✓；at：AppID→BotID ✓（P15）、add_at_group ✓；auto_escape 刻意差异（Rust 尊重该字段）；array/string_ob11 ✓。
 
-**媒体链**：local/url/base64 四类 ✓；多媒体段拆分 ✓（P1）；**>5MB 分片上传 ✓（P29a）**；**silk 转码/图片压缩 ✓（P29a）**；素材链 oss_type=7 ✓；图床 provider 4~10 ✓（P7）；图床上传重试 ✓（P7）；**card 本地 pic_url ✓（P29a）**；markdown 内嵌图替换 ✓；unknown_* 透传 ✓；qqmusic 仍降级文本（待 P29b）。
+**媒体链**：local/url/base64 四类 ✓；多媒体段拆分 ✓（P1）；**>5MB 分片上传 ✓（P29a）**；**silk 转码/图片压缩 ✓（P29a）**；素材链 oss_type=7 ✓；图床 provider 4~10 ✓（P7）；图床上传重试 ✓（P7）；**card 本地 pic_url ✓（P29a）**；markdown 内嵌图替换 ✓；unknown_* 透传 ✓；qqmusic ✓（P29b：真实 markdown+键盘）。
 
 ### B4. CQ 码进出站
 
@@ -69,15 +69,15 @@
 | 未知码 | 原样保留文本 | Segment::raw_or_cq 逐字节透传 | 已对齐 | High |
 | `voice` 别名 | voice≡record | 码表有 voice，OutboundPlan 归一需运行验证 | 部分 | Medium |
 | at 顺序 | 纯 at 回退原文 | 缺 qq/反查失败原样透传 | 已对齐 | High |
-| AppID→BotID | message_parser.go:1679-1682（do_not_replace_appid） | 全仓无实现 | **缺失** | High |
+| AppID→BotID | message_parser.go:1679-1682（do_not_replace_appid） | `/users/@me` + 出站替换 + `do_not_replace_appid`（P15） | **已对齐** | High |
 | node 出站 | CQ 管道无 outbound node | cqcode.rs:775-780 outbound:false | 已对齐 | High |
 
 ### B5. 限速/队列/重试
 
 | 项 | Go | Rust | 状态 | 置信 |
 |---|---|---|---|---|
-| 发送队列 | messagequeue/queue.go:96-122（GetSendDelay≤0 取 300ms、失败 3 次线性退避） | 无全局队列；仅 forward_send_interval | **缺失** | High |
-| 令牌桶 | ratelimit.go:26-33（5qps/burst10，WaitWithTimeout 5s） | 无 | **缺失** | High |
+| 发送队列 | messagequeue/queue.go:96-122（Go 队列为**死代码**，活路径仅令牌桶+重试） | 无全局队列（与 Go 死代码同口径）；forward_send_interval + 令牌桶 + 3 次线性退避（P10/P10b） | **已对齐（按活路径）** | High |
+| 令牌桶 | ratelimit.go:26-33（5qps/burst10，WaitWithTimeout 5s） | queue.rs 令牌桶，`DeferredDeps::limiter` 可注入（P10/P10b） | **已对齐** | High |
 | 错误分类/重试 | retry_policy.go:18-30（22009/40034025/26）、默认 3 次 | 22009→SSM；40034025 无分支 | 部分 | High |
 | get_g_list_delay | config.go:2520；逐群 sleep | group_admin.rs 每请求读快照、N-1 次异步 sleep | **已对齐（P2 `e1f822c`）** | High |
 | SSM 队列 | send_group_msg.go:483-490 | deferred.rs:297-420 | 已对齐 | High |
@@ -86,19 +86,42 @@
 
 | Sev | 缺口 | 建议补法 | 估量 |
 |---|---|---|---|
-| High | >5MB 分片上传缺失（Rust 直接 1400） | runtime/media 补 init/分片/complete，deferred 按需切换 | 400-600 行 |
-| High | silk 转码 + 图片压缩未接线 | 复用 gensokyo-media/silk.rs + compress.rs | 200-300 行 |
-| High | qqmusic 降级为分享文案 | 歌曲查询 + markdown 模板 + 键盘（music_prefix） | 250-350 行 |
+| ~~High~~ | ~~>5MB 分片上传缺失（Rust 直接 1400）~~ | ~~runtime/media 补 init/分片/complete~~ | **已修（P29a）** |
+| ~~High~~ | ~~silk 转码 + 图片压缩未接线~~ | ~~复用 gensokyo-media/silk.rs + compress.rs~~ | **已修（P29a）** |
+| ~~High~~ | ~~qqmusic 降级为分享文案~~ | ~~歌曲查询 + markdown 模板 + 键盘（music_prefix）~~ | **已修（P29b）** |
 | High | 多媒体段无 markdown 时 1400 | 照 Go 逐媒体段各发一条 | ~~120-200 行~~ **已修（P1 `3fcb426`）** |
-| High | card 本地 pic_url 未上传 | 照 resolveCardPic 接素材链 | 60-100 行 |
+| ~~High~~ | ~~card 本地 pic_url 未上传~~ | ~~照 resolveCardPic 接素材链~~ | **已修（P29a）** |
 | Medium | 图床 provider 仅 7/8，缺 4/5/6/9/10 | 每 provider 一个 backend（hosting trait 已有） | ~~500-700 行~~ **已修（P7，待提交；接线 P11）** |
 | Medium | 图床上传无重试 | 3 次 1s/2s 退避 | ~~40-60 行~~ **已修（P7 retry.rs）** |
 | Medium | 无发送队列/5qps/发送间隔 | runtime 全局令牌桶 + 串行队列 | 200-300 行 |
 | Medium | get_g_list_delay 缺失 | get_group_list/成员列表逐群 sleep | ~~30-50 行~~ **已修（P2 `e1f822c`）** |
-| Medium | add_at_group 无消费者、AppID→BotID 缺失 | 入站/文本渲染各补一处 | 40-60 行 |
+| ~~Medium~~ | ~~add_at_group 无消费者、AppID→BotID 缺失~~ | ~~入站/文本渲染各补一处~~ | **已修（P15 + 入站 add_at_group）** |
 | Low | lib.rs:50 陈旧文档（SSM/#62 已落地仍写未接线） | 改注释 | 5 行 |
 | Low | KNOWN_ACTIONS 3 个幽灵项 | 对齐 Go 实际注册表 | 10 行 |
 
 **推荐顺序**：媒体四件套（分片、silk/压缩、多媒体拆条、card pic）→ qqmusic → 图床 provider → 队列/限速 → 其余。
 
-（本文由三分域审计汇总；A/C 表的「状态」列以 HEAD 8c69129 时点为准。）
+## D. 运行效率（Rust 侧特化，非 Go 对照项）
+
+| # | 措施 | 实现 | 状态 |
+|---|---|---|---|
+| P31 | 事件只序列化一次 | `PublishedEvent{Arc<Event> + 发布时一次 serde_json}`，订阅通道 `Arc<PublishedEvent>`；反向 WS / 正向 WS / post_url 复用同一份 JSON（字节等价 2 用例锁定） | **已落地** |
+| P31 | release 口径 | `lto = "fat"`、`panic = "abort"`（release）；bench 只设 lto（cargo 忽略 bench 的 panic） | **已落地** |
+| P34 | PGO 流水线 | `xtask pgo`（generate → 负载 → profdata merge → use → 复测 + `pgo-report.md`）；Windows GNU 缺 profiler runtime（E0463），需 Linux/msvc 宿主；BOLT Linux-only | **工具就绪 / 宿主受限** |
+| P35 | redb 批量写 | `IdMapWriteBatch` / `with_write_batch`；群消息 5→2、私聊 3→2 事务；实测 42×（4000 次身份写） | **已落地** |
+| P35 | ID 热查询缓存 | 有界 LRU（默认 4096 条/60s，可关）、提交后代际失效；实测 2.8× | **已落地** |
+| — | tracing 编译期裁剪 | 用户裁定：release 保留全部日志级别 | **不做** |
+| 排队 | mimalloc 分配器（P33）、共享 HTTP 传输 | 分配器需新依赖（已批准）；共享 transport 收益仅启动期，P31 评估后暂缓 | 待做 |
+
+## E. 接线缺口（P36）
+
+P36 是「库 / 函数已落地、生产调用点未接」的收口波次。A 表里的「待接线 P36」即下列各项：
+
+| # | 项 | 现状 | 接线点 / 验收 |
+|---|---|---|---|
+| 1 | 短链 HTTP 路由 | `gensokyo-storage::short_url` 库 + 校验 / 恶意判定齐全（P30，模块头已写契约） | 主 listener 挂 `POST /url`（创建：400 或 `{"shortURL":…}`）与 `GET /url/:shortURL`（301 / 404） |
+| 2 | `ensure_config_complete` 启动调用 | `gensokyo-config::complete` 文本补键齐全（P30），模块头已标「未接线」 | `gensokyo-bin/src/startup.rs` 在 `ensure_config_file` 之后调用并处理 `CompletionReport`（Go `config.go:350` 的写后重启改为由 runtime 决定） |
+| 3 | unioncache 生产接线 | `gensokyo-storage::union_cache` 双向映射齐全（P30） | 入站群消息写 `id→union`；`mdutil` / inline search 反查 `union→id`（Go 调用点见模块头） |
+| 4 | `SystemInfo` / `executable_name` 消费者 | `gensokyo-core::sys` 只读信息齐全（P30） | WebUI `/api/status` 投影这两个字段（对齐 Go `sys.GetExecutableName` 的用途） |
+
+（本文由三分域审计汇总；A/B/C/D 表与 §E 状态已按 R4g 波次回写，时点见 `docs/rust-m0.md`。）

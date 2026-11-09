@@ -130,7 +130,7 @@ async fn webhook_post_publishes_onebot_event() {
         .await
         .expect("订阅者未收到事件")
         .expect("事件总线已关闭");
-    match event.as_ref() {
+    match &**event {
         Event::Message(message) => {
             assert_eq!(message.raw_message, "hello");
             assert_eq!(message.text(), "hello");

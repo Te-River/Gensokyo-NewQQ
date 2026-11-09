@@ -5,6 +5,11 @@
 pub(crate) mod encoding;
 pub mod grpc;
 
+mod batch;
+mod lookup_cache;
+
+pub use batch::IdMapWriteBatch;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -20,6 +25,7 @@ use tracing::{debug, warn};
 use crate::StorageError;
 use crate::echo::generate_row_id;
 use encoding::{decode_i64, encode_i64, normalize_identity, vuin_identity_key, vuin_prefix};
+use lookup_cache::{LookupCache, LookupKey, LookupValue};
 
 /// 身份库默认文件名（Go `openid-map.db` 的 redb 等价物）。
 pub const DEFAULT_IDENTITY_PATH: &str = "openid-map.redb";
@@ -31,6 +37,10 @@ pub const DEFAULT_MSG_TTL: Duration = Duration::from_secs(3600);
 pub const DEFAULT_USER_NAME_TTL: Duration = Duration::from_secs(600);
 /// 名称缓存条数达到该值时，写入操作顺带清理过期项（Go 由后台协程每 10 分钟清理）。
 pub const USER_NAME_SWEEP_THRESHOLD: usize = 1024;
+/// 读路径热查询缓存的默认容量（条）；`0` 关闭缓存。
+pub const DEFAULT_LOOKUP_CACHE_CAPACITY: usize = 4096;
+/// 读路径热查询缓存的默认单条 TTL；`Duration::ZERO` 关闭缓存。
+pub const DEFAULT_LOOKUP_CACHE_TTL: Duration = Duration::from_secs(60);
 
 /// 身份库：正表与反表。
 ///
@@ -108,6 +118,12 @@ pub struct IdMapOptions {
     pub msg_ttl: Duration,
     /// 名称缓存 TTL，默认 [`DEFAULT_USER_NAME_TTL`]。
     pub user_name_ttl: Duration,
+    /// 读路径热查询缓存容量（条），默认 [`DEFAULT_LOOKUP_CACHE_CAPACITY`]；`0` 关闭缓存。
+    ///
+    /// 只影响读速度：写入提交后相关 key 立即失效，命中与否对外不可观测。
+    pub lookup_cache_capacity: usize,
+    /// 读路径热查询缓存单条 TTL，默认 [`DEFAULT_LOOKUP_CACHE_TTL`]；`Duration::ZERO` 关闭缓存。
+    pub lookup_cache_ttl: Duration,
 }
 
 impl Default for IdMapOptions {
@@ -122,6 +138,8 @@ impl Default for IdMapOptions {
             hash_id: false,
             msg_ttl: DEFAULT_MSG_TTL,
             user_name_ttl: DEFAULT_USER_NAME_TTL,
+            lookup_cache_capacity: DEFAULT_LOOKUP_CACHE_CAPACITY,
+            lookup_cache_ttl: DEFAULT_LOOKUP_CACHE_TTL,
         }
     }
 }
@@ -171,6 +189,20 @@ impl IdMapOptions {
         self.user_name_ttl = ttl;
         self
     }
+
+    /// 设置读路径热查询缓存容量（条）；`0` 关闭缓存，行为与不缓存时逐值相同。
+    #[must_use]
+    pub fn with_lookup_cache_capacity(mut self, capacity: usize) -> Self {
+        self.lookup_cache_capacity = capacity;
+        self
+    }
+
+    /// 设置读路径热查询缓存单条 TTL；`Duration::ZERO` 关闭缓存。
+    #[must_use]
+    pub fn with_lookup_cache_ttl(mut self, ttl: Duration) -> Self {
+        self.lookup_cache_ttl = ttl;
+        self
+    }
 }
 
 /// 名称缓存项。
@@ -195,13 +227,15 @@ pub struct IdentityMapping {
 
 /// idmap 本地存储。
 ///
-/// `Send + Sync`：内部两个 redb [`Database`]（各自串行写事务）+ 一个名称缓存互斥锁。
+/// `Send + Sync`：内部两个 redb [`Database`]（各自串行写事务）、一个名称缓存互斥锁，以及读
+/// 路径的有界热查询缓存（[`lookup_cache`]，写入提交后精确失效）。
 #[derive(Debug)]
 pub struct IdMapStore {
     options: IdMapOptions,
     identity_db: Database,
     msg_db: Database,
     user_names: Mutex<HashMap<i64, UserNameEntry>>,
+    lookup_cache: LookupCache,
 }
 
 impl IdMapStore {
@@ -226,11 +260,13 @@ impl IdMapStore {
         }
         let identity_db = Database::create(&options.identity_path).map_err(rb)?;
         let msg_db = Database::create(&options.msg_path).map_err(rb)?;
+        let lookup_cache = LookupCache::new(options.lookup_cache_capacity, options.lookup_cache_ttl);
         let store = Self {
             options,
             identity_db,
             msg_db,
             user_names: Mutex::new(HashMap::new()),
+            lookup_cache,
         };
         store.init_schema()?;
         debug!(
@@ -292,6 +328,11 @@ impl IdMapStore {
         &self.msg_db
     }
 
+    /// 清空读路径缓存并前进代际号：给绕过本类型直接写库的路径（JSONL 导入）用。
+    pub(crate) fn invalidate_lookup_cache(&self) {
+        self.lookup_cache.clear();
+    }
+
     /// 建表并写入 schema 版本（Go `initNewDBs` 的建 bucket + `schema_version`）。
     ///
     /// 与 Go 一致，每次打开都**无条件**覆盖 `schema_version`；读到未知版本时按 Go
@@ -345,45 +386,44 @@ impl IdMapStore {
     ///
     /// redb 事务失败或计数器/表数据损坏时返回 [`StorageError`]。
     pub fn retrieve_virtual_value(&self, identity: &str) -> Result<(String, i64), StorageError> {
-        let normalized =
-            normalize_identity(identity, &self.options.app_id, self.options.uin.as_deref());
-        let txn = self.identity_db.begin_write().map_err(rb)?;
-        let (vuin, created) = {
-            let existing = {
-                let forward = txn.open_table(IDENTITY_TO_VUIN).map_err(rb)?;
-                let value = forward.get(normalized.key.as_str()).map_err(rb)?;
-                match value {
-                    Some(guard) => Some(decode_vuin(guard.value())?),
-                    None => None,
-                }
-            };
-            match existing {
-                Some(vuin) => {
-                    touch_last_seen_tx(&txn, vuin, &normalized.raw)?;
-                    (vuin, false)
-                }
-                None => {
-                    // 写事务内读 counter 与已占用的 vUIN：redb 的读事务可与写事务共存，
-                    // 读到的是已提交状态，因此不会看到本事务未提交的写入。
-                    let current = read_counter_tx(&txn, CURRENT_VUIN_KEY)?;
-                    let planned = if self.options.hash_id {
-                        self.hash_vuin(&normalized.raw)?
-                    } else {
-                        self.next_free_vuin(current)?
-                    };
-                    let vuin = allocate_vuin_tx(&txn, planned, &normalized, self.options.hash_id)?;
-                    (vuin, true)
-                }
+        self.with_write_batch(|batch| batch.retrieve_virtual_value(identity))
+    }
+
+    /// 在已打开的写事务里查/分配身份（[`IdMapWriteBatch`] 与
+    /// [`IdMapStore::retrieve_virtual_value`] 的唯一实现）。
+    ///
+    /// 批内重复解析同一身份时，写事务里的正表已含本事务未提交的行，因此不会重复分配。
+    fn resolve_identity_tx(
+        &self,
+        txn: &WriteTransaction,
+        normalized: &encoding::NormalizedIdentity,
+    ) -> Result<(i64, bool), StorageError> {
+        let existing = {
+            let forward = txn.open_table(IDENTITY_TO_VUIN).map_err(rb)?;
+            let value = forward.get(normalized.key.as_str()).map_err(rb)?;
+            match value {
+                Some(guard) => Some(decode_vuin(guard.value())?),
+                None => None,
             }
         };
-        txn.commit().map_err(rb)?;
-
-        if created {
-            debug!(identity = %normalized.raw, vuin, "idmap 身份已分配");
-        } else {
-            debug!(identity = %normalized.raw, vuin, "idmap 身份命中");
+        match existing {
+            Some(vuin) => {
+                touch_last_seen_tx(txn, vuin, &normalized.raw)?;
+                Ok((vuin, false))
+            }
+            None => {
+                // 写事务内读 counter 与已占用的 vUIN：`next_free_vuin`/`hash_vuin` 读的是已提交
+                // 状态，但 counter 取本事务视角（含本批此前的分配），因此批内不会重号。
+                let current = read_counter_tx(txn, CURRENT_VUIN_KEY)?;
+                let planned = if self.options.hash_id {
+                    self.hash_vuin(&normalized.raw)?
+                } else {
+                    self.next_free_vuin(current)?
+                };
+                let vuin = allocate_vuin_tx(txn, planned, normalized, self.options.hash_id)?;
+                Ok((vuin, true))
+            }
         }
-        Ok((normalized.raw, vuin))
     }
 
     /// 只查身份对应的 vUIN，**不分配**（Go `lookupVirtualIdentity` / `RetrieveVirtualValue`
@@ -395,12 +435,34 @@ impl IdMapStore {
     pub fn lookup_virtual_value(&self, identity: &str) -> Result<i64, StorageError> {
         let normalized =
             normalize_identity(identity, &self.options.app_id, self.options.uin.as_deref());
+        let key = LookupKey::Identity(normalized.key.clone());
+        if let Some(value) = self.lookup_cache.get(&key) {
+            return match value {
+                LookupValue::Vuin(vuin) => Ok(vuin),
+                _ => Err(StorageError::NotFound(format!("身份 {}", normalized.raw))),
+            };
+        }
+        // 只有读窗口内没有提交发生（代际号未变）才回填：否则可能把提交前的旧值写成缓存
+        let epoch = self.lookup_cache.epoch();
         let txn = self.identity_db.begin_read().map_err(rb)?;
         let forward = txn.open_table(IDENTITY_TO_VUIN).map_err(rb)?;
-        match forward.get(normalized.key.as_str()).map_err(rb)? {
+        let result = match forward.get(normalized.key.as_str()).map_err(rb)? {
             Some(guard) => decode_vuin(guard.value()),
             None => Err(StorageError::NotFound(format!("身份 {}", normalized.raw))),
+        };
+        drop(forward);
+        drop(txn);
+        if self.lookup_cache.epoch() == epoch {
+            match &result {
+                Ok(vuin) => self.lookup_cache.insert(key, LookupValue::Vuin(*vuin)),
+                // 负结果同样缓存：@ 未登记用户是高频路径；分配身份时会精确失效这条
+                Err(err) if err.is_not_found() => {
+                    self.lookup_cache.insert(key, LookupValue::Missing);
+                }
+                Err(_) => {}
+            }
         }
+        result
     }
 
     /// 从 vUIN 反查身份（Go `retrieveIdentity`）。
@@ -409,6 +471,9 @@ impl IdMapStore {
     /// 否则扫描反表（同一 vUIN 下可能有多个身份 key，Go 迁移遗留），优先返回
     /// `openid:` 前缀或 OpenID 形态的原始串，再回退第一个。
     ///
+    /// 结果带读路径缓存（[`IdMapOptions::lookup_cache_capacity`]）：写入提交后精确失效，
+    /// 因此与不缓存时逐值相同，只是重复反查不必再开读事务。
+    ///
     /// # Errors
     ///
     /// 查不到时返回 [`StorageError::NotFound`]。
@@ -416,6 +481,31 @@ impl IdMapStore {
         if vuin <= 0 {
             return Err(StorageError::NotFound(format!("vUIN={vuin}")));
         }
+        let key = LookupKey::Vuin(vuin);
+        if let Some(value) = self.lookup_cache.get(&key) {
+            return match value {
+                LookupValue::Raw(raw) => Ok(raw),
+                _ => Err(StorageError::NotFound(format!("vUIN={vuin}"))),
+            };
+        }
+        // 只有读窗口内没有提交发生（代际号未变）才回填：否则可能把提交前的旧值写成缓存
+        let epoch = self.lookup_cache.epoch();
+        let result = self.read_row_by_id(vuin);
+        if self.lookup_cache.epoch() == epoch {
+            match &result {
+                Ok(raw) => self.lookup_cache.insert(key, LookupValue::Raw(raw.clone())),
+                // 负结果同样缓存：`force_unbind` 会精确失效对应 vUIN
+                Err(err) if err.is_not_found() => {
+                    self.lookup_cache.insert(key, LookupValue::Missing);
+                }
+                Err(_) => {}
+            }
+        }
+        result
+    }
+
+    /// [`IdMapStore::retrieve_row_by_id`] 的不带缓存实现。
+    fn read_row_by_id(&self, vuin: i64) -> Result<String, StorageError> {
         let txn = self.identity_db.begin_read().map_err(rb)?;
         {
             let last_seen = txn.open_table(LAST_SEEN).map_err(rb)?;
@@ -527,9 +617,16 @@ impl IdMapStore {
         let normalized =
             normalize_identity(&raw, &self.options.app_id, self.options.uin.as_deref());
         let txn = self.identity_db.begin_write().map_err(rb)?;
-        let removed = {
+        let (removed, unbound_vuins) = {
             let mut forward = txn.open_table(IDENTITY_TO_VUIN).map_err(rb)?;
-            forward.remove(normalized.key.as_str()).map_err(rb)?;
+            // 删之前取出被解绑的 vUIN：反查缓存按 vUIN 存，解绑后必须一并失效
+            let mut vuins: Vec<i64> = forward
+                .remove(normalized.key.as_str())
+                .map_err(rb)?
+                .as_ref()
+                .and_then(|guard| decode_i64(guard.value()))
+                .into_iter()
+                .collect();
             let mut reverse = txn.open_table(VUIN_TO_IDENTITY).map_err(rb)?;
             // 先收集 key 再删：redb 的迭代器持有表的不可变借用。
             let mut stale = Vec::new();
@@ -540,11 +637,23 @@ impl IdMapStore {
                 }
             }
             for key in &stale {
+                // key 形态 `<vUIN>:<identity key>`：前缀就是反查缓存要失效的 vUIN
+                if let Some(vuin) = key
+                    .split_once(':')
+                    .and_then(|(head, _)| head.parse::<i64>().ok())
+                {
+                    vuins.push(vuin);
+                }
                 reverse.remove(key.as_str()).map_err(rb)?;
             }
-            stale.len()
+            (stale.len(), vuins)
         };
         txn.commit().map_err(rb)?;
+        // 先 bump 关闭回填窗口，再失效清理命中窗口
+        self.lookup_cache.bump_epoch();
+        let mut dirty = vec![LookupKey::Identity(normalized.key)];
+        dirty.extend(unbound_vuins.into_iter().map(LookupKey::Vuin));
+        self.lookup_cache.invalidate(&dirty);
         Ok(removed)
     }
 
@@ -589,52 +698,46 @@ impl IdMapStore {
     ///
     /// 消息 ID 为空、redb 事务失败或数据损坏时返回 [`StorageError`]。
     pub fn store_cache_with_ttl(&self, msg_id: &str, ttl: Duration) -> Result<i64, StorageError> {
-        if msg_id.is_empty() {
-            return Err(StorageError::Corrupt("消息 ID 不能为空".to_owned()));
-        }
-        let expires = expires_after(unix_now(), ttl);
-        let cache_key = msg_id.to_owned();
+        self.with_write_batch(|batch| batch.store_cache_with_ttl(msg_id, ttl))
+    }
 
-        let txn = self.msg_db.begin_write().map_err(rb)?;
-        let (virtual_id, created) = {
-            let existing = {
-                let forward = txn.open_table(MSG_TO_VIRTUAL).map_err(rb)?;
-                let value = forward.get(cache_key.as_str()).map_err(rb)?;
-                match value {
-                    Some(guard) => Some(decode_vuin(guard.value())?),
-                    None => None,
-                }
-            };
-            match existing {
-                Some(virtual_id) => {
-                    let key = virtual_id.to_string();
-                    let expires_bytes = encode_i64(expires);
-                    let mut expires_table = txn.open_table(EXPIRES_AT).map_err(rb)?;
-                    expires_table
-                        .insert(key.as_str(), expires_bytes.as_slice())
-                        .map_err(rb)?;
-                    let mut reverse = txn.open_table(VIRTUAL_TO_MSG).map_err(rb)?;
-                    reverse
-                        .insert(key.as_str(), cache_key.as_bytes())
-                        .map_err(rb)?;
-                    (virtual_id, false)
-                }
-                None => {
-                    let current = read_counter_tx(&txn, CURRENT_MSG_KEY)?;
-                    let planned = self.next_free_msg_id(current)?;
-                    let virtual_id = allocate_msg_tx(&txn, planned, &cache_key, expires)?;
-                    (virtual_id, true)
-                }
+    /// 在已打开的写事务里查/分配虚拟消息 ID（[`IdMapWriteBatch`] 的唯一实现）。
+    fn store_cache_tx(
+        &self,
+        txn: &WriteTransaction,
+        msg_id: &str,
+        ttl: Duration,
+    ) -> Result<(i64, bool), StorageError> {
+        let expires = expires_after(unix_now(), ttl);
+        let existing = {
+            let forward = txn.open_table(MSG_TO_VIRTUAL).map_err(rb)?;
+            let value = forward.get(msg_id).map_err(rb)?;
+            match value {
+                Some(guard) => Some(decode_vuin(guard.value())?),
+                None => None,
             }
         };
-        txn.commit().map_err(rb)?;
-
-        if created {
-            debug!(msg_id = %msg_id, virtual_id, "idmap 消息 ID 已分配");
-        } else {
-            debug!(msg_id = %msg_id, virtual_id, "idmap 消息 ID 命中");
+        match existing {
+            Some(virtual_id) => {
+                let key = virtual_id.to_string();
+                let expires_bytes = encode_i64(expires);
+                let mut expires_table = txn.open_table(EXPIRES_AT).map_err(rb)?;
+                expires_table
+                    .insert(key.as_str(), expires_bytes.as_slice())
+                    .map_err(rb)?;
+                let mut reverse = txn.open_table(VIRTUAL_TO_MSG).map_err(rb)?;
+                reverse
+                    .insert(key.as_str(), msg_id.as_bytes())
+                    .map_err(rb)?;
+                Ok((virtual_id, false))
+            }
+            None => {
+                let current = read_counter_tx(txn, CURRENT_MSG_KEY)?;
+                let planned = self.next_free_msg_id(current)?;
+                let virtual_id = allocate_msg_tx(txn, planned, msg_id, expires)?;
+                Ok((virtual_id, true))
+            }
         }
-        Ok(virtual_id)
     }
 
     /// 从虚拟消息 ID 反查真实消息 ID（Go `RetrieveMsgID`）。
@@ -682,24 +785,7 @@ impl IdMapStore {
         user: &str,
         msg_id: &str,
     ) -> Result<(), StorageError> {
-        if group.is_empty() || user.is_empty() || msg_id.is_empty() {
-            return Ok(());
-        }
-        let key = latest_key(group, user);
-        let expires = unix_now().saturating_add(ttl_seconds(self.options.msg_ttl));
-
-        let txn = self.msg_db.begin_write().map_err(rb)?;
-        {
-            let mut table = txn.open_table(LATEST_BY_GROUP_USER).map_err(rb)?;
-            table.insert(key.as_str(), msg_id.as_bytes()).map_err(rb)?;
-            let expires_bytes = encode_i64(expires);
-            let mut expires_table = txn.open_table(LATEST_EXPIRES_AT).map_err(rb)?;
-            expires_table
-                .insert(key.as_str(), expires_bytes.as_slice())
-                .map_err(rb)?;
-        }
-        txn.commit().map_err(rb)?;
-        Ok(())
+        self.with_write_batch(|batch| batch.store_latest_msg_id(group, user, msg_id))
     }
 
     /// 取"群 × 用户"的最新未过期消息 ID（Go `GetLatestMsgID`）。
@@ -783,14 +869,7 @@ impl IdMapStore {
         subtype: &str,
         value: &str,
     ) -> Result<(), StorageError> {
-        let key = config_key(section, subtype);
-        let txn = self.identity_db.begin_write().map_err(rb)?;
-        {
-            let mut table = txn.open_table(CONFIG).map_err(rb)?;
-            table.insert(key.as_str(), value.as_bytes()).map_err(rb)?;
-        }
-        txn.commit().map_err(rb)?;
-        Ok(())
+        self.with_write_batch(|batch| batch.write_config(section, subtype, value))
     }
 
     /// 读配置（Go `ReadConfig`）：键不存在返回 [`StorageError::NotFound`]。
@@ -1018,6 +1097,26 @@ fn read_counter_tx(txn: &WriteTransaction, key: &str) -> Result<i64, StorageErro
         Some(guard) => decode_vuin(guard.value()),
         None => Ok(0),
     }
+}
+
+/// 在写事务里记录"群 × 用户"最新消息 ID（Go `StoreLatestMsgID` 的落盘部分）。
+fn store_latest_tx(
+    txn: &WriteTransaction,
+    group: &str,
+    user: &str,
+    msg_id: &str,
+    ttl: Duration,
+) -> Result<(), StorageError> {
+    let key = latest_key(group, user);
+    let expires = unix_now().saturating_add(ttl_seconds(ttl));
+    let mut table = txn.open_table(LATEST_BY_GROUP_USER).map_err(rb)?;
+    table.insert(key.as_str(), msg_id.as_bytes()).map_err(rb)?;
+    let expires_bytes = encode_i64(expires);
+    let mut expires_table = txn.open_table(LATEST_EXPIRES_AT).map_err(rb)?;
+    expires_table
+        .insert(key.as_str(), expires_bytes.as_slice())
+        .map_err(rb)?;
+    Ok(())
 }
 
 /// 反表里是否存在 `"<vUIN>:"` 前缀的 key（Go `vuinExistsTx`）。

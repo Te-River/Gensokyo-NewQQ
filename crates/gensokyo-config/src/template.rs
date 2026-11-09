@@ -1,8 +1,8 @@
 //! 首启模板生成。
 //!
 //! 模板内容与 Go `template/config_template.go` 的 `ConfigTemplate` 原始字符串一致
-//! （`templates/config.yml`，UTF-8）。这里只做"文件缺失时写出模板"，**不做** Go
-//! `ensureConfigComplete` 的字段合并——那是 M1d 的范围。
+//! （`templates/config.yml`，UTF-8）。这里只做"文件缺失时写出模板"；Go
+//! `ensureConfigComplete` 的补键回写见 [`crate::complete`]。
 //!
 //! 写盘走"同目录 `config.yml.tmp` + rename"：进程在写一半时崩溃不会留下半截
 //! `config.yml`，下次启动仍能重新生成。

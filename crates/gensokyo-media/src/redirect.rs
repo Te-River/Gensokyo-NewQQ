@@ -10,7 +10,9 @@
 //! - **逐跳手动跟随**：必须先关掉 `reqwest` 的自动重定向，才能对每一跳目标做 SSRF 判定。
 //! - **每跳校验**：只允许 http(s)；host 解析不出、或解析到私有 / 回环 / 链路本地地址即拒绝
 //!   （域名先解析、逐个 IP 判定，解析失败也拒绝）。口径同 Go `isPrivateOrLoopback`，
-//!   另加 `0.0.0.0` / `::`（Go 未列，属于更严格的补充）。
+//!   另加 `0.0.0.0` / `::`（Go 未列，属于更严格的补充）。IP 判定复用
+//!   `gensokyo_core::net`（RFC1918 + 可组合的回环 / 链路本地 / 未指定 / ULA）；
+//!   短链校验只用 RFC1918，是刻意差异（它要逐字节对齐 Go 的放行行为），见该模块文档。
 //! - **上限**：最多跟随 [`MAX_REDIRECTS`] 跳，整链总超时 [`RESOLVE_TIMEOUT`]。
 //! - **必须真的发生重定向**：末跳 2xx 且地址与入参不同才算成功（Go 同口径；把原短链交回去
 //!   没有意义，交给调用方走降级语义）。
@@ -23,6 +25,7 @@ use std::net::{IpAddr, ToSocketAddrs};
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use gensokyo_core::net;
 use reqwest::Url;
 
 use crate::error::{Error, Result};
@@ -239,22 +242,14 @@ async fn target_allowed(probe: &dyn RedirectProbe, url: &Url) -> bool {
 }
 
 /// 私有 / 回环 / 链路本地地址判定（Go `ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()`，
-/// 另把 `0.0.0.0` / `::` 与 IPv4-mapped IPv6 一并归入）。
+/// 另把 `0.0.0.0` / `::` 与 IPv4-mapped IPv6 一并归入）。各条规则在 `gensokyo_core::net`，
+/// 这里只做组合；行为与拆分前逐条一致。
 fn is_blocked_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()
-        }
-        IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_unique_local()
-                || v6.is_unicast_link_local()
-                || v6
-                    .to_ipv4_mapped()
-                    .is_some_and(|v4| is_blocked_ip(IpAddr::V4(v4)))
-        }
-    }
+    net::is_rfc1918(ip)
+        || net::is_loopback(ip)
+        || net::is_link_local(ip)
+        || net::is_unspecified(ip)
+        || net::is_unique_local(ip)
 }
 
 #[cfg(test)]

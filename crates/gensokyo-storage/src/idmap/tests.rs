@@ -28,6 +28,8 @@ fn write_reverse_entry(store: &IdMapStore, vuin: i64, identity_key: &str, raw: &
             .expect("写反表");
     }
     txn.commit().expect("提交");
+    // 绕过 store 的写路径，读缓存必须整片失效（导入器同口径）
+    store.invalidate_lookup_cache();
 }
 
 /// 直接写 `last_seen`（公开 API 只在分配/命中时更新它）。
@@ -35,6 +37,7 @@ fn write_last_seen(store: &IdMapStore, vuin: i64, raw: &str) {
     let txn = store.identity_db.begin_write().expect("写事务");
     touch_last_seen_tx(&txn, vuin, raw).expect("写 last_seen");
     txn.commit().expect("提交");
+    store.invalidate_lookup_cache();
 }
 
 #[test]
@@ -535,4 +538,331 @@ fn force_unbind_reports_go_argument_errors() {
     assert!(missing.to_string().contains("424242"), "{missing}");
     // 不存在的身份串：Go 删不到也算成功（幂等）
     assert_eq!(store.force_unbind("nobody").expect("幂等解绑"), 0);
+}
+
+// ---- P35：批量写 + 读路径热查询缓存 ----
+
+/// 带缓存配置打开（容量 0 = 关闭）。
+fn open_with_cache(dir: &Path, capacity: usize, ttl: Duration) -> IdMapStore {
+    IdMapStore::open(
+        options(dir)
+            .with_lookup_cache_capacity(capacity)
+            .with_lookup_cache_ttl(ttl),
+    )
+    .expect("打开 idmap 存储失败")
+}
+
+/// 绕过 store 直接把某个身份的正表值改成 `vuin`（模拟外部/旧版本写库）。
+fn overwrite_vuin_row(store: &IdMapStore, openid: &str, vuin: i64) {
+    let key = normalize_identity(openid, "10001", None).key;
+    let txn = store.identity_db.begin_write().expect("写事务");
+    {
+        let mut forward = txn.open_table(IDENTITY_TO_VUIN).expect("正表");
+        forward
+            .insert(key.as_str(), encode_i64(vuin).as_slice())
+            .expect("改库");
+    }
+    txn.commit().expect("提交");
+}
+
+#[test]
+fn write_batch_commits_every_key_and_pairs_with_reads() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store = open(dir.path());
+    let openid = "E".repeat(32);
+
+    let (raw, vuin, msg_a, msg_b) = store
+        .with_write_batch(|batch| {
+            let (raw, vuin) = batch.retrieve_virtual_value(&openid)?;
+            let msg_a = batch.store_cache("MSG-A")?;
+            let msg_b = batch.store_cache("MSG-B")?;
+            batch.write_config(&vuin.to_string(), "type", "group")?;
+            Ok((raw, vuin, msg_a, msg_b))
+        })
+        .expect("批量提交");
+
+    assert_eq!(raw, openid);
+    assert_eq!(vuin, 1, "顺序模式首个身份是 1");
+    assert_ne!(msg_a, msg_b, "同一批内的两次分配不能重号");
+    // 写后立即读：非批量读路径（含缓存）看到的就是本批提交的值
+    assert_eq!(store.lookup_virtual_value(&openid).expect("查身份"), vuin);
+    assert_eq!(store.retrieve_row_by_id(vuin).expect("反查身份"), openid);
+    assert_eq!(
+        store.retrieve_row_by_cache(msg_a).expect("反查消息"),
+        "MSG-A"
+    );
+    assert_eq!(
+        store
+            .read_config(&vuin.to_string(), "type")
+            .expect("读配置"),
+        "group"
+    );
+}
+
+#[test]
+fn write_batch_rolls_back_when_the_closure_fails() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let openid = "F".repeat(32);
+    {
+        let store = open(dir.path());
+        let result: Result<(), StorageError> = store.with_write_batch(|batch| {
+            batch.retrieve_virtual_value(&openid)?;
+            batch.store_cache("MSG-X")?;
+            Err(StorageError::Corrupt("闭包报错".to_owned()))
+        });
+        assert!(
+            matches!(result, Err(StorageError::Corrupt(_))),
+            "闭包错误原样上抛"
+        );
+        // 未提交事务整批丢弃：同实例读不到（读走库，不是缓存）
+        assert!(
+            store
+                .lookup_virtual_value(&openid)
+                .expect_err("身份不应存在")
+                .is_not_found()
+        );
+    }
+    // 重开：磁盘上同样没有任何批内写入
+    let reopened = open(dir.path());
+    assert!(
+        reopened
+            .lookup_virtual_value(&openid)
+            .expect_err("重开后仍不应存在")
+            .is_not_found()
+    );
+    assert!(
+        reopened
+            .retrieve_row_by_cache(1)
+            .expect_err("消息 ID 也不应存在")
+            .is_not_found()
+    );
+}
+
+#[test]
+fn lookup_cache_serves_reads_and_a_write_invalidates_it() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store = open(dir.path());
+    let openid = "G".repeat(32);
+
+    // 负结果先进缓存，随后分配必须让它失效（写后立即可读）
+    assert!(
+        store
+            .lookup_virtual_value(&openid)
+            .expect_err("未登记")
+            .is_not_found()
+    );
+    let (_, vuin) = store.retrieve_virtual_value(&openid).expect("分配 vUIN");
+    assert_eq!(
+        store.lookup_virtual_value(&openid).expect("写后立即读"),
+        vuin,
+        "分配身份必须让负缓存失效"
+    );
+
+    // 绕过 store 直接改库：命中缓存 → 读到的仍是旧值（证明缓存确实在服务读路径）
+    overwrite_vuin_row(&store, &openid, 4242);
+    assert_eq!(
+        store.lookup_virtual_value(&openid).expect("命中缓存"),
+        vuin,
+        "缓存命中：库里已被外部改成 4242"
+    );
+    // 导入器等直接写库的路径用整片失效入口
+    store.invalidate_lookup_cache();
+    assert_eq!(
+        store.lookup_virtual_value(&openid).expect("失效后读库"),
+        4242
+    );
+}
+
+#[test]
+fn row_cache_is_invalidated_by_force_unbind() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store = open(dir.path());
+    let openid = "H".repeat(32);
+    let (_, vuin) = store.retrieve_virtual_value(&openid).expect("分配 vUIN");
+
+    // 先填充反查缓存，再解绑：解绑必须让它失效，否则会反查到已删除的身份
+    assert_eq!(store.retrieve_row_by_id(vuin).expect("反查"), openid);
+    store.force_unbind(&openid).expect("解绑");
+    assert!(
+        store
+            .retrieve_row_by_id(vuin)
+            .expect_err("已解绑")
+            .is_not_found(),
+        "解绑后反查缓存必须失效"
+    );
+}
+
+#[test]
+fn disabled_or_zero_ttl_cache_reads_the_database_every_time() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let openid = "I".repeat(32);
+
+    for capacity in [0_usize, DEFAULT_LOOKUP_CACHE_CAPACITY] {
+        let ttl = if capacity == 0 {
+            DEFAULT_LOOKUP_CACHE_TTL
+        } else {
+            Duration::ZERO
+        };
+        let store = open_with_cache(dir.path(), capacity, ttl);
+        let (_, vuin) = store.retrieve_virtual_value(&openid).expect("分配 vUIN");
+        assert_eq!(store.lookup_virtual_value(&openid).expect("查"), vuin);
+        // 关闭缓存（容量 0 或 TTL 0）时，外部写库立刻可见——与不缓存完全一致
+        overwrite_vuin_row(&store, &openid, 4242);
+        assert_eq!(
+            store.lookup_virtual_value(&openid).expect("读库"),
+            4242,
+            "容量 {capacity} / TTL {ttl:?} 时必须直读库"
+        );
+        drop(store);
+    }
+}
+
+#[test]
+fn lookup_cache_evicts_the_least_recently_used_entry() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store = open_with_cache(dir.path(), 2, DEFAULT_LOOKUP_CACHE_TTL);
+    let (a, b, c) = ("J".repeat(32), "K".repeat(32), "L".repeat(32));
+    let mut vuins = Vec::new();
+    for openid in [&a, &b, &c] {
+        vuins.push(store.retrieve_virtual_value(openid).expect("分配").1);
+        store.lookup_virtual_value(openid).expect("回填缓存");
+    }
+
+    // 容量 2：插入第三条时最久未用的 a 被淘汰；b 仍在缓存里 → 外部改库看不见
+    overwrite_vuin_row(&store, &b, 4243);
+    assert_eq!(
+        store.lookup_virtual_value(&b).expect("命中缓存"),
+        vuins[1],
+        "未淘汰的项仍由缓存服务"
+    );
+    // a 已被淘汰（最后一次读它是在插入 b 之前）→ 外部改库立刻可见
+    overwrite_vuin_row(&store, &a, 4242);
+    assert_eq!(
+        store.lookup_virtual_value(&a).expect("读库"),
+        4242,
+        "容量满后最久未用的一条应被淘汰"
+    );
+}
+
+#[test]
+fn zero_ttl_entry_expires_immediately() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store = open_with_cache(dir.path(), 16, Duration::from_nanos(1));
+    let openid = "M".repeat(32);
+    let (_, vuin) = store.retrieve_virtual_value(&openid).expect("分配 vUIN");
+    store.lookup_virtual_value(&openid).expect("回填缓存");
+
+    overwrite_vuin_row(&store, &openid, 4242);
+    assert_eq!(
+        store.lookup_virtual_value(&openid).expect("读库"),
+        4242,
+        "1ns 的 TTL 过后续期读库，不会返回 {vuin} 这个旧值"
+    );
+}
+
+#[test]
+fn concurrent_reads_and_writes_stay_consistent_with_cache() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store = Arc::new(open(dir.path()));
+    let barrier = Arc::new(Barrier::new(8));
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let store = Arc::clone(&store);
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            for i in 0..16 {
+                let openid = format!("{}{i}", "N".repeat(24));
+                let (raw, vuin) = store.retrieve_virtual_value(&openid).expect("分配 vUIN");
+                assert_eq!(raw, openid);
+                // 并发分配同一身份：所有线程必须拿到同一个 vUIN，且反查一致
+                assert_eq!(store.lookup_virtual_value(&openid).expect("查身份"), vuin);
+                assert_eq!(store.retrieve_row_by_id(vuin).expect("反查身份"), openid);
+                assert_eq!(store.lookup_virtual_value(&openid).expect("再查"), vuin);
+            }
+        }));
+    }
+    for handle in handles {
+        handle.join().expect("并发线程不得 panic");
+    }
+}
+
+/// 性能探针（默认不跑）：`cargo test -p gensokyo-storage -- --ignored --nocapture perf_probe`。
+///
+/// 只打印数量级：200 个身份 × 20 轮「逐条提交」vs「单批提交」，以及 4000 次
+/// `lookup_virtual_value` 在缓存开/关下的耗时。
+#[test]
+#[ignore = "手动性能探针，不进常规 suite"]
+fn perf_probe_batch_and_cache() {
+    use std::time::Instant;
+
+    const IDENTITIES: usize = 200;
+    const ROUNDS: usize = 20;
+
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store = open(dir.path());
+
+    let sequential = Instant::now();
+    for _ in 0..ROUNDS {
+        for i in 0..IDENTITIES {
+            store
+                .retrieve_virtual_value(&format!("batch-{i}"))
+                .expect("逐条写");
+        }
+    }
+    let sequential = sequential.elapsed();
+
+    let batched = Instant::now();
+    for _ in 0..ROUNDS {
+        store
+            .with_write_batch(|batch| {
+                for i in 0..IDENTITIES {
+                    batch.retrieve_virtual_value(&format!("batch-{i}"))?;
+                }
+                Ok(())
+            })
+            .expect("批量写");
+    }
+    let batched = batched.elapsed();
+
+    let hits = Instant::now();
+    for _ in 0..ROUNDS {
+        for i in 0..IDENTITIES {
+            store
+                .lookup_virtual_value(&format!("batch-{i}"))
+                .expect("缓存读");
+        }
+    }
+    let hits = hits.elapsed();
+
+    let dir_off = tempfile::tempdir().expect("临时目录");
+    let cold = open_with_cache(dir_off.path(), 0, DEFAULT_LOOKUP_CACHE_TTL);
+    for i in 0..IDENTITIES {
+        cold.retrieve_virtual_value(&format!("cold-{i}"))
+            .expect("准备");
+    }
+    let misses = Instant::now();
+    for _ in 0..ROUNDS {
+        for i in 0..IDENTITIES {
+            cold.lookup_virtual_value(&format!("cold-{i}"))
+                .expect("无缓存读");
+        }
+    }
+    let misses = misses.elapsed();
+
+    println!(
+        "batch: {} 次写 / {} 轮：逐条提交 {:?}，单批提交 {:?}（{:.1}x）",
+        IDENTITIES * ROUNDS,
+        ROUNDS,
+        sequential,
+        batched,
+        sequential.as_secs_f64() / batched.as_secs_f64()
+    );
+    println!(
+        "cache: {} 次 lookup：命中 {:?}，无缓存 {:?}（{:.1}x）",
+        IDENTITIES * ROUNDS,
+        hits,
+        misses,
+        misses.as_secs_f64() / hits.as_secs_f64()
+    );
 }

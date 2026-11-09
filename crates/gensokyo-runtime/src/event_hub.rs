@@ -6,6 +6,8 @@
 //!
 //! 语义取舍：
 //! - 事件以 `Arc<Event>` 传递，多订阅者共享同一份反序列化结果，省掉逐连接克隆。
+//! - 发布时**一次性**序列化成 OneBot JSON（[`PublishedEvent::json`]）：反向 WS / 正向 WS /
+//!   `post_url` 上报复用同一份字节，不再各自 `serde_json::to_string`。
 //! - broadcast 是**环形缓冲**：订阅者落后 [`DEFAULT_HUB_CAPACITY`] 条以上会收到
 //!   `Lagged`，落后的部分直接丢弃（不阻塞发布方）。Go 的 `writeCh` 满了也是丢消息，
 //!   这里同样是「宁可丢，不背压」。
@@ -20,10 +22,36 @@ use tokio::sync::broadcast;
 /// 默认环形缓冲容量（条）。
 pub const DEFAULT_HUB_CAPACITY: usize = 1024;
 
+/// 一条已发布的事件：反序列化结果 + 发布时序列化好的 OneBot JSON。
+///
+/// 所有订阅者共享同一个 `Arc<PublishedEvent>`，因此 JSON 只序列化一次；
+/// [`PublishedEvent::json`] 与 `serde_json::to_string(&event)` 逐字节相同。
+#[derive(Debug)]
+pub struct PublishedEvent {
+    event: Arc<Event>,
+    json: String,
+}
+
+impl PublishedEvent {
+    /// 事件的 OneBot JSON（发布时一次序列化，订阅者复用同一份）。
+    #[must_use]
+    pub fn json(&self) -> &str {
+        &self.json
+    }
+}
+
+impl std::ops::Deref for PublishedEvent {
+    type Target = Event;
+
+    fn deref(&self) -> &Event {
+        &self.event
+    }
+}
+
 /// 进程内事件总线；克隆只复制发送端句柄。
 #[derive(Debug, Clone)]
 pub struct EventHub {
-    sender: broadcast::Sender<Arc<Event>>,
+    sender: broadcast::Sender<Arc<PublishedEvent>>,
     /// 后台订阅者数量（[`EventHub::subscribe_background`]），不计入
     /// [`EventHub::downstream_count`]。
     background: Arc<AtomicUsize>,
@@ -35,7 +63,7 @@ pub struct EventHub {
 /// 因此不可能与实际订阅者数量漂移。
 #[derive(Debug)]
 pub struct BackgroundSubscription {
-    receiver: broadcast::Receiver<Arc<Event>>,
+    receiver: broadcast::Receiver<Arc<PublishedEvent>>,
     background: Arc<AtomicUsize>,
 }
 
@@ -44,7 +72,7 @@ impl BackgroundSubscription {
     ///
     /// # Errors
     /// 订阅者落后超过容量时 `Lagged`，总线关闭时 `Closed`。
-    pub async fn recv(&mut self) -> Result<Arc<Event>, broadcast::error::RecvError> {
+    pub async fn recv(&mut self) -> Result<Arc<PublishedEvent>, broadcast::error::RecvError> {
         self.receiver.recv().await
     }
 }
@@ -74,7 +102,7 @@ impl EventHub {
 
     /// 新增一个订阅者；订阅之后发布的事件才会送达它。
     #[must_use]
-    pub fn subscribe(&self) -> broadcast::Receiver<Arc<Event>> {
+    pub fn subscribe(&self) -> broadcast::Receiver<Arc<PublishedEvent>> {
         self.sender.subscribe()
     }
 
@@ -110,7 +138,21 @@ impl EventHub {
 
     /// 同 [`EventHub::publish`]，用于调用方已持有 `Arc<Event>` 的场景。
     pub fn publish_shared(&self, event: Arc<Event>) -> usize {
-        self.sender.send(event).unwrap_or(0)
+        // 与 `broadcast::Sender::send` 的「无订阅者返回 0」同一口径：无人消费就不付
+        // 序列化成本。
+        if self.sender.receiver_count() == 0 {
+            return 0;
+        }
+        let json = match serde_json::to_string(&*event) {
+            Ok(json) => json,
+            Err(err) => {
+                tracing::error!(error = %err, "事件序列化失败，丢弃该事件");
+                return 0;
+            }
+        };
+        self.sender
+            .send(Arc::new(PublishedEvent { event, json }))
+            .unwrap_or(0)
     }
 
     /// 当前订阅者数量（测试与诊断用）。
@@ -122,6 +164,8 @@ impl EventHub {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::EventHub;
     use gensokyo_core::Ob11Id;
     use gensokyo_protocol::Event;
@@ -176,6 +220,46 @@ mod tests {
             let event = receiver.recv().await.expect("应收到事件");
             assert_eq!(event.post_type(), post_type::META_EVENT);
         }
+    }
+
+    /// 发布时序列化的字节必须与旧路径（每个订阅者各自 `to_string`）逐字节一致，
+    /// 且两个订阅者共享同一次序列化的结果。
+    fn assert_published_bytes_match(event: Event) {
+        let hub = EventHub::default();
+        let mut first = hub.subscribe();
+        let mut second = hub.subscribe();
+        let expected = serde_json::to_string(&event).expect("序列化失败");
+        assert_eq!(hub.publish(event), 2);
+
+        let first = first.try_recv().expect("订阅者 A 应收到事件");
+        let second = second.try_recv().expect("订阅者 B 应收到事件");
+        assert_eq!(first.json(), expected, "订阅者 A 的字节必须与旧路径一致");
+        assert_eq!(second.json(), expected, "订阅者 B 的字节必须与旧路径一致");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "两个订阅者应共享同一次序列化的结果"
+        );
+    }
+
+    /// 真实事件：典型 `GROUP_AT_MESSAGE_CREATE` 载荷（数组/字符串混排、中文、CQ 码）。
+    #[test]
+    fn published_json_is_byte_identical_for_a_real_message_event() {
+        let raw = r#"{"post_type":"message","message_type":"group","sub_type":"normal",
+            "time":1700000000,"self_id":10000,"message_id":8888,"user_id":12345,
+            "group_id":99999,"raw_message":"你好[CQ:at,qq=10000]",
+            "message":"你好[CQ:at,qq=10000]","font":0,
+            "sender":{"user_id":12345,"nickname":"阿求","card":"","role":"member","sex":"unknown","age":0},
+            "real_user_id":"A1B2C3","to_me":true}"#;
+        assert_published_bytes_match(serde_json::from_str(raw).expect("真实事件应可反序列化"));
+    }
+
+    /// notice 事件（`c2c_wakeup_resp` 这类只由本地构造的终局通知）。
+    #[test]
+    fn published_json_is_byte_identical_for_a_notice_event() {
+        let raw = r#"{"post_type":"notice","notice_type":"c2c_wakeup_resp",
+            "time":1700000000,"self_id":102001234,"user_id":0,
+            "real_user_id":"A1B2C3D4E5F6","status":"success","message_id":"WAKE-OK"}"#;
+        assert_published_bytes_match(serde_json::from_str(raw).expect("notice 应可反序列化"));
     }
 
     #[tokio::test]

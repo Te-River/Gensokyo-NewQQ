@@ -244,6 +244,40 @@ struct MentionContext<'a> {
     full_group: bool,
 }
 
+/// 一条消息事件里由 idmap 派生的四个 ID（P35：四个写入合并成一个写事务）。
+struct DerivedIds {
+    /// `sender.user_id`：群消息的 string 形态恒 `0`（Go M1-B 口径），其余取 vUIN。
+    sender_user_id: Ob11Id,
+    /// 事件 `user_id`。
+    user_id: Ob11Id,
+    /// 事件 `group_id`；私聊恒空串（调用方不读）。
+    group_id: Ob11Id,
+    /// 事件 `message_id`（虚拟消息 ID）。
+    message_id: Ob11Id,
+}
+
+impl DerivedIds {
+    /// 全部回退原始字符串：idmap 未注入或批量写入失败时用。
+    fn raw(
+        string_ob11: bool,
+        user_raw: &str,
+        group_raw: Option<&str>,
+        message_raw: &str,
+        group_sender: bool,
+    ) -> Self {
+        Self {
+            sender_user_id: if group_sender && string_ob11 {
+                Ob11Id::num(0)
+            } else {
+                Ob11Id::Str(user_raw.to_owned())
+            },
+            user_id: Ob11Id::Str(user_raw.to_owned()),
+            group_id: Ob11Id::Str(group_raw.unwrap_or_default().to_owned()),
+            message_id: Ob11Id::Str(message_raw.to_owned()),
+        }
+    }
+}
+
 /// 入站转换器：配置快照 + 可选 idmap / echo / botstats / BotID。
 #[derive(Debug, Clone)]
 pub struct Inbound {
@@ -570,23 +604,6 @@ impl Inbound {
         self.bot_id.as_deref() == Some(user) || is_own_id(settings, user)
     }
 
-    /// OpenID → OneBot ID；数字形态优先走 idmap，失败不伪造数字。
-    fn ob11_id(&self, settings: &Settings, raw: &str) -> Ob11Id {
-        if raw.is_empty() || settings.get_string_ob11() {
-            return Ob11Id::Str(raw.to_owned());
-        }
-        let Some(idmap) = self.idmap.as_deref() else {
-            return Ob11Id::Str(raw.to_owned());
-        };
-        match idmap.retrieve_virtual_value(raw) {
-            Ok((_, vuin)) => Ob11Id::Num(vuin),
-            Err(err) => {
-                tracing::warn!(identity = raw, error = %err, "idmap 分配虚拟 ID 失败，回退原始字符串");
-                Ob11Id::Str(raw.to_owned())
-            }
-        }
-    }
-
     /// notice / request 事件的 group_id / user_id：Go 这些 handler 一律
     /// `idmap.StoreIDv2` 取**数字 vUIN**，与 `string_ob11` 无关（string 形态只影响
     /// message 事件）。idmap 未注入时回退原始字符串，不伪造数字。
@@ -625,19 +642,73 @@ impl Inbound {
         }
     }
 
-    /// QQ message_id → OneBot message_id（数字形态经 idmap 的 echo 映射）。
-    fn message_id(&self, settings: &Settings, raw: &str) -> Ob11Id {
-        if raw.is_empty() || settings.get_string_ob11() {
-            return Ob11Id::Str(raw.to_owned());
-        }
+    /// 一条消息事件要落的 idmap 写入（群/用户身份、message_id、群注册）合并成一次批量提交。
+    ///
+    /// 与逐条提交（每个字段一次写事务）相比只有提交次数不同：成功路径逐项结果一致（同一批内
+    /// 重复解析同一身份命中本批已写入的行，不会重号）。身份库与消息库是两个 redb 文件，
+    /// **跨库非原子**：身份库先提交，消息库提交失败时身份写入保留（与 Go 两个 bbolt 库各自
+    /// `Update` 同口径）；失败时本事件上报仍整组回退原始字符串，但已提交的身份行不回滚。
+    ///
+    /// `group_sender`：群消息的 `sender.user_id` 在 string 形态下恒 `0`（Go M1-B），私聊照常
+    /// 取 idmap。
+    fn derive_message_ids(
+        &self,
+        settings: &Settings,
+        user_raw: &str,
+        group_raw: Option<&str>,
+        message_raw: &str,
+        group_sender: bool,
+    ) -> DerivedIds {
+        let string_ob11 = settings.get_string_ob11();
         let Some(idmap) = self.idmap.as_deref() else {
-            return Ob11Id::Str(raw.to_owned());
+            return DerivedIds::raw(string_ob11, user_raw, group_raw, message_raw, group_sender);
         };
-        match idmap.store_cache(raw) {
-            Ok(virtual_id) => Ob11Id::Num(virtual_id),
+        let derived = idmap.with_write_batch(|batch| {
+            // 派生顺序对齐 Go `ProcessGroupMessage.go:74-75`：先群、后用户。
+            let group_id = match (group_raw, string_ob11) {
+                (None | Some(""), _) => Ob11Id::Str(String::new()),
+                (Some(raw), true) => Ob11Id::Str(raw.to_owned()),
+                (Some(raw), false) => Ob11Id::Num(batch.retrieve_virtual_value(raw)?.1),
+            };
+            // 空身份串不过 idmap：Go `StoreIDv2("")` 与旧的逐条路径都会原样上报空串，
+            // 让 store 去分配只会写出一行 `raw:` 的垃圾身份（旧 `ob11_id` 的 `raw.is_empty()` 分支）
+            let user_id = if string_ob11 || user_raw.is_empty() {
+                Ob11Id::Str(user_raw.to_owned())
+            } else {
+                Ob11Id::Num(batch.retrieve_virtual_value(user_raw)?.1)
+            };
+            let sender_user_id = if group_sender && string_ob11 {
+                Ob11Id::num(0)
+            } else {
+                user_id.clone()
+            };
+            // 空 message_id 同样不过 idmap：`store_cache` 对空串报错，会把整批身份写入一起回滚
+            let message_id = if string_ob11 || message_raw.is_empty() {
+                Ob11Id::Str(message_raw.to_owned())
+            } else {
+                Ob11Id::Num(batch.store_cache(message_raw)?)
+            };
+            // 群注册（Go `WriteConfigv2(group, "type", "group")`）：section 取上报形态本身
+            let section = group_id.to_string();
+            if !section.is_empty() {
+                batch.write_config(&section, "type", "group")?;
+            }
+            Ok(DerivedIds {
+                sender_user_id,
+                user_id,
+                group_id,
+                message_id,
+            })
+        });
+        match derived {
+            Ok(ids) => ids,
             Err(err) => {
-                tracing::warn!(message_id = raw, error = %err, "message_id 虚拟化失败，回退原始字符串");
-                Ob11Id::Str(raw.to_owned())
+                tracing::warn!(
+                    user = user_raw,
+                    error = %err,
+                    "idmap 批量写入失败，本事件的虚拟 ID 回退原始字符串"
+                );
+                DerivedIds::raw(string_ob11, user_raw, group_raw, message_raw, group_sender)
             }
         }
     }
@@ -749,13 +820,17 @@ impl Inbound {
             extra.insert("platform".to_owned(), Value::String("qq".to_owned()));
         }
 
+        // P35：用户/群身份、message_id 与群注册合并成一个写事务（成功路径逐项与逐条提交一致）
+        let DerivedIds {
+            sender_user_id,
+            user_id,
+            group_id,
+            message_id,
+        } = self.derive_message_ids(settings, user_raw, Some(&payload.group_id), &payload.id, true);
+
         let sender = Sender {
-            // Go M1-B：string 形态不做 idmap 转换，`sender.user_id` 恒为 0。
-            user_id: Some(if settings.get_string_ob11() {
-                Ob11Id::num(0)
-            } else {
-                self.ob11_id(settings, user_raw)
-            }),
+            // Go M1-B：string 形态不做 idmap 转换，`sender.user_id` 恒为 0（见 `derive_message_ids`）。
+            user_id: Some(sender_user_id),
             nickname: Some(
                 author
                     .map_or("", |author| author.username.as_str())
@@ -774,10 +849,6 @@ impl Inbound {
             ..Sender::default()
         };
 
-        let message_id = self.message_id(settings, &payload.id);
-        let group_id = self.ob11_id(settings, &payload.group_id);
-        let user_id = self.ob11_id(settings, user_raw);
-        self.register_group(&group_id);
         self.feed_group_echo(settings, &payload, &group_id, &user_id, &message_id);
         let ctx = MentionContext {
             mentions: &payload.mentions,
@@ -837,16 +908,22 @@ impl Inbound {
             );
         }
 
+        // P35：身份与 message_id 合并成一个写事务（私聊没有群注册）
+        let DerivedIds {
+            sender_user_id,
+            user_id,
+            message_id,
+            ..
+        } = self.derive_message_ids(settings, user_raw, None, &payload.id, false);
+
         let sender = Sender {
-            user_id: Some(self.ob11_id(settings, user_raw)),
+            user_id: Some(sender_user_id),
             // Go `PrivateSenderS`：nickname / tiny_id 非 omitempty，恒上报（空串）。
             nickname: Some(String::new()),
             tiny_id: Some(String::new()),
             ..Sender::default()
         };
 
-        let message_id = self.message_id(settings, &payload.id);
-        let user_id = self.ob11_id(settings, user_raw);
         self.feed_private_echo(settings, &payload, &user_id, &message_id);
         let ctx = MentionContext {
             mentions: &[],
@@ -1756,6 +1833,46 @@ mod tests {
                 .read_config(&group_id.to_string(), "type")
                 .expect("群应已注册"),
             "group"
+        );
+    }
+
+    /// 缺 `author` / 空 `id` 的群消息：空身份不写进 idmap，ID 原样回退空串。
+    #[test]
+    fn group_message_without_author_skips_empty_identity() {
+        use gensokyo_protocol::Event;
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nsettings: {}\n").expect("写配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let store = test_store(dir.path());
+        let inbound = Inbound::new(manager, Some(Arc::clone(&store)));
+
+        let payload = json!({
+            "id": "",
+            "group_id": "g0123456789abcdef0123456789abcdef",
+            "content": "hello"
+        });
+        let events = inbound
+            .convert("GROUP_AT_MESSAGE_CREATE", Some(&payload), None)
+            .expect("缺 author 的群消息仍应转换");
+        let Event::Message(message) = &events[0] else {
+            panic!("GROUP_AT_MESSAGE_CREATE 应转群消息");
+        };
+        assert!(
+            message.user_id.as_str() == Some(""),
+            "无 author 时 user_id 回退空串"
+        );
+        assert!(
+            message.message_id.as_str() == Some(""),
+            "空 message_id 原样上报"
+        );
+        // 空的身份串不能进 idmap（旧逐条路径同样不写，这里保证批量路径一致）
+        assert!(
+            store
+                .lookup_virtual_value("")
+                .expect_err("空身份不应登记")
+                .is_not_found()
         );
     }
 

@@ -211,7 +211,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             },
             event = events.recv() => match event {
                 Ok(event) => {
-                    if !send_event(&mut sink, &event).await {
+                    // 事件 JSON 由发布方序列化一次，这里直接复用同一份字节。
+                    if !send_payload(&mut sink, event.json()).await {
                         tracing::debug!("正向 WS 推送事件失败，连接视为断开");
                         break;
                     }
@@ -232,21 +233,30 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     tracing::debug!("正向 WS 客户端已断开");
 }
 
-/// 写一条事件，返回**连接是否仍可写**。
+/// 写一条**已序列化**的事件 JSON，返回**连接是否仍可写**。
+async fn send_payload<S>(sink: &mut S, payload: &str) -> bool
+where
+    S: Sink<Message> + Unpin,
+{
+    sink.send(Message::Text(payload.to_owned().into()))
+        .await
+        .is_ok()
+}
+
+/// 写一条**本地构造**的事件（connect / 心跳）：序列化后交给 [`send_payload`]。
 ///
 /// 序列化失败只记 error 并返回 `true`：没有可发的 payload，不代表连接坏了。
 async fn send_event<S>(sink: &mut S, event: &Event) -> bool
 where
     S: Sink<Message> + Unpin,
 {
-    let text = match serde_json::to_string(event) {
-        Ok(text) => text,
+    match serde_json::to_string(event) {
+        Ok(text) => send_payload(sink, &text).await,
         Err(err) => {
             tracing::error!(error = %err, "事件序列化失败，跳过该事件");
-            return true;
+            true
         }
-    };
-    sink.send(Message::Text(text.into())).await.is_ok()
+    }
 }
 
 #[cfg(test)]

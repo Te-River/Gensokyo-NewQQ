@@ -22,7 +22,7 @@
 | 正式迭代 | 默认 100 000，`--iters` 可改 | 单用例 0.1–2 s，够稳又快 |
 | 防优化 | `std::hint::black_box` 包住输入与返回值 | 否则 LTO 会把整个循环消掉，测出 0 ns |
 | 哨兵值 | 闭包返回 `len()` / `bool` | 计时区间内不做额外分配，避免把测量开销算进去 |
-| 编译口径 | `profile.release` / `profile.bench`（lto=thin、codegen-units=1、opt-level=3） | 基准必须测发布口径，debug 数字没有意义 |
+| 编译口径 | `profile.release`（`xtask bench` 走 `cargo run --release`，被测代码编进释放档二进制） | 基准必须测发布口径，debug 数字没有意义；仓内当前**没有 `cargo bench` 消费者**，`[profile.bench]` 只是同口径保留，见 §5 |
 | 不引入 criterion | — | 本机是共享环境（并行构建、后台任务），置信区间只会制造「精确的错觉」；固定迭代 + 多次取中位数足够判断量级 |
 
 **样本坏掉要在计时前炸**：事件 JSON 与 `send_group_msg` 参数在开始计时前各解析/规划一次，
@@ -85,7 +85,7 @@ cargo run --release -p xtask -- bench
 
 ### 4.2 同负载端到端对比（Rust vs Go，2026-10-25）
 
-**环境**：AMD Ryzen 5 5600U（6C/12T）、13.8 GB、Windows 11 26300、Go 1.26.4、rustc 1.99.1（release，LTO=thin）、oha 1.16.0。
+**环境**：AMD Ryzen 5 5600U（6C/12T）、13.8 GB、Windows 11 26300、Go 1.26.4、rustc 1.99.1（release，**LTO=thin**——历史数字，当前口径已改为 `lto=fat`，见 §5）、oha 1.16.0。
 
 **场景**：本地 `get_login_info`（无 QQ 网络 I/O）；Go 走 HTTP API 路径 `/get_login_info`，Rust 走统一 action 入口 `POST /action`；两边均 `disable_webui: true`、`log_level: 3`（error）、无反向 WS，请求体相同。64 并发、50,000 请求/轮，Go/Rust 交替跑 **10 轮**，取均值 ± 标准差（括号内为 10 轮区间），预热 3,000。
 
@@ -118,19 +118,29 @@ cargo run --release -p xtask -- bench
 
 ```toml
 [profile.release]
-lto = "thin"
+lto = "fat"
 codegen-units = 1
 opt-level = 3
 strip = "symbols"
+panic = "abort"
 
 [profile.bench]   # 与 release 同档，避免「基准跑的是另一套编译参数」
-lto = "thin"
+lto = "fat"
 codegen-units = 1
 opt-level = 3
 strip = "symbols"
 ```
 
-- **不设 `panic = "abort"`**：runtime 的 handler 隔离依赖 `catch_unwind`，abort 会让单个 handler 的 panic 拖垮整个进程。
+- **`panic = "abort"`（P31 用户裁定）**：省掉展开表、异常路径更短。代价与原先的取舍相反——
+  runtime 的 handler 隔离靠 `dispatcher.rs` 的 `catch_unwind`，abort 下它不再生效：任何 panic
+  （含 tokio 任务内）**直接终止进程**，不再是「只丢这一条请求」。要恢复隔离就删掉这一行。
+  Go 侧在 action 汇聚点 `callapi.go:271-272` 用 `defer mylog.RecoverPanic(...)` 兜住 handler
+  panic，只丢当前请求；Rust release 在 P31 后没有这一层兜底——这是刻意的性能取舍，不是 parity 缺口。
+- `[profile.bench]` 当前**没有 `cargo bench` 消费者**：本仓基准统一由 `xtask bench` 以
+  `--release` 跑，测的是 `profile.release`；该段只保留 lto/cgu/opt 同口径，将来直接启用
+  `cargo bench` 时不用另调。
+- `panic` 对 `[profile.bench]` 被 cargo 忽略（`warning: panic setting is ignored for bench profile`），
+  因此 bench 段不写该字段；将来若启用 `cargo bench`，其展开语义由 cargo 固定为 unwind。
 - `strip = "symbols"` 只影响产物体积；要 profile 就临时加 `RUSTFLAGS="-C debuginfo=1"`，不要改发布 profile。
 
 ## 6. 后续优化清单
@@ -148,7 +158,114 @@ strip = "symbols"
 
 ---
 
-## 7. 尚未覆盖（待补）
+## 7. PGO / BOLT（提效，可选）
+
+> 两者都是「不改代码、只改编译产物」的优化：PGO 让编译器知道哪些分支/函数真的热，BOLT 按采样重排二进制的代码布局。
+> 本仓把 PGO 做成可复现的子命令；BOLT 只在 Linux 上可用，不进流水线（§7.4）。
+
+### 7.1 PGO 流水线（`cargo xtask pgo`）
+
+实现见 `xtask/src/pgo.rs`，五步：
+
+| 步 | 命令 | 作用 |
+|----|------|------|
+| 0 基线 | `cargo run --release -p xtask -- bench --iters N` | 未优化口径的 ns/op，作为对比起点 |
+| 1 插桩构建 | `RUSTFLAGS="-Cprofile-generate=<dir>" cargo build --release -p gensokyo-bin` | 每个函数入口插计数 |
+| 2 跑负载 | 默认同上 bench（带同一条 `RUSTFLAGS`），或 `--workload <cmd>` | 产出 `<dir>/*.profraw` |
+| 3 合并 | `llvm-profdata merge -o <dir>/merged.profdata <dir>` | 多份 profraw → 一份 profile |
+| 4 profile-use 重建 | `RUSTFLAGS="-Cprofile-use=<merged> -Cllvm-args=-pgo-warn-missing-function" cargo build --release -p gensokyo-bin` | 按热度重排分支/内联；profile 缺函数时告警 |
+| 5 复测 | 同第 0 步 | 前后对比写入 `<dir>/pgo-report.md` |
+
+```powershell
+# 默认负载：100 000 次迭代的 bench，profile 与报告落在 <target-dir>/pgo
+cargo run --release -p xtask -- pgo
+
+# 快速试跑（只想确认流水线通不通）
+cargo run --release -p xtask -- pgo --iters 5000
+
+# 自定义负载：命令在 workspace 根目录、带插桩 RUSTFLAGS 执行（跑压测框架时用这个）
+cargo run --release -p xtask -- pgo --workload "<压测命令，例如 §4.2 的 oha 调用>"
+
+# 换 profile 目录（默认 target/pgo）
+cargo run --release -p xtask -- pgo --profile-dir D:\pgo
+```
+
+- **`llvm-profdata` 探测顺序**：`rustc --print sysroot` + `rustc -vV` 的 `host:` →
+  `<sysroot>/lib/rustlib/<host>/bin/llvm-profdata[.exe]`；找不到再退回 PATH 里的同名工具。
+  都没有时报错并提示 `rustup component add llvm-tools-preview`（用 `+<toolchain>` 时要带 `--toolchain`）。
+- 探测放在**基线之后、插桩构建之前**：基线 bench 不依赖 `llvm-profdata`，先跑它保证每次运行
+  都留下对比数字；探测失败时只损失一次基线，不会白跑十几分钟的插桩构建 + 负载。
+- 自定义 `--workload` 会**跳过基线 bench 与前后对比**（没有基准数字），报告里只有插桩 /
+  merge / profile-use 重建的结果；`--iters` 与 `--workload` 互斥，此路径下不生效。
+- 每轮负载前清空插桩目录里的 `.profraw`：混入上一轮的 profile 会让 merge 失败，或把旧负载算进来。
+- 负载跑完没有 `.profraw` 直接报错：说明负载执行的不是插桩产物（自定义 `--workload` 绕过 cargo 时最常见）。
+
+### 7.2 测量口径与边界
+
+- 对比必须**同一 `--iters`、同一机器、同一次运行内的两个进程**；本机噪声约 ±10%（共享环境冷启动时可达 ~30%），
+  单轮差异落在噪声内不算收益，看 3 轮中位数。报告文件里的数字是单轮的，只用于判断量级。
+- 默认负载是 `xtask bench`，只覆盖 `gensokyo-protocol` / `gensokyo-actions` 的**同步热路径**：
+  服务端主循环、tokio 调度、网络栈不在 profile 里，那部分 PGO 收益为 0。要吃满收益就用 `--workload` 跑真实压测。
+- profile 与源码/rustc 版本绑定：升级工具链后必须重新采集，别复用旧 `merged.profdata`（函数指纹变了会退化成无优化，`-pgo-warn-missing-function` 只负责告警）。
+- 与 §5 的 `lto = "fat"` 叠加时，插桩与重建两轮都要走全量 LTO，构建时间明显上升；CI 上建议把 `target/` 与 `pgo/` 一起缓存。
+
+### 7.3 本机实测（2026-11-09，Windows / GNU 宿主：不可用）
+
+环境：HEAD `328189f` + P37 待提交工作树、`rustc 1.99.1 (58cf8f9c3 2026-10-13)`、
+host `x86_64-pc-windows-gnu`、`cargo run --release -p xtask -- pgo --iters 200`。
+
+| 步 | 结果 |
+|----|------|
+| 0 基线 bench | `cqcode::parse` **10 023.5** / `Event::deserialize` **3 410.0** / `plan_send_group_msg` **6 623.5** ns/op（`--iters 200`，与 §4 的 100 000 次口径不可直接比；同机复跑波动可达 ~10–28%，只看量级） |
+| 探测 llvm-profdata | **失败**（预期）：`未找到 llvm-profdata：先执行 rustup component add llvm-tools-preview …`；命令在此退出，**基线数字已经产出** |
+| 1 插桩构建（手工分步） | **失败**：`error[E0463]: can't find crate for 'profiler_builtins'` / `the compiler may have been built without the profiler runtime`（连 `cfg-if` 这类依赖都编译不过） |
+
+说明：前两行来自**同一次 `xtask pgo` 运行**——当前顺序是「基线 → 探测 → 插桩」，缺
+`llvm-profdata` 时基线数字照样输出，不会白跑。第 3 行是**手工分步执行**（前一次实测；跳过
+探测，直接 `RUSTFLAGS="-Cprofile-generate=<dir>" cargo build --release -p gensokyo-bin`）
+复现的；在本机当前顺序下命令走不到插桩这一步。
+
+结论：**`x86_64-pc-windows-gnu` 的 rustc 发行版不带 profiler runtime**，`-Cprofile-generate` 在本机无法插桩，
+因此拿不到 PGO 前后数字；本机同时也没装 `llvm-tools-preview`（merge 步骤缺工具）。
+`xtask pgo` 在这两种情况下都给可操作提示，不会静默跳过或伪造数字。
+
+可行路径：
+
+```bash
+# Linux CI（x86_64-unknown-linux-gnu）：完整流水线；PGO 产物尚未接入 build.ps1/xtask build
+rustup component add llvm-tools-preview
+cargo xtask pgo --iters 20000          # 等价 cargo run --release -p xtask -- pgo
+# 报告：target/pgo/pgo-report.md；要留档就把它作为 CI artifact 上传
+```
+
+PGO 产物**尚未接入 `build.ps1` / `xtask build`**：发布链仍是 plain release + UPX。要在发布物里用
+PGO，需手工以 profile-use 口径构建，或把接线作为独立事项排期。
+
+Windows 侧只能换 msvc 宿主（本机缺 `link.exe`，见 §3），或等 rustc 给 gnu 宿主补上 profiler runtime。
+
+### 7.4 BOLT（Linux-only，可选，不进流水线）
+
+- **做法**：`llvm-bolt` 用 perf 采样得到的 `perf.data`（`perf2bolt` 转 `perf.fdata`）重排函数布局、
+  拆分 hot/cold 段、做 `-reorder-blocks=ext-tsp -reorder-functions=hfsort`。
+- **为什么只在 Linux**：需要 `perf record` 与 `llvm-bolt`，还要求 `perf_event_paranoid` 允许采样；
+  Windows 没有可用实现（也没有等价的采样后端），所以本仓不做 Windows BOLT。
+- **前置条件**：二进制要能解析符号——`RUSTFLAGS="-C debuginfo=1 -C force-frame-pointers=yes"` 构建，
+  且**不要** `strip = "symbols"`（§5 默认 strip，BOLT 前临时关掉）。
+- **预估收益**：服务端这种循环密集负载，QPS +5–15%、P99 略降；体积 +5–10%。与 PGO 互补（PGO 改代码生成，BOLT 改布局）。
+- **何时值得**：发布前最后一步、构造稳定、已有可复现压测；**不值得**：功能还在变、负载不具代表性、容器里拿不到 perf 权限。
+
+### 7.5 该做 / 不该做
+
+| 该做 | 不该做 |
+|------|--------|
+| 用稳定、覆盖真实热点的负载（§4.2 的 oha 场景）采集 | 拿 bench 的 3 条微基准代表整个服务（只覆盖库层同步路径） |
+| 收益用 ≥3 轮中位数确认，`--iters` 固定 | 拿单轮 ±3% 的差异当结论 |
+| 把 PGO 放进发布流水线（可重复、与源码/rustc 版本绑定） | 把 PGO 产物当通用二进制分发到别的机器 |
+| 同时验证 §4 基线没有退化（PGO 只改布局，不该变慢） | 用 PGO 掩盖算法/分配问题（§6 那些仍要做） |
+
+---
+
+## 8. 尚未覆盖（待补）
 
 - **action 分发基线**：`Registry` 正在从同步 `Handler` 改为异步（并行重构中），同步 dispatch 基线会被推翻，
   等异步签名定稿后补一条 `tokio` 单线程 runtime 下的 dispatch 用例。

@@ -707,6 +707,7 @@ name = "gensokyo-media"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
+ "gensokyo-core",
  "image",
  "reqwest",
  "rustls",

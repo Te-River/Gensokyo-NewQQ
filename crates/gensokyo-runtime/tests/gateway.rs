@@ -200,7 +200,7 @@ async fn identify_ready_and_dispatch_reach_hub() {
         .await
         .expect("等待 hub 事件超时")
         .expect("hub 已关闭");
-    let value = serde_json::to_value(&*event).expect("事件序列化失败");
+    let value: serde_json::Value = serde_json::from_str(event.json()).expect("事件序列化失败");
     assert_eq!(value["post_type"], "message");
     assert_eq!(value["message_type"], "group");
     assert_eq!(value["group_id"], "G1");

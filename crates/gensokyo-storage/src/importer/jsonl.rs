@@ -304,12 +304,7 @@ fn split_line(bytes: &[u8], offset: usize) -> (&[u8], usize) {
 
 /// `end` 行之前所有原始字节的 SHA-256 小写十六进制。
 fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut text = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        text.push_str(&format!("{byte:02x}"));
-    }
-    text
+    crate::hex_lower(&Sha256::digest(bytes))
 }
 
 fn format_err(number: usize, detail: &str) -> ImportError {

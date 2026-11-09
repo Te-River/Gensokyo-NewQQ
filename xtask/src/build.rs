@@ -183,7 +183,7 @@ fn flavors(args: &BuildArgs) -> &'static [bool] {
 }
 
 /// workspace 根目录：`Cargo.lock` 所在目录（`cargo xtask` 可能在子目录被调用）。
-fn workspace_root() -> Result<PathBuf> {
+pub(crate) fn workspace_root() -> Result<PathBuf> {
     let lock = find_lockfile()?;
     lock.parent()
         .map(Path::to_path_buf)
@@ -191,13 +191,13 @@ fn workspace_root() -> Result<PathBuf> {
 }
 
 /// cargo 可执行文件：`cargo run` 会注入 `$CARGO`，否则用 PATH 里的 cargo。
-fn cargo() -> String {
+pub(crate) fn cargo() -> String {
     std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned())
 }
 
 /// `cargo metadata` 的 `target_directory`：尊重 `CARGO_TARGET_DIR` 与 `.cargo/config.toml`，
 /// 不能假定产物在 `<root>/target`。
-fn target_directory(root: &Path) -> Result<PathBuf> {
+pub(crate) fn target_directory(root: &Path) -> Result<PathBuf> {
     let output = Command::new(cargo())
         .args(["metadata", "--no-deps", "--format-version", "1", "--locked"])
         .current_dir(root)
@@ -221,7 +221,7 @@ fn target_directory(root: &Path) -> Result<PathBuf> {
 /// 保证 `webui/dist` 存在：`rust-embed` 编译期读目录，缺目录直接编译失败。
 ///
 /// 只要 `css/style.css` 在就认为已有真实前端产物（`frontend: npm run build`），不再占位。
-fn ensure_webui_dist(root: &Path) -> Result<()> {
+pub(crate) fn ensure_webui_dist(root: &Path) -> Result<()> {
     let dist = root.join("webui").join("dist");
     if dist.join("css/style.css").is_file() {
         return Ok(());

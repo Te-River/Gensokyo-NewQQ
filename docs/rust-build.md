@@ -93,6 +93,16 @@ Go 版用 `-tags=small` 裁剪 WebUI/OSS/gRPC/二维码。**Rust 侧目前没有
   （不用 `--workspace`，避免把 10 个库 crate 与 xtask 自身一起打包）。
 - 日志打印每个产物的**实际路径与大小（MB）**；UPX 压缩在复制之后进行，最终汇总里的体积是压缩后的。
 
+## release 的 panic 语义（运维必读）
+
+`[profile.release]` 是 `panic = "abort"`（P31）：任何 panic（含 tokio 任务内）**直接退出进程**，
+不会只丢当前请求。进程内的易失状态——SSM 待补发队列、echo 缓存、延迟队列 / 未完成计划——随
+进程一起消失；生产部署必须有 supervisor / 服务自启（systemd `Restart=always`、Windows 服务恢复
+策略或等价物），否则一次 panic 就是停机。
+
+dev/test 仍是 unwind：`dispatcher.rs` 的 `catch_unwind` handler 隔离只在 unwind 口径有效，单测
+能覆盖 panic→1500；release 下这层隔离退化为进程退出。
+
 ## CI 用法
 
 ```yaml

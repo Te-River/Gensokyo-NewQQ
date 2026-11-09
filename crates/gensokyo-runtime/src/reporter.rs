@@ -12,7 +12,7 @@
 //! |------|----|------|
 //! | 触发 | 每条 `BroadcastMessageToAll` | 每条 hub 事件（发布方不等待） |
 //! | 并发 | 每条事件一个 goroutine，URL 之间并发 | 每条事件一个任务（`JoinSet`），URL 之间 `join_all` 并发 |
-//! | body | `ConvertMapToJSONString(message)`，即发给 WS 的同一份事件 JSON | `serde_json::to_string(event)` |
+//! | body | `ConvertMapToJSONString(message)`，即发给 WS 的同一份事件 JSON | 发布时一次性序列化的同一份 JSON（`PublishedEvent::json`） |
 //! | 请求头 | `Content-Type: application/json` + `X-Self-ID: uin 或 app_id` | 同左 |
 //! | 鉴权 | 无（`GetPostSecret` 在 Go 里没有任何调用点） | 无 |
 //! | 失败 | 记日志后放弃，不重试 | 同左（`warn`） |
@@ -38,7 +38,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gensokyo_config::Settings;
-use gensokyo_protocol::Event;
 use gensokyo_qq::{HttpRequest, HttpTransport, ReqwestTransport};
 use tokio::sync::{broadcast, watch};
 use tokio::task::{JoinHandle, JoinSet};
@@ -119,7 +118,7 @@ where
                     }
                     let transport = Arc::clone(&transport);
                     in_flight.spawn(async move {
-                        post_event(transport.as_ref(), &event, &urls, &self_id).await;
+                        post_event(transport.as_ref(), event.json(), &urls, &self_id).await;
                     });
                 }
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
@@ -154,24 +153,17 @@ fn targets(settings: &Settings) -> (Vec<String>, String) {
     (urls, self_id)
 }
 
-/// 把一条事件并发 POST 到全部 URL，等全部完成（Go `WaitGroup`）。
+/// 把一条事件的 JSON 并发 POST 到全部 URL，等全部完成（Go `WaitGroup`）。
 ///
-/// 单个 URL 失败只记日志：Go 的 `sendPostRequest` 同样不向调用方传播错误。
-async fn post_event<T>(transport: &T, event: &Event, urls: &[String], self_id: &str)
+/// `payload` 由发布方一次序列化（[`crate::event_hub::PublishedEvent::json`]），与发给 WS 的
+/// 逐字节相同。单个 URL 失败只记日志：Go 的 `sendPostRequest` 同样不向调用方传播错误。
+async fn post_event<T>(transport: &T, payload: &str, urls: &[String], self_id: &str)
 where
     T: HttpTransport,
 {
-    let payload = match serde_json::to_string(event) {
-        Ok(payload) => payload,
-        Err(err) => {
-            tracing::error!(error = %err, "事件序列化失败，post_url 上报跳过");
-            return;
-        }
-    };
-
     let posts = urls
         .iter()
-        .map(|url| post_one(transport, url, &payload, self_id));
+        .map(|url| post_one(transport, url, payload, self_id));
     futures::future::join_all(posts).await;
 }
 

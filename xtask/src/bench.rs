@@ -54,7 +54,7 @@ pub fn run(iters: u64) -> Result<()> {
 
     // 输出保持 ASCII：基线要能跨控制台代码页原样粘贴进文档与 PR。
     println!(
-        "platform: {}-{} | profile: release (lto=thin, codegen-units=1, opt-level=3)",
+        "platform: {}-{} | profile: release (lto=fat, codegen-units=1, opt-level=3, panic=abort)",
         std::env::consts::OS,
         std::env::consts::ARCH
     );

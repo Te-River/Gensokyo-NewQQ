@@ -311,7 +311,8 @@ async fn serve(
             },
             event = events.recv() => match event {
                 Ok(event) => {
-                    if send_event(&mut sink, &event, failed, disable_error_chan(state)).await {
+                    // 事件 JSON 由发布方序列化一次，这里直接复用同一份字节。
+                    if send_payload(&mut sink, event.json(), failed, disable_error_chan(state)).await {
                         return StopReason::Disconnected;
                     }
                 }
@@ -332,10 +333,28 @@ async fn serve(
     }
 }
 
-/// 写一条事件。
+/// 写一条**已序列化**的事件 JSON。
 ///
-/// 写失败时（[`write_payload`] 报错且 `disable_error_chan=false`）把原 JSON 压入
+/// 写失败时（[`write_payload`] 报错且 `disable_error_chan=false`）把该 JSON 压入
 /// [`FailedMessages`]，返回 `true` 表示连接已不可写、调用方应断开重连。
+async fn send_payload<S>(
+    sink: &mut S,
+    payload: &str,
+    failed: &mut FailedMessages,
+    disable_error_chan: bool,
+) -> bool
+where
+    S: futures::Sink<Message> + Unpin,
+{
+    if write_payload(sink, payload).await {
+        return false;
+    }
+    failed.record(payload.to_owned(), disable_error_chan);
+    true
+}
+
+/// 写一条**本地构造**的事件（connect / 心跳）：序列化后交给 [`send_payload`]。
+///
 /// 序列化失败只记 error：没有可补发的 payload，也不断开。
 async fn send_event<S>(
     sink: &mut S,
@@ -346,18 +365,13 @@ async fn send_event<S>(
 where
     S: futures::Sink<Message> + Unpin,
 {
-    let text = match serde_json::to_string(event) {
-        Ok(text) => text,
+    match serde_json::to_string(event) {
+        Ok(text) => send_payload(sink, &text, failed, disable_error_chan).await,
         Err(err) => {
             tracing::error!(error = %err, "事件序列化失败，跳过该事件");
-            return false;
+            false
         }
-    };
-    if write_payload(sink, &text).await {
-        return false;
     }
-    failed.record(text, disable_error_chan);
-    true
 }
 
 /// 写一帧文本；`false` 表示底层写失败。
