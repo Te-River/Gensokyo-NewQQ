@@ -13,14 +13,14 @@
 | 功能 | 反向 WS 收到 action 不 dispatch | wsclient/ws.go:249-261 | ws_client.rs：dispatch_json + mpsc 回执写回 | **已对齐（P4 `9e71c31`）** | — |
 | 安全 | webhook ed25519 签名 / op13 | server/webhook.go:94,115-120,163-193 | webhook.rs：Go 同款 seed 派生/待签/401；op13 {plain_token,signature} | **已对齐（W1，待提交）** | — |
 | 功能 | union_webhook 扇出 | main.go:530,1046-1090 | 无 | 缺失 | 80-120 行 |
-| 功能 | 反向 WS TLS/代理 | ws.go:352-355 | 无 TLS/代理 | 缺失 | 30-80 行 |
-| 功能 | `array_value` 消息段 | ProcessGroupMessage.go:189-190 | inbound.rs:61-63 自述未实现 | 缺失 | 300-500 行 |
-| 功能 | `remove_at`/`convert_other_at` | message_parser.go:1679-1721,1877,1895 | 无 RevertTransformedText | 缺失 | 400-700 行 |
+| 功能 | 反向 WS TLS/代理 | ws.go:352-355 | wss 随 rustls feature；代理走环境变量 + CONNECT 隧道（P22） | **已对齐** | — |
+| 功能 | `array_value` 消息段 | ProcessGroupMessage.go:189-190 | inbound 三事件段数组（P19；媒体入站段仍缺） | **已对齐（文本/at）** | — |
+| 功能 | `remove_at`/`convert_other_at` | message_parser.go:1679-1721,1877,1895 | revert_mentions：自身@剥离/还原、只查不分配、trim、去 /（P20） | **已对齐** | — |
 | 功能 | `enable_change_word` | main.go:765-770,787-792 | inbound/send 均接 acnode 开关（P8；审计时表项已过期） | **已对齐** | — |
 | 功能 | `add_at_group` 消费者 | ProcessGroupNormalMessage.go:148-150（**入站上报**变换，非出站） | inbound.rs reported_group_content（全量群消息加 `[CQ:at,qq=AppID]`，与 Go 同点） | **已对齐（W2，待提交）** | — |
 | 功能 | AppID→BotID | message_parser.go:1669-1683（需 `/users/@me` 的 BotID 注入） | 缺 BotID 来源（Go main.go:254/304），暂缓 | 缺失 | 中 |
 | 功能 | `op_user_id_type` | Processor.go:245-270（调用点 :293,311,334） | gateway.rs `apply_op_userid_type`（网关 dispatch / webhook 发布前改写；vuin/ruin/其余三态 + sender 跟随） | **已对齐（P24）** | — |
-| 功能 | `http_only_bot` | Processor.go:374-399（全 WS 失败时补 downtime 回复） | 仅配置字段，无 downtime 回退 | 缺失 | 待估 |
+| 功能 | `http_only_bot` | Processor.go:374-399（全 WS 失败时补 downtime 回复） | downtime.rs：无下游订阅者时按 Go 回群 AT/C2C（P26） | **已对齐** | — |
 | 边角 | 401/403 语义 | wsserver.go:85-94；httpapi.go:23-31 | auth.rs：WS 缺 token 401 `Missing token` / 错 token 403 `Incorrect token`；HTTP API 一律 403 `鉴权失败` | **已对齐（P24）** | — |
 | — | 15 类 QQ 事件转换 | main.go:746-887,889-930 | inbound.rs:282-328 | **已对齐** | — |
 | — | intents 位表 | botgo/event/register.go:100-172 | intent.rs:77-95 | **已对齐**（待 #70 消费） | — |
@@ -29,7 +29,10 @@
 
 | 级别 | 缺口 | Go 证据 | Rust 现状 | 状态 |
 |---|---|---|---|---|
-| P0 | bbolt→redb 导入器（含 UserInfo 表） | map_service.go:124；new_service.go:96；main.go:371 | G1 `legacy-export`（`2c7f058`）+ R1 importer（JSONL v1、幂等/冲突/校验/自动导入） | **已对齐（待提交）** |
+| P0 | bbolt→redb 导入器（含 UserInfo 表） | map_service.go:124；new_service.go:96；main.go:371 | G1 `legacy-export`（`2c7f058`）+ R1 importer（JSONL v1、幂等/冲突/校验/自动导入） | **已对齐** |
+| P1 | 三后端审核客户端（COS CI/阿里 Green/百度 AIP） | oss/ 的 UploadAndAudit* | oss/audit.rs 真实实现 + AuditRejected（P21）；语音仅 /uploadrecord 使用（端点未移植，缺口在册） | **图片已对齐/语音缺口** |
+| P1 | `/getid` type 18/19 | getIDHandler.go:351-373；service.go:2394,2488 | storage list_identities/force_unbind + upload_http 18/19（P27；Go 自身缺陷在文档） | **已对齐** |
+| P1 | lotus gRPC idmap 服务 | main.go:507；main_grpc.go | boot 起 IdMapService 服务端 + 优雅关闭；仅服务端起才隐藏 /getid（P28）；客户端模式未实现（缺口） | **服务端已对齐** |
 | P0 | WebUI 登录路径兼容 `/api/check-login-status` | webui/api.go:47 | 双路径并存同 handler + login isLoggedIn 契约 | **已对齐（P6a）** |
 | P0 | `/uploadpic`、`/uploadpicv2`、`/getid` HTTP 端点 | main.go:508,523-524；server/uploadpic.go；server/getIDHandler.go:104,203-267 | upload_http.rs（10 用例；getid 1~4/6/7/8~11/13/15/16 同码同形，5/12/14/18/19 依赖 bbolt 迁移期结构回 501） | **已对齐（P14/P24；gRPC 装配前 /getid 恒挂载）** |
 | P1 | oss 阿里/百度/腾讯后端 | oss/{aliyun,baidu,tencent}.go | media/oss/（0~3 直传 + deferred 分派；审核开关 fail-closed） | **已对齐（P13）** |
@@ -55,7 +58,7 @@
 
 **消息链特性矩阵**（对齐=已对齐）：reply/echo ✓；msg_type 0/2/6/7/8 ✓；markdown/keyboard ✓；card 部分（私聊也支持=扩展；本地 pic 未上传）；input_notify ✓；stream/SSE ✓；**qqmusic 缺失**（降级分享文案，无歌曲查询/模板/键盘）；forward ✓（保留 node 媒体）；raw ✓；wakeup/active ✓；SSM ✓（仅群入队同 Go）；懒消息/2000/seq ✓；**at：AppID→BotID 未实现、add_at_group 无消费者**；auto_escape 刻意差异（Rust 尊重该字段）；array/string_ob11 ✓。
 
-**媒体链**：local/url/base64 四类 ✓；**多媒体段（无 markdown）1400（P1 修复中）**；**>5MB 分片上传缺失**；**silk 转码/图片压缩未接线**；素材链 oss_type=7 ✓；**图床 provider 仅 7/8（缺 4/5/6/9/10）**；**图床上传无重试**；**card 本地 pic_url 未上传（1400）**；markdown 内嵌图替换 ✓；unknown_* 透传 ✓。
+**媒体链**：local/url/base64 四类 ✓；多媒体段拆分 ✓（P1）；**>5MB 分片上传 ✓（P29a）**；**silk 转码/图片压缩 ✓（P29a）**；素材链 oss_type=7 ✓；图床 provider 4~10 ✓（P7）；图床上传重试 ✓（P7）；**card 本地 pic_url ✓（P29a）**；markdown 内嵌图替换 ✓；unknown_* 透传 ✓；qqmusic 仍降级文本（待 P29b）。
 
 ### B4. CQ 码进出站
 
