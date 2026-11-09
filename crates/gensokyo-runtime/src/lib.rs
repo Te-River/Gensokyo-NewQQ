@@ -111,6 +111,7 @@ pub mod builtin;
 /// `send_*` 的 deferred 计划执行（计划 → `MessageToCreate` → QQ 上游）。
 pub mod deferred;
 pub mod dispatcher;
+pub mod downtime;
 pub mod event_hub;
 /// QQ 上游事件 WS 网关客户端：`/gateway/bot` → Identify/Resume → dispatch（任务 #70）。
 pub mod gateway;

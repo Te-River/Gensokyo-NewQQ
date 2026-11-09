@@ -12,7 +12,8 @@ use serde::de::DeserializeOwned;
 use crate::dto::{
     ApprovalJoinRequest, BatchRemoveMembersRequest, BatchRemoveMembersResponse, BotUser,
     CreateJoinApprovalStrategyRequest, CreateJoinApprovalStrategyResponse, CreatePanelRequest,
-    CreatePanelResponse, FileUpload, GenerateUrlLink, GenerateUrlLinkRequest,
+    CreatePanelResponse, FileUpload, FileUploadMergeRequest, FileUploadPartFinishRequest,
+    FileUploadPrepareRequest, FileUploadPrepareResponse, GenerateUrlLink, GenerateUrlLinkRequest,
     JoinApprovalStrategyList, MediaResponse, MemberBlacklistList, MemberBlacklistRequest,
     MemberBlacklistResponse, MenuResponse, MessageResponse, MessageToCreate, PanelList,
     PanelRecordDetail, PanelTargetRequest, PutMenuRequest, UpdateJoinApprovalStrategyRequest,
@@ -144,6 +145,39 @@ impl<T: HttpTransport> OpenApiClient<T> {
         file.validate()?;
         let path = format!("/v2/users/{}/files", encode_path_segment(user_openid));
         self.post_json(&path, file).await
+    }
+
+    /// 分片上传·预上传（`POST /v2/groups/{id}/upload_prepare` / `…/users/{id}/upload_prepare`）。
+    pub async fn prepare_file_upload(
+        &self,
+        id: &str,
+        is_group: bool,
+        request: &FileUploadPrepareRequest,
+    ) -> Result<FileUploadPrepareResponse> {
+        let path = file_upload_path(id, is_group, "upload_prepare");
+        self.post_json(&path, request).await
+    }
+
+    /// 分片上传·通知单片完成（`POST /v2/{groups|users}/{id}/upload_part_finish`）。
+    pub async fn finish_file_upload_part(
+        &self,
+        id: &str,
+        is_group: bool,
+        request: &FileUploadPartFinishRequest,
+    ) -> Result<()> {
+        let path = file_upload_path(id, is_group, "upload_part_finish");
+        self.post_json_void(&path, request).await
+    }
+
+    /// 分片上传·合并分片（`POST /v2/{groups|users}/{id}/files`，响应取 `file_info`）。
+    pub async fn merge_file_upload(
+        &self,
+        id: &str,
+        is_group: bool,
+        request: &FileUploadMergeRequest,
+    ) -> Result<MediaResponse> {
+        let path = file_upload_path(id, is_group, "files");
+        self.post_json(&path, request).await
     }
 
     /// 指令面板列表（`GET /v2/panels`）；`cursor` 空串等同首页，`limit` 为 `None` 时不传。
@@ -482,6 +516,12 @@ fn decode_json<R: DeserializeOwned>(response: &HttpResponse) -> Result<R> {
     serde_json::from_slice(&response.body).map_err(|err| {
         Error::InvalidResponse(format!("解析响应失败(status={}): {err}", response.status))
     })
+}
+
+/// 分片上传端点：群 / C2C 二选一，`suffix` 取 `upload_prepare` / `upload_part_finish` / `files`。
+fn file_upload_path(id: &str, is_group: bool, suffix: &str) -> String {
+    let scope = if is_group { "groups" } else { "users" };
+    format!("/v2/{scope}/{}/{}", encode_path_segment(id), suffix)
 }
 
 /// 拼查询串：`None` / 空串的参数整段跳过，其余按 [`encode_path_segment`] 同规则转义。

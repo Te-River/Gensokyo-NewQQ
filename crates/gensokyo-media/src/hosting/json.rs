@@ -4,11 +4,12 @@
 //! 的依赖边不允许变动），而本 crate 只需要「按路径取字符串」。因此这里实现一个只读、
 //! 零依赖的子集解析器：
 //! - 支持 object / array / string / number / `true` / `false` / `null`；
-//! - 整数保留为 [`Value::Number`]（取 Bilibili 的 `code` 用），浮点与数组不构造值（跳过即止）；
+//! - 整数保留为 [`Value::Number`]（取 Bilibili 的 `code` 用），浮点不构造值；
+//! - 数组保留为 [`Value::Array`]（内容审核要按 `data[].results[].suggestion` 走）；
 //! - 严格按 RFC 8259 处理转义，含 `\/` 与 `\uXXXX` 代理对；
 //! - 拒绝尾随垃圾，与 Go `json.Unmarshal` 一致。
 
-/// 解析后的 JSON 值：只需要对象容器、字符串与整数，其余标量统一成 [`Value::Other`]。
+/// 解析后的 JSON 值：只需要对象容器、数组、字符串与整数，其余标量统一成 [`Value::Other`]。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Value {
     /// JSON 字符串（已解码转义）。
@@ -17,7 +18,9 @@ pub(crate) enum Value {
     Number(i64),
     /// JSON 对象，保持书写顺序。
     Object(Vec<(String, Value)>),
-    /// 布尔 / null / 数组 / 浮点数：只要能跳过，就不需要值。
+    /// JSON 数组，保持书写顺序。
+    Array(Vec<Value>),
+    /// 布尔 / null / 浮点数：只要能跳过，就不需要值。
     Other,
 }
 
@@ -51,6 +54,14 @@ impl Value {
         match self.path(path)? {
             Self::Number(value) => Some(*value),
             _ => None,
+        }
+    }
+
+    /// 按路径取数组元素；路径不存在或末节点不是数组时返回空切片。
+    pub(crate) fn path_values(&self, path: &[&str]) -> &[Self] {
+        match self.path(path) {
+            Some(Self::Array(items)) => items,
+            _ => &[],
         }
     }
 
@@ -153,20 +164,21 @@ impl Parser<'_> {
         }
     }
 
-    /// 数组只做语法校验：逐元素解析后丢弃。
+    /// 数组：逐元素解析后保留（内容审核要看 `data[].results[].suggestion`）。
     fn array(&mut self) -> Option<Value> {
         self.index += 1; // '['
+        let mut items = Vec::new();
         self.skip_whitespace();
         if self.peek()? == b']' {
             self.index += 1;
-            return Some(Value::Other);
+            return Some(Value::Array(items));
         }
         loop {
-            self.value()?;
+            items.push(self.value()?);
             self.skip_whitespace();
             match self.bump()? {
                 b',' => continue,
-                b']' => return Some(Value::Other),
+                b']' => return Some(Value::Array(items)),
                 _ => return None,
             }
         }
@@ -339,9 +351,41 @@ mod tests {
     #[test]
     fn parses_arrays_and_literals_around_target_field() {
         let root = parse(b"[1,true,null,{\"a\":[{\"b\":\"c\"}]}]\n").expect("数组可解析");
-        assert_eq!(root, Value::Other);
+        assert_eq!(
+            root,
+            Value::Array(vec![
+                Value::Number(1),
+                Value::Other,
+                Value::Other,
+                Value::Object(vec![(
+                    "a".to_owned(),
+                    Value::Array(vec![Value::Object(vec![(
+                        "b".to_owned(),
+                        Value::String("c".to_owned()),
+                    )])]),
+                )]),
+            ])
+        );
         let root = parse(br#"{"list":[1,2],"resourceUrl":"https://r/u.png"}"#).expect("合法 JSON");
         assert_eq!(root.path_str(&["resourceUrl"]), Some("https://r/u.png"));
+    }
+
+    #[test]
+    fn walks_nested_arrays_for_audit_suggestions() {
+        let root = parse(
+            br#"{"code":200,"data":[{"results":[{"suggestion":"pass"},{"suggestion":"block"}]},{"results":[{"suggestion":"pass"}]}]}"#,
+        )
+        .expect("合法 JSON");
+        assert_eq!(root.path_i64(&["code"]), Some(200));
+        let suggestions: Vec<&str> = root
+            .path_values(&["data"])
+            .iter()
+            .flat_map(|task| task.path_values(&["results"]))
+            .filter_map(|result| result.path_str(&["suggestion"]))
+            .collect();
+        assert_eq!(suggestions, ["pass", "block", "pass"]);
+        assert!(root.path_values(&["missing"]).is_empty());
+        assert!(root.path_values(&["code"]).is_empty(), "非数组返回空切片");
     }
 
     #[test]

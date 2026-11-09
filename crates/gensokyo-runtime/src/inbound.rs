@@ -52,6 +52,11 @@
 //! - `time`：QQ 负载带 `timestamp` 时用它，否则取当前秒级时间戳。Go 群消息用 `time.Now()`，
 //!   这里偏向可复现（同一事件重放得到同一 `time`）。`GROUP_JOIN_REQUEST` 的 `apply_at`
 //!   优先按 RFC3339 解析（Go `time.Parse`），失败再按秒级数字解析。
+//! - **正文明文处理**（`<@OpenID>` mention 反解 → 自身 @ 剥离 → trim → 去首个 `/`）见
+//!   [`Inbound::revert_mentions`]，字符串形态与段数组形态各按 Go 自己的路径算一遍。
+//!   @bot 判定用「事件 `mentions[]` 的 `is_you`/`bot` 标记 + BotID / AppID」，消息作者
+//!   本人永不当作 @bot（`is_you` 在多实例场景会误标发送者）。与 Go 的差异：Go 另有进程级
+//!   `selfAtIDs` 跨事件记忆（`RememberSelfAtID`），本仓不引入跨请求的全局可变表。
 //!
 //! 金样（`Processor/testdata/inbound/`）是这些字段口径的回归保险：改动事件形态时先跑
 //! `tests/golden_inbound.rs`。
@@ -61,9 +66,7 @@
 //! - 消息段：`array_value = true` 时 `message` 按 CQ 解析成段数组（text / at / 其余入站码，
 //!   见 [`reported_message`]），但图片 / 语音 / 视频 / ark 卡片段仍未生成——Go
 //!   `ConvertToSegmentedMessage` 从 `attachments` / `msg_elements` 取图与事件段，这里没有
-//!   那条数据通路。`<@OpenID>` mention 反解（Go `RevertTransformedText` /
-//!   `ConvertToSegmentedMessage` 的 at 分支、`remove_at` 剥离）同样未做——其中的
-//!   BotID→AppID 还原已单独实现（见 [`bot_id_to_app_id`]）。
+//!   那条数据通路。
 //! - `global_group_msg_rre_to_message` / `global_c2c_msg_switch_to_message`（`true` 时 Go 把
 //!   这些开关事件「伪装成 message」的业务转换，`ConvertGroupRejectToMessage` 等）未做：
 //!   两个开关打开时这里仍只上报 notice。
@@ -119,6 +122,20 @@ struct QqMessage {
     timestamp: Option<Value>,
     #[serde(default)]
     author: Option<QqAuthor>,
+    #[serde(default)]
+    mentions: Vec<QqMention>,
+}
+
+/// 消息 `mentions[]` 的一项：群场景用 OpenID 标识被 @ 的用户，
+/// `is_you` / `bot` 是唯一可靠的 @bot 信号（与 Ready 事件的 `me.id` 形态不同）。
+#[derive(Debug, Deserialize)]
+struct QqMention {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    is_you: bool,
+    #[serde(default)]
+    bot: bool,
 }
 
 /// QQ 消息作者。
@@ -215,6 +232,16 @@ enum GroupFlavor {
 enum GroupMemberFlavor {
     Add,
     Remove,
+}
+
+/// `<@OpenID>` 反解的判定素材：事件 `mentions[]` + 消息作者 + 事件形态。
+struct MentionContext<'a> {
+    /// 事件 `mentions[]`：`is_you` / `bot` 标记是 OpenID 形态下 @bot 的唯一可靠信号。
+    mentions: &'a [QqMention],
+    /// 消息作者 OpenID：作者本人永不当作 @bot。
+    author_id: &'a str,
+    /// `GROUP_MESSAGE_CREATE`：@bot 恒剥离，与 `remove_at` 无关。
+    full_group: bool,
 }
 
 /// 入站转换器：配置快照 + 可选 idmap / echo / botstats / BotID。
@@ -423,6 +450,124 @@ impl Inbound {
         } else {
             i64::try_from(settings.get_app_id()).unwrap_or(i64::MAX)
         }
+    }
+
+    /// 入站正文的 mention 处理：`<@OpenID>` 反解 → 自身 @ 剥离 → trim → 去首个 `/`。
+    ///
+    /// 顺序照 Go `RevertTransformedText`（字符串路径）与 `ConvertToSegmentedMessage`
+    /// （段数组路径）：两条路径都从 `data.Content` 重算，先逐处反解/剥离 mention，再按
+    /// 「全量群消息或 `remove_at`」trim 一次，最后按 `remove_prefix` 去掉第一个 `/`。
+    /// mention 一律**原位**替换或剥离，不前移、不重排；反查失败的 `<@OpenID>` 原样留在原位。
+    ///
+    /// `string_form` 选形态，两形态的差异只在开头与 trim 条件：
+    ///
+    /// - `true`（字符串路径）：`" "` / `"/ "` / `" / "` 归一成 `" "`，并先 trim 前后空白。
+    /// - `false`（段数组路径）：只有 `" "` 被保护，没有初始 trim（Go 只在 at 处理之后
+    ///   按 `is_full_group_message || remove_at` trim）。
+    ///
+    /// 自身 @ 的剥离范围：全量群消息（`GROUP_MESSAGE_CREATE`）**恒剥离**，与 `remove_at`
+    /// 无关；`GROUP_AT_MESSAGE_CREATE` 只在 `remove_at = true` 时剥离，否则还原成
+    /// `[CQ:at,qq=<self_id>]`（Go `message_parser.go:1876-1883` / `:2262-2276`）。
+    fn revert_mentions(
+        &self,
+        settings: &Settings,
+        content: &str,
+        ctx: &MentionContext<'_>,
+        string_form: bool,
+    ) -> String {
+        // 「保护态」正文：用户就想发一个空格/斜杠，前后两次 trim 都不碰。
+        let (text, protected) = match (string_form, content) {
+            (_, " ") | (true, "/ " | " / ") => (" ".to_owned(), true),
+            (true, _) => (content.trim().to_owned(), false),
+            (false, _) => (content.to_owned(), false),
+        };
+        let strip_self = ctx.full_group || settings.get_remove_at();
+        let mut out = String::with_capacity(text.len());
+        let mut last = 0;
+        for (range, user) in scan_mentions(&text) {
+            out.push_str(&text[last..range.start]);
+            let resolved = self.resolve_mention(settings, user);
+            if self.is_self_mention(settings, ctx, user, resolved.as_deref()) {
+                if !strip_self {
+                    // mentions 判定的 @bot 可能不在 idmap 里（反查失败），退回 self_id 形态
+                    let qq = resolved.unwrap_or_else(|| self.self_id_of(settings).to_string());
+                    out.push_str(&format!("[CQ:at,qq={qq}]"));
+                }
+            } else if let Some(qq) = resolved {
+                out.push_str(&format!("[CQ:at,qq={qq}]"));
+            } else {
+                // 未开启转换 / idmap 查不到：原样保留在原位
+                out.push_str(&text[range.clone()]);
+            }
+            last = range.end;
+        }
+        out.push_str(&text[last..]);
+
+        let mut text = out;
+        if strip_self && !protected {
+            // 剥掉开头的 @ 会留下它后面的空格（Go `message_parser.go:1893-1900`）。
+            text = text.trim().to_owned();
+        }
+        if settings.get_remove_prefix()
+            && let Some(idx) = text.find('/')
+        {
+            // Go 去掉的是正文里**第一个** `/`，不限位置（`message_parser.go:1906-1911`）。
+            text.remove(idx);
+        }
+        text
+    }
+
+    /// `<@user>` 是否为 @bot 自身（Go `isIncomingSelfAt`）。
+    ///
+    /// 作者本人永不当作 @bot：`is_you` 在多实例等场景会误标发送者，误判会把发送者的 @
+    /// 当 @bot 剥掉。其余依次看事件 `mentions[]` 的 `is_you`/`bot` 标记、BotID / AppID
+    /// 直等，最后兼容「解析结果等于 `uin` 或 `app_id`」。
+    fn is_self_mention(
+        &self,
+        settings: &Settings,
+        ctx: &MentionContext<'_>,
+        user: &str,
+        resolved: Option<&str>,
+    ) -> bool {
+        if user.is_empty() || user == ctx.author_id {
+            return false;
+        }
+        if ctx
+            .mentions
+            .iter()
+            .any(|mention| mention.id == user && (mention.is_you || mention.bot))
+        {
+            return true;
+        }
+        if self.is_known_self(settings, user) {
+            return true;
+        }
+        resolved.is_some_and(|qq| is_own_id(settings, qq))
+    }
+
+    /// `<@user>` → OneBot `qq` 值（Go `resolveIncomingAtID`）。
+    ///
+    /// 自身 → `self_id` 形态（`use_uin ? uin : app_id`）；他人 → idmap **只查不分配**的
+    /// vUIN（`convert_other_at = false` 或查不到映射都返回 `None`，正文原样保留）。
+    fn resolve_mention(&self, settings: &Settings, user: &str) -> Option<String> {
+        if self.is_known_self(settings, user) {
+            return Some(self.self_id_of(settings).to_string());
+        }
+        if !settings.get_convert_other_at() {
+            return None;
+        }
+        match self.idmap.as_deref()?.lookup_virtual_value(user) {
+            Ok(vuin) => Some(vuin.to_string()),
+            Err(err) => {
+                tracing::debug!(identity = user, error = %err, "mention 反查失败，正文保留原样");
+                None
+            }
+        }
+    }
+
+    /// BotID / AppID 直等的自身判定（Go `IsSelfAtID` 里不依赖 mentions 的那部分）。
+    fn is_known_self(&self, settings: &Settings, user: &str) -> bool {
+        self.bot_id.as_deref() == Some(user) || is_own_id(settings, user)
     }
 
     /// OpenID → OneBot ID；数字形态优先走 idmap，失败不伪造数字。
@@ -634,10 +779,23 @@ impl Inbound {
         let user_id = self.ob11_id(settings, user_raw);
         self.register_group(&group_id);
         self.feed_group_echo(settings, &payload, &group_id, &user_id, &message_id);
+        let ctx = MentionContext {
+            mentions: &payload.mentions,
+            author_id: user_raw,
+            full_group: flavor == GroupFlavor::Full,
+        };
         let content = bot_id_to_app_id(settings, payload.content, self.bot_id.as_deref());
-        let raw_message = reported_group_content(settings, &content, flavor);
-        // 数组形态解析未加 `add_at_group` 前缀的正文（`string_form` 只给字符串形态用）。
-        let message = reported_message(settings, &content, &raw_message);
+        let text = self.revert_mentions(settings, &content, &ctx, true);
+        let raw_message = reported_group_content(settings, &text, flavor);
+        // 段数组形态与字符串形态不同源：Go `ConvertToSegmentedMessage` 从 `data.Content`
+        // 重新处理，不做字符串路径的初始 trim、也不吃 `add_at_group` 前缀
+        // （见 [`Inbound::revert_mentions`] 的 `string_form`）。关闭 `array_value` 时不读。
+        let segment_source = if settings.get_array_value() {
+            self.revert_mentions(settings, &content, &ctx, false)
+        } else {
+            String::new()
+        };
+        let message = reported_message(settings, &segment_source, &raw_message);
         Ok(Event::Message(MessageEvent {
             time: timestamp_of(payload.timestamp.as_ref()),
             self_id: Ob11Id::num(self.self_id_of(settings)),
@@ -690,8 +848,21 @@ impl Inbound {
         let message_id = self.message_id(settings, &payload.id);
         let user_id = self.ob11_id(settings, user_raw);
         self.feed_private_echo(settings, &payload, &user_id, &message_id);
+        let ctx = MentionContext {
+            mentions: &[],
+            author_id: user_raw,
+            full_group: false,
+        };
         let content = bot_id_to_app_id(settings, payload.content, self.bot_id.as_deref());
-        let message = reported_message(settings, &content, &content);
+        // 单聊在 Go 里同样走 `RevertTransformedText`（`ProcessC2CMessage.go:104`），
+        // 只是没有 `mentions`、也不算全量群消息。
+        let text = self.revert_mentions(settings, &content, &ctx, true);
+        let segment_source = if settings.get_array_value() {
+            self.revert_mentions(settings, &content, &ctx, false)
+        } else {
+            String::new()
+        };
+        let message = reported_message(settings, &segment_source, &text);
         Ok(Event::Message(MessageEvent {
             time: timestamp_of(payload.timestamp.as_ref()),
             self_id: Ob11Id::num(self.self_id_of(settings)),
@@ -701,7 +872,7 @@ impl Inbound {
             user_id,
             group_id: None,
             message,
-            raw_message: content,
+            raw_message: text,
             font: Some(0),
             sender: Some(sender),
             anonymous: None,
@@ -1159,8 +1330,9 @@ fn reported_group_content(settings: &Settings, content: &str, flavor: GroupFlavo
 ///
 /// 两种形态读的正文不同：Go 字符串路径上报 `messageText`（含 `add_at_group` 前缀，
 /// `ProcessGroupNormalMessage.go:148-150` / `:176`），数组路径的
-/// `ConvertToSegmentedMessage` 则直接回读 `data.Content`（`handlers/message_parser.go:2182`），
-/// 前缀不进段数组。`content` 传原始正文，`string_form` 传字符串形态（不含前缀时两者相同）。
+/// `ConvertToSegmentedMessage` 则从 `data.Content` 重算（`handlers/message_parser.go:2182`），
+/// 前缀不进段数组。`content` 传段数组形态的正文（[`Inbound::revert_mentions`] 的
+/// `string_form = false` 结果，`array_value` 关闭时不读），`string_form` 传字符串形态。
 /// 段名不在入站码表（[`code_spec`] 查无此项或 `inbound` 为假，例如用户手打的 `[CQ:remove,…]`）
 /// 时折回 text 原文，不向客户端交出它不认识的段；相邻 text 段合并成一段，
 /// 与 Go 文本段「连续切片」的粒度一致。
@@ -1209,6 +1381,41 @@ fn bot_id_to_app_id(settings: &Settings, content: String, bot_id: Option<&str>) 
         return content;
     };
     content.replace(bot_id, &app_id)
+}
+
+/// 正文里的裸 mention 扫描（Go `incomingAtRe` = `<@!?([0-9A-Fa-f]+)>`）。
+///
+/// 返回 (字节区间, 用户 ID)，按出现顺序、互不重叠。字符类与 Go 一致只认十六进制——QQ 的
+/// OpenID 与数字 UIN 都落在其中，`<@用户名>` 这类形态不匹配、原样留在正文。
+fn scan_mentions(text: &str) -> Vec<(std::ops::Range<usize>, &str)> {
+    let bytes = text.as_bytes();
+    let mut mentions = Vec::new();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'<' && bytes.get(cursor + 1) == Some(&b'@') {
+            let mut end = cursor + 2;
+            if bytes.get(end) == Some(&b'!') {
+                end += 1;
+            }
+            let id_start = end;
+            while bytes.get(end).is_some_and(|byte| byte.is_ascii_hexdigit()) {
+                end += 1;
+            }
+            if end > id_start && bytes.get(end) == Some(&b'>') {
+                // ID 段全是 ASCII，切片边界必然落在字符边界上
+                mentions.push((cursor..end + 1, &text[id_start..end]));
+                cursor = end + 1;
+                continue;
+            }
+        }
+        cursor += 1;
+    }
+    mentions
+}
+
+/// `id` 是否等于配置里的 `uin` 或 `app_id`（Go `GetUinStr()` / `GetAppIDStr()` 比对）。
+fn is_own_id(settings: &Settings, id: &str) -> bool {
+    id == settings.get_uin().to_string() || id == settings.get_app_id().to_string()
 }
 
 /// 入站敏感词过滤：只改写三个消息事件的 `content` 与 `author.username`
@@ -1360,8 +1567,30 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{auto_approved_pair, parse_rfc3339, timestamp_of, verify_comment};
+    use super::{auto_approved_pair, parse_rfc3339, scan_mentions, timestamp_of, verify_comment};
     use serde_json::json;
+
+    #[test]
+    fn scan_mentions_matches_go_hex_character_class() {
+        let text = "<@ABC123> a <@!def456> b <@zzz> c <@> d <@ABC";
+        let found: Vec<&str> = scan_mentions(text)
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect();
+        // 与 Go `incomingAtRe = <@!?([0-9A-Fa-f]+)>` 一致：`!` 可选、只认十六进制、
+        // 空 ID 与缺 `>` 都不匹配（原样留在正文）。
+        assert_eq!(found, vec!["ABC123", "def456"]);
+    }
+
+    #[test]
+    fn scan_mentions_reports_in_place_byte_ranges() {
+        let text = "前<@AB>后";
+        let found = scan_mentions(text);
+        assert_eq!(found.len(), 1);
+        let (range, id) = &found[0];
+        assert_eq!(*id, "AB");
+        assert_eq!(&text[range.clone()], "<@AB>");
+    }
 
     #[test]
     fn timestamp_accepts_string_number_and_missing() {
@@ -1564,6 +1793,8 @@ mod tests {
 
     /// 入站正文 BotID → AppID（Go `RevertTransformedText` 的 `message_parser.go:1850-1854`）：
     /// 群聊与私聊同一口径，否则客户端认不出 @bot（`self_id` 用的是 AppID）。
+    /// 还原后的 `<@!AppID>` 是 @bot 自身：AT 事件在 `remove_at` 关闭时归一成
+    /// `[CQ:at,qq=<self_id>]`（`message_parser.go:1883`），全量群消息则直接剥离。
     #[test]
     fn bot_id_in_content_is_reported_as_app_id() {
         use gensokyo_protocol::{Event, MessageContent};
@@ -1586,8 +1817,8 @@ mod tests {
         let MessageContent::Text(text) = &message.message else {
             panic!("群消息正文应为文本");
         };
-        assert_eq!(text, "<@!102001234> 你好");
-        assert_eq!(message.raw_message, "<@!102001234> 你好", "两条同源");
+        assert_eq!(text, "[CQ:at,qq=102001234] 你好");
+        assert_eq!(message.raw_message, "[CQ:at,qq=102001234] 你好", "两条同源");
 
         let private = json!({
             "id": "m-2",
@@ -1603,7 +1834,7 @@ mod tests {
         let MessageContent::Text(text) = &message.message else {
             panic!("私聊正文应为文本");
         };
-        assert_eq!(text, "<@!102001234> 你好");
+        assert_eq!(text, "[CQ:at,qq=102001234] 你好");
     }
 
     /// BotID 缺失时正文逐字透传（Go 的 `BotID != ""` 守卫：空串替换会打散正文）。

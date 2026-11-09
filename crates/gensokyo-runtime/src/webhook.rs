@@ -146,7 +146,7 @@ async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Bytes) 
             let published = events.len();
             for mut event in events {
                 crate::gateway::apply_op_userid_type(&mut event, settings.get_op_userid_type());
-                state.hub().publish(event);
+                state.downtime().publish(event);
             }
             tracing::debug!(published, "webhook 事件已发布");
             (

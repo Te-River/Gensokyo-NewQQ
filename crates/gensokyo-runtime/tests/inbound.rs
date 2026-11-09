@@ -4,11 +4,14 @@
 
 mod support;
 
+use std::sync::Arc;
+
 use gensokyo_core::Ob11Id;
 use gensokyo_protocol::Event;
 use gensokyo_protocol::MessageContent;
 use gensokyo_protocol::event::MessageType;
 use gensokyo_runtime::Inbound;
+use gensokyo_storage::{IdMapOptions, IdMapStore};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -757,3 +760,280 @@ fn array_value_applies_to_private_message() {
     assert!(message.message.is_array(), "单聊同样走段数组");
     assert_eq!(message.raw_message, "x[CQ:at,qq=7]");
 }
+
+// ---- 入站正文：mention 反解 / remove_at / remove_prefix（Go `RevertTransformedText`）----
+
+/// 群场景里机器人的 OpenID（来自 `mentions[].is_you`，与 Ready 的 `bot_id` 形态不同）。
+const BOT_MENTION: &str = "BEDAB0A652B5271EF7A8E9EB9ED48B42";
+/// 机器人真实 ID（`GET /users/@me`）；纯数字，也能被 `<@([0-9A-Fa-f]+)>` 匹配。
+const BOT_ID: &str = "7000012345678901234";
+/// 消息发送者：被 `is_you` 误标时也不允许当作 @bot。
+const SENDER_OPENID: &str = "D8FB64288B16F160289247BA495B7233";
+/// 可反查的他人。
+const OTHER_OPENID: &str = "AAAA1111AAAA1111AAAA1111AAAA1111";
+/// 故意不入 idmap 的他人。
+const UNMAPPED_OPENID: &str = "BBBB2222BBBB2222BBBB2222BBBB2222";
+
+const AT_BASE: &str = "  app_id: 12345\n  string_ob11: true\n  native_ob11: true\n";
+
+/// 带 idmap 的入站：预置 `seed` 里 OpenID 的 vUIN（`convert_other_at` 是**只查不分配**）。
+fn at_inbound(settings: &str, seed: &[&str]) -> (Inbound, Vec<String>, TempDir) {
+    let (manager, dir) = support::config(settings);
+    let store = Arc::new(
+        IdMapStore::open(
+            IdMapOptions::new(
+                dir.path().join("openid-map.redb"),
+                dir.path().join("msgid-map.redb"),
+            )
+            .with_app_id("12345"),
+        )
+        .expect("打开 idmap 存储失败"),
+    );
+    let vids = seed
+        .iter()
+        .map(|openid| {
+            let (_, vuin) = store.retrieve_virtual_value(openid).expect("预置映射失败");
+            vuin.to_string()
+        })
+        .collect();
+    (Inbound::new(manager, Some(store)), vids, dir)
+}
+
+fn at_payload(content: &str, mentions: Value) -> Value {
+    json!({
+        "id": "M1",
+        "group_id": "G1",
+        "content": content,
+        "timestamp": "1700000000",
+        "author": {"id": SENDER_OPENID, "username": "alice"},
+        "mentions": mentions,
+    })
+}
+
+/// 转换一条群消息，返回 (`raw_message`, `message` 的纯文本形态)。
+fn at_text(inbound: &Inbound, kind: &str, payload: &Value) -> (String, String) {
+    let events = inbound
+        .convert(kind, Some(payload), None)
+        .expect("转换失败");
+    let Event::Message(message) = &events[0] else {
+        panic!("应为 message 事件，实得 {events:?}");
+    };
+    (message.raw_message.clone(), message.text())
+}
+
+/// 段数组形态的 `message` 段（JSON 视图）。
+fn array_segments(inbound: &Inbound, kind: &str, payload: &Value) -> (Vec<Value>, String) {
+    let events = inbound
+        .convert(kind, Some(payload), None)
+        .expect("转换失败");
+    let Event::Message(message) = &events[0] else {
+        panic!("应为 message 事件，实得 {events:?}");
+    };
+    let MessageContent::Array(segments) = &message.message else {
+        panic!("array_value=true 应上报段数组，实得 {:?}", message.message);
+    };
+    (
+        segments
+            .iter()
+            .map(|segment| serde_json::to_value(segment).expect("段序列化失败"))
+            .collect(),
+        message.raw_message.clone(),
+    )
+}
+
+#[test]
+fn mention_of_other_becomes_cq_at() {
+    let settings = format!("{AT_BASE}  convert_other_at: true\n  remove_at: true\n");
+    let (inbound, vids, _dir) = at_inbound(&settings, &[OTHER_OPENID]);
+    let payload = at_payload(
+        &format!("<@{BOT_MENTION}> <@{OTHER_OPENID}> 你好"),
+        json!([{"id": BOT_MENTION, "is_you": true}]),
+    );
+    let (raw, text) = at_text(&inbound, "GROUP_AT_MESSAGE_CREATE", &payload);
+    assert_eq!(raw, format!("[CQ:at,qq={}] 你好", vids[0]));
+    assert_eq!(text, " 你好", "纯文本形态只剩 at 之后的正文");
+}
+
+#[test]
+fn self_mention_uses_self_id_when_remove_at_is_off() {
+    let settings = format!("{AT_BASE}  remove_at: false\n");
+    let (inbound, _vids, _dir) = at_inbound(&settings, &[]);
+    let payload = at_payload(
+        &format!("<@{BOT_MENTION}> 你好"),
+        json!([{"id": BOT_MENTION, "is_you": true}]),
+    );
+    let (raw, _) = at_text(&inbound, "GROUP_AT_MESSAGE_CREATE", &payload);
+    assert_eq!(
+        raw, "[CQ:at,qq=12345] 你好",
+        "关闭 remove_at 时自身 @ 还原成 self_id（`use_uin ? uin : app_id`）"
+    );
+}
+
+#[test]
+fn self_mention_strip_follows_event_and_remove_at() {
+    let content = format!("<@{BOT_MENTION}> 你好");
+    let mentions = json!([{"id": BOT_MENTION, "is_you": true}]);
+    for (kind, remove_at, want) in [
+        ("GROUP_AT_MESSAGE_CREATE", true, "你好"),
+        ("GROUP_AT_MESSAGE_CREATE", false, "[CQ:at,qq=12345] 你好"),
+        // 全量群消息的 @bot 恒剥离，与 remove_at 无关
+        ("GROUP_MESSAGE_CREATE", false, "你好"),
+        ("GROUP_MESSAGE_CREATE", true, "你好"),
+    ] {
+        let settings = format!("{AT_BASE}  remove_at: {remove_at}\n");
+        let (inbound, _vids, _dir) = at_inbound(&settings, &[]);
+        let (raw, _) = at_text(&inbound, kind, &at_payload(&content, mentions.clone()));
+        assert_eq!(raw, want, "kind={kind} remove_at={remove_at}");
+    }
+}
+
+#[test]
+fn mention_matching_bot_id_is_stripped_without_mention_flags() {
+    let settings = format!("{AT_BASE}  remove_at: true\n");
+    let (inbound, _vids, _dir) = at_inbound(&settings, &[]);
+    let inbound = inbound.with_bot_id(BOT_ID);
+    let payload = at_payload(&format!("<@{BOT_ID}> 你好"), json!([]));
+    let (raw, _) = at_text(&inbound, "GROUP_AT_MESSAGE_CREATE", &payload);
+    assert_eq!(raw, "你好", "mentions 缺失时 BotID 直等仍判为自身");
+}
+
+#[test]
+fn mention_author_is_never_treated_as_self() {
+    // Go `zzzz_inbound_at_order_test.go` ⑦：`is_you` 误标发送者时，发送者的 @ 既不能被
+    // 当成 @bot 剥掉，也不能被映射成 bot 的 ID。
+    let settings = format!("{AT_BASE}  convert_other_at: true\n  remove_at: true\n");
+    let (inbound, vids, _dir) = at_inbound(&settings, &[SENDER_OPENID]);
+    let payload = at_payload(
+        &format!("<@{BOT_MENTION}> at检测 <@{SENDER_OPENID}>"),
+        json!([
+            {"id": SENDER_OPENID, "is_you": true},
+            {"id": BOT_MENTION, "bot": true},
+        ]),
+    );
+    let (raw, _) = at_text(&inbound, "GROUP_AT_MESSAGE_CREATE", &payload);
+    assert_eq!(raw, format!("at检测 [CQ:at,qq={}]", vids[0]));
+}
+
+#[test]
+fn unresolvable_mention_keeps_raw_text_in_place() {
+    let settings = format!("{AT_BASE}  convert_other_at: true\n  remove_at: true\n");
+    let (inbound, _vids, _dir) = at_inbound(&settings, &[]);
+    let payload = at_payload(
+        &format!("<@{BOT_MENTION}> <@{UNMAPPED_OPENID}> 中"),
+        json!([{"id": BOT_MENTION, "is_you": true}]),
+    );
+    let (raw, _) = at_text(&inbound, "GROUP_AT_MESSAGE_CREATE", &payload);
+    assert_eq!(raw, format!("<@{UNMAPPED_OPENID}> 中"), "反查失败原位保留");
+}
+
+#[test]
+fn all_switches_off_keeps_content_verbatim() {
+    // 他人 OpenID 已进 idmap，但 convert_other_at 关闭：不得查表、不得生成 at。
+    let (inbound, _vids, _dir) = at_inbound(AT_BASE, &[OTHER_OPENID]);
+    let content = format!("<@{OTHER_OPENID}> at检测 <@1234>");
+    let (raw, _) = at_text(
+        &inbound,
+        "GROUP_AT_MESSAGE_CREATE",
+        &at_payload(&content, json!([])),
+    );
+    assert_eq!(raw, content, "三个开关全关时正文零变化");
+    assert!(!raw.contains("[CQ:at"), "convert_other_at 关闭时不得生成 at 码");
+}
+
+#[test]
+fn remove_prefix_value_drops_first_slash() {
+    let settings = format!("{AT_BASE}  remove_prefix: true\n");
+    let (inbound, _vids, _dir) = at_inbound(&settings, &[]);
+    let (raw, _) = at_text(
+        &inbound,
+        "GROUP_AT_MESSAGE_CREATE",
+        &at_payload("/指令 a/b", json!([])),
+    );
+    assert_eq!(raw, "指令 a/b", "只去第一个 `/`（Go `strings.Index` 口径）");
+}
+
+#[test]
+fn string_form_trims_surrounding_whitespace() {
+    let (inbound, _vids, _dir) = at_inbound(AT_BASE, &[]);
+    let (raw, _) = at_text(
+        &inbound,
+        "GROUP_AT_MESSAGE_CREATE",
+        &at_payload("  你好  ", json!([])),
+    );
+    assert_eq!(raw, "你好");
+}
+
+#[test]
+fn lone_slash_and_space_survives_trim_and_prefix_removal() {
+    // 字符串路径把 "/ " 归一成 " "（Go `message_parser.go:1832`），既不再 trim 也不去 `/`。
+    let settings = format!("{AT_BASE}  remove_prefix: true\n  remove_at: true\n");
+    let (inbound, _vids, _dir) = at_inbound(&settings, &[]);
+    let (raw, _) = at_text(
+        &inbound,
+        "GROUP_AT_MESSAGE_CREATE",
+        &at_payload("/ ", json!([])),
+    );
+    assert_eq!(raw, " ");
+}
+
+#[test]
+fn array_form_emits_at_segment_in_place() {
+    let settings = "  app_id: 12345\n  string_ob11: true\n  native_ob11: true\n  array: true\n  convert_other_at: true\n  remove_at: true\n";
+    let (inbound, vids, _dir) = at_inbound(settings, &[OTHER_OPENID]);
+    let payload = at_payload(
+        &format!("<@{BOT_MENTION}> <@{OTHER_OPENID}> 你好"),
+        json!([{"id": BOT_MENTION, "is_you": true}]),
+    );
+    let (segments, raw) = array_segments(&inbound, "GROUP_AT_MESSAGE_CREATE", &payload);
+    assert_eq!(
+        segments,
+        vec![
+            json!({"type": "at", "data": {"qq": vids[0]}}),
+            json!({"type": "text", "data": {"text": " 你好"}}),
+        ],
+        "at 段按原位顺序落段，不前移"
+    );
+    assert_eq!(raw, format!("[CQ:at,qq={}] 你好", vids[0]));
+}
+
+#[test]
+fn array_form_keeps_whitespace_when_remove_at_is_off() {
+    // Go 段路径（`ConvertToSegmentedMessage`）没有初始 trim：`remove_at=false` 的 AT 事件
+    // 把 "  你好  " 原样报成 text 段，而字符串路径（先 trim）报 "你好"。
+    let settings = "  app_id: 12345\n  string_ob11: true\n  native_ob11: true\n  array: true\n";
+    let (inbound, _vids, _dir) = at_inbound(settings, &[]);
+    let (segments, raw) = array_segments(
+        &inbound,
+        "GROUP_AT_MESSAGE_CREATE",
+        &at_payload("  你好  ", json!([])),
+    );
+    assert_eq!(
+        segments,
+        vec![json!({"type": "text", "data": {"text": "  你好  "}})]
+    );
+    assert_eq!(raw, "你好");
+}
+
+#[test]
+fn private_message_converts_other_mentions() {
+    // 单聊在 Go 里同样走 `RevertTransformedText`（`ProcessC2CMessage.go:104`）。
+    let settings = format!("{AT_BASE}  convert_other_at: true\n");
+    let (inbound, vids, _dir) = at_inbound(&settings, &[OTHER_OPENID]);
+    let events = inbound
+        .convert(
+            "C2C_MESSAGE_CREATE",
+            Some(&json!({
+                "id": "M2",
+                "content": format!("<@{OTHER_OPENID}> hi"),
+                "timestamp": "1700000000",
+                "author": {"id": SENDER_OPENID}
+            })),
+            None,
+        )
+        .expect("转换失败");
+    let Event::Message(message) = &events[0] else {
+        panic!("应为 message 事件，实得 {events:?}");
+    };
+    assert_eq!(message.raw_message, format!("[CQ:at,qq={}] hi", vids[0]));
+}
+

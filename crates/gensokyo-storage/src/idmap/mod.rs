@@ -180,6 +180,19 @@ struct UserNameEntry {
     stored_at: Instant,
 }
 
+/// 一条身份映射（Go `IdentityMapping`）：正表的一行加该 vUIN 的名称缓存。
+///
+/// 字段即 `/getid` type 19 的响应字段（`real_id` / `virtual_id` / `username`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentityMapping {
+    /// 原始身份串（反表值，已剥离 `uin:` 前缀）。
+    pub real_id: String,
+    /// 正表里该身份对应的 vUIN。
+    pub virtual_id: i64,
+    /// 名称缓存，未缓存时为空串（Go `GetUserName` 未命中返回 `""`）。
+    pub username: String,
+}
+
 /// idmap 本地存储。
 ///
 /// `Send + Sync`：内部两个 redb [`Database`]（各自串行写事务）+ 一个名称缓存互斥锁。
@@ -448,6 +461,91 @@ impl IdMapStore {
             }
         }
         fallback.ok_or_else(|| StorageError::NotFound(format!("vUIN={vuin}")))
+    }
+
+    /// 枚举全部身份映射（Go `ListAllIdentities`）：只读正表，按 key 升序。
+    ///
+    /// `real_id` 取反表里保存的原始身份串。Go 用的是 `stripUinPrefix(正向 key)`，也就是
+    /// `openid:QQ:<AppID>:<raw>` 这种归一化 key，与其字段注释“OpenID（去除 uin: 前缀）”不符；
+    /// 这里返回调用方真正想要的原始串（反表缺行时回退 key）。顺序与 Go 的 bbolt `ForEach`
+    /// 一致，都是 key 字节序。
+    ///
+    /// # Errors
+    ///
+    /// redb 事务失败或表数据损坏时返回 [`StorageError`]。
+    pub fn list_identities(&self) -> Result<Vec<IdentityMapping>, StorageError> {
+        let txn = self.identity_db.begin_read().map_err(rb)?;
+        let forward = txn.open_table(IDENTITY_TO_VUIN).map_err(rb)?;
+        let reverse = txn.open_table(VUIN_TO_IDENTITY).map_err(rb)?;
+        let mut mappings = Vec::new();
+        for entry in forward.iter().map_err(rb)? {
+            let (key, value) = entry.map_err(rb)?;
+            let identity_key = key.value();
+            let virtual_id = decode_vuin(value.value())?;
+            let reverse_key = vuin_identity_key(virtual_id, identity_key);
+            let real_id = match reverse.get(reverse_key.as_str()).map_err(rb)? {
+                Some(guard) => decode_text(guard.value())?,
+                None => identity_key.to_owned(),
+            };
+            let username = self.get_user_name(virtual_id).unwrap_or_default();
+            mappings.push(IdentityMapping {
+                real_id,
+                virtual_id,
+                username,
+            });
+        }
+        Ok(mappings)
+    }
+
+    /// 强制解绑（Go `ForceUnbindID`）：删除正表条目与该身份的全部反对表条目。
+    ///
+    /// `id` 支持 Go 的两种入参：原始身份串，或十进制 vUIN（后者经
+    /// [`IdMapStore::retrieve_row_by_id`] 反查原始身份）。返回删除的**反表**条目数
+    /// （Go 口径：正表不计数）。
+    ///
+    /// 与 Go 的差异：Go 删正表时用 `uinKey(raw)`（没配 `uin` 时就是 `raw`），永远命中不了
+    /// `openid:QQ:<AppID>:<raw>` 这类真实 key，解绑后正表残留；这里按 `normalize_identity`
+    /// 算出真实 key 再删，正反查同时失效。
+    ///
+    /// # Errors
+    ///
+    /// `id` 为空、vUIN 反查不到、或 redb 事务/表数据失败时返回 [`StorageError`]。
+    pub fn force_unbind(&self, id: &str) -> Result<usize, StorageError> {
+        if id.is_empty() {
+            return Err(StorageError::Corrupt("id 不能为空".to_owned()));
+        }
+        let raw = match id.parse::<i64>() {
+            Ok(vuin) => self.retrieve_row_by_id(vuin).map_err(|err| {
+                if err.is_not_found() {
+                    StorageError::NotFound(format!("虚拟 ID {id} 未找到对应 OpenID"))
+                } else {
+                    err
+                }
+            })?,
+            Err(_) => id.to_owned(),
+        };
+        let normalized =
+            normalize_identity(&raw, &self.options.app_id, self.options.uin.as_deref());
+        let txn = self.identity_db.begin_write().map_err(rb)?;
+        let removed = {
+            let mut forward = txn.open_table(IDENTITY_TO_VUIN).map_err(rb)?;
+            forward.remove(normalized.key.as_str()).map_err(rb)?;
+            let mut reverse = txn.open_table(VUIN_TO_IDENTITY).map_err(rb)?;
+            // 先收集 key 再删：redb 的迭代器持有表的不可变借用。
+            let mut stale = Vec::new();
+            for entry in reverse.iter().map_err(rb)? {
+                let (key, value) = entry.map_err(rb)?;
+                if decode_text(value.value())? == normalized.raw {
+                    stale.push(key.value().to_owned());
+                }
+            }
+            for key in &stale {
+                reverse.remove(key.as_str()).map_err(rb)?;
+            }
+            stale.len()
+        };
+        txn.commit().map_err(rb)?;
+        Ok(removed)
     }
 
     /// vUIN 对应的 `last_seen` 原始身份串（Go `readLastSeenTx`）。

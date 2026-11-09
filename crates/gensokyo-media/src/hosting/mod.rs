@@ -52,7 +52,7 @@ pub mod cos;
 pub(crate) mod digest;
 #[cfg(test)]
 pub(crate) mod fixtures;
-mod json;
+pub(crate) mod json;
 pub mod multipart;
 pub mod nature;
 pub(crate) mod qcloud;

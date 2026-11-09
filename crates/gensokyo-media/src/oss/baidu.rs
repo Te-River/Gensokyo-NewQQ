@@ -14,8 +14,9 @@
 //! `qqbot-upload-<md5>-<纳秒>.jpg`（Go 用 `os.CreateTemp` 的随机后缀），访问 URL 与上传 URL
 //! 同形：`https://<b_BOS_BUCKETNAME>/<appid>/<key>`（BOS 的 path-style 寻址）。
 //!
-//! 与 Go 的差异：`b_audit`（0 仅上传 / 1 BOS+审核 / 2 本地上传+审核）只支持 0；1 与 2 都依赖
-//! Go 的审核客户端或本地 `/uploadpic` 端点，未实现时在发请求前返回 [`Error::HostingConfig`]。
+//! `b_audit` 的三种模式：0 仅上传（同 Go）；1 = BOS 上传后按 Go `ImgCensorUrl` 的形态审核
+//! （见 [`crate::oss::audit`]）；2 = 先传到本机 `/uploadpic` 再审核该 URL——那条链是 runtime
+//! 的本地上传出口，本 crate 没有，仍在发请求前返回 [`Error::HostingConfig`]（fail-closed）。
 
 use std::sync::Arc;
 
@@ -62,13 +63,16 @@ impl BaiduBosConfig {
                 "百度云 BOS 未取到 AppID：对象桶名就是 AppID".to_owned(),
             ));
         }
-        if self.audit != 0 {
-            return Err(Error::HostingConfig(format!(
-                "百度云 BOS 审核模式 b_audit={} 尚未实现（仅支持 0，仅上传），本次上传跳过",
-                self.audit
-            )));
+        match self.audit {
+            0 | 1 => Ok(()),
+            2 => Err(Error::HostingConfig(
+                "百度云 BOS 审核模式 b_audit=2 要先传到本机 /uploadpic 再审核，本 crate 没有本地上传出口（请改用 0 或 1）"
+                    .to_owned(),
+            )),
+            other => Err(Error::HostingConfig(format!(
+                "百度云 BOS 审核模式 b_audit={other} 非法（Go 只认 0 / 1 / 2）"
+            ))),
         }
-        Ok(())
     }
 }
 
@@ -132,6 +136,8 @@ fn authorization(config: &BaiduBosConfig, host: &str, uri: &str, date: &str) -> 
 }
 
 /// 上传一份图片字节，返回 `https://<b_BOS_BUCKETNAME>/<appid>/<key>`。
+///
+/// `b_audit=1` 时先 PUT 再审核（Go 同序）：审核不通过返回 [`Error::AuditRejected`]。
 pub async fn upload(
     transport: Arc<dyn HostingTransport>,
     config: &BaiduBosConfig,
@@ -140,7 +146,7 @@ pub async fn upload(
     let (timestamp, nanos) = unix_now();
     let plan = plan(config, data, timestamp, nanos)?;
     put(
-        transport,
+        Arc::clone(&transport),
         plan.url,
         vec![
             ("Host".to_owned(), plan.host),
@@ -150,6 +156,9 @@ pub async fn upload(
         data,
     )
     .await?;
+    if config.audit == 1 {
+        super::audit::baidu(transport, config, &plan.result_url).await?;
+    }
     Ok(plan.result_url)
 }
 
@@ -232,11 +241,11 @@ mod tests {
                 ..bos()
             },
             BaiduBosConfig {
-                audit: 1,
+                audit: 2,
                 ..bos()
             },
             BaiduBosConfig {
-                audit: 2,
+                audit: 3,
                 ..bos()
             },
         ] {
@@ -278,5 +287,103 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, Error::HttpStatus(403)), "{error}");
+    }
+
+    fn audited() -> OssConfig {
+        OssConfig {
+            baidu: BaiduBosConfig {
+                audit: 1,
+                ..bos()
+            },
+            ..OssConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn audits_after_upload_with_img_censor_url() {
+        let transport = Arc::new(
+            FakeTransport::new()
+                .respond(200, "")
+                .respond(200, r#"{"conclusion":"合规","log_id":1,"data":[]}"#),
+        );
+        let url = upload_oss(OssKind::BaiduBos, transport.clone(), &audited(), PNG)
+            .await
+            .expect("审核通过");
+
+        let calls = transport.calls();
+        assert_eq!(calls.len(), 2, "PUT 之后再来一次审核");
+        let audit = &calls[1];
+        assert_eq!(audit.method, UploadMethod::Post);
+        assert_eq!(
+            audit.url,
+            "https://aip.baidubce.com/rest/2.0/solution/v1/img_censor/v2/user_defined?aipSdk=golang"
+        );
+        let header = |name: &str| {
+            audit
+                .headers
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| panic!("缺 {name}：{:?}", audit.headers))
+        };
+        assert_eq!(header("Host"), "aip.baidubce.com");
+        assert_eq!(header("x-bce-date").len(), 20, "2026-11-09T10:00:00Z");
+        let authorization = header("Authorization");
+        assert!(
+            authorization.starts_with("bce-auth-v1/bce-ak/"),
+            "{authorization}"
+        );
+        assert!(
+            authorization.contains("/1800/host;x-bce-date/"),
+            "{authorization}"
+        );
+        let body = audit.body.as_ref().expect("审核有 form 请求体");
+        assert_eq!(body.content_type, "application/x-www-form-urlencoded");
+        assert_eq!(
+            String::from_utf8_lossy(&body.bytes),
+            format!("imgUrl={}", url.replace(':', "%3A").replace('/', "%2F")),
+            "审核的是刚上传的公网 URL"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_images_that_fail_audit() {
+        let transport = Arc::new(
+            FakeTransport::new()
+                .respond(200, "")
+                .respond(200, r#"{"conclusion":"不合规","log_id":2}"#),
+        );
+        let error = upload_oss(OssKind::BaiduBos, transport.clone(), &audited(), PNG)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::AuditRejected(reason) if reason.contains("不合规")),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_errors_when_aip_credentials_are_rejected() {
+        let transport = Arc::new(FakeTransport::new().respond(200, "").respond(
+            200,
+            r#"{"error_code":14,"error_msg":"IAM Certification failed"}"#,
+        ));
+        let error = upload_oss(OssKind::BaiduBos, transport.clone(), &audited(), PNG)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::HostingResponse(reason) if reason.contains("error_code=14")),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_failure_skips_audit() {
+        let transport = Arc::new(FakeTransport::new().respond(403, "AccessDenied"));
+        let error = upload_oss(OssKind::BaiduBos, transport.clone(), &audited(), PNG)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::HttpStatus(403)), "{error}");
+        assert_eq!(transport.calls().len(), 1, "上传失败不发审核请求");
     }
 }

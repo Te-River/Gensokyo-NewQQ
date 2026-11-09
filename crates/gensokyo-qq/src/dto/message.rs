@@ -483,6 +483,89 @@ impl FileUpload {
     }
 }
 
+/// 分片上传·预上传请求（对齐 `botgo/dto.UploadPrepareRequest`）。
+///
+/// `file_size` / `block_size` 在官方契约里都是**字符串**（Go DTO 同为 string）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FileUploadPrepareRequest {
+    /// 文件类型，见 [`file_type`]。
+    pub file_type: u32,
+    /// 文件大小（字节，十进制字符串）。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub file_size: String,
+    /// 文件名。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub file_name: String,
+    /// 全文件 MD5（32 位小写十六进制）。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub md5: String,
+    /// 全文件 SHA1；Go 侧不填，保留字段以对齐官方契约。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub sha1: String,
+    /// 文件前 10002432 字节（约 10MB）的 MD5（Go `md5_10m`）。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub md5_10m: String,
+}
+
+/// 分片上传·预上传响应（对齐 `botgo/dto.UploadPrepareResponse`）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FileUploadPrepareResponse {
+    /// 上传任务 ID，合并时回传。
+    pub upload_id: String,
+    /// 服务端下发的分片大小（字节，字符串）；空串时调用方用 5MiB 兜底。
+    pub block_size: String,
+    /// 待上传分片列表；为空表示预上传失败。
+    pub parts: Vec<FileUploadPart>,
+}
+
+/// 一个待上传分片（对齐 `botgo/dto.UploadPart`）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FileUploadPart {
+    /// 分片序号，从 0 开始；切片起点 = `index * block_size`。
+    pub index: u64,
+    /// 预签名 PUT URL（COS 域名，PUT 时不得带 Authorization）。
+    pub presigned_url: String,
+    /// 本片大小（字节，字符串）；Go 侧只透传，不参与切片计算。
+    pub block_size: String,
+}
+
+/// 分片上传·分片完成通知（对齐 `botgo/dto.UploadPartFinishRequest`）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FileUploadPartFinishRequest {
+    /// 预上传返回的上传任务 ID。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub upload_id: String,
+    /// 分片序号。
+    pub part_index: u64,
+    /// 本片实际大小（字节，字符串）。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub block_size: String,
+    /// 本片 MD5（32 位小写十六进制）。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub md5: String,
+}
+
+/// 分片上传·合并请求（对齐 `botgo/dto.FileUploadRequest`，`POST /v2/.../files`）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FileUploadMergeRequest {
+    /// 文件类型，见 [`file_type`]。
+    pub file_type: u32,
+    /// 文件名。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub file_name: String,
+    /// 是否由服务端直接发送；分片合并固定 `false`（Go 同）。
+    #[serde(skip_serializing_if = "is_false")]
+    pub srv_send_msg: bool,
+    /// 预上传返回的上传任务 ID。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub upload_id: String,
+}
+
 /// 发送消息响应（群 / C2C 文本路径）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -548,6 +631,52 @@ mod tests {
         assert!(
             value.get("event_id").is_none(),
             "event_id 为空时不得出现在 JSON 里: {value}"
+        );
+    }
+
+    #[test]
+    fn chunked_upload_dtos_use_official_field_names() {
+        let prepare = FileUploadPrepareRequest {
+            file_type: 1,
+            file_size: "5000001".to_owned(),
+            file_name: "a.png".to_owned(),
+            md5: "a".repeat(32),
+            sha1: String::new(),
+            md5_10m: "b".repeat(32),
+        };
+        let value = serde_json::to_value(&prepare).unwrap();
+        assert_eq!(value["file_size"], "5000001", "file_size 必须是字符串");
+        assert_eq!(value["md5_10m"], "b".repeat(32));
+        assert!(value.get("sha1").is_none(), "空 sha1 不序列化（Go omitempty）");
+
+        let response: FileUploadPrepareResponse = serde_json::from_value(json!({
+            "upload_id": "up-1",
+            "block_size": "5242880",
+            "parts": [{"index": 0, "presigned_url": "https://cos.example/p0", "block_size": "5242880"}],
+        }))
+        .unwrap();
+        assert_eq!(response.upload_id, "up-1");
+        assert_eq!(response.parts[0].index, 0);
+
+        let merge = FileUploadMergeRequest {
+            file_type: 1,
+            file_name: "a.png".to_owned(),
+            srv_send_msg: false,
+            upload_id: "up-1".to_owned(),
+        };
+        let value = serde_json::to_value(&merge).unwrap();
+        assert!(value.get("srv_send_msg").is_none(), "false 不序列化");
+        assert_eq!(value["upload_id"], "up-1");
+
+        let finish = FileUploadPartFinishRequest {
+            upload_id: "up-1".to_owned(),
+            part_index: 1,
+            block_size: "1".to_owned(),
+            md5: "c".repeat(32),
+        };
+        assert_eq!(
+            serde_json::to_value(&finish).unwrap()["part_index"],
+            json!(1)
         );
     }
 

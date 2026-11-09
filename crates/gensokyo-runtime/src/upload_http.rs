@@ -24,12 +24,17 @@
 //!   保存 / 拼 URL 逻辑（省掉一跳），成功响应完全一致。
 //! - `oss_type=0` 且 `lotus=true && !lotus_without_uploadpic` 时 Go 转发给远端 lotus 图床；
 //!   Rust 未移植 lotus 出站，返回 500 并说明原因（不伪造成功）。
-//! - `getid` 的 5、12、14、18、19 依赖 bbolt 迁移期数据结构，Rust idmap 未提供，回 **501**；
+//! - `getid` 的 5、12、14 依赖 bbolt 迁移期数据结构，Rust idmap 未提供，回 **501**；
 //!   复合键类型 8~11 由本地 `IdMapStore` 两次单键调用组合实现（与 gRPC 服务端同一套语义），
 //!   其余类型与 Go 同码同形状。Go 的 `switch` 无 `default`，未知 type 返回 **200 空响应体**，
 //!   此处照抄。
-//! - `getid` 恒挂载：Go 在 lotus gRPC 接管 idmap 时不注册该路由，但 Rust 侧 gRPC 服务端尚未
-//!   装配，照搬会让远端 lotus 调用整条消失（见 [`router`]）。
+//! - `getid` 18/19（Go `ForceUnbindID` / `ListAllIdentities`）：18 按 `normalize_identity` 删正表
+//!   条目，因此解绑后正反查都查不到（Go 删的是 `uin:<raw>`，命中不了真实 key，正表会残留）；
+//!   19 的 `real_id` 取反表里的原始身份串（Go 取归一化 key），空库回 `[]`（Go 的 nil 切片是
+//!   `null`）。18 的错误按 Go 一律回 500（Go 该分支没有 404）。
+//! - `getid` 的挂载与 gRPC 接管联动：Go 在 lotus gRPC 接管 idmap 时不注册该路由
+//!   （`main.go:507`）。是否接管由 [`crate::boot`] 按「服务端是否真的起来」决定——起不来时
+//!   仍挂本地路由（Go 那里会 `Fatalf`），避免远端 lotus 调用整条消失（见 [`router`]）。
 //! - `/uploadpicv2` 的宽高：Go 对 0~3 按 URL 再下载一次取尺寸；这里统一读内存里的文件头
 //!   （`gensokyo_media::image_size`），少一次网络往返，结果对同一张图一致。
 //! - 图床短签名外链的 302→直链解析属 P7 的口径（`gensokyo_media::hosting` 未做），v2 复用
@@ -38,7 +43,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
-use std::sync::{LazyLock, Mutex, Once, PoisonError};
+use std::sync::{LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{
@@ -68,31 +73,23 @@ const CHANNEL_TEMP: &str = "./channel_temp";
 /// `getid` 签名时间窗口：Go `±300s`。
 const TIMESTAMP_WINDOW: i64 = 300;
 
-/// 三条路由。`/getid` 恒挂载：Go `main.go:507` 在 lotus gRPC 接管 idmap 时不注册它，但本仓库
-/// 的 gRPC 服务端尚未装配（`gensokyo-bin` 不引用 `idmap/grpc`），照搬会让远端 lotus 的
-/// 8~11 调用整条消失，因此这里只在 lotus gRPC 配置下 warn 一次；等 gRPC 服务端接线后恢复
-/// 该条件即可。
-pub(crate) fn router(state: AppState) -> Router {
-    let settings = state.config().snapshot();
-    if settings.get_lotus() && settings.get_lotus_grpc() {
-        warn_grpc_idmap_unavailable();
-    }
-    Router::new()
+/// 三条 idmap / 上传路由。
+///
+/// `mount_getid=false` 对应 Go `main.go:507`：`lotus_grpc` 的 gRPC idmap 服务端接管后不再
+/// 注册本地 `/getid`（同一进程不摆两套 idmap 入口）。是否接管由 [`crate::boot`] 按服务端
+/// **是否真的起来**决定，监听失败时仍挂本地路由。
+pub(crate) fn router(state: AppState, mount_getid: bool) -> Router {
+    let routes = Router::new()
         .route("/uploadpic", post(upload_pic))
-        .route("/uploadpicv2", post(upload_pic_v2))
-        .route("/getid", get(get_id))
+        .route("/uploadpicv2", post(upload_pic_v2));
+    let routes = if mount_getid {
+        routes.route("/getid", get(get_id))
+    } else {
+        routes
+    };
+    routes
         .layer(DefaultBodyLimit::max(MAX_FORM_BYTES))
         .with_state(state)
-}
-
-/// `lotus_grpc` 打开但本进程没有 gRPC idmap 服务端：`/getid` 照常挂载，日志说明原因（一次）。
-fn warn_grpc_idmap_unavailable() {
-    static WARNED: Once = Once::new();
-    WARNED.call_once(|| {
-        tracing::warn!(
-            "lotus_grpc=true 但 Rust 侧尚未装配 gRPC idmap 服务端；/getid 保持挂载以承接远端调用"
-        );
-    });
 }
 
 // ---------------------------------------------------------------- /uploadpic
@@ -528,9 +525,49 @@ async fn get_id(State(state): State<AppState>, request: Request) -> Response {
                     "id parameter is required for type 18",
                 );
             }
-            unsupported(type_value)
+            let Some(idmap) = state.idmap() else {
+                return idmap_missing();
+            };
+            // Go `ForceUnbindID`：删正表条目 + 该身份的全部反对表条目，返回反表计数。
+            // Go 的 type 18 分支没有 404，任何错误都回 500。
+            match idmap.force_unbind(id) {
+                Ok(unbound) => Json(json!({
+                    "status": "success",
+                    "unbound_count": unbound,
+                }))
+                .into_response(),
+                Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+            }
         }
-        19 => unsupported(type_value),
+        19 => {
+            let Some(idmap) = state.idmap() else {
+                return idmap_missing();
+            };
+            // Go `ListAllIdentities`：快照直接作为响应体（不套 data 层）。
+            // 差异：Go 的 nil 切片序列化成 `"mappings": null`，空库这里给 `[]`。
+            match idmap.list_identities() {
+                Ok(mappings) => {
+                    let entries: Vec<_> = mappings
+                        .iter()
+                        .map(|mapping| {
+                            json!({
+                                "real_id": mapping.real_id,
+                                "virtual_id": mapping.virtual_id,
+                                "username": mapping.username,
+                            })
+                        })
+                        .collect();
+                    let count = entries.len();
+                    Json(json!({
+                        "mappings": entries,
+                        "count": count,
+                        "timestamp": unix_now(),
+                    }))
+                    .into_response()
+                }
+                Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+            }
+        }
         // Go 的 switch 没有 default：写完 200 头就返回，响应体为空
         _ => StatusCode::OK.into_response(),
     }
@@ -813,9 +850,15 @@ mod tests {
     use tempfile::TempDir;
     use tower::ServiceExt;
 
-    use super::{router, sign_payload};
+    use super::sign_payload;
     use crate::hosting::HostingRuntime;
     use crate::state::AppState;
+
+    /// 路由用例默认覆盖「本地 `/getid` 挂载」这一支（等价 `mount_getid=true`）；
+    /// 接管后的隐藏行为在 `getid_route_follows_idmap_grpc_takeover` 里直接走 `super::router`。
+    fn router(state: AppState) -> axum::Router {
+        super::router(state, true)
+    }
 
     /// 测试侧自己算签名，避免用被测代码当 oracle。
     fn hmac_hex(key: &[u8], data: &[u8]) -> String {
@@ -1424,7 +1467,6 @@ mod tests {
                 400,
                 "id parameter is required for type 18",
             ),
-            ("/getid?type=19", 501, "type=19"),
         ] {
             let (status, body) = call(router(state.clone()), get_request(uri, LOCAL_PEER)).await;
             assert_eq!(status, expected_status, "{uri}");
@@ -1443,15 +1485,121 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn getid_force_unbind_and_list_identities_follow_go() {
+        let directory = TempDir::new().expect("临时目录");
+        let state =
+            AppState::with_builtin_handlers(manager(&directory, "  server_dir: example.com\n"))
+                .with_idmap(idmap(&directory));
+
+        // 19：空库 → 空数组（Go 的 nil 切片序列化成 null，这里给 []）
+        let (status, body) = call(
+            router(state.clone()),
+            get_request("/getid?type=19", LOCAL_PEER),
+        )
+        .await;
+        assert_eq!(status, 200, "{body:?}");
+        assert_eq!(body["mappings"], Value::Array(Vec::new()));
+        assert_eq!(body["count"], 0);
+        assert!(
+            body["timestamp"].as_i64().is_some_and(|value| value > 0),
+            "{body:?}"
+        );
+
+        let openid = "E".repeat(32);
+        let other = "F".repeat(32);
+        let (status, body) = call(
+            router(state.clone()),
+            get_request(&format!("/getid?type=1&id={openid}"), LOCAL_PEER),
+        )
+        .await;
+        assert_eq!(status, 200, "{body:?}");
+        let row = body["row"].as_i64().expect("row");
+        let (status, body) = call(
+            router(state.clone()),
+            get_request(&format!("/getid?type=1&id={other}"), LOCAL_PEER),
+        )
+        .await;
+        assert_eq!(status, 200, "{body:?}");
+        state
+            .idmap()
+            .expect("idmap 已装配")
+            .store_user_name(row, "alice");
+
+        // 19：按正表 key 升序（两个 OpenID 前缀相同，比较的是 raw 段）
+        let (status, body) = call(
+            router(state.clone()),
+            get_request("/getid?type=19", LOCAL_PEER),
+        )
+        .await;
+        assert_eq!(status, 200, "{body:?}");
+        assert_eq!(body["count"], 2);
+        assert_eq!(body["mappings"][0]["real_id"], openid);
+        assert_eq!(body["mappings"][0]["virtual_id"], row);
+        assert_eq!(body["mappings"][0]["username"], "alice");
+        assert_eq!(body["mappings"][1]["real_id"], other);
+        assert_eq!(body["mappings"][1]["username"], "");
+
+        // 18：按 OpenID 解绑 → 正反查都查不到
+        let (status, body) = call(
+            router(state.clone()),
+            get_request(&format!("/getid?type=18&id={openid}"), LOCAL_PEER),
+        )
+        .await;
+        assert_eq!(status, 200, "{body:?}");
+        assert_eq!(body["status"], "success");
+        assert_eq!(body["unbound_count"], 1);
+        let (status, body) = call(
+            router(state.clone()),
+            get_request(&format!("/getid?type=2&id={row}"), LOCAL_PEER),
+        )
+        .await;
+        assert_eq!(status, 404, "{body:?}");
+        assert_eq!(body["error"], "ID not found");
+        let (status, _) = call(
+            router(state.clone()),
+            get_request(&format!("/getid?type=7&id={openid}"), LOCAL_PEER),
+        )
+        .await;
+        assert_eq!(status, 500, "正表已删：lookup 失败按 Go 回 500");
+
+        // 18：未知身份串 → Go 也回 200 + 0 条（幂等，该分支没有 404）
+        let (status, body) = call(
+            router(state.clone()),
+            get_request("/getid?type=18&id=nobody", LOCAL_PEER),
+        )
+        .await;
+        assert_eq!(status, 200, "{body:?}");
+        assert_eq!(body["unbound_count"], 0);
+
+        // 18：十进制按 vUIN 处理，反查不到 → 500（Go 该分支没有 404）
+        let (status, body) = call(
+            router(state.clone()),
+            get_request("/getid?type=18&id=424242", LOCAL_PEER),
+        )
+        .await;
+        assert_eq!(status, 500, "{body:?}");
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|text| text.contains("424242")),
+            "{body:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn getid_pro_types_pair_two_single_keys() {
         let directory = TempDir::new().expect("临时目录");
-        let state = AppState::with_builtin_handlers(manager(&directory, "  server_dir: example.com\n"))
-            .with_idmap(idmap(&directory));
+        let state =
+            AppState::with_builtin_handlers(manager(&directory, "  server_dir: example.com\n"))
+                .with_idmap(idmap(&directory));
 
         // 8：群真实 ID + 用户真实 ID → 两个 vUIN（Go `StoreIDv2Pro`）
         let (status, body) = call(
             router(state.clone()),
-            get_request("/getid?type=8&id=openid:group&subid=openid:member", LOCAL_PEER),
+            get_request(
+                "/getid?type=8&id=openid:group&subid=openid:member",
+                LOCAL_PEER,
+            ),
         )
         .await;
         assert_eq!(status, 200, "{body:?}");
@@ -1461,7 +1609,10 @@ mod tests {
         // 重复调用命中同一对 vUIN（Go `StoreIDv2` 的查不到才分配）
         let (status, body) = call(
             router(state.clone()),
-            get_request("/getid?type=8&id=openid:group&subid=openid:member", LOCAL_PEER),
+            get_request(
+                "/getid?type=8&id=openid:group&subid=openid:member",
+                LOCAL_PEER,
+            ),
         )
         .await;
         assert_eq!(status, 200);
@@ -1522,19 +1673,26 @@ mod tests {
         }
     }
 
+    /// gRPC idmap 服务端接管后本地 `/getid` 不再注册（Go `main.go:507`）；未接管时照常挂载。
     #[tokio::test]
-    async fn getid_route_stays_mounted_even_with_lotus_grpc() {
+    async fn getid_route_follows_idmap_grpc_takeover() {
         let directory = TempDir::new().expect("临时目录");
-        let plain = AppState::with_builtin_handlers(manager(&directory, "  server_dir: x\n"));
-        let (status, _) = call(router(plain), get_request("/getid?type=", LOCAL_PEER)).await;
-        assert_eq!(status, 400, "默认应注册 /getid");
-
-        // Rust 侧没有 gRPC idmap 服务端：照常挂载，否则远端 lotus 调用会静默消失
-        let grpc = AppState::with_builtin_handlers(manager(
+        let state = AppState::with_builtin_handlers(manager(
             &directory,
             "  server_dir: x\n  lotus: true\n  lotus_grpc: true\n",
         ));
-        let (status, _) = call(router(grpc), get_request("/getid?type=", LOCAL_PEER)).await;
-        assert_eq!(status, 400, "lotus_grpc 配置下同样挂载 /getid");
+        let (status, _) = call(
+            router(state.clone()),
+            get_request("/getid?type=", LOCAL_PEER),
+        )
+        .await;
+        assert_eq!(status, 400, "未接管时应挂载 /getid（400 是缺参数）");
+
+        let (status, body) = call(
+            super::router(state, false),
+            get_request("/getid?type=", LOCAL_PEER),
+        )
+        .await;
+        assert_eq!(status, 404, "gRPC 接管后 /getid 不应存在: {body:?}");
     }
 }

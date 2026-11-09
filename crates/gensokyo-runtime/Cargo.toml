@@ -28,6 +28,9 @@ md-5.workspace = true
 base64.workspace = true
 # webhook ed25519 验签（ring 已随 TLS 栈进树，这里只是直连）
 ring.workspace = true
+# idmap gRPC 服务端（`lotus && lotus_grpc`）：服务端与 17 个 RPC 实现都在 gensokyo-storage
+# 的 `idmap::grpc`，这里只需要 tonic 的 `transport::Server` 装配与关闭信号
+tonic.workspace = true
 # 反向 WS 客户端：`SinkExt` / `StreamExt` 拆读写两半
 futures.workspace = true
 serde.workspace = true
@@ -43,6 +46,8 @@ futures.workspace = true
 # webhook 用例要按 Go 的 seed 规则自己派生密钥并签名
 ring.workspace = true
 tempfile = "3.27.0"
+# 图片压缩接线用例要生成 JPEG 样本（工作区已因 gensokyo-media 锁定 image）
+image.workspace = true
 # 路由级用例：in-process 调用 `Router`（axum 自身只提供 `serve`，`oneshot` 在 tower）
 tower = { version = "0.5", features = ["util"] }
 tokio = { workspace = true, features = [

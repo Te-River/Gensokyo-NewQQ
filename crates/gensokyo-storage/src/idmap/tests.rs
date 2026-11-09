@@ -438,3 +438,101 @@ fn find_config_sections_strips_suffix_not_first_colon() {
         ["outer".to_owned(), "outer:inner".to_owned()],
     );
 }
+
+#[test]
+fn list_identities_enumerates_forward_table_in_key_order() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store = open(dir.path());
+
+    assert!(
+        store.list_identities().expect("空库枚举").is_empty(),
+        "空库回空列表"
+    );
+
+    let openid_a = "A".repeat(32);
+    let openid_b = "B".repeat(32);
+    // 逆序写入：枚举结果按正表 key 升序（Go bbolt `ForEach` 的字节序），与 vUIN 无关
+    let (_, row_b) = store.retrieve_virtual_value(&openid_b).expect("写 B");
+    let (_, row_a) = store.retrieve_virtual_value(&openid_a).expect("写 A");
+    store.store_user_name(row_b, "bee");
+
+    assert_eq!(
+        store.list_identities().expect("枚举"),
+        vec![
+            IdentityMapping {
+                real_id: openid_a,
+                virtual_id: row_a,
+                username: String::new(),
+            },
+            IdentityMapping {
+                real_id: openid_b,
+                virtual_id: row_b,
+                username: "bee".to_owned(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn force_unbind_deletes_forward_and_reverse_rows() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store = open(dir.path());
+    let openid = "C".repeat(32);
+    let (_, row) = store.retrieve_virtual_value(&openid).expect("写身份");
+    // 迁移遗留：同一 vUIN 下再挂一条指向同一身份的反表条目
+    write_reverse_entry(&store, row, "openid:QQ:other", &openid);
+
+    assert_eq!(
+        store.force_unbind(&openid).expect("按身份解绑"),
+        2,
+        "反表两条都要删掉（Go 只计数反表）"
+    );
+    assert!(
+        store
+            .lookup_virtual_value(&openid)
+            .expect_err("正表已删")
+            .is_not_found()
+    );
+    assert!(
+        store
+            .retrieve_row_by_id(row)
+            .expect_err("反表已删")
+            .is_not_found()
+    );
+    assert!(store.list_identities().expect("枚举").is_empty());
+}
+
+#[test]
+fn force_unbind_accepts_vuin_input() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store = open(dir.path());
+    let openid = "D".repeat(32);
+    let (_, row) = store.retrieve_virtual_value(&openid).expect("写身份");
+
+    assert_eq!(
+        store.force_unbind(&row.to_string()).expect("按 vUIN 解绑"),
+        1
+    );
+    assert!(
+        store
+            .lookup_virtual_value(&openid)
+            .expect_err("正表已删")
+            .is_not_found()
+    );
+}
+
+#[test]
+fn force_unbind_reports_go_argument_errors() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store = open(dir.path());
+
+    assert!(
+        matches!(store.force_unbind(""), Err(StorageError::Corrupt(_))),
+        "空 id 与 Go 一样报错"
+    );
+    let missing = store.force_unbind("424242").expect_err("未知 vUIN");
+    assert!(missing.is_not_found(), "{missing}");
+    assert!(missing.to_string().contains("424242"), "{missing}");
+    // 不存在的身份串：Go 删不到也算成功（幂等）
+    assert_eq!(store.force_unbind("nobody").expect("幂等解绑"), 0);
+}

@@ -19,6 +19,7 @@ use gensokyo_storage::{BotStatsStore, EchoStore, IdMapStore};
 
 use crate::builtin;
 use crate::dispatcher::Dispatcher;
+use crate::downtime::Downtime;
 use crate::event_hub::EventHub;
 use crate::hosting::HostingRuntime;
 use crate::media::MediaRuntime;
@@ -210,6 +211,13 @@ impl AppState {
     #[must_use]
     pub fn hub(&self) -> &EventHub {
         &self.hub
+    }
+
+    /// 事件发布器：发布到总线，并在没有任何下游 WS 订阅者时按 Go 兜底回
+    /// `downtime_message`（`!http_only_bot` 时才发，见 [`crate::downtime`]）。
+    #[must_use]
+    pub fn downtime(&self) -> Downtime {
+        Downtime::from_state(self)
     }
 
     /// handler 注册表。

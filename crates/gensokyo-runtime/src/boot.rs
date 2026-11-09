@@ -35,6 +35,11 @@
 //! 这是启动期唯一一次主动联网（含换 access_token）；失败只 `warn`，BotID 缺失时两侧都不替换
 //! （Go 取不到 `Me` 时进 `nologin` 分支，整段初始化都跳过）。
 //!
+//! `lotus && lotus_grpc` 时还会起 idmap gRPC 服务端（tonic；Go `main_grpc.go`）：监听
+//! `0.0.0.0:{lotus_grpc_port}`，注册与 Go 共用 `proto/idmap.proto` 的 17 个 RPC，句柄与两个
+//! listener 共用同一套关闭语义。起来之后本地 `/getid` 按 Go `main.go:507` 隐藏；起不来
+//! （idmap 未装配 / 端口被占）只 `warn` 并继续挂载本地路由，不让功能静默消失。
+//!
 //! [`RuntimeOptions`] 可覆盖两个绑定地址：测试用 `127.0.0.1:0` 取随机端口，避免端口冲突。
 //!
 //! [`RuntimeOptions::config_watch`]（默认开）在启动时拉起 [`gensokyo_config::ConfigWatcher`]：
@@ -60,6 +65,7 @@ use axum::Router;
 use gensokyo_config::{ConfigWatcher, ReloadOutcome, Settings, WatcherHandle};
 use gensokyo_core::{Error, Result};
 use gensokyo_qq::{ReqwestTransport, TokenConfig, TokenManager};
+use gensokyo_storage::idmap::grpc::{IdMapService, pb};
 use gensokyo_storage::idmap::{DEFAULT_IDENTITY_PATH, DEFAULT_MSG_PATH, IdMapOptions, IdMapStore};
 use gensokyo_storage::{BotStatsStore, DEFAULT_BOTSTATS_PATH, EchoStore};
 use gensokyo_webui::{WebUi, WebUiState};
@@ -254,6 +260,17 @@ impl Runtime {
         let state = Self::attach_bot_id(state).await;
         let settings = state.config().snapshot();
 
+        // Go `main.go:507`：`lotus_grpc` 打开时 idmap 由 gRPC 接管，本地 `/getid` 不再注册。
+        // 是否接管看服务端**真的起来**没有——起不来就退回本地路由（Go 那里 `Fatalf`）。
+        let idmap_grpc = match idmap_grpc_bind(&settings) {
+            Ok(Some(bind)) => start_idmap_grpc(&state, &bind).await,
+            Ok(None) => None,
+            Err(reason) => {
+                tracing::warn!(reason, "gRPC idmap 服务端不启动，/getid 保持挂载");
+                None
+            }
+        };
+
         // 注册表在 `AppState` 装配时创建（内置 3 个 + `gensokyo_actions::register_all`）；
         // 这里只记录规模，`send_*` 的 deferred 计划由 dispatcher 在执行链上完成。
         tracing::info!(actions = state.registry().len(), "action 注册表已就绪");
@@ -311,7 +328,7 @@ impl Runtime {
 
         // `/uploadpic*` 与 `/getid`：Go 挂在主服务器 `r`，这里挂主 listener；HTTP 端口只在
         // 主 listener 不存在时兜底（见下方 `http` 分支）。
-        let upload = crate::upload_http::router(state.clone());
+        let upload = crate::upload_http::router(state.clone(), idmap_grpc.is_none());
 
         // 先把两个 listener 都绑好再 spawn：任一绑定失败时，已绑定的 socket 随局部变量
         // 释放关闭，不会出现「WS 已在跑、HTTP 启动失败」的半启动状态。
@@ -394,6 +411,7 @@ impl Runtime {
         Ok(RuntimeHandle {
             ws,
             http,
+            idmap_grpc,
             ws_client,
             gateway,
             post_url,
@@ -648,6 +666,8 @@ impl fmt::Debug for ServerHandle {
 pub struct RuntimeHandle {
     ws: Option<ServerHandle>,
     http: Option<ServerHandle>,
+    /// idmap gRPC 服务端（仅 `lotus && lotus_grpc` 且绑定成功时存在）。
+    idmap_grpc: Option<ServerHandle>,
     ws_client: Option<WsClientHandle>,
     /// QQ 上游 WS 网关（`gateway=false`、缺凭据或传输构建失败时为 `None`）。
     gateway: Option<GatewayHandle>,
@@ -671,6 +691,12 @@ impl RuntimeHandle {
     #[must_use]
     pub fn http_addr(&self) -> Option<SocketAddr> {
         self.http.as_ref().map(|server| server.addr)
+    }
+
+    /// idmap gRPC 服务端的实际监听地址（未启用或绑定失败为 `None`）。
+    #[must_use]
+    pub fn idmap_grpc_addr(&self) -> Option<SocketAddr> {
+        self.idmap_grpc.as_ref().map(|server| server.addr)
     }
 
     /// 本次启动的反向 WS 地址数量（0 表示没有 `ws_address`）。
@@ -752,10 +778,11 @@ impl RuntimeHandle {
             tracing::debug!("配置热重载监听已停止");
         }
 
-        let mut servers: Vec<ServerHandle> = [self.ws.take(), self.http.take()]
-            .into_iter()
-            .flatten()
-            .collect();
+        let mut servers: Vec<ServerHandle> =
+            [self.ws.take(), self.http.take(), self.idmap_grpc.take()]
+                .into_iter()
+                .flatten()
+                .collect();
         let total = servers.len();
 
         // 先对全部 listener 发关停信号，再逐个 await：串行 await 会让后一个在前一个的
@@ -816,7 +843,14 @@ impl RuntimeHandle {
         if let Some(watch) = &self.config_watch {
             watch.task.abort();
         }
-        for server in [self.ws.as_ref(), self.http.as_ref()].into_iter().flatten() {
+        for server in [
+            self.ws.as_ref(),
+            self.http.as_ref(),
+            self.idmap_grpc.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
             server.task.abort();
         }
     }
@@ -847,7 +881,10 @@ impl Drop for RuntimeHandle {
             tracing::warn!("RuntimeHandle 未 shutdown 即被 drop，已中止 post_url 事件上报");
             drop(reporter);
         }
-        for server in [self.ws.take(), self.http.take()].into_iter().flatten() {
+        for server in [self.ws.take(), self.http.take(), self.idmap_grpc.take()]
+            .into_iter()
+            .flatten()
+        {
             if server.task.is_finished() {
                 tracing::debug!(addr = %server.addr, kind = server.kind, "服务任务已结束，无需中止");
                 continue;
@@ -860,6 +897,85 @@ impl Drop for RuntimeHandle {
             );
         }
     }
+}
+
+/// idmap gRPC 的监听地址（Go `main_grpc.go` 的 `net.Listen("tcp", ":"+lotus_grpc_port)`）。
+///
+/// 只在 `lotus && lotus_grpc` 时接管：Go 的同一开关会跳过本地 `/getid` 注册
+/// （`main.go:507`）。端口非法时返回原因字符串——调用方 `warn` 后继续挂载 `/getid`，
+/// 不让可选服务把启动路径拖住。
+///
+/// # 与 Go 的差异
+///
+/// Go `main_grpc.go:26-35` 在 `lotus=true` 时走的是**客户端**（连 `server_dir:port` 的父
+/// 进程），只有 `lotus=false` 才 `grpcServer.Serve`（且阻塞主线程）。本仓库还没有 idmap
+/// gRPC 客户端，因此这里改为起服务端：`/getid` 仍按 Go 隐藏，idmap 至少保留一条远程入口，
+/// 不会随开关一起静默消失。
+fn idmap_grpc_bind(settings: &Settings) -> Result<Option<String>, String> {
+    if !(settings.get_lotus() && settings.get_lotus_grpc()) {
+        return Ok(None);
+    }
+    let port = settings.get_lotus_grpc_port();
+    let port = u16::try_from(port)
+        .map_err(|_| format!("lotus_grpc_port={port} 不是合法端口（0~65535）"))?;
+    // Go 的 `":port"` 监听全接口；这里显式写 `0.0.0.0`，与正向 WS 的绑定口径一致。
+    Ok(Some(format!("0.0.0.0:{port}")))
+}
+
+/// 启动 idmap gRPC 服务端（Go `main_grpc.go:37-46`：`grpc.NewServer` +
+/// `proto.RegisterIDMapServiceServer(grpcServer, &idmap.Server{})`）。
+///
+/// 返回 `None` 表示没起来（idmap 未装配 / 监听失败）：调用方据此继续挂载本地 `/getid`，
+/// 否则被隐藏的这条路由会连同 gRPC 一起消失。Go 该分支监听失败直接 `Fatalf`；这里与其它
+/// attach 口径一致，可选能力失败只 `warn`。
+async fn start_idmap_grpc(state: &AppState, bind: &str) -> Option<ServerHandle> {
+    let Some(store) = state.idmap_arc() else {
+        tracing::warn!("idmap 未装配，gRPC idmap 服务端不启动（/getid 保持挂载）");
+        return None;
+    };
+    let listener = match TcpListener::bind(bind).await {
+        Ok(listener) => listener,
+        Err(err) => {
+            tracing::warn!(bind, error = %err, "gRPC idmap 服务端监听失败（/getid 保持挂载）");
+            return None;
+        }
+    };
+    let addr = match listener.local_addr() {
+        Ok(addr) => addr,
+        Err(err) => {
+            tracing::warn!(bind, error = %err, "gRPC idmap 服务端读取监听地址失败（/getid 保持挂载）");
+            return None;
+        }
+    };
+
+    let (shutdown, shutdown_rx) = oneshot::channel::<()>();
+    let service = pb::id_map_service_server::IdMapServiceServer::new(IdMapService::new(store));
+    let task = tokio::spawn(async move {
+        // 复用已绑定的 listener：端口冲突在启动期暴露，不必等 `serve` 内部报错再回退。
+        // tonic 对 `Some(Err)` 只记日志并继续 accept，与 Go `grpcServer.Serve` 的重试一致。
+        let incoming = futures::stream::unfold(listener, |listener| async move {
+            match listener.accept().await {
+                Ok((stream, _)) => Some((Ok::<_, std::io::Error>(stream), listener)),
+                Err(err) => Some((Err(err), listener)),
+            }
+        });
+        if let Err(err) = tonic::transport::Server::builder()
+            .add_service(service)
+            .serve_with_incoming_shutdown(incoming, async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+        {
+            tracing::error!(error = %err, "gRPC idmap 服务端异常退出");
+        }
+    });
+    tracing::info!(%addr, "idmap gRPC 服务端已启动");
+    Some(ServerHandle {
+        kind: "idmap gRPC",
+        addr,
+        shutdown: Some(shutdown),
+        task,
+    })
 }
 
 async fn bind_listener(kind: &'static str, raw: &str) -> Result<(TcpListener, SocketAddr)> {
@@ -919,9 +1035,107 @@ fn normalize_bind(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use gensokyo_config::ReloadOutcome;
+    use std::sync::Arc;
+    use std::time::Duration;
 
-    use super::{ReloadLevel, normalize_bind, reload_log_entries, upload_falls_back_to_http};
+    use gensokyo_config::{ConfigManager, ReloadOutcome};
+    use gensokyo_storage::idmap::grpc::IdMapClient;
+    use gensokyo_storage::idmap::{IdMapOptions, IdMapStore};
+    use tempfile::TempDir;
+    use tonic::transport::Endpoint;
+
+    use super::{
+        AppState, ReloadLevel, idmap_grpc_bind, normalize_bind, reload_log_entries,
+        start_idmap_grpc, upload_falls_back_to_http,
+    };
+
+    fn settings(directory: &TempDir, yaml: &str) -> Arc<gensokyo_config::Settings> {
+        let path = directory.path().join("config.yml");
+        std::fs::write(&path, format!("version: 1\nsettings:\n{yaml}")).expect("写配置");
+        ConfigManager::new(&path).expect("读配置").snapshot()
+    }
+
+    /// 配置开关：只有 `lotus && lotus_grpc` 才起 gRPC idmap 服务端。
+    #[test]
+    fn idmap_grpc_bind_follows_lotus_grpc_switch() {
+        let directory = TempDir::new().expect("临时目录");
+        assert_eq!(
+            idmap_grpc_bind(&settings(&directory, "  server_dir: x\n")),
+            Ok(None),
+            "默认不起 gRPC"
+        );
+        assert_eq!(
+            idmap_grpc_bind(&settings(&directory, "  lotus_grpc: true\n")),
+            Ok(None),
+            "lotus=false 不起 gRPC（Go 该分支会阻塞在 Serve）"
+        );
+        assert_eq!(
+            idmap_grpc_bind(&settings(
+                &directory,
+                "  lotus: true\n  lotus_grpc: true\n  lotus_grpc_port: 9800\n"
+            )),
+            Ok(Some("0.0.0.0:9800".to_owned()))
+        );
+        assert!(
+            idmap_grpc_bind(&settings(
+                &directory,
+                "  lotus: true\n  lotus_grpc: true\n  lotus_grpc_port: -1\n"
+            ))
+            .is_err(),
+            "非法端口应返回原因而不是 panic"
+        );
+    }
+
+    /// 起服务 + 一个 RPC 往返：`StoreIDV2` 分配、`RetrieveRowByIDV2` 反查，且与本地 store 同库。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn idmap_grpc_serves_rpc_round_trip() {
+        let directory = TempDir::new().expect("临时目录");
+        let path = directory.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nsettings:\n  app_id: 10000001\n").expect("写配置");
+        let manager = Arc::new(ConfigManager::new(&path).expect("读配置"));
+        let store = Arc::new(
+            IdMapStore::open(
+                IdMapOptions::new(
+                    directory.path().join("identity.redb"),
+                    directory.path().join("messages.redb"),
+                )
+                .with_app_id("10000001"),
+            )
+            .expect("打开 idmap"),
+        );
+        let state = AppState::with_builtin_handlers(manager).with_idmap(Arc::clone(&store));
+
+        let handle = start_idmap_grpc(&state, "127.0.0.1:0")
+            .await
+            .expect("gRPC idmap 服务端应启动");
+        let endpoint = Endpoint::from_shared(format!("http://{}", handle.addr)).expect("endpoint");
+        let mut client = IdMapClient::connect(endpoint).await.expect("连接 gRPC");
+
+        let row = client
+            .store_idv2("openid-p28")
+            .await
+            .expect("StoreIDV2")
+            .row;
+        assert!(row > 0);
+        let id = client
+            .retrieve_row_by_idv2(row.to_string())
+            .await
+            .expect("RetrieveRowByIDV2")
+            .id;
+        assert_eq!(id, "openid-p28");
+        // 服务端注入的就是本地那份 store，不是另开一个库
+        assert_eq!(
+            store.retrieve_row_by_id(row).expect("本地反查"),
+            "openid-p28"
+        );
+
+        let notify = handle.shutdown.expect("关闭信号");
+        let _ = notify.send(());
+        tokio::time::timeout(Duration::from_secs(5), handle.task)
+            .await
+            .expect("服务端应在超时内退出")
+            .expect("任务不应 panic");
+    }
 
     #[test]
     fn bare_port_becomes_wildcard_bind() {

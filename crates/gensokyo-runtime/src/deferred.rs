@@ -15,7 +15,7 @@
 //! | 文本 | `content` | 按 CQ 重新分词，`[CQ:at,qq=…]` 转 v2 的 `<@openid>`（虚拟号经 idmap 反查）；缺 `qq` 的 at 段（`[CQ:at]` / `[CQ:at ]` / `[CQ:at,foo]` / `[CQ:at,qq=]`）与反查失败的数字虚拟号都原样透传（后者只 `warn`）；`at` 后与键值两侧允许空白（`[CQ:at , qq = 1]` 照常解析）；`auto_escape = true` 时原样发送、不解析 |
 //! | `[CQ:at,qq=all]` / `[CQ:at,qq=everyone]` / 字面 `<qqbot-at-everyone />` | `<qqbot-at-everyone />` | 仅群聊，且受「每群每自然日 1 次」限制，见下节「@全员」 |
 //! | `markdown` | `markdown` + `msg_type=2` | 只取 `content`：模板字段（`template_id` / `custom_template_id`）已废弃，出站不构造；文本被丢弃、`card` 让位；正文里的本地图片按 `oss_type` 换引用：`7` → `qqbot-media://` 素材库，`1~3` → 内置云 OSS 对象 URL，`4~6/8~10` → 图床 CDN URL（[`resolve_markdown_images`]）；与媒体同现时先发这一条，媒体另起 `msg_type=7` 条 |
-//! | `card` | `card` + `msg_type=8` | 群聊与单聊同构；`{type:"tuwen", content:{title,description,url,pic_url}}`，四字段校验见 [`compose_card`]；与媒体同现时卡片先发、媒体另起 `msg_type=7` 条 |
+//! | `card` | `card` + `msg_type=8` | 群聊与单聊同构；`{type:"tuwen", content:{title,description,url,pic_url}}`，四字段校验见 [`compose_card`]；`pic_url` 是本地路径时先上传成公网 URL（Go `resolveCardPic`，失败保留原值）；与媒体同现时卡片先发、媒体另起 `msg_type=7` 条 |
 //! | 图片 / 语音 / 视频 / 文件 | `media` + `msg_type=7` | 见下节「媒体」 |
 //! | `[CQ:reply]` | `msg_id` | 虚拟号先经 idmap / echo 还原成真实消息 ID；还原失败 `1400`，不静默丢 |
 //! | `keyboard` | `keyboard` | 与 text / markdown / card 同发，不改变 `msg_type`（Go `applyGroupMarkdownKeyboard` 口径）；`data` 必须是 JSON 对象，否则 `1400` |
@@ -79,11 +79,15 @@
 //! 限制（细节见 [`crate::media`]）：
 //! - **单条消息只有一个 `media` 槽**：多段媒体一段一条发送（见上节「消息体拆分与优先级」），
 //!   既不丢段、也不塞进同一条；
-//! - **单条媒体上限 5MB**（[`MAX_MEDIA_BYTES`](crate::media::MAX_MEDIA_BYTES)，对齐 Go
-//!   `file_data` 直传上限），超限 `1400`；Go 的超限分片上传尚未落地；
+//! - **`file_data` 直传上限 5MB**（[`MAX_MEDIA_BYTES`]）：超过改走分片上传——预上传 →
+//!   逐片预签名 PUT + `upload_part_finish` → `files` 合并（Go `chunkedUpload`）。任一步失败
+//!   按上游错误返回，**不**降级回 `file_data` 直传（Go 同）；下载硬上限 200MB
+//!   （[`crate::media::MAX_UPLOAD_BYTES`]）；
 //! - [`MediaRef::Unknown`] 视为「已经拿到上游 `file_info`」，直接透传、不再上传（Go 的
 //!   `unknown_*` 回退口径）；
-//! - 不压缩 / 不转码：原字节直传。
+//! - **本地 / base64 来源**先做发送前处理（Go 条件，URL 来源原样）：图片按
+//!   `image_sizelimit`（KB，`0` = 不压缩）压缩；语音不是 AMR / SILK 时经 `ffmpeg` + `pts`
+//!   转码（工具缺失报 1500）；视频 / 文件不处理。
 //!
 //! ## 被动回复身份与 msg_seq
 //!
@@ -157,8 +161,8 @@ use gensokyo_protocol::outbound::{InputNotifyPayload, StreamKind, StreamPayload}
 use gensokyo_protocol::{Event, MediaRef, OutboundPlan};
 use gensokyo_qq::dto::message::{MessageCard, MessageCardContent};
 use gensokyo_qq::dto::{
-    FileUpload, InputNotify, Markdown, Media, MessageResponse, MessageToCreate, StreamSse,
-    file_type, msg_type,
+    FileUpload, FileUploadMergeRequest, FileUploadPartFinishRequest, FileUploadPrepareRequest,
+    InputNotify, Markdown, Media, MessageResponse, MessageToCreate, StreamSse, file_type, msg_type,
 };
 use gensokyo_storage::EchoStore;
 use gensokyo_storage::echo::{DEFAULT_MESSAGE_ID, MessageGroupPair};
@@ -167,7 +171,7 @@ use serde_json::Value;
 use crate::at_everyone::{self, Reservation};
 use crate::event_hub::EventHub;
 use crate::hosting::HostingRuntime;
-use crate::media::MediaRuntime;
+use crate::media::{MAX_MEDIA_BYTES, MediaRuntime};
 use crate::queue;
 
 /// handler 响应 `data` 里的 deferred 标记（与 `gensokyo_actions::DEFERRED_FIELD` 同值）。
@@ -921,7 +925,7 @@ pub async fn compose(
         let extras = compose_media_extras(context, target, openid, &message.plan, deps).await?;
         return Ok((out, extras));
     }
-    if let Some(card) = compose_card(&message.plan, &rendered)? {
+    if let Some(card) = compose_card(context, deps.hosting, &message.plan, &rendered).await? {
         // 卡片独占正文：官方要求 msg_type=8 时 content 为空
         out.content = None;
         out.msg_type = Some(msg_type::CARD);
@@ -1217,7 +1221,7 @@ fn local_media_path(raw: &str) -> Option<PathBuf> {
     std::path::absolute(raw).ok()
 }
 
-/// 一处引用 → 可写进 Markdown 的公网 URL；`None` 表示保留原引用。
+/// 一处本地引用（markdown 图片 / 卡片 `pic_url`）→ 公网 URL；`None` 表示保留原引用。
 ///
 /// 按 `oss_type` 选上传链（Go `resolveLocalImageMedia` → `images.UploadBase64ImageToServer`）：
 /// - `7`（ChatGLM）：官方素材库，产出 `qqbot-media://` 引用；
@@ -1250,7 +1254,7 @@ async fn resolve_url(
         return None;
     }
     let Some(path) = local_media_path(raw) else {
-        tracing::warn!(url = %raw, "markdown 图片路径未通过安全校验，保留原引用");
+        tracing::warn!(url = %raw, "本地图片路径未通过安全校验，保留原引用");
         return None;
     };
     let bytes = match tokio::fs::read(&path).await {
@@ -1259,7 +1263,7 @@ async fn resolve_url(
             tracing::warn!(
                 path = %path.display(),
                 error = %err,
-                "markdown 图片读取失败，保留原引用"
+                "本地图片读取失败，保留原引用"
             );
             return None;
         }
@@ -1276,7 +1280,7 @@ async fn resolve_url(
         };
     }
     let Some(image) = sniff_image(&bytes) else {
-        tracing::warn!(path = %path.display(), "markdown 图片格式无法识别，保留原引用");
+        tracing::warn!(path = %path.display(), "本地图片格式无法识别，保留原引用");
         return None;
     };
     let extension = match image {
@@ -1293,7 +1297,7 @@ async fn resolve_url(
     if kind == HostingKind::ChatGlm {
         // `validate_image_upload` 只收 png / jpeg / gif / webp（Go `sniffMediaImageFormat` 同）
         if image == ImageKind::Bmp {
-            tracing::warn!(path = %path.display(), "markdown 图片是 BMP，素材库不收，保留原引用");
+            tracing::warn!(path = %path.display(), "本地图片是 BMP，素材库不收，保留原引用");
             return None;
         }
         return match upload_bytes_to_media_store(context.api(), &bytes, &file_name, image.mime())
@@ -1304,7 +1308,7 @@ async fn resolve_url(
                 tracing::warn!(
                     path = %path.display(),
                     error = %err,
-                    "markdown 图片上传素材库失败，保留原引用"
+                    "本地图片上传素材库失败，保留原引用"
                 );
                 None
             }
@@ -1337,7 +1341,7 @@ fn warn_hosting_failure(kind: HostingKind, path: &std::path::Path, err: &gensoky
         provider = kind.provider_name(),
         path = %path.display(),
         error = %err,
-        "markdown 图片图床上传失败，保留原引用"
+        "本地图片图床上传失败，保留原引用"
     );
 }
 
@@ -1359,7 +1363,7 @@ fn warn_oss_failure(kind: OssKind, path: &std::path::Path, err: &gensokyo_media:
         provider = kind.name(),
         path = %path.display(),
         error = %err,
-        "markdown 图片内置云 OSS 上传失败，保留原引用"
+        "本地图片内置云 OSS 上传失败，保留原引用"
     );
 }
 
@@ -1376,10 +1380,17 @@ fn warn_local_upload_unavailable() {
 
 /// `plan.card` → 图文卡片：`{type:"tuwen", content:{title,description,url,pic_url}}`。
 ///
-/// 四字段官方校验（title 1~50、description 1~200、url / pic_url https 且 ≤1024）在
+/// `pic_url` 按 Go `resolveCardPic` 处理：`http(s)` 原样保留；其余（本地路径）先走统一上传链
+/// （[`resolve_url`]，按 `oss_type` 选内置 OSS / 图床 / 素材库）换成公网 URL，失败保留原值并
+/// `warn`。四字段官方校验（title 1~50、description 1~200、url / pic_url https 且 ≤1024）在
 /// [`MessageCardContent::validate`]；四项缺一或任一字段非法都 `1400`。
 /// 多份 card 只发第一份（与 Go 的第一份语义一致）。
-fn compose_card(plan: &OutboundPlan, rendered_text: &str) -> Result<Option<MessageCard>> {
+async fn compose_card(
+    context: &ActionContext,
+    hosting: &HostingRuntime,
+    plan: &OutboundPlan,
+    rendered_text: &str,
+) -> Result<Option<MessageCard>> {
     let Some(payload) = plan.card.first() else {
         return Ok(None);
     };
@@ -1391,11 +1402,16 @@ fn compose_card(plan: &OutboundPlan, rendered_text: &str) -> Result<Option<Messa
         ));
     }
     let fields = payload.fields()?;
+    // Go `resolveCardPic`：空串 / http(s) 原样；本地路径上传后换公网 URL；失败保留原值
+    let pic = match fields.pic {
+        Some(pic) => Some(resolve_url(context, hosting, &pic).await.unwrap_or(pic)),
+        None => None,
+    };
     let content = MessageCardContent {
         title: fields.title,
         description: fields.desc,
         url: fields.url,
-        pic_url: fields.pic,
+        pic_url: pic,
     };
     content
         .validate()
@@ -1830,10 +1846,34 @@ async fn compose_single_media(
     }
 
     let fetched = deps.media.fetch(reference).await?;
+    // Go 的发送前处理：图片只压缩本地 / base64 来源（`local_image` / `base64_image`），
+    // URL 图片原样；语音三种来源都先判 AMR/SILK 再转码。这里按同一口径处理。
+    let local_or_inline = matches!(reference, MediaRef::Local(_) | MediaRef::Base64(_));
+    let mut bytes = fetched.bytes;
+    match kind {
+        MediaKind::Image if local_or_inline => {
+            let threshold_kb =
+                u64::try_from(context.config().snapshot().get_image_size_limit()).unwrap_or(0);
+            if threshold_kb > 0 {
+                bytes = deps.media.prepare_image(bytes, threshold_kb).await?;
+            }
+        }
+        MediaKind::Record => {
+            let sample_rate =
+                u32::try_from(context.config().snapshot().get_record_sample_rate()).unwrap_or(0);
+            bytes = deps.media.prepare_record(bytes, sample_rate).await?;
+        }
+        MediaKind::Image | MediaKind::Video | MediaKind::File => {}
+    }
+    let file_name = file_name.map_or_else(|| fetched.file_name.clone(), str::to_owned);
+    // 官方 `file_data` 直传上限 5MB；超过走分片链（Go `needsChunkedUpload` → `chunkedUpload`）
+    if bytes.len() as u64 > MAX_MEDIA_BYTES {
+        return upload_media_chunked(context, target, openid, kind, &bytes, &file_name).await;
+    }
     let upload = FileUpload {
         file_type: kind.file_type(),
-        file_data: Some(gensokyo_media::encode_base64(&fetched.bytes)),
-        file_name: Some(file_name.map_or_else(|| fetched.file_name.clone(), str::to_owned)),
+        file_data: Some(gensokyo_media::encode_base64(&bytes)),
+        file_name: Some(file_name),
         ..FileUpload::default()
     };
     let uploaded = match target {
@@ -1849,6 +1889,142 @@ async fn compose_single_media(
     Ok(Media {
         file_info: uploaded.file_info,
     })
+}
+
+/// 分片上传默认分片大小：5MiB（Go `defaultBlockSize`），仅当服务端未下发 `block_size` 时使用。
+const CHUNK_DEFAULT_BLOCK_SIZE: u64 = 5 * 1024 * 1024;
+
+/// `md5_10m` 的取样上限：前 10002432 字节（Go `computeMD510m`）。
+const CHUNK_MD5_10M_BYTES: usize = 10_002_432;
+
+/// >5MB 媒体上传：预上传 → 逐片 PUT + 完成通知 → 合并（Go `chunkedUpload`）。
+///
+/// 分片按服务端下发的 `block_size` 切；每片起点 `index * block_size`（Go 同，忽略片自带的
+/// `part.block_size`）。任一步失败都原样上抛，不降级回 `file_data` 直传（Go 同样直接返回错误）。
+async fn upload_media_chunked(
+    context: &ActionContext,
+    target: &SendTarget,
+    openid: &str,
+    kind: MediaKind,
+    bytes: &[u8],
+    file_name: &str,
+) -> Result<Media> {
+    let is_group = matches!(target, SendTarget::Group(_));
+    let file_size = bytes.len();
+    let name = if file_name.is_empty() {
+        format!("upload_{}", unix_timestamp())
+    } else {
+        file_name.to_owned()
+    };
+    let prepared = context
+        .api()
+        .prepare_file_upload(
+            openid,
+            is_group,
+            FileUploadPrepareRequest {
+                file_type: kind.file_type(),
+                file_size: file_size.to_string(),
+                file_name: name.clone(),
+                md5: md5_hex(bytes),
+                sha1: String::new(),
+                md5_10m: md5_hex(&bytes[..file_size.min(CHUNK_MD5_10M_BYTES)]),
+            },
+        )
+        .await?;
+    if prepared.parts.is_empty() {
+        return Err(Error::Upstream {
+            code: 0,
+            message: "分片上传预上传未返回任何分片".to_owned(),
+        });
+    }
+    let block_size = prepared
+        .block_size
+        .parse::<u64>()
+        .ok()
+        .filter(|size| *size > 0)
+        .unwrap_or(CHUNK_DEFAULT_BLOCK_SIZE);
+    for part in &prepared.parts {
+        let start = part
+            .index
+            .checked_mul(block_size)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .filter(|offset| *offset < file_size)
+            .ok_or_else(|| Error::Upstream {
+                code: 0,
+                message: format!(
+                    "分片索引越界: part={} block_size={block_size} file_size={file_size}",
+                    part.index
+                ),
+            })?;
+        let end = part
+            .index
+            .saturating_add(1)
+            .checked_mul(block_size)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .map_or(file_size, |offset| offset.min(file_size));
+        let chunk = &bytes[start..end];
+        // 分片 PUT 与素材直传同为「预签名 URL、不带 Authorization」，复用同一出口
+        context
+            .api()
+            .put_presigned_image(&part.presigned_url, "application/octet-stream", chunk.to_vec())
+            .await?;
+        context
+            .api()
+            .finish_file_upload_part(
+                openid,
+                is_group,
+                FileUploadPartFinishRequest {
+                    upload_id: prepared.upload_id.clone(),
+                    part_index: part.index,
+                    block_size: chunk.len().to_string(),
+                    md5: md5_hex(chunk),
+                },
+            )
+            .await?;
+    }
+    let merged = context
+        .api()
+        .merge_file_upload(
+            openid,
+            is_group,
+            FileUploadMergeRequest {
+                file_type: kind.file_type(),
+                file_name: name,
+                srv_send_msg: false,
+                upload_id: prepared.upload_id,
+            },
+        )
+        .await?;
+    if merged.file_info.is_empty() {
+        return Err(Error::Upstream {
+            code: 0,
+            message: "分片合并成功但未返回 file_info".to_owned(),
+        });
+    }
+    Ok(Media {
+        file_info: merged.file_info,
+    })
+}
+
+/// 全文件 / 分片的 MD5（32 位小写十六进制；Go `computeMD5`）。
+fn md5_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    use md5::Digest as _;
+
+    let digest = md5::Md5::digest(bytes);
+    let mut hex = String::with_capacity(32);
+    for byte in digest {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+/// Unix 秒（Go `time.Now().Unix()`，仅用于缺省文件名）。
+fn unix_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 /// 本阶段仍不支持的消息段；返回第一个命中的段名。
@@ -1877,6 +2053,7 @@ mod tests {
     };
     use gensokyo_config::ConfigManager;
     use gensokyo_core::{Error, Ob11Id, Result};
+    use gensokyo_media::silk::{ProcessOutput, ProcessRunner, SilkCodec};
     use gensokyo_media::{BoxFuture, FetchRequest, Fetcher, MediaTransport, TransportResponse};
     use gensokyo_media::{
         HostingTransport, UploadMethod, UploadRequest, UploadResponse,
@@ -1892,9 +2069,10 @@ mod tests {
         MediaImagePrepareResponse,
     };
     use gensokyo_qq::dto::{
-        BotInGroupState, FileUpload, GroupInfo, GroupMember, GroupMemberList, InputNotify,
-        JoinRequestList, Markdown, MediaResponse, MessageResponse, MessageToCreate, StreamSse,
-        file_type, msg_type,
+        BotInGroupState, FileUpload, FileUploadMergeRequest, FileUploadPart,
+        FileUploadPartFinishRequest, FileUploadPrepareRequest, FileUploadPrepareResponse, GroupInfo,
+        GroupMember, GroupMemberList, InputNotify, JoinRequestList, Markdown, MediaResponse,
+        MessageResponse, MessageToCreate, StreamSse, file_type, msg_type,
     };
     use gensokyo_storage::echo::MessageGroupPair;
     use gensokyo_storage::{EchoStore, IdMapOptions, IdMapStore};
@@ -1907,7 +2085,7 @@ mod tests {
     use crate::at_everyone::SECTION;
     use crate::event_hub::EventHub;
     use crate::hosting::HostingRuntime;
-    use crate::media::{MAX_MEDIA_BYTES, MediaRuntime};
+    use crate::media::{MAX_MEDIA_BYTES, MAX_UPLOAD_BYTES, MediaRuntime};
 
     /// 测试统一的 32 位 OpenID（`resolve_openid` 对 32 位直通，不需要 idmap）。
     const OPENID: &str = "0123456789ABCDEF0123456789ABCDEF";
@@ -1954,6 +2132,18 @@ mod tests {
         /// 素材链（prepare → PUT → complete）的注入结果：`Some(url)` = complete 返回该引用，
         /// `None` = complete 报上游错误。按调用顺序消费，多图用例逐个排队。
         media_results: Mutex<Vec<Option<String>>>,
+        /// 预上传响应（每次 prepare 消费一次）；`None` = 测试未配置。
+        chunked: Mutex<Option<Result<FileUploadPrepareResponse>>>,
+        /// 合并响应（每次 merge 消费一次）。
+        chunk_merge_results: Mutex<Option<Result<MediaResponse>>>,
+        /// 预上传入参记录。
+        prepares: Mutex<Vec<FileUploadPrepareRequest>>,
+        /// 分片 PUT 记录（预签名 URL, 字节数）。
+        chunk_puts: Mutex<Vec<(String, usize)>>,
+        /// 分片完成通知记录。
+        part_finishes: Mutex<Vec<FileUploadPartFinishRequest>>,
+        /// 合并入参记录。
+        merges: Mutex<Vec<FileUploadMergeRequest>>,
     }
 
     impl FakeQqApi {
@@ -2001,6 +2191,59 @@ mod tests {
 
         fn with_send_error(self, err: Error) -> Self {
             self.push_send(Err(err))
+        }
+
+        /// 配置分片上传：两片（首片 `MAX_MEDIA_BYTES` 字节、次片剩余），合并返回 `file_info`。
+        fn with_chunked(self, file_info: &str) -> Self {
+            *self.chunked.lock().expect("分片槽锁未中毒") = Some(Ok(FileUploadPrepareResponse {
+                upload_id: "UP-1".to_owned(),
+                block_size: MAX_MEDIA_BYTES.to_string(),
+                parts: vec![
+                    FileUploadPart {
+                        index: 0,
+                        presigned_url: "https://cos.example.com/part-0".to_owned(),
+                        block_size: MAX_MEDIA_BYTES.to_string(),
+                    },
+                    FileUploadPart {
+                        index: 1,
+                        presigned_url: "https://cos.example.com/part-1".to_owned(),
+                        block_size: "1".to_owned(),
+                    },
+                ],
+            }));
+            *self.chunk_merge_results.lock().expect("合并槽锁未中毒") = Some(Ok(MediaResponse {
+                file_info: file_info.to_owned(),
+                ..MediaResponse::default()
+            }));
+            self
+        }
+
+        /// 配置预上传失败（验证不降级回 `file_data` 直传）。
+        fn with_chunked_prepare_error(self, err: Error) -> Self {
+            *self.chunked.lock().expect("分片槽锁未中毒") = Some(Err(err));
+            *self.chunk_merge_results.lock().expect("合并槽锁未中毒") = Some(Err(
+                Error::Unsupported("预上传已失败，不应走到合并".to_owned()),
+            ));
+            self
+        }
+
+        fn prepares(&self) -> Vec<FileUploadPrepareRequest> {
+            self.prepares.lock().expect("预上传记录锁未中毒").clone()
+        }
+
+        fn chunk_puts(&self) -> Vec<(String, usize)> {
+            self.chunk_puts.lock().expect("分片 PUT 记录锁未中毒").clone()
+        }
+
+        fn part_finishes(&self) -> Vec<FileUploadPartFinishRequest> {
+            self.part_finishes
+                .lock()
+                .expect("分片完成记录锁未中毒")
+                .clone()
+        }
+
+        fn merges(&self) -> Vec<FileUploadMergeRequest> {
+            self.merges.lock().expect("合并记录锁未中毒").clone()
         }
 
         fn push_send(self, result: Result<MessageResponse>) -> Self {
@@ -2111,6 +2354,50 @@ mod tests {
             Box::pin(async move { self.upload(file) })
         }
 
+        fn prepare_file_upload(
+            &self,
+            _id: &str,
+            _is_group: bool,
+            request: FileUploadPrepareRequest,
+        ) -> QqFuture<'_, FileUploadPrepareResponse> {
+            self.prepares
+                .lock()
+                .expect("预上传记录锁未中毒")
+                .push(request);
+            let mut prepared = self.chunked.lock().expect("分片槽锁未中毒");
+            let prepared = prepared.take().expect("测试未配置分片上传脚本");
+            Box::pin(async move { prepared })
+        }
+
+        fn finish_file_upload_part(
+            &self,
+            _id: &str,
+            _is_group: bool,
+            request: FileUploadPartFinishRequest,
+        ) -> QqFuture<'_, ()> {
+            self.part_finishes
+                .lock()
+                .expect("分片完成记录锁未中毒")
+                .push(request);
+            Box::pin(async { Ok(()) })
+        }
+
+        fn merge_file_upload(
+            &self,
+            _id: &str,
+            _is_group: bool,
+            request: FileUploadMergeRequest,
+        ) -> QqFuture<'_, MediaResponse> {
+            self.merges
+                .lock()
+                .expect("合并记录锁未中毒")
+                .push(request);
+            // 合并结果单独存放：prepare 已把整份分片脚本取走。
+            let mut results = self.chunk_merge_results.lock().expect("合并槽锁未中毒");
+            let result = results.take().expect("测试未配置分片合并结果");
+            Box::pin(async move { result })
+        }
+
         fn prepare_media_image(
             &self,
             _request: MediaImagePrepareRequest,
@@ -2126,10 +2413,14 @@ mod tests {
 
         fn put_presigned_image(
             &self,
-            _presigned_url: &str,
+            presigned_url: &str,
             _content_type: &str,
             bytes: Vec<u8>,
         ) -> QqFuture<'_, String> {
+            self.chunk_puts
+                .lock()
+                .expect("分片 PUT 记录锁未中毒")
+                .push((presigned_url.to_owned(), bytes.len()));
             Box::pin(async move {
                 assert!(!bytes.is_empty(), "直传字节不应为空");
                 Ok("etag-md5".to_owned())
@@ -2402,7 +2693,7 @@ mod tests {
         let requests = transport.requests();
         assert_eq!(requests.len(), 1, "URL 必须先经下载器");
         assert_eq!(requests[0].url, "https://example.com/a.png");
-        assert_eq!(requests[0].max_bytes, MAX_MEDIA_BYTES);
+        assert_eq!(requests[0].max_bytes, MAX_UPLOAD_BYTES);
 
         let uploads = api.uploads();
         assert_eq!(uploads.len(), 1);
@@ -2464,6 +2755,277 @@ mod tests {
         assert!(matches!(err, Error::Protocol(_)), "超限应映射 1400: {err}");
         assert!(api.uploads().is_empty(), "超限不应触发上传");
         assert!(api.sent().is_empty(), "超限不应发送");
+    }
+
+    // ---- 分片上传 / 压缩 / 转码 / 卡片图片 ----
+
+    /// 质量 95 编码的 JPEG：压缩阶梯从 75 起步，重编码后字节必然不同。
+    fn jpeg_fixture() -> Vec<u8> {
+        let mut image = image::RgbImage::new(64, 64);
+        for (x, y, pixel) in image.enumerate_pixels_mut() {
+            *pixel = image::Rgb([x as u8 * 3, y as u8 * 3, (x + y) as u8]);
+        }
+        let mut out = Vec::new();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 95);
+        encoder.encode_image(&image).expect("编码测试 JPEG");
+        out
+    }
+
+    #[tokio::test]
+    async fn media_over_five_megabytes_uses_chunked_upload() {
+        let api = Arc::new(
+            FakeQqApi::default()
+                .with_chunked("CHUNK-FILE-INFO")
+                .with_send("MSG-1"),
+        );
+        let (_dir, context) = context(Arc::clone(&api));
+        let body = vec![7u8; MAX_MEDIA_BYTES as usize + 1];
+        let media = MediaRuntime::with_transport(Arc::new(FakeTransport::new(&body)));
+        let plan = group_request(image_plan(MediaRef::Url(
+            "https://example.com/big.png".to_owned(),
+        )));
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect(">5MB 应走分片上传");
+
+        assert!(api.uploads().is_empty(), ">5MB 不应走 file_data 直传");
+        let prepares = api.prepares();
+        assert_eq!(prepares.len(), 1);
+        assert_eq!(prepares[0].file_type, file_type::IMAGE);
+        assert_eq!(prepares[0].file_size, (MAX_MEDIA_BYTES + 1).to_string());
+        assert_eq!(prepares[0].md5.len(), 32, "全文件 MD5 必须是 32 位十六进制");
+        assert_eq!(prepares[0].md5_10m.len(), 32);
+
+        let puts = api.chunk_puts();
+        assert_eq!(puts.len(), 2, "两片各一次 PUT");
+        assert_eq!(puts[0].0, "https://cos.example.com/part-0");
+        assert_eq!(puts[0].1, MAX_MEDIA_BYTES as usize);
+        assert_eq!(puts[1].1, 1, "次片是剩余 1 字节");
+
+        let finishes = api.part_finishes();
+        assert_eq!(finishes.len(), 2);
+        assert_eq!(finishes[0].part_index, 0);
+        assert_eq!(finishes[0].block_size, MAX_MEDIA_BYTES.to_string());
+        assert_eq!(finishes[1].block_size, "1");
+
+        let merges = api.merges();
+        assert_eq!(merges.len(), 1);
+        assert_eq!(merges[0].upload_id, "UP-1");
+        assert_eq!(merges[0].file_name, "media.png");
+        assert_eq!(
+            api.sent()[0]
+                .media
+                .as_ref()
+                .map(|media| media.file_info.as_str()),
+            Some("CHUNK-FILE-INFO")
+        );
+    }
+
+    #[tokio::test]
+    async fn chunked_prepare_failure_does_not_fall_back_to_direct_upload() {
+        let api = Arc::new(
+            FakeQqApi::default().with_chunked_prepare_error(Error::Upstream {
+                code: 40_034_001,
+                message: "prepare failed".to_owned(),
+            }),
+        );
+        let (_dir, context) = context(Arc::clone(&api));
+        let body = vec![7u8; MAX_MEDIA_BYTES as usize + 1];
+        let media = MediaRuntime::with_transport(Arc::new(FakeTransport::new(&body)));
+        let plan = group_request(image_plan(MediaRef::Url(
+            "https://example.com/big.png".to_owned(),
+        )));
+
+        let err = execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect_err("预上传失败必须报错");
+
+        assert!(
+            matches!(err, Error::Upstream { .. }),
+            "应保留上游错误: {err}"
+        );
+        assert!(api.uploads().is_empty(), "不得降级回 file_data 直传");
+        assert!(api.chunk_puts().is_empty(), "预上传失败不应继续 PUT");
+        assert!(api.sent().is_empty(), "失败不应发送");
+    }
+
+    #[tokio::test]
+    async fn local_image_is_compressed_when_image_sizelimit_is_set() {
+        let api = Arc::new(FakeQqApi::with_upload("FILE-INFO").with_send("MSG-1"));
+        let (_dir, context) = context_with_settings(Arc::clone(&api), "  image_sizelimit: 1\n");
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("cover.jpg");
+        let source = jpeg_fixture();
+        std::fs::write(&path, &source).expect("写本地图片失败");
+        let media = MediaRuntime::default();
+
+        execute(&context, &group_request(image_plan(MediaRef::Local(path))), &deps(&media, None))
+            .await
+            .expect("压缩后应发送成功");
+
+        let uploads = api.uploads();
+        let data = uploads[0].file_data.as_deref().expect("直传路径应带 file_data");
+        let decoded = gensokyo_media::decode_base64(data).expect("file_data 应是合法 base64");
+        assert_ne!(decoded, source, "命中 image_sizelimit 必须重编码");
+        assert!(decoded.starts_with(&[0xFF, 0xD8]), "JPEG 应保持 JPEG");
+    }
+
+    /// 假进程出口：ffmpeg 写 PCM，pts 写 Silk；都不启动真实进程。
+    #[derive(Debug, Clone, Copy)]
+    struct FakeSilkRunner;
+
+    impl ProcessRunner for FakeSilkRunner {
+        fn run(&self, program: &str, args: &[String]) -> gensokyo_media::Result<ProcessOutput> {
+            match program {
+                "ffmpeg" => {
+                    std::fs::write(
+                        std::path::Path::new(args.last().expect("末参是 PCM 路径")),
+                        b"pcm",
+                    )
+                    .expect("写 PCM");
+                }
+                "pts" => {
+                    let index = args
+                        .iter()
+                        .position(|arg| arg.as_str() == "-o")
+                        .expect("pts 参数含 -o");
+                    std::fs::write(std::path::Path::new(&args[index + 1]), b"\x02#!SILK_V3-deferred")
+                        .expect("写 Silk");
+                }
+                other => panic!("意外的程序: {other}"),
+            }
+            Ok(ProcessOutput {
+                status: Some(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn local_record_is_transcoded_before_upload() {
+        let api = Arc::new(FakeQqApi::with_upload("FILE-INFO").with_send("MSG-1"));
+        let (_dir, context) =
+            context_with_settings(Arc::clone(&api), "  record_sampleRate: 24000\n");
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("voice.mp3");
+        std::fs::write(&path, b"ID3\x04not-silk").expect("写本地语音失败");
+        let media = MediaRuntime::default().with_silk_codec(SilkCodec::with_runner(FakeSilkRunner));
+
+        execute(
+            &context,
+            &group_request(OutboundPlan {
+                records: vec![MediaRef::Local(path)],
+                ..OutboundPlan::default()
+            }),
+            &deps(&media, None),
+        )
+        .await
+        .expect("语音转码后应发送成功");
+
+        let uploads = api.uploads();
+        assert_eq!(uploads[0].file_type, file_type::VOICE);
+        let data = uploads[0].file_data.as_deref().expect("应带 file_data");
+        assert_eq!(
+            gensokyo_media::decode_base64(data).expect("file_data 应是合法 base64"),
+            b"\x02#!SILK_V3-deferred"
+        );
+    }
+
+    #[tokio::test]
+    async fn url_record_is_transcoded_too() {
+        let api = Arc::new(FakeQqApi::with_upload("FILE-INFO").with_send("MSG-1"));
+        let (_dir, context) =
+            context_with_settings(Arc::clone(&api), "  record_sampleRate: 24000\n");
+        let media = MediaRuntime::with_transport(Arc::new(FakeTransport::new(
+            b"ID3\x04url-audio",
+        )))
+        .with_silk_codec(SilkCodec::with_runner(FakeSilkRunner));
+
+        execute(
+            &context,
+            &group_request(OutboundPlan {
+                records: vec![MediaRef::Url("https://example.com/a.mp3".to_owned())],
+                ..OutboundPlan::default()
+            }),
+            &deps(&media, None),
+        )
+        .await
+        .expect("URL 语音也应转码后发送");
+
+        let uploads = api.uploads();
+        let data = uploads[0].file_data.as_deref().expect("应带 file_data");
+        assert_eq!(
+            gensokyo_media::decode_base64(data).expect("file_data 应是合法 base64"),
+            b"\x02#!SILK_V3-deferred"
+        );
+    }
+
+    fn card_with_pic(pic: Option<String>) -> OutboundPlan {
+        OutboundPlan {
+            card: vec![CardPayload::from_fields(&CardFields {
+                title: Some("标题".to_owned()),
+                desc: Some("描述".to_owned()),
+                pic,
+                url: Some("https://example.com/a".to_owned()),
+            })],
+            ..OutboundPlan::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn card_local_pic_is_uploaded_to_public_url() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context_with_settings(Arc::clone(&api), BILIBILI_SETTINGS);
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("cover.jpg");
+        std::fs::write(&path, jpeg_fixture()).expect("写封面图失败");
+        let hosting = HostingRuntime::with_transport(Arc::new(FakeHosting::ok()));
+        let plan = group_request(card_with_pic(Some(
+            path.to_string_lossy().into_owned(),
+        )));
+
+        execute(
+            &context,
+            &plan,
+            &deps_with_hosting(&no_media(), None, None, &hosting),
+        )
+        .await
+        .expect("本地封面图应上传后发送成功");
+
+        let sent = api.sent();
+        assert_eq!(sent.len(), 1);
+        let card = sent[0].card.as_ref().expect("卡片体");
+        assert_eq!(
+            card.content.pic_url.as_deref(),
+            Some("https://cdn.example/1.png"),
+            "本地路径应换成上传后的公网 URL"
+        );
+    }
+
+    #[tokio::test]
+    async fn card_local_pic_upload_failure_keeps_original_and_is_400() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context_with_settings(Arc::clone(&api), BILIBILI_SETTINGS);
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("cover.jpg");
+        std::fs::write(&path, jpeg_fixture()).expect("写封面图失败");
+        let hosting = HostingRuntime::with_transport(Arc::new(FakeHosting::with_status(400)));
+        let plan = group_request(card_with_pic(Some(
+            path.to_string_lossy().into_owned(),
+        )));
+
+        let err = execute(
+            &context,
+            &plan,
+            &deps_with_hosting(&no_media(), None, None, &hosting),
+        )
+        .await
+        .expect_err("上传失败保留本地路径后应被 https 校验拦下");
+
+        assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
+        assert!(api.sent().is_empty(), "非法卡片不应发送");
     }
 
     #[tokio::test]
@@ -4997,13 +5559,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builtin_oss_audit_switch_fails_closed() {
+    async fn builtin_oss_audit_switch_uploads_then_audits() {
         let dir = tempfile::tempdir().expect("临时目录");
         let path = write_png(&dir, "a.png");
         let transport = Arc::new(FakeHosting::ok());
         let hosting = HostingRuntime::with_transport(transport.clone());
         let api = Arc::new(FakeQqApi::default());
-        // 审核未实现 → 发请求前就报 HostingConfig，绝不把未审核的图片传上去
         let settings = format!("{}  t_audit: true\n", oss_settings(1));
         let (_cfg, context) = context_with_settings(api, &settings);
         let raw = format!("![图]({path})");
@@ -5011,9 +5572,19 @@ mod tests {
         assert_eq!(
             resolve_markdown_images(&context, &hosting, &raw).await,
             raw,
-            "审核开关打开时保留原引用"
+            "审核响应不可用（这里回的不是 CI XML）同样保留原引用"
         );
-        assert!(transport.requests().is_empty(), "审核未实现不发请求");
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 2, "t_audit 打开：先 PUT 再审核");
+        assert_eq!(requests[0].method, UploadMethod::Put);
+        assert_eq!(requests[1].method, UploadMethod::Get);
+        assert!(
+            requests[1]
+                .url
+                .ends_with("?ci-process=sensitive-content-recognition"),
+            "{}",
+            requests[1].url
+        );
     }
 
     #[tokio::test]

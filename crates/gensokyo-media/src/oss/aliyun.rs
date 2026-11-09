@@ -15,7 +15,9 @@
 //! - Go 的结果 URL 是 `https://<bucket>.oss-<region>.aliyuncs.com/<key>`（region 从 endpoint
 //!   里截出来）；这里直接用「bucket + endpoint」拼，标准 endpoint 下两者完全等价，
 //!   非标准 endpoint（自定义域名）下这里才是对的；
-//! - `a_audit`（内容安全 `ImageSyncScan`）未实现，见 [`AliyunOssConfig::validate`]。
+//! - `a_audit` 打开时按 Go `green.CreateImageSyncScanRequest` 的形态审核（见
+//!   [`crate::oss::audit`]）；`oss://<bucket>/<key>` 里的 bucket 用 `a_OSS_BucketName`
+//!   （Go 用 `GetAppIDStr()`，指向一个不存在的桶）。
 
 use std::sync::Arc;
 
@@ -55,12 +57,6 @@ impl AliyunOssConfig {
         if self.access_key_id.is_empty() || self.access_key_secret.is_empty() {
             return Err(Error::HostingConfig(
                 "阿里云 OSS 未配置（请填 a_OSS_AccessKeyId / a_OSS_AccessKeySecret）".to_owned(),
-            ));
-        }
-        if self.audit {
-            return Err(Error::HostingConfig(
-                "阿里云 OSS 内容审核（a_audit）尚未实现，本次上传跳过以保证不发布未审核图片"
-                    .to_owned(),
             ));
         }
         Ok(())
@@ -129,6 +125,8 @@ fn authorization(
 }
 
 /// 上传一份图片字节，返回 `https://<bucket>.<endpoint>/<key>`。
+///
+/// `a_audit` 打开时先 PUT 再审核（Go 同序）：审核不通过返回 [`Error::AuditRejected`]。
 pub async fn upload(
     transport: Arc<dyn HostingTransport>,
     config: &AliyunOssConfig,
@@ -137,7 +135,7 @@ pub async fn upload(
     let (timestamp, _) = unix_now();
     let plan = plan(config, data, timestamp)?;
     put(
-        transport,
+        Arc::clone(&transport),
         plan.url,
         vec![
             ("Date".to_owned(), plan.date),
@@ -147,6 +145,9 @@ pub async fn upload(
         data,
     )
     .await?;
+    if config.audit {
+        super::audit::aliyun(transport, config, &plan.key).await?;
+    }
     Ok(plan.result_url)
 }
 
@@ -155,8 +156,11 @@ mod tests {
     use std::sync::Arc;
 
     use super::{AliyunOssConfig, plan};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
     use crate::error::Error;
     use crate::hosting::UploadMethod;
+    use crate::hosting::digest;
     use crate::hosting::fixtures::FakeTransport;
     use crate::oss::upload as upload_oss;
     use crate::oss::{OssConfig, OssKind};
@@ -231,10 +235,6 @@ mod tests {
                 access_key_secret: String::new(),
                 ..oss()
             },
-            AliyunOssConfig {
-                audit: true,
-                ..oss()
-            },
         ] {
             let error = plan(&broken, PNG, 0).unwrap_err();
             assert!(
@@ -273,5 +273,111 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, Error::HttpStatus(500)), "{error}");
+    }
+
+    fn audited() -> OssConfig {
+        OssConfig {
+            aliyun: AliyunOssConfig {
+                audit: true,
+                ..oss()
+            },
+            ..OssConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn audits_after_upload_with_image_sync_scan() {
+        let transport = Arc::new(
+            FakeTransport::new().respond(200, "").respond(
+                200,
+                r#"{"code":200,"requestId":"r","data":[{"results":[{"suggestion":"pass","label":"normal"}]}]}"#,
+            ),
+        );
+        let url = upload_oss(OssKind::AliyunOss, transport.clone(), &audited(), PNG)
+            .await
+            .expect("审核通过");
+
+        let calls = transport.calls();
+        assert_eq!(calls.len(), 2, "PUT 之后再来一次审核");
+        let audit = &calls[1];
+        assert_eq!(audit.method, UploadMethod::Post);
+        assert_eq!(audit.url, "https://green.aliyuncs.com/green/image/scan");
+        let header = |name: &str| {
+            audit
+                .headers
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| panic!("缺 {name}：{:?}", audit.headers))
+        };
+        assert_eq!(header("Accept"), "application/json");
+        assert_eq!(header("x-acs-action"), "ImageSyncScan");
+        assert_eq!(header("x-acs-version"), "2018-05-09");
+        assert_eq!(header("x-acs-signature-method"), "HMAC-SHA1");
+        assert!(header("Authorization").starts_with("acs a-id:"));
+        let body = audit.body.as_ref().expect("审核有 JSON 请求体");
+        assert_eq!(body.content_type, "application/octet-stream");
+        let text = String::from_utf8_lossy(&body.bytes);
+        assert!(text.contains(r#""scenes":["porn"]"#), "{text}");
+        assert!(
+            text.contains(&format!(r#""url":"oss://a-bucket/{}""#, url.rsplit('/').next().unwrap())),
+            "审核的是刚上传的对象：{text}"
+        );
+        assert_eq!(
+            header("Content-MD5"),
+            BASE64.encode(digest::md5_digest(&body.bytes)),
+            "Content-MD5 覆盖 body"
+        );
+        assert_eq!(url, calls[0].url);
+    }
+
+    #[tokio::test]
+    async fn rejects_images_with_non_pass_suggestion() {
+        let transport = Arc::new(FakeTransport::new().respond(200, "").respond(
+            200,
+            r#"{"code":200,"data":[{"results":[{"suggestion":"block"}]}]}"#,
+        ));
+        let error = upload_oss(OssKind::AliyunOss, transport.clone(), &audited(), PNG)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::AuditRejected(reason) if reason.contains("block")),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_errors_when_green_service_is_not_enabled() {
+        let transport = Arc::new(
+            FakeTransport::new()
+                .respond(200, "")
+                .respond(200, r#"{"code":596,"msg":"service not opened"}"#),
+        );
+        let error = upload_oss(OssKind::AliyunOss, transport.clone(), &audited(), PNG)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::HostingResponse(reason) if reason.contains("596")),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_switch_off_sends_no_audit_request() {
+        let transport = Arc::new(FakeTransport::new().respond(200, ""));
+        upload_oss(OssKind::AliyunOss, transport.clone(), &config(), PNG)
+            .await
+            .expect("上传成功");
+        assert_eq!(transport.calls().len(), 1, "a_audit=false 不审核");
+    }
+
+    #[tokio::test]
+    async fn upload_failure_skips_audit() {
+        let transport = Arc::new(FakeTransport::new().respond(403, "AccessDenied"));
+        let error = upload_oss(OssKind::AliyunOss, transport.clone(), &audited(), PNG)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::HttpStatus(403)), "{error}");
+        assert_eq!(transport.calls().len(), 1, "上传失败不发审核请求");
     }
 }

@@ -73,6 +73,55 @@ pub const DEFAULT_FFMPEG: &str = "ffmpeg";
 /// 默认 `pts` 程序名（走 PATH 查找）。
 pub const DEFAULT_PTS: &str = "pts";
 
+/// Go `silk.HeaderAmr`：AMR 文件头。
+pub const AMR_HEADER: &[u8] = b"#!AMR";
+/// Go `silk.HeaderSilk`：Silk v3 文件头（**带**前导 `0x02`，与 Go `IsAMRorSILK` 同口径）。
+pub const SILK_HEADER: &[u8] = b"\x02#!SILK_V3";
+
+/// 是否已是 AMR / Silk（Go `silk.IsAMRorSILK`）：是则无需转码。
+///
+/// 注意：Go 只认带 `0x02` 前缀的 Silk 头；裸 `#!SILK_V3` 在 Go 侧会被送去转码，这里保持一致。
+#[must_use]
+pub fn is_amr_or_silk(bytes: &[u8]) -> bool {
+    bytes.starts_with(AMR_HEADER) || bytes.starts_with(SILK_HEADER)
+}
+
+/// 音频合法性初筛（Go `silk.CheckAudio` 的近似）：图片与纯文本直接判非法。
+///
+/// Go 用 `http.DetectContentType` 的结果里是否含 `text` / `image` 判定；这里用图片文件头
+/// 嗅探 + 前 512 字节「无可打印字符」判定覆盖同样的常见情形。认不出的二进制返回 `true`，
+/// 交给 `ffmpeg` 决定（Go 对未知二进制同样放行）。
+#[must_use]
+pub fn check_audio(bytes: &[u8]) -> bool {
+    if crate::sniff::sniff_image(bytes).is_some() {
+        return false;
+    }
+    !looks_like_text(bytes)
+}
+
+/// 前 512 字节是否像文本：合法 UTF-8 且不含控制字符（`\t` / `\r` / `\n` 除外）。
+fn looks_like_text(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(512)];
+    if head.is_empty() {
+        return false;
+    }
+    let text = match std::str::from_utf8(head) {
+        Ok(text) => text,
+        // 末尾可能正好截断在多字节字符中间：只用有效前缀判定
+        Err(err) if err.valid_up_to() + 4 > head.len() => {
+            match std::str::from_utf8(&head[..err.valid_up_to()]) {
+                Ok(text) => text,
+                Err(_) => return false,
+            }
+        }
+        Err(_) => return false,
+    };
+    !text.is_empty()
+        && !text
+            .chars()
+            .any(|ch| ch.is_control() && !matches!(ch, '\t' | '\n' | '\r'))
+}
+
 /// 临时 PCM 目录名（对齐 Go `os.TempDir()/gensokyo-silk`）。
 const TEMP_DIR: &str = "gensokyo-silk";
 /// 错误信息里保留的 stderr 字符上限，避免把整段 ffmpeg 日志塞进错误链。
@@ -216,7 +265,7 @@ impl SilkCodec {
     /// 中间的 16-bit 单声道 PCM 落在系统临时目录，返回（无论成功或失败）前删除。
     pub fn encode_to_silk(&self, input: &Path, output: &Path, sample_rate: u32) -> Result<()> {
         validate_sample_rate(sample_rate)?;
-        let pcm = TempPcm::new()?;
+        let pcm = TempFile::new("pcm")?;
         let rate = sample_rate.to_string();
 
         let ffmpeg_args = vec![
@@ -250,7 +299,7 @@ impl SilkCodec {
     /// `pts` 以 [`DEFAULT_SAMPLE_RATE`] 解出 16-bit 单声道 PCM，`ffmpeg` 再按同一采样率读取，
     /// 不做二次重采样。中途的 PCM 文件同样在返回前删除。
     pub fn decode_silk(&self, input: &Path, output: &Path) -> Result<()> {
-        let pcm = TempPcm::new()?;
+        let pcm = TempFile::new("pcm")?;
         let rate = DEFAULT_SAMPLE_RATE.to_string();
 
         let pts_args = vec![
@@ -277,6 +326,30 @@ impl SilkCodec {
         self.run_checked(&self.ffmpeg, &ffmpeg_args)?;
 
         ensure_output(output, &self.ffmpeg)
+    }
+
+    /// 字节级编码入口（Go `silk.EncoderSilk` 的等价）：临时输入 → `encode_to_silk` → 读回字节。
+    ///
+    /// 供出站媒体链在内存里转码使用；输入 / 输出临时文件由 RAII 清理。
+    pub fn encode_bytes_to_silk(&self, bytes: &[u8], sample_rate: u32) -> Result<Vec<u8>> {
+        if bytes.is_empty() {
+            return Err(Error::SilkCodec("输入音频为空".to_owned()));
+        }
+        let input = TempFile::new("raw")?;
+        let output = TempFile::new("silk")?;
+        std::fs::write(input.path(), bytes).map_err(|err| {
+            Error::SilkCodec(format!(
+                "写临时音频 {} 失败: {err}",
+                input.path().display()
+            ))
+        })?;
+        self.encode_to_silk(input.path(), output.path(), sample_rate)?;
+        std::fs::read(output.path()).map_err(|err| {
+            Error::SilkCodec(format!(
+                "读取 silk 产物 {} 失败: {err}",
+                output.path().display()
+            ))
+        })
     }
 
     /// 执行一次进程并把「找不到程序 / 非零退出」翻译成 crate 错误。
@@ -349,20 +422,20 @@ where
     }
 }
 
-/// 自动清理的临时 PCM 路径。
-struct TempPcm {
+/// 自动清理的临时文件路径。
+struct TempFile {
     path: PathBuf,
 }
 
-impl TempPcm {
-    fn new() -> Result<Self> {
+impl TempFile {
+    fn new(extension: &str) -> Result<Self> {
         let dir = std::env::temp_dir().join(TEMP_DIR);
         std::fs::create_dir_all(&dir).map_err(|err| {
             Error::SilkCodec(format!("创建 silk 临时目录 {} 失败: {err}", dir.display()))
         })?;
         let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
         Ok(Self {
-            path: dir.join(format!("{}-{seq}.pcm", std::process::id())),
+            path: dir.join(format!("{}-{seq}.{extension}", std::process::id())),
         })
     }
 
@@ -371,7 +444,7 @@ impl TempPcm {
     }
 }
 
-impl Drop for TempPcm {
+impl Drop for TempFile {
     fn drop(&mut self) {
         if let Err(err) = std::fs::remove_file(&self.path)
             && err.kind() != std::io::ErrorKind::NotFound
@@ -393,7 +466,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        DEFAULT_SAMPLE_RATE, PTS_ENV, ProcessOutput, ProcessRunner, SilkCodec, resolve_program,
+        DEFAULT_SAMPLE_RATE, PTS_ENV, ProcessOutput, ProcessRunner, SilkCodec, check_audio,
+        is_amr_or_silk, resolve_program,
     };
     use crate::error::{Error, Result};
 
@@ -501,6 +575,62 @@ mod tests {
 
     /// 记录 ffmpeg 写出的 PCM 路径，供调用方断言清理。
     type PcmSlot = Arc<Mutex<Option<PathBuf>>>;
+
+    #[test]
+    fn amr_or_silk_headers_follow_go() {
+        assert!(is_amr_or_silk(b"#!AMR\x0a"), "AMR 头应命中");
+        assert!(is_amr_or_silk(b"\x02#!SILK_V3rest"), "带 0x02 的 Silk 头应命中");
+        assert!(
+            !is_amr_or_silk(b"#!SILK_V3"),
+            "Go IsAMRorSILK 只认带 0x02 的 Silk 头"
+        );
+        assert!(!is_amr_or_silk(b"ID3\x04"));
+    }
+
+    #[test]
+    fn check_audio_rejects_text_and_images() {
+        assert!(!check_audio(b"hello, this is not audio"));
+        assert!(
+            !check_audio(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]),
+            "图片必须判非法"
+        );
+        assert!(check_audio(b"ID3\x04\x00\x00"), "ID3 标签不是文本");
+        assert!(check_audio(&[0xff, 0xfb, 0x90, 0x64]), "裸 MP3 帧头放行");
+    }
+
+    #[test]
+    fn encode_bytes_round_trips_through_temp_files() {
+        let runner = Arc::new(FakeRunner::new(|inv| match inv.program.as_str() {
+            "ffmpeg" => {
+                let pcm = PathBuf::from(inv.args.last().expect("ffmpeg 末参是 PCM 路径"));
+                std::fs::write(pcm, b"pcm-bytes").expect("写 PCM");
+                Ok(ok())
+            }
+            "pts" => {
+                let index = inv
+                    .args
+                    .iter()
+                    .position(|arg| arg.as_str() == "-o")
+                    .expect("pts 参数含 -o");
+                std::fs::write(Path::new(&inv.args[index + 1]), b"\x02#!SILK_V3-encoded")
+                    .expect("写 silk");
+                Ok(ok())
+            }
+            other => panic!("意外的程序: {other}"),
+        }));
+        let codec = SilkCodec::with_runner(runner);
+
+        let silk = codec
+            .encode_bytes_to_silk(b"ID3\x04audio", 24_000)
+            .expect("字节级编码成功");
+
+        assert_eq!(silk, b"\x02#!SILK_V3-encoded");
+        assert!(is_amr_or_silk(&silk));
+        let err = codec
+            .encode_bytes_to_silk(b"", 24_000)
+            .expect_err("空输入必须拒绝");
+        assert!(matches!(err, Error::SilkCodec(_)), "空输入应报 SilkCodec: {err}");
+    }
 
     #[test]
     fn encode_runs_ffmpeg_then_pts_and_removes_pcm() {

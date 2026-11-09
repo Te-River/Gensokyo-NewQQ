@@ -28,9 +28,10 @@ pub use media_image::{
     MediaImageList, MediaImagePrepareRequest, MediaImagePrepareResponse, SUPPORTED_CONTENT_TYPES,
 };
 pub use message::{
-    FileUpload, GenerateUrlLink, GenerateUrlLinkRequest, InputNotify, Markdown, MarkdownParams,
-    Media, MediaResponse, MessageReference, MessageResponse, MessageToCreate, StreamSse, file_type,
-    msg_type,
+    FileUpload, FileUploadMergeRequest, FileUploadPart, FileUploadPartFinishRequest,
+    FileUploadPrepareRequest, FileUploadPrepareResponse, GenerateUrlLink, GenerateUrlLinkRequest,
+    InputNotify, Markdown, MarkdownParams, Media, MediaResponse, MessageReference, MessageResponse,
+    MessageToCreate, StreamSse, file_type, msg_type,
 };
 pub use panel::{
     CreatePanelRequest, CreatePanelResponse, Menu, MenuItem, MenuResponse, MenuSwitch, Panel,

@@ -11,15 +11,22 @@
 //! - **单次尝试**：Go 的 `oss` 包没有重试（重试只存在于 `imagehosting`），这里保持一致；
 //! - 成功判定是 2xx（三家 SDK 同口径），响应体不解析——URL 由配置与 key 拼出来。
 //!
-//! # 与 Go 的差异（能力缺口）
+//! # 内容审核（`t_audit` / `b_audit` / `a_audit`）
 //!
-//! - **内容审核未实现**：`t_audit` / `b_audit` / `a_audit` 打开时，后端在发请求前返回
-//!   [`Error::HostingConfig`]，调用方据此保留原引用。Go 会先审核再决定是否返回 URL；
-//!   这里 fail-closed（宁可这条 Markdown 图片不替换，也不把未审核的图片传到公网）。
-//! - **语音上传未实现**：Go `UploadAndAuditRecord*`（`.amr`）在 Rust 侧没有调用方，
-//!   出站语音走 QQ CDN，不经这条链。
+//! 开关打开时**先上传、再审核**（与 Go 同序），审核在 [`audit`] 里；不通过返回
+//! [`Error::AuditRejected`]，调用方据此保留原引用。三家请求形态逐字段对齐 Go 所用 SDK；
+//! Go 在几处会静默放行、这里统一报错，逐条列在 [`audit`] 的模块文档里。
+//! `b_audit=2`（先传本机 `/uploadpic` 再审核）依赖 runtime 的本地上传出口，本 crate 没有，
+//! 仍在发请求前返回 [`Error::HostingConfig`]（fail-closed）。
+//!
+//! # 未覆盖
+//!
+//! **语音上传**：Go `oss.UploadAndAuditRecord*`（`.amr`）只被 `POST /uploadrecord` →
+//! `images.UploadBase64RecordToServer` 这条链使用；本 crate 的上传入口没有调用方，
+//! 因此不提供无消费者的语音上传 API（runtime 的 `/uploadrecord` 尚未落地）。
 
 pub mod aliyun;
+mod audit;
 pub mod baidu;
 pub mod tencent;
 

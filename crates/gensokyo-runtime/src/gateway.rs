@@ -58,7 +58,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
-use crate::event_hub::EventHub;
+use crate::downtime::Downtime;
 use crate::inbound::Inbound;
 use crate::intent::IntentPlan;
 use crate::state::AppState;
@@ -242,7 +242,7 @@ pub struct GatewayClient<T: HttpTransport> {
     transport: Arc<T>,
     tokens: Arc<TokenManager<T>>,
     config: Arc<ConfigManager>,
-    hub: EventHub,
+    downtime: Downtime,
     inbound: Inbound,
     options: GatewayOptions,
     /// 多分片时本实例固定的分片；`None` 表示每次 identify 按配置现算（单分片）。
@@ -265,7 +265,7 @@ impl<T: HttpTransport> Clone for GatewayClient<T> {
             transport: Arc::clone(&self.transport),
             tokens: Arc::clone(&self.tokens),
             config: Arc::clone(&self.config),
-            hub: self.hub.clone(),
+            downtime: self.downtime.clone(),
             inbound: self.inbound.clone(),
             options: self.options.clone(),
             shard: self.shard,
@@ -275,7 +275,7 @@ impl<T: HttpTransport> Clone for GatewayClient<T> {
 }
 
 impl<T: HttpTransport + 'static> GatewayClient<T> {
-    /// 从 [`AppState`] 取配置、事件总线与入站转换器。
+    /// 从 [`AppState`] 取配置、事件发布器（含总线）与入站转换器。
     #[must_use]
     pub fn new(
         transport: Arc<T>,
@@ -287,7 +287,7 @@ impl<T: HttpTransport + 'static> GatewayClient<T> {
             transport,
             tokens,
             config: state.config_arc(),
-            hub: state.hub().clone(),
+            downtime: Downtime::from_state(state),
             inbound: Inbound::from_state(state),
             options,
             shard: None,
@@ -724,7 +724,7 @@ impl<T: HttpTransport + 'static> GatewayClient<T> {
                 let published = events.len();
                 for mut event in events {
                     apply_op_userid_type(&mut event, &mode);
-                    self.hub.publish(event);
+                    self.downtime.publish(event);
                 }
                 tracing::debug!(kind, published, "QQ 网关事件已发布");
             }

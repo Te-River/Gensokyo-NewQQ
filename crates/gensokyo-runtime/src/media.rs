@@ -13,24 +13,30 @@
 //!
 //! # 限制
 //!
-//! - [`MAX_MEDIA_BYTES`]（5MB，十进制 5_000_000 字节）对齐 Go `handlers/send_group_msg.go`
-//!   的 `file_data` 直传上限：超限返回请求侧错误（`retcode 1400`）。Go 的超限路径走分片上传
-//!   （`upload_prepare` / `upload_part_finish`），`gensokyo-qq` 尚未实现，因此这里的超限
-//!   直接报错而不是静默降级。
-//! - 不压缩、不转码、不抽帧：原字节直传（压缩是 `gensokyo_media::compress` 的独立能力）。
+//! - 下载上限 [`MAX_UPLOAD_BYTES`]（200MB，对齐 Go `getHardLimit`）：超过即请求侧错误
+//!   （`retcode 1400`）。超过 [`MAX_MEDIA_BYTES`]（5MB，Go `file_data` 直传上限）的媒体由
+//!   [`crate::deferred`] 改走分片上传（`upload_prepare` → `upload_part_finish` → `files`）。
+//! - 图片压缩 / 语音转码只在 [`MediaRuntime::prepare_image`] / [`MediaRuntime::prepare_record`]
+//!   里做，条件由调用方按 Go 的口径判定（`image_sizelimit` / 本地或 base64 来源）。
 //! - 不做 SSRF / 私网拦截，与 `gensokyo-media` 的既有边界一致。
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+use std::sync::OnceLock;
 
 use gensokyo_core::{Error, Result};
+use gensokyo_media::compress::{CompressOptions, compress_image};
+use gensokyo_media::silk::{DEFAULT_SAMPLE_RATE, SilkCodec};
 use gensokyo_media::{
     BoxFuture, FetchRequest, Fetcher, HttpTransport, MediaSource, MediaTransport, TransportResponse,
 };
 use gensokyo_protocol::MediaRef;
 
-/// 单条媒体的大小上限：5MB（**十进制 5_000_000 字节**，与 Go `file_data` 直传上限同口径，
-/// 不用 `5 * 1024 * 1024` 的二进制口径）。
+/// `file_data` 直传上限：5MB（**十进制 5_000_000 字节**，与 Go `maxDirectFileDataBytes`
+/// 同口径）。超过它由 [`crate::deferred`] 改走分片上传，不再是请求侧错误。
 pub const MAX_MEDIA_BYTES: u64 = 5_000_000;
+
+/// 下载硬上限：200MB（Go `getHardLimit`），超过直接报错。
+pub const MAX_UPLOAD_BYTES: u64 = 200 * 1024 * 1024;
 
 /// 取回的一份媒体。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,10 +49,11 @@ pub struct FetchedMedia {
     pub file_name: String,
 }
 
-/// deferred 的媒体下载器（上传由 [`gensokyo_actions::QqApi`] 负责）。
+/// deferred 的媒体下载器 + 发送前处理（压缩 / 转码）。
 #[derive(Debug)]
 pub struct MediaRuntime {
     fetcher: Fetcher,
+    silk: SilkCodec,
 }
 
 impl Default for MediaRuntime {
@@ -61,18 +68,29 @@ impl Default for MediaRuntime {
 }
 
 impl MediaRuntime {
-    /// 用给定传输创建（上限 [`MAX_MEDIA_BYTES`]、超时取 `gensokyo_media` 默认值）。
+    /// 用给定传输创建（上限 [`MAX_UPLOAD_BYTES`]、超时取 `gensokyo_media` 默认值）。
     #[must_use]
     pub fn with_transport(transport: Arc<dyn MediaTransport>) -> Self {
         Self {
-            fetcher: Fetcher::from_shared(transport).with_max_bytes(MAX_MEDIA_BYTES),
+            fetcher: Fetcher::from_shared(transport).with_max_bytes(MAX_UPLOAD_BYTES),
+            silk: SilkCodec::new(),
         }
     }
 
     /// 直接使用外部构造好的下载器（测试按需覆盖上限 / 超时 / 临时目录）。
     #[must_use]
     pub fn with_fetcher(fetcher: Fetcher) -> Self {
-        Self { fetcher }
+        Self {
+            fetcher,
+            silk: SilkCodec::new(),
+        }
+    }
+
+    /// 替换 silk 编解码器的进程出口（单测注入假执行器；生产用默认 `ffmpeg` / `pts`）。
+    #[must_use]
+    pub fn with_silk_codec(mut self, silk: SilkCodec) -> Self {
+        self.silk = silk;
+        self
     }
 
     /// 当前大小上限（`0` 表示不限制）。
@@ -123,6 +141,66 @@ impl MediaRuntime {
             content_type: fetched.content_type,
             bytes,
         })
+    }
+
+    /// 图片压缩（Go `images.CompressSingleImage`）：`threshold_kb == 0` 时原样返回。
+    ///
+    /// 参数按 Go 口径：不缩放（`max_side = 0`）、质量阶梯 [`gensokyo_media::compress::GO_QUALITY_LADDER`]、
+    /// 目标体积 `threshold_kb * 1024` 字节。格式差异（PNG 保留 PNG、GIF 不支持）见
+    /// [`gensokyo_media::compress`] 的模块文档。
+    ///
+    /// # Errors
+    /// 解码 / 编码失败（含 GIF / BMP）返回 [`Error::Protocol`]，与 Go「压缩图片失败」同样中止本条消息。
+    pub async fn prepare_image(&self, bytes: Vec<u8>, threshold_kb: u64) -> Result<Vec<u8>> {
+        if threshold_kb == 0 {
+            return Ok(bytes);
+        }
+        let target = usize::try_from(threshold_kb.saturating_mul(1024)).unwrap_or(usize::MAX);
+        let options = CompressOptions {
+            max_side: 0,
+            target_bytes: Some(target),
+            ..CompressOptions::default()
+        };
+        tokio::task::spawn_blocking(move || compress_image(&bytes, &options))
+            .await
+            .map_err(|err| Error::Upstream {
+                code: 0,
+                message: format!("图片压缩任务异常终止: {err}"),
+            })?
+            .map_err(|err| Error::Protocol(format!("图片压缩失败（retcode 1400）: {err}")))
+    }
+
+    /// 语音转码（Go `silk.EncoderSilk` 路径）：已是 AMR / SILK 的原样返回。
+    ///
+    /// 非音频内容（图片 / 纯文本）返回 [`Error::Protocol`]（Go `voice type error`）；
+    /// 外部 `ffmpeg` / `pts` 缺失或失败返回 [`Error::Upstream`]。`sample_rate = 0` 回退
+    /// [`DEFAULT_SAMPLE_RATE`]（Go 直接拿 0 去调编码器会失败，这里取模板默认值）。
+    pub async fn prepare_record(&self, bytes: Vec<u8>, sample_rate: u32) -> Result<Vec<u8>> {
+        if gensokyo_media::silk::is_amr_or_silk(&bytes) {
+            return Ok(bytes);
+        }
+        if !gensokyo_media::silk::check_audio(&bytes) {
+            return Err(Error::Protocol(
+                "语音格式不支持：既不是 AMR / SILK，也识别不出音频类型（Go voice type error）"
+                    .to_owned(),
+            ));
+        }
+        let codec = self.silk.clone();
+        let rate = if sample_rate == 0 {
+            DEFAULT_SAMPLE_RATE
+        } else {
+            sample_rate
+        };
+        tokio::task::spawn_blocking(move || codec.encode_bytes_to_silk(&bytes, rate))
+            .await
+            .map_err(|err| Error::Upstream {
+                code: 0,
+                message: format!("语音转码任务异常终止: {err}"),
+            })?
+            .map_err(|err| Error::Upstream {
+                code: 0,
+                message: format!("语音转码失败，请检查 ffmpeg / pts 是否安装: {err}"),
+            })
     }
 }
 
@@ -195,38 +273,157 @@ impl MediaTransport for LazyHttpTransport {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
+    use gensokyo_media::silk::{ProcessOutput, ProcessRunner};
 
     #[tokio::test]
-    async fn media_limit_is_decimal_five_megabytes() {
+    async fn download_limit_is_the_two_hundred_megabyte_hard_limit() {
         assert_eq!(
             MAX_MEDIA_BYTES, 5_000_000,
             "官方 5MB 按十进制口径：5 * 1024 * 1024 会少放行 24_288 字节"
         );
+        assert_eq!(MAX_UPLOAD_BYTES, 200 * 1024 * 1024, "对齐 Go getHardLimit");
         let runtime = MediaRuntime::default();
-        assert_eq!(runtime.max_bytes(), MAX_MEDIA_BYTES);
+        assert_eq!(runtime.max_bytes(), MAX_UPLOAD_BYTES);
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct EmptyTransport;
+
+    impl MediaTransport for EmptyTransport {
+        fn get(
+            &self,
+            _request: FetchRequest,
+        ) -> BoxFuture<'_, gensokyo_media::Result<TransportResponse>> {
+            Box::pin(async {
+                Ok(TransportResponse {
+                    status: 200,
+                    content_type: None,
+                    body: Vec::new(),
+                })
+            })
+        }
     }
 
     #[tokio::test]
     async fn local_file_at_limit_passes_and_one_byte_over_is_rejected() {
-        let runtime = MediaRuntime::default();
+        // 上限收到 4 字节：本地文件读路径不经过传输，只验大小闸门
+        let runtime = MediaRuntime::with_fetcher(Fetcher::new(EmptyTransport).with_max_bytes(4));
         let dir = tempfile::tempdir().expect("临时目录");
 
         let exact = dir.path().join("exact.bin");
-        std::fs::write(&exact, vec![0u8; MAX_MEDIA_BYTES as usize]).expect("写 5_000_000 字节失败");
+        std::fs::write(&exact, [1, 2, 3, 4]).expect("写 4 字节失败");
         let fetched = runtime
             .fetch(&MediaRef::Local(exact))
             .await
-            .expect("恰好 5_000_000 字节应放行");
-        assert_eq!(fetched.bytes.len() as u64, MAX_MEDIA_BYTES);
+            .expect("恰好 4 字节应放行");
+        assert_eq!(fetched.bytes.len(), 4);
 
         let over = dir.path().join("over.bin");
-        std::fs::write(&over, vec![0u8; MAX_MEDIA_BYTES as usize + 1])
-            .expect("写 5_000_001 字节失败");
+        std::fs::write(&over, [1, 2, 3, 4, 5]).expect("写 5 字节失败");
         let err = runtime
             .fetch(&MediaRef::Local(over))
             .await
-            .expect_err("5_000_001 字节必须拒绝");
+            .expect_err("超限必须拒绝");
         assert!(matches!(err, Error::Protocol(_)), "超限应映射 1400: {err}");
+    }
+
+    /// 质量 95 编码的 JPEG：压缩阶梯从 75 起步，重编码后字节必然不同。
+    fn jpeg_fixture() -> Vec<u8> {
+        let mut image = image::RgbImage::new(64, 64);
+        for (x, y, pixel) in image.enumerate_pixels_mut() {
+            *pixel = image::Rgb([x as u8 * 3, y as u8 * 3, (x + y) as u8]);
+        }
+        let mut out = Vec::new();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 95);
+        encoder.encode_image(&image).expect("编码测试 JPEG");
+        out
+    }
+
+    #[tokio::test]
+    async fn prepare_image_compresses_only_when_threshold_is_set() {
+        let source = jpeg_fixture();
+        let runtime = MediaRuntime::default();
+
+        let unchanged = runtime
+            .prepare_image(source.clone(), 0)
+            .await
+            .expect("阈值 0 原样返回");
+        assert_eq!(unchanged, source, "阈值 0 必须逐字节不变");
+
+        let compressed = runtime
+            .prepare_image(source.clone(), 1)
+            .await
+            .expect("阈值 1KB 应压缩成功");
+        assert_ne!(compressed, source, "命中阈值必须重编码");
+        assert!(compressed.starts_with(&[0xFF, 0xD8]), "JPEG 应保持 JPEG");
+    }
+
+    #[tokio::test]
+    async fn prepare_record_passes_through_amr_and_silk() {
+        let runtime = MediaRuntime::default();
+        for already in [b"\x02#!SILK_V3abc".to_vec(), b"#!AMR\x0a".to_vec()] {
+            let out = runtime
+                .prepare_record(already.clone(), 24_000)
+                .await
+                .expect("已是 AMR/SILK 应原样返回");
+            assert_eq!(out, already, "不满足转码条件时必须零变化");
+        }
+    }
+
+    #[tokio::test]
+    async fn prepare_record_rejects_non_audio() {
+        let runtime = MediaRuntime::default();
+        let err = runtime
+            .prepare_record(b"hello, not audio".to_vec(), 24_000)
+            .await
+            .expect_err("文本必须拒绝");
+        assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
+    }
+
+    /// 假进程出口：ffmpeg 写 PCM，pts 写 Silk；都不启动真实进程。
+    #[derive(Debug, Clone, Copy)]
+    struct FakeRunner;
+
+    impl ProcessRunner for FakeRunner {
+        fn run(
+            &self,
+            program: &str,
+            args: &[String],
+        ) -> gensokyo_media::Result<ProcessOutput> {
+            match program {
+                "ffmpeg" => {
+                    std::fs::write(Path::new(args.last().expect("末参是 PCM 路径")), b"pcm")
+                        .expect("写 PCM");
+                }
+                "pts" => {
+                    let index = args
+                        .iter()
+                        .position(|arg| arg.as_str() == "-o")
+                        .expect("pts 参数含 -o");
+                    std::fs::write(Path::new(&args[index + 1]), b"\x02#!SILK_V3-runtime")
+                        .expect("写 Silk");
+                }
+                other => panic!("意外的程序: {other}"),
+            }
+            Ok(ProcessOutput {
+                status: Some(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn prepare_record_encodes_non_silk_audio() {
+        let runtime =
+            MediaRuntime::default().with_silk_codec(SilkCodec::with_runner(FakeRunner));
+        let out = runtime
+            .prepare_record(b"ID3\x04not-silk".to_vec(), 24_000)
+            .await
+            .expect("非 Silk 音频应转码");
+        assert_eq!(out, b"\x02#!SILK_V3-runtime");
     }
 }

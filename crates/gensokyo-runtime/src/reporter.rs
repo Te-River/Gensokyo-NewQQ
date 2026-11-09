@@ -95,7 +95,9 @@ async fn run<T>(state: AppState, transport: Arc<T>, mut stop: watch::Receiver<bo
 where
     T: HttpTransport + 'static,
 {
-    let mut events = state.hub().subscribe();
+    // 后台订阅：post_url 上报不是 OneBot 下游，不参与 downtime 兜底判定
+    // （见 `EventHub::downstream_count`）；该句柄自己持有 receiver，drop 时一起消失。
+    let mut events = state.hub().subscribe_background();
     // 在途上报任务：每条事件一个，`join_next` 顺手回收已完成的。
     let mut in_flight: JoinSet<()> = JoinSet::new();
 

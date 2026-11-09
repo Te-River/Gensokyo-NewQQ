@@ -44,6 +44,9 @@ pub enum Error {
     /// 图床响应无法解析出可用的上传 URL。
     #[error("图床响应无效: {0}")]
     HostingResponse(String),
+    /// 内容审核未通过：这条媒体不得发布（调用方保留原引用）。
+    #[error("内容审核未通过: {0}")]
+    AuditRejected(String),
     /// 图片格式不在 M2c 解码范围（只解码 JPEG / PNG / WebP）。
     #[error("不支持的图片格式: {0}")]
     UnsupportedImageFormat(String),

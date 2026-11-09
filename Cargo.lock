@@ -758,6 +758,7 @@ dependencies = [
  "gensokyo-qq",
  "gensokyo-storage",
  "gensokyo-webui",
+ "image",
  "md-5",
  "ring",
  "serde",
@@ -765,6 +766,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.30.0",
+ "tonic",
  "tower",
  "tracing",
 ]

@@ -21,8 +21,9 @@
 //!   [`hosting::HostingKind::from_oss_type`]（0 = 本地上传，1~3 = 内置云 OSS（见 [`oss`]），均返回 `None`）。
 //! - [`oss::OssKind`]：`oss_type` 1~3 的内置云 OSS（腾讯云 COS / 百度云 BOS / 阿里云 OSS），
 //!   [`oss::upload`] 单次尝试直传（Go `oss` 包同口径，无重试），对象 key 是 `md5(字节).jpg`，
-//!   签名与请求头逐字段照 Go；审核开关（`t_audit` / `b_audit` / `a_audit`）未实现，
-//!   打开时在发请求前返回 [`Error::HostingConfig`]，由调用方保留原引用（fail-closed）。
+//!   签名与请求头逐字段照 Go；审核开关（`t_audit` / `b_audit` / `a_audit`）打开时先传后审，
+//!   不合规或审核请求不可用返回 [`Error::AuditRejected`] / [`Error::HostingResponse`]，
+//!   由调用方保留原引用。
 //! - [`hosting::HostingBackend`]：`async fn upload(&self, data, filename) -> Result<String>`；
 //!   oss_type 4~10 全部落地（COS / Bilibili / QQ频道 / ChatGLM / Ukaka / 星野 / Nature），
 //!   端点、表单字段、签名与成功判定都照 Go `imagehosting/`。
@@ -52,8 +53,11 @@
 //!   `compressPNG` 的做法压到白底。
 //!
 //! ## M2d：silk 音频编解码（外部进程版）
-//! - [`silk::SilkCodec`]：`encode_to_silk`（ffmpeg → 16-bit 单声道 PCM → `pts` → Silk v3）与
+//! - [`silk::SilkCodec`]：`encode_to_silk`（ffmpeg → 16-bit 单声道 PCM → `pts` → Silk v3）、
+//!   `encode_bytes_to_silk`（同一链路的字节级入口，供出站媒体链在内存里转码）与
 //!   `decode_silk`（`pts` → PCM → ffmpeg 转目标容器），参数顺序对齐 Go `silk/silk.go`。
+//! - [`silk::is_amr_or_silk`] / [`silk::check_audio`]：Go `IsAMRorSILK` / `CheckAudio` 的
+//!   等价判定（转码前短路与非音频初筛）。
 //! - [`silk::ProcessRunner`]：唯一的进程出口。生产实现 [`silk::CommandRunner`]
 //!   （`std::process::Command`），测试用假执行器断言程序名 / 参数 / 错误映射。
 //! - 程序路径可配置：`GENSOKYO_FFMPEG` / `GENSOKYO_PTS`，缺省 `ffmpeg` / `pts`（走 PATH）。

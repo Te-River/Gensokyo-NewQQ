@@ -26,6 +26,7 @@
 //! | [`QqApi::send_c2c_message`] | `POST /v2/users/{uid}/messages` | 真实调用（deferred 执行链） |
 //! | [`QqApi::upload_group_file`] | `POST /v2/groups/{gid}/files` | 真实调用（deferred 媒体上传） |
 //! | [`QqApi::upload_c2c_file`] | `POST /v2/users/{uid}/files` | 真实调用（deferred 媒体上传） |
+//! | [`QqApi::prepare_file_upload`] / [`QqApi::finish_file_upload_part`] / [`QqApi::merge_file_upload`] | `POST /v2/groups/{id}/upload_prepare`（C2C 为 `/v2/users/{id}/…`）→ `upload_part_finish` → `files` | 真实调用（>5MB 分片上传；分片 PUT 复用 [`QqApi::put_presigned_image`]） |
 //! | [`QqApi::prepare_media_image`] | `POST /v2/media-images/prepare` | 真实调用（素材管理） |
 //! | [`QqApi::put_presigned_image`] | `PUT <presigned_url>`（COS） | 真实调用（不带 Authorization） |
 //! | [`QqApi::complete_media_image`] | `POST /v2/media-images/complete` | 真实调用（素材管理） |
@@ -72,9 +73,10 @@ use gensokyo_qq::dto::media_image::{
 use gensokyo_qq::dto::{
     ApprovalJoinRequest, BatchRemoveMembersRequest, CreateJoinApprovalStrategyRequest,
     CreateJoinApprovalStrategyResponse, CreatePanelRequest, CreatePanelResponse, FileUpload,
-    GenerateUrlLink, GenerateUrlLinkRequest, JoinApprovalStrategyList, MediaResponse,
-    MemberBlacklistList, MemberBlacklistRequest, MemberBlacklistResponse, MemberMuteState,
-    MenuResponse, MessageResponse, MessageToCreate, PanelList, PanelRecordDetail,
+    FileUploadMergeRequest, FileUploadPartFinishRequest, FileUploadPrepareRequest,
+    FileUploadPrepareResponse, GenerateUrlLink, GenerateUrlLinkRequest, JoinApprovalStrategyList,
+    MediaResponse, MemberBlacklistList, MemberBlacklistRequest, MemberBlacklistResponse,
+    MemberMuteState, MenuResponse, MessageResponse, MessageToCreate, PanelList, PanelRecordDetail,
     PanelTargetRequest, PutMenuRequest, RestrictChatSetting, UpdateJoinApprovalStrategyRequest,
     UpdateJoinApprovalStrategyResponse, UpdatePanelRequest, VersionResponse, WhitelistUsersRequest,
     WhitelistUsersResponse,
@@ -208,6 +210,55 @@ pub trait QqApi: Send + Sync + fmt::Debug {
         Box::pin(async {
             Err(Error::Unsupported(
                 "upload_c2c_file: 当前 QqApi 实现不支持媒体上传".to_owned(),
+            ))
+        })
+    }
+
+    /// 分片上传·预上传（`POST /v2/{groups|users}/{id}/upload_prepare`）。
+    ///
+    /// 超过 `file_data` 直传上限（5MB）的媒体由调用方编排三步：
+    /// prepare → 逐片 [`QqApi::put_presigned_image`] + 本方法 → [`QqApi::merge_file_upload`]。
+    /// 分片字节的 PUT 复用素材直传（同为「预签名 URL、不带 Authorization」），Content-Type
+    /// 传 `application/octet-stream`（Go `chunkedUpload` 同）。
+    ///
+    /// 默认实现返回 [`Error::Unsupported`]：只跑查询类 action 的替身不必实现分片上传。
+    fn prepare_file_upload(
+        &self,
+        _id: &str,
+        _is_group: bool,
+        _request: FileUploadPrepareRequest,
+    ) -> QqFuture<'_, FileUploadPrepareResponse> {
+        Box::pin(async {
+            Err(Error::Unsupported(
+                "prepare_file_upload: 当前 QqApi 实现不支持分片上传".to_owned(),
+            ))
+        })
+    }
+
+    /// 分片上传·通知单片完成（`POST /v2/{groups|users}/{id}/upload_part_finish`）。
+    fn finish_file_upload_part(
+        &self,
+        _id: &str,
+        _is_group: bool,
+        _request: FileUploadPartFinishRequest,
+    ) -> QqFuture<'_, ()> {
+        Box::pin(async {
+            Err(Error::Unsupported(
+                "finish_file_upload_part: 当前 QqApi 实现不支持分片上传".to_owned(),
+            ))
+        })
+    }
+
+    /// 分片上传·合并分片（`POST /v2/{groups|users}/{id}/files`），返回 `file_info`。
+    fn merge_file_upload(
+        &self,
+        _id: &str,
+        _is_group: bool,
+        _request: FileUploadMergeRequest,
+    ) -> QqFuture<'_, MediaResponse> {
+        Box::pin(async {
+            Err(Error::Unsupported(
+                "merge_file_upload: 当前 QqApi 实现不支持分片上传".to_owned(),
             ))
         })
     }
@@ -643,6 +694,48 @@ impl<T: HttpTransport> QqApi for OpenApiClient<T> {
         let user_openid = user_openid.to_owned();
         Box::pin(async move {
             OpenApiClient::upload_c2c_file(self, &user_openid, &file)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn prepare_file_upload(
+        &self,
+        id: &str,
+        is_group: bool,
+        request: FileUploadPrepareRequest,
+    ) -> QqFuture<'_, FileUploadPrepareResponse> {
+        let id = id.to_owned();
+        Box::pin(async move {
+            OpenApiClient::prepare_file_upload(self, &id, is_group, &request)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn finish_file_upload_part(
+        &self,
+        id: &str,
+        is_group: bool,
+        request: FileUploadPartFinishRequest,
+    ) -> QqFuture<'_, ()> {
+        let id = id.to_owned();
+        Box::pin(async move {
+            OpenApiClient::finish_file_upload_part(self, &id, is_group, &request)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn merge_file_upload(
+        &self,
+        id: &str,
+        is_group: bool,
+        request: FileUploadMergeRequest,
+    ) -> QqFuture<'_, MediaResponse> {
+        let id = id.to_owned();
+        Box::pin(async move {
+            OpenApiClient::merge_file_upload(self, &id, is_group, &request)
                 .await
                 .map_err(qq_error)
         })

@@ -46,8 +46,6 @@
 //! - 消息撤回、流式消息、`input_notify` / `card` 的强类型模型（可用
 //!   [`dto::MessageToCreate::with_extra`] 透传）。
 //! - 入群申请审批、自动审批策略、成员黑名单、批量移出、自定义菜单、指令面板。
-//! - 分片上传（`upload_prepare` / `upload_part_finish`）与富媒体合并；当前只做
-//!   `file_data` / `url` 直传（botgo `handlers` 侧对 >5MB 文件另走分片）。
 
 pub mod dto;
 pub mod error;
@@ -58,9 +56,10 @@ pub mod openapi;
 pub mod token;
 
 pub use dto::{
-    BotInGroupState, FileUpload, GroupInfo, GroupMember, GroupMemberList, InputNotify, JoinRequest,
-    JoinRequestList, Markdown, MediaResponse, MessageResponse, MessageToCreate, RestrictChatSetting,
-    StreamSse, file_type, msg_type,
+    BotInGroupState, FileUpload, FileUploadMergeRequest, FileUploadPartFinishRequest,
+    FileUploadPrepareRequest, FileUploadPrepareResponse, GroupInfo, GroupMember, GroupMemberList,
+    InputNotify, JoinRequest, JoinRequestList, Markdown, MediaResponse, MessageResponse,
+    MessageToCreate, RestrictChatSetting, StreamSse, file_type, msg_type,
 };
 pub use error::{ApiError, Error, Result};
 pub use http::{
