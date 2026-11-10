@@ -2,7 +2,7 @@
 //!
 //! M1d 落地 [`idmap`] 的**本地**存储（redb），M1e 落地 [`echo`] 的进程内映射与
 //! [`importer`] 的 JSONL 导入，M1f 落地 [`idmap::grpc`] 的 `IDMapService`（tonic，17 个 RPC
-//! 中 14 个已接线，3 个明确 `unimplemented`，见该模块文档）。HTTP 远程回退留给后续里程碑。
+//! 中 15 个已接线，2 个明确 `unimplemented`，见该模块文档）。HTTP 远程回退留给后续里程碑。
 //!
 //! # 库文件
 //!

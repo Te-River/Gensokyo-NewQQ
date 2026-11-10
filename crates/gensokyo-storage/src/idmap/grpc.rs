@@ -21,12 +21,10 @@
 //! | `StoreCacheV2` / `RetrieveRowByCacheV2` | [`IdMapStore::store_cache`] / [`IdMapStore::retrieve_row_by_cache`] |
 //! | `UpdateVirtualValueV2` | [`IdMapStore::update_virtual_value`]（Go `UpdateVirtualValue`：三段反查身份 → 迁移正反表 / `new == 0` 彻底解绑 / 隔离模式写 alias）；"已存在"回 `Status::already_exists` |
 //! | `UpdateVirtualValueV2Pro` | 两次 [`IdMapStore::update_virtual_value`]（Go `UpdateVirtualValuev2Pro`：非原子顺序调用） |
-//! | `FindSubKeysByIdPro` | **未实现** → `Status::unimplemented`（见下） |
+//! | `FindSubKeysByIdPro` | [`IdMapStore::find_sub_keys_by_id`]（Go 读退役 bbolt `ids` 桶；redb 按正表前缀扫，现代 schema 恒空） |
 //!
 //! # 未做的部分（明确列出）
 //!
-//! - `FindSubKeysByIdPro`：Go 读的是**已退役** bbolt `ids` 桶里的 `id:sub` 复合键
-//!   （`idmap/service.go:2112`），redb 身份库没有等价表结构。
 //! - TLS/mTLS 与鉴权：不做。与 Go 侧一致（明文 h2c，内网/反向代理兜底）；监听地址、连接数、
 //!   超时由调用方用 `tonic::transport::Server` / `Endpoint` 自行配置，本模块不接管生命周期。
 //!
@@ -266,9 +264,14 @@ impl pb::id_map_service_server::IdMapService for IdMapService {
 
     async fn find_sub_keys_by_id_pro(
         &self,
-        _request: Request<pb::FindSubKeysRequest>,
+        request: Request<pb::FindSubKeysRequest>,
     ) -> Result<Response<pb::FindSubKeysResponse>, Status> {
-        Err(Status::unimplemented(SUB_KEYS_UNIMPLEMENTED))
+        let request = request.into_inner();
+        let keys = self
+            .store
+            .find_sub_keys_by_id(&request.id)
+            .map_err(status)?;
+        Ok(Response::new(pb::FindSubKeysResponse { keys }))
     }
 
     async fn delete_config_v2(
@@ -305,10 +308,6 @@ impl pb::id_map_service_server::IdMapService for IdMapService {
         Ok(Response::new(pb::RetrieveRowByCacheResponse { id }))
     }
 }
-
-/// `FindSubKeysByIdPro` 的拒绝理由。
-const SUB_KEYS_UNIMPLEMENTED: &str = "FindSubKeysByIdPro 未实现：Go 读的是已退役 bbolt `ids` \
-     桶的 `id:sub` 复合键（idmap/service.go:2112），redb 身份库没有等价表结构";
 
 /// `IDMapService` 客户端：对 tonic 生成的 `IdMapServiceClient` 的薄封装。
 ///
@@ -612,7 +611,8 @@ impl IdMapClient {
             .map(Response::into_inner)
     }
 
-    /// RPC 14：`FindSubKeysByIdPro`（服务端当前恒回 `Unimplemented`）。
+    /// RPC 14：`FindSubKeysByIdPro`（Go 读退役 bbolt `ids` 桶；redb 按正表前缀扫，现代
+    /// schema 下恒空）。
     ///
     /// # Errors
     ///
@@ -920,12 +920,15 @@ mod tests {
             first_new + 100
         );
 
-        let err = harness
+        // RPC 14：现代 schema 的正表没有 `id:sub` 复合键，与 Go 一样回空列表
+        let sub_keys = harness.client.find_sub_keys_by_id_pro("id").await?;
+        assert!(sub_keys.keys.is_empty(), "{sub_keys:?}");
+        // 已登记的身份也不会命中：正表 key 是 `openid:QQ:<AppID>:<raw>`，不是两段复合键
+        let sub_keys = harness
             .client
-            .find_sub_keys_by_id_pro("id")
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::Unimplemented);
+            .find_sub_keys_by_id_pro("openid-user-1")
+            .await?;
+        assert!(sub_keys.keys.is_empty(), "{sub_keys:?}");
         Ok(())
     }
 }

@@ -25,10 +25,11 @@
 //!   保存 / 拼 URL 逻辑（省掉一跳），成功响应完全一致。
 //! - `oss_type=0` 且 `lotus=true && !lotus_without_uploadpic` 时 Go 转发给远端 lotus 图床；
 //!   Rust 未移植 lotus 出站，返回 500 并说明原因（不伪造成功）。
-//! - `getid` 的 14 依赖已退役的 bbolt `ids` 桶（复合键 `id:sub`），Rust idmap 未提供，回 **501**；
-//!   复合键类型 8~11 与重绑定 5/12 由本地 `IdMapStore` 组合实现（与 gRPC 服务端同一套语义），
-//!   其余类型与 Go 同码同形状。Go 的 `switch` 无 `default`，未知 type 返回 **200 空响应体**，
-//!   此处照抄。
+//! - `getid` 的 14（Go `FindSubKeysByIdPro`）按正表 key 前缀扫子键——Go 读的是已退役的 bbolt
+//!   `ids` 桶，redb 没有该桶，现代 schema 下与 Go 一样恒空，回 200 `{"keys":null}`（Go 的
+//!   nil 切片序列化成 `null`）；复合键类型 8~11 与重绑定 5/12 由本地 `IdMapStore` 组合实现
+//!   （与 gRPC 服务端同一套语义），其余类型与 Go 同码同形状。Go 的 `switch` 无 `default`，
+//!   未知 type 返回 **200 空响应体**，此处照抄。
 //! - `getid` 18/19（Go `ForceUnbindID` / `ListAllIdentities`）：18 按 `normalize_identity` 删正表
 //!   条目，因此解绑后正反查都查不到（Go 删的是 `uin:<raw>`，命中不了真实 key，正表会残留）；
 //!   19 的 `real_id` 取反表里的原始身份串（Go 取归一化 key），空库回 `[]`（Go 的 nil 切片是
@@ -595,7 +596,18 @@ async fn get_id(State(state): State<AppState>, request: Request) -> Response {
                 Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
             }
         }
-        14 => unsupported(type_value),
+        14 => {
+            let Some(idmap) = state.idmap() else {
+                return idmap_missing();
+            };
+            // Go `FindSubKeysByIdPro`：读退役 bbolt `ids` 桶的 `id:sub` 复合键；redb 按正表
+            // 前缀扫，现代 schema 恒空。Go 的 nil 切片序列化成 `null`，这里照抄。
+            match idmap.find_sub_keys_by_id(id) {
+                Ok(keys) if keys.is_empty() => Json(json!({ "keys": null })).into_response(),
+                Ok(keys) => Json(json!({ "keys": keys })).into_response(),
+                Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+            }
+        }
         15 => {
             let subtype = first(&pairs, "subtype").unwrap_or("");
             let Some(idmap) = state.idmap() else {
@@ -716,13 +728,6 @@ fn retrieve_row(idmap: &IdMapStore, raw: &str) -> Result<String, StorageError> {
         Ok(row) => idmap.retrieve_row_by_id(row),
         Err(_) => Err(StorageError::NotFound(format!("vUIN {raw}"))),
     }
-}
-
-fn unsupported(type_value: i64) -> Response {
-    json_error(
-        StatusCode::NOT_IMPLEMENTED,
-        format!("type={type_value} 未实现：Rust idmap 未提供该复合键操作"),
-    )
 }
 
 fn idmap_missing() -> Response {
@@ -1819,7 +1824,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn getid_reports_unsupported_and_go_quirk_shapes() {
+    async fn getid_reports_go_error_and_quirk_shapes() {
         let directory = TempDir::new().expect("临时目录");
         let state = AppState::with_builtin_handlers(manager(&directory, "  server_dir: x\n"))
             .with_idmap(idmap(&directory));
@@ -1851,7 +1856,6 @@ mod tests {
                 400,
                 "Invalid input values oldVirtualValue1",
             ),
-            ("/getid?type=14&id=1", 501, "type=14"),
             (
                 "/getid?type=18",
                 400,
@@ -1867,6 +1871,15 @@ mod tests {
                 "{uri} → {body:?}"
             );
         }
+
+        // type 14：Go 的 `ids` 桶在现代 schema 下恒空，nil 切片序列化成 `null`
+        let (status, body) = call(
+            router(state.clone()),
+            get_request("/getid?type=14&id=1", LOCAL_PEER),
+        )
+        .await;
+        assert_eq!(status, 200, "{body:?}");
+        assert_eq!(body, serde_json::json!({ "keys": null }));
 
         // Go switch 无 default：未知 type 是 200 空体
         let (status, body) = call(router(state), get_request("/getid?type=99", LOCAL_PEER)).await;

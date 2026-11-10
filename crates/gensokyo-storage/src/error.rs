@@ -6,7 +6,10 @@ use thiserror::Error;
 ///
 /// 不 panic、不 `unwrap`：所有可预期失败都通过本枚举上抛。文件系统 IO 错误由 redb
 /// 包装后归入 [`StorageError::Redb`]，因此不再单列不可达的 `Io` 变体。
+///
+/// `#[non_exhaustive]`：后续新增变体对下游不是破坏性变更（下游匹配需保留通配分支）。
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum StorageError {
     /// 键不存在。
     #[error("键不存在: {0}")]

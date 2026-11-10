@@ -599,6 +599,39 @@ impl IdMapStore {
         Ok(mappings)
     }
 
+    /// 取同一前缀下的所有子键（Go `FindSubKeysById`，`idmap/service.go:2113`）：按
+    /// `"<id>:"` 前缀扫正表，收集冒号后的部分，且只收**恰好两段**的 key（Go 的
+    /// `len(keyParts) == 2`）。
+    ///
+    /// Go 读的是早已退役的 bbolt `ids` 桶（`map_service.go:146`），桶里只有迁移遗留的
+    /// `uin:<…>` / `row-<N>` 复合键；redb 没有这张桶，这里按同一前缀语义扫正表。正表 key
+    /// 全是归一化身份串（`openid:QQ:<AppID>:<raw>` / `ruin:<平台>:<序号>:<id>` / `raw:<raw>`），
+    /// 现代 schema 下与 Go 一样返回空。
+    ///
+    /// 与 Go 的差异：key 空间不同——`id` 传 `raw` 且库里有不含冒号的 `raw:<身份>` 行时会命中，
+    /// Go 的 `ids` 桶不会；真实调用方传群号 / UIN，走不到这条。
+    ///
+    /// # Errors
+    ///
+    /// redb 事务失败时返回 [`StorageError::Redb`]。
+    pub fn find_sub_keys_by_id(&self, id: &str) -> Result<Vec<String>, StorageError> {
+        let txn = self.identity_db.begin_read().map_err(rb)?;
+        let forward = txn.open_table(IDENTITY_TO_VUIN).map_err(rb)?;
+        let prefix = format!("{id}:");
+        let mut keys = Vec::new();
+        for entry in forward.range(prefix.as_str()..).map_err(rb)? {
+            let (key, _) = entry.map_err(rb)?;
+            let key = key.value();
+            let Some(sub) = key.strip_prefix(prefix.as_str()) else {
+                break;
+            };
+            if !sub.contains(':') {
+                keys.push(sub.to_owned());
+            }
+        }
+        Ok(keys)
+    }
+
     /// 强制解绑（Go `ForceUnbindID`）：删除正表条目与该身份的全部反对表条目。
     ///
     /// `id` 支持 Go 的两种入参：原始身份串，或十进制 vUIN（后者经
@@ -704,8 +737,8 @@ impl IdMapStore {
             return self.write_rebind_alias(old_vuin, new_vuin);
         }
         let txn = self.identity_db.begin_write().map_err(rb)?;
-        // 要迁/要删的身份：反表 key 后缀 + 该行保存的原始身份串（正表要跟着一起改）
-        let mut migrated: Vec<(String, String)> = Vec::new();
+        // 要迁/要删的身份：反表 key 后缀 + 该行 value 的原始字节（迁到新 vUIN 时原样写回）
+        let mut migrated: Vec<(String, Vec<u8>)> = Vec::new();
         // 被删反表行的 head（`"<vUIN>:"` 前缀）：反查缓存按 vUIN 存，必须一并失效
         let mut unbound_vuins = vec![old_vuin];
         {
@@ -728,7 +761,8 @@ impl IdMapStore {
                     .strip_prefix(prefix.as_str())
                     .unwrap_or_default()
                     .to_owned();
-                migrated.push((identity_key, decode_text(value.value())?));
+                // value 原样搬运：不 decode 就不必让单条非 UTF-8 行中止整族迁移
+                migrated.push((identity_key, value.value().to_vec()));
                 stale.push(key.value().to_owned());
             }
             for key in &stale {
@@ -736,16 +770,26 @@ impl IdMapStore {
             }
             // 反表缺行、只能靠正表兜底时，被选中的身份也要一起迁/删
             if !migrated.iter().any(|(key, _)| key == &identity.key) {
-                migrated.push((identity.key.clone(), identity.raw.clone()));
+                migrated.push((identity.key.clone(), identity.raw.clone().into_bytes()));
             }
             if new_vuin != 0 {
                 let mapped = encode_i64(new_vuin);
                 for (key, raw) in &migrated {
+                    // 正表行可能原本就指向另一个 vUIN（外部写坏才有）：写回前把旧值一并
+                    // 压进 unbound_vuins，否则那个 vUIN 的反查缓存会继续回已迁走的身份
+                    if let Some(previous) = forward
+                        .get(key.as_str())
+                        .map_err(rb)?
+                        .and_then(|guard| decode_i64(guard.value()))
+                        && previous != new_vuin
+                    {
+                        unbound_vuins.push(previous);
+                    }
                     forward
                         .insert(key.as_str(), mapped.as_slice())
                         .map_err(rb)?;
                     reverse
-                        .insert(vuin_identity_key(new_vuin, key).as_str(), raw.as_bytes())
+                        .insert(vuin_identity_key(new_vuin, key).as_str(), raw.as_slice())
                         .map_err(rb)?;
                 }
             } else {
