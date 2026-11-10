@@ -189,6 +189,7 @@ strip = "symbols"
 | 3 | **缓冲复用**：入站 WS 帧解析与出站 JSON 序列化每次新建 `Vec<u8>` / `String` | `gensokyo-runtime` 传输层、`gensokyo-qq` | 减少高频小分配；`bytes::BytesMut` 已在 workspace 依赖中 | 基线 c + 分配计数（后续可加 `#[global_allocator]` 计数版临时 bench） |
 | 4 | **连接池**：出站 HTTP 复用 `reqwest::Client` 与 keep-alive，禁止每 action 新建 | `gensokyo-qq` | 省掉每次 TLS 握手，长尾延迟收益远大于热点路径 | 网络路径 bench 覆盖不到，需集成测量（本地 mock server 跑 P50/P99） |
 | 5 | **分配器对照**：`mimalloc` 已落地（§4.3：a −51% / b −21% / c −47%）；jemalloc 在 Windows 需要完整 MSVC 工具链，本机不可评估 | `gensokyo-bin` 入口 | mimalloc 的时间收益已兑现；剩余缺口是 RSS 与分配次数的对照 | 系统档 / mimalloc 档各跑 3 次基线 a/b/c（数字见 §4.3）+ 常驻 RSS；**必须独占机器**，并行编译会让同一档位差 3× |
+| 6 | **共享 HTTP 传输（P41 已落地）**：`gensokyo_runtime::boot::shared_transport()` 用 `OnceLock` 缓存首个**成功**构建的 `Arc<ReqwestTransport>`，QQ 网关 / action 客户端 / post_url 上报 / union_webhook 扇出四处共用同一个 `reqwest::Client`；构建失败不入缓存（下次重试，各调用点降级语义不变）。边界：四条链路共用**同一个**连接池上限，一条链路占满空闲连接时其他链路要排队；URL / 超时 / 头 / 重试 / 代理 / 证书口径均未改 | `crates/gensokyo-runtime/src/boot.rs`（+ `reporter` / `webhook` / `gensokyo-bin/src/startup.rs` 三个调用点） | 启动期 Client 构建 4 次 → 1 次；运行期 webhook 每条回调不再新建 Client，keep-alive 才真正复用（省 TLS 握手，长尾收益大于热点路径） | §4 微基准覆盖不到（走网络）；实例等价性用 `Arc::ptr_eq`（`gensokyo-bin` 的 `shared_transport_returns_same_instance` 用例）证明 |
 
 **通用要求**：任何一项落地前先记录「改前」中位数，落地后用同一 `--iters`、同一机器重跑，
 数字写回 §4（保留历史行，别覆盖），否则优化无从复核。

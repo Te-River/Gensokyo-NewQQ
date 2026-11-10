@@ -58,7 +58,7 @@
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use axum::Router;
@@ -454,6 +454,36 @@ impl Runtime {
     }
 }
 
+/// 进程级共享 HTTP 传输：首次成功构建后缓存，之后每次取用只 `Arc::clone`。四个调用点
+/// （QQ 上游网关、action 客户端、post_url 上报、union_webhook 扇出）由此共用同一个
+/// `reqwest::Client`，连接池与 TLS 会话缓存随之共享。
+///
+/// 失败**不写缓存**：`OnceLock` 只在成功路径被初始化，构建失败原样返回 `Err`，下次调用
+/// 重新尝试。这样「这一次没装上 rustls provider」不会被固化成全进程状态，各调用点的降级
+/// 语义（`warn` / `None` / 无 QQ 模式）保持原样。
+///
+/// # Errors
+/// 与 [`ReqwestTransport::new`] 相同：未安装进程级 rustls provider，或 reqwest 客户端
+/// 构建失败。
+pub fn shared_transport() -> Result<Arc<ReqwestTransport>, gensokyo_qq::Error> {
+    if let Some(cached) = SHARED_TRANSPORT.get() {
+        return Ok(Arc::clone(cached));
+    }
+    #[cfg(test)]
+    BUILD_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fresh = ReqwestTransport::new()?;
+    // 并发首建时多个调用都能走到这里：`get_or_init` 只保留先到的那个，后到的丢掉自己这份，
+    // 保证全进程只有一份底层客户端。
+    Ok(Arc::clone(SHARED_TRANSPORT.get_or_init(|| Arc::new(fresh))))
+}
+
+/// 共享传输缓存：只存**成功**构建的实例（失败不落缓存，见 [`shared_transport`]）。
+static SHARED_TRANSPORT: OnceLock<Arc<ReqwestTransport>> = OnceLock::new();
+
+/// 测试专用的构建尝试计数：用来断言「失败的构建不缓存」。
+#[cfg(test)]
+static BUILD_ATTEMPTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// 启动 QQ 上游 WS 网关（任务 #70）。
 ///
 /// 凭据齐备时用 `ReqwestTransport` + [`TokenManager`] 装配；缺 `app_id` / `client_secret`
@@ -469,8 +499,8 @@ fn start_gateway(state: &AppState) -> Option<GatewayHandle> {
         return None;
     }
 
-    let transport = match ReqwestTransport::new() {
-        Ok(transport) => Arc::new(transport),
+    let transport = match shared_transport() {
+        Ok(transport) => transport,
         Err(err) => {
             tracing::warn!(error = %err, "构建 QQ HTTP 传输失败，QQ 上游 WS 网关不启动");
             return None;
@@ -1085,6 +1115,23 @@ mod tests {
         let path = directory.path().join("config.yml");
         std::fs::write(&path, format!("version: 1\nsettings:\n{yaml}")).expect("写配置");
         ConfigManager::new(&path).expect("读配置").snapshot()
+    }
+
+    /// 共享传输：构建失败**不落缓存**，下一次调用会重新尝试。
+    ///
+    /// 前提：本 crate 的测试进程不安装 rustls provider（只有 `gensokyo-bin` 装），所以两次
+    /// 取用都必然失败——正好用来验证「一次失败不会被固化成全进程状态」。
+    #[test]
+    fn shared_transport_failure_is_not_cached() {
+        let before = super::BUILD_ATTEMPTS.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(super::shared_transport().is_err(), "未装 provider 时应报错");
+        assert!(
+            super::shared_transport().is_err(),
+            "失败不应被缓存，第二次仍走构建并报错"
+        );
+        let attempts =
+            super::BUILD_ATTEMPTS.load(std::sync::atomic::Ordering::Relaxed) - before;
+        assert!(attempts >= 2, "两次失败应各尝试构建一次，实际 {attempts} 次");
     }
 
     /// 配置开关：只有 `lotus && lotus_grpc` 才起 gRPC idmap 服务端。

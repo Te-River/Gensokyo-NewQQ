@@ -28,7 +28,7 @@ use gensokyo_config::{
     ensure_config_file,
 };
 use gensokyo_core::Error as CoreError;
-use gensokyo_qq::{HttpTransport, OpenApiClient, ReqwestTransport, TokenConfig, TokenManager};
+use gensokyo_qq::{HttpTransport, OpenApiClient, TokenConfig, TokenManager};
 use gensokyo_runtime::{
     AppState, DEFAULT_SHUTDOWN_TIMEOUT, Runtime, RuntimeHandle, RuntimeOptions,
 };
@@ -139,7 +139,7 @@ fn complete_config(path: &Path) {
 /// `gensokyo-qq` / `gensokyo-media` 只启用 `rustls-no-provider`，provider 由二进制注入。
 /// 返回**本次调用**是否新装了 provider：已装好时直接返回 `false`（`install_default` 在已有
 /// provider 时会失败，先查再装即可让重复调用幂等）。安装失败只 warn、不 panic——后续
-/// [`ReqwestTransport::new`] 会自行报错并触发无 QQ 降级。
+/// [`gensokyo_runtime::boot::shared_transport`] 会自行报错并触发无 QQ 降级。
 #[must_use]
 pub fn install_crypto_provider() -> bool {
     if rustls::crypto::CryptoProvider::get_default().is_some() {
@@ -218,8 +218,8 @@ pub fn build_state(config: Arc<ConfigManager>) -> AppState {
         );
         return AppState::with_builtin_handlers(config);
     };
-    let transport = match ReqwestTransport::new() {
-        Ok(transport) => Arc::new(transport),
+    let transport = match gensokyo_runtime::boot::shared_transport() {
+        Ok(transport) => transport,
         Err(err) => {
             tracing::warn!(
                 error = %err,
@@ -818,6 +818,19 @@ settings:
         assert!(
             rustls::crypto::CryptoProvider::get_default().is_some(),
             "安装后应能取到 provider"
+        );
+    }
+
+    /// 共享 HTTP 传输：两次取用拿到**同一个**实例（连接池与 TLS 会话缓存共享）。
+    #[test]
+    fn shared_transport_returns_same_instance() {
+        let _ = install_crypto_provider();
+        let first =
+            gensokyo_runtime::boot::shared_transport().expect("装好 provider 后应能构建传输");
+        let second = gensokyo_runtime::boot::shared_transport().expect("第二次应复用缓存");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "两次取用应指向同一份共享传输（同一个 reqwest::Client）"
         );
     }
 

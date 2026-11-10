@@ -64,7 +64,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use gensokyo_config::Settings;
-use gensokyo_qq::{HttpMethod, HttpRequest, HttpTransport, ReqwestTransport};
+use gensokyo_qq::{HttpMethod, HttpRequest, HttpTransport};
 use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 use serde_json::{Value, json};
 
@@ -174,7 +174,7 @@ fn spawn_union_fanout(state: &AppState, headers: &HeaderMap, body: &Bytes) {
 
     let request = fanout_request(&target, headers, body);
     tokio::spawn(async move {
-        let transport = match ReqwestTransport::new() {
+        let transport = match crate::boot::shared_transport() {
             Ok(transport) => transport,
             Err(err) => {
                 // 每条回调都 warn 会刷屏（Go 的客户端是包级单例、构建期就成功）。
@@ -185,7 +185,7 @@ fn spawn_union_fanout(state: &AppState, headers: &HeaderMap, body: &Bytes) {
                 return;
             }
         };
-        forward(&transport, request).await;
+        forward(transport.as_ref(), request).await;
     });
 }
 

@@ -52,14 +52,16 @@ const CONTENT_TYPE: &str = "application/json";
 pub struct PostUrlReporter;
 
 impl PostUrlReporter {
-    /// 用 `gensokyo-qq` 的 [`ReqwestTransport`] 启动上报。
+    /// 用进程级共享的 [`ReqwestTransport`]（[`crate::boot::shared_transport`]）启动上报。
     ///
     /// 传输构建失败（二进制未安装 rustls CryptoProvider）时只 `warn`：上报不启动，
     /// 事件照旧走 WS，不影响其他链路。生产路径由 `gensokyo-bin` 启动时安装 provider。
     #[must_use]
     pub fn start(state: AppState) -> PostUrlReporterHandle {
-        match ReqwestTransport::new() {
-            Ok(transport) => Self::start_with(state, transport),
+        match crate::boot::shared_transport() {
+            // 共享实例以 `Arc` 交出：这里要一份持有者，取底层传输的 clone（同一个
+            // `reqwest::Client`，连接池与 TLS 会话缓存不变）。
+            Ok(transport) => Self::start_with(state, ReqwestTransport::clone(&transport)),
             Err(err) => {
                 tracing::warn!(error = %err, "post_url 事件上报未启动：HTTP 传输构建失败");
                 PostUrlReporterHandle::idle()
