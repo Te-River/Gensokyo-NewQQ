@@ -151,3 +151,7 @@ cargo +1.99.1-x86_64-pc-windows-gnu run -p xtask -- build --no-upx   # 宿主 re
 - **短链不迁移**：Go 存在 `gensokyo.db` bucket `shortURLs` 里的短码不会导入 Rust 的
   `short-urls.redb`，旧短链在 Rust 版上直接 404，需要重新生成（idmap / echo 走 JSONL 导入，
   短链没有对应导入器）。
+- **`/getid` type 5/12 会改 ID 映射，且不可回滚**：Rust 版这两个分支已是真实实现（重绑定/解绑，
+  与 Go 相同的三段反查与"目标已存在"拒绝），操作会直接改写 `openid-map.redb`——操作前先备份该文件。
+  同时 gRPC `UpdateVirtualValueV2` / `UpdateVirtualValueV2Pro` 由 `Unimplemented` 变为真实实现，
+  错误码从 `Unknown` 变为 `NotFound` / `AlreadyExists`（对应 Go 的 `不存在:<old>` / `<new> :已存在`）。

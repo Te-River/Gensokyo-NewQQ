@@ -32,6 +32,19 @@ fn write_reverse_entry(store: &IdMapStore, vuin: i64, identity_key: &str, raw: &
     store.invalidate_lookup_cache();
 }
 
+/// 直接写正表（模拟"同一个 vUIN 挂着多条身份"，Go 迁移遗留形态）。
+fn write_forward_entry(store: &IdMapStore, identity_key: &str, vuin: i64) {
+    let txn = store.identity_db.begin_write().expect("写事务");
+    {
+        let mut forward = txn.open_table(IDENTITY_TO_VUIN).expect("正表");
+        forward
+            .insert(identity_key, encode_i64(vuin).as_slice())
+            .expect("写正表");
+    }
+    txn.commit().expect("提交");
+    store.invalidate_lookup_cache();
+}
+
 /// 直接写 `last_seen`（公开 API 只在分配/命中时更新它）。
 fn write_last_seen(store: &IdMapStore, vuin: i64, raw: &str) {
     let txn = store.identity_db.begin_write().expect("写事务");
@@ -785,6 +798,315 @@ fn concurrent_reads_and_writes_stay_consistent_with_cache() {
     for handle in handles {
         handle.join().expect("并发线程不得 panic");
     }
+}
+
+#[test]
+fn update_virtual_value_rebinds_forward_and_reverse_rows() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store = open(dir.path());
+    let openid = "P".repeat(32);
+    let (_, old) = store.retrieve_virtual_value(&openid).expect("分配 vUIN");
+    let new = old + 100;
+
+    store.update_virtual_value(old, new).expect("重绑定");
+
+    assert_eq!(store.lookup_virtual_value(&openid).expect("正表"), new);
+    assert_eq!(store.retrieve_row_by_id(new).expect("新 vUIN 反查"), openid);
+    // 旧 vUIN 的正反查都下线：last_seen 还留着 old，但正表已指向 new，反表旧前缀已删
+    assert!(
+        store
+            .retrieve_row_by_id(old)
+            .expect_err("旧 vUIN 反查")
+            .is_not_found()
+    );
+    assert_eq!(store.retrieve_row_by_id(new).expect("再查"), openid);
+}
+
+#[test]
+fn update_virtual_value_rejects_taken_target() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store = open(dir.path());
+    let (first_openid, second_openid) = ("R".repeat(32), "S".repeat(32));
+    let (first_raw, first) = store.retrieve_virtual_value(&first_openid).expect("a");
+    let (_, second) = store.retrieve_virtual_value(&second_openid).expect("b");
+
+    let err = store
+        .update_virtual_value(first, second)
+        .expect_err("目标 vUIN 已被占用");
+    assert!(
+        matches!(&err, StorageError::AlreadyExists(row) if *row == second),
+        "{err}"
+    );
+    assert!(err.to_string().contains(" :已存在"), "{err}");
+
+    // 两表都不动
+    assert_eq!(first_raw, first_openid);
+    assert_eq!(store.lookup_virtual_value(&first_openid).expect("a"), first);
+    assert_eq!(
+        store.retrieve_row_by_id(first).expect("a 反查"),
+        first_openid
+    );
+    assert_eq!(
+        store.lookup_virtual_value(&second_openid).expect("b"),
+        second
+    );
+    assert_eq!(
+        store.retrieve_row_by_id(second).expect("b 反查"),
+        second_openid
+    );
+}
+
+#[test]
+fn update_virtual_value_zero_unbinds_every_duplicate() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store = open(dir.path());
+    let openid = "T".repeat(32);
+    let (_, row) = store.retrieve_virtual_value(&openid).expect("分配 vUIN");
+    // 迁移遗留：同一 vUIN 下挂第二个身份 key，另一个 vUIN 也指向同一 OpenID
+    write_reverse_entry(&store, row, "openid:QQ:other", &openid);
+    write_reverse_entry(&store, row + 50, "openid:QQ:10001", &openid);
+    // 预热重复行的反查缓存（命中写 `Vuin(row+50)`）：解绑删行后必须一起失效
+    assert_eq!(
+        store.retrieve_row_by_id(row + 50).expect("预热重复行"),
+        openid
+    );
+
+    store.update_virtual_value(row, 0).expect("彻底解绑");
+
+    assert!(
+        store
+            .lookup_virtual_value(&openid)
+            .expect_err("正表已删")
+            .is_not_found()
+    );
+    assert!(
+        store
+            .retrieve_row_by_id(row)
+            .expect_err("本行反表已删")
+            .is_not_found()
+    );
+    assert!(
+        store
+            .retrieve_row_by_id(row + 50)
+            .expect_err("重复反查条目也要删")
+            .is_not_found()
+    );
+    assert!(store.list_identities().expect("枚举").is_empty());
+}
+
+#[test]
+fn update_virtual_value_migrates_every_identity_of_one_vuin() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store = open(dir.path());
+    let first = "K".repeat(32);
+    let second = "L".repeat(32);
+    let (_, old) = store.retrieve_virtual_value(&first).expect("分配 vUIN");
+    // 1:N：第二个身份也挂在 old 上（正表 + 反表各一行），Go 迁移遗留的数据形态
+    let second_key = normalize_identity(&second, "10001", None).key;
+    write_forward_entry(&store, &second_key, old);
+    write_reverse_entry(&store, old, &second_key, &second);
+    let new = old + 200;
+
+    store.update_virtual_value(old, new).expect("重绑定");
+
+    assert_eq!(store.lookup_virtual_value(&first).expect("第一个身份"), new);
+    assert_eq!(
+        store.lookup_virtual_value(&second).expect("第二个身份"),
+        new
+    );
+    assert_eq!(store.retrieve_row_by_id(new).expect("新 vUIN 反查"), first);
+    assert!(
+        store
+            .retrieve_row_by_id(old)
+            .expect_err("旧 vUIN 反查")
+            .is_not_found()
+    );
+
+    // 再解绑：两条身份都查不到，正反表不留悬挂映射
+    store.update_virtual_value(new, 0).expect("彻底解绑");
+    assert!(
+        store
+            .lookup_virtual_value(&first)
+            .expect_err("第一个身份已解绑")
+            .is_not_found()
+    );
+    assert!(
+        store
+            .lookup_virtual_value(&second)
+            .expect_err("第二个身份已解绑")
+            .is_not_found()
+    );
+    assert!(
+        store
+            .retrieve_row_by_id(new)
+            .expect_err("反查已删")
+            .is_not_found()
+    );
+}
+
+#[test]
+fn update_virtual_value_falls_back_to_forward_scan() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store = open(dir.path());
+    let openid = "U".repeat(32);
+    let (_, old) = store.retrieve_virtual_value(&openid).expect("分配 vUIN");
+    // Go 的第三段兜底：反表缺行时靠"正表值等于 old"找到身份
+    drop_reverse_rows(&store, old);
+
+    store
+        .update_virtual_value(old, old + 1)
+        .expect("兜底重绑定");
+
+    assert_eq!(store.lookup_virtual_value(&openid).expect("正表"), old + 1);
+    assert_eq!(store.retrieve_row_by_id(old + 1).expect("反查"), openid);
+}
+
+#[test]
+fn update_virtual_value_reports_missing_old_value() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store = open(dir.path());
+
+    let err = store
+        .update_virtual_value(4242, 4243)
+        .expect_err("旧 vUIN 不存在");
+    assert!(err.is_not_found(), "{err}");
+}
+
+#[test]
+fn update_virtual_value_pro_runs_two_sequential_rebinds() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store = open(dir.path());
+    let (a, b, c) = ("V".repeat(32), "W".repeat(32), "X".repeat(32));
+    let (_, first) = store.retrieve_virtual_value(&a).expect("a");
+    let (_, second) = store.retrieve_virtual_value(&b).expect("b");
+
+    store
+        .update_virtual_value_pro(first, first + 10, second, second + 10)
+        .expect("两次都成功");
+    assert_eq!(store.lookup_virtual_value(&a).expect("a"), first + 10);
+    assert_eq!(store.lookup_virtual_value(&b).expect("b"), second + 10);
+
+    // 非原子：第一次成功、第二次失败时，第一次的落地不回滚（Go 如此）
+    let (_, third) = store.retrieve_virtual_value(&c).expect("c");
+    let err = store
+        .update_virtual_value_pro(third, third + 10, 999_999, 1)
+        .expect_err("第二次的旧值不存在");
+    assert!(err.is_not_found(), "{err}");
+    assert_eq!(store.lookup_virtual_value(&c).expect("c"), third + 10);
+
+    // 第一次就失败：第二次不会被执行，目标身份原样
+    let err = store
+        .update_virtual_value_pro(888_888, 1, third, third + 20)
+        .expect_err("第一次的旧值不存在");
+    assert!(err.is_not_found(), "{err}");
+    assert_eq!(store.lookup_virtual_value(&c).expect("c 不变"), third + 10);
+}
+
+#[test]
+fn rebind_invalidates_both_lookup_directions() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store = open(dir.path());
+    let openid = "Y".repeat(32);
+    let (_, old) = store.retrieve_virtual_value(&openid).expect("分配 vUIN");
+    let new = old + 500;
+
+    // 预热：正向命中、反向命中、以及 new 的负缓存
+    assert_eq!(store.lookup_virtual_value(&openid).expect("正向"), old);
+    assert_eq!(store.retrieve_row_by_id(old).expect("反向"), openid);
+    assert!(
+        store
+            .retrieve_row_by_id(new)
+            .expect_err("负缓存")
+            .is_not_found()
+    );
+
+    store.update_virtual_value(old, new).expect("重绑定");
+
+    assert_eq!(
+        store.lookup_virtual_value(&openid).expect("正向新值"),
+        new,
+        "正表缓存必须失效"
+    );
+    assert_eq!(
+        store.retrieve_row_by_id(new).expect("新的负缓存必须失效"),
+        openid
+    );
+    assert!(
+        store
+            .retrieve_row_by_id(old)
+            .expect_err("旧 vUIN 缓存必须失效")
+            .is_not_found()
+    );
+}
+
+#[test]
+fn isolation_rebind_writes_alias_without_touching_old_rows() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store = IdMapStore::open(options(dir.path()).with_uin("10000")).expect("打开 idmap");
+    let openid = "Z".repeat(32);
+    let (_, old) = store.retrieve_virtual_value(&openid).expect("分配 vUIN");
+    let alias_row = old + 100;
+
+    store
+        .update_virtual_value(old, alias_row)
+        .expect("写 alias");
+
+    // alias：新行号（裸写与带 uin 前缀两种入参）都解析到旧 vUIN
+    assert_eq!(
+        store
+            .lookup_virtual_value(&alias_row.to_string())
+            .expect("alias"),
+        old
+    );
+    assert_eq!(
+        store
+            .lookup_virtual_value(&format!("10000:{alias_row}"))
+            .expect("带 uin 前缀的 alias"),
+        old
+    );
+    // 旧映射原样保留（Go 的隔离分支直接返回，不删旧行、不写反表）
+    assert_eq!(store.lookup_virtual_value(&openid).expect("旧身份"), old);
+    assert_eq!(store.retrieve_row_by_id(old).expect("旧反查"), openid);
+    assert!(
+        store
+            .retrieve_row_by_id(alias_row)
+            .expect_err("隔离模式不写反表")
+            .is_not_found()
+    );
+    // 隔离模式跳过 exists 检查：同一 alias 可以重复写
+    store
+        .update_virtual_value(old, alias_row)
+        .expect("重复 alias 不报已存在");
+    // `getid?type=19` 不能把隔离 alias 当成身份列出（Go 跳过复合键）
+    let listed: Vec<String> = store
+        .list_identities()
+        .expect("枚举")
+        .into_iter()
+        .map(|mapping| mapping.real_id)
+        .collect();
+    assert_eq!(listed, vec![openid]);
+}
+
+/// 删掉某个 vUIN 的全部反表条目（模拟"反表缺行、只能靠正表兜底"）。
+fn drop_reverse_rows(store: &IdMapStore, vuin: i64) {
+    let txn = store.identity_db.begin_write().expect("写事务");
+    {
+        let mut reverse = txn.open_table(VUIN_TO_IDENTITY).expect("反表");
+        let prefix = vuin_prefix(vuin);
+        let mut stale = Vec::new();
+        for entry in reverse.range(prefix.as_str()..).expect("扫描") {
+            let (key, _) = entry.expect("行");
+            if !key.value().starts_with(prefix.as_str()) {
+                break;
+            }
+            stale.push(key.value().to_owned());
+        }
+        for key in &stale {
+            reverse.remove(key.as_str()).expect("删反表");
+        }
+    }
+    txn.commit().expect("提交");
+    store.invalidate_lookup_cache();
 }
 
 /// 性能探针（默认不跑）：`cargo test -p gensokyo-storage -- --ignored --nocapture perf_probe`。

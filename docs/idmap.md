@@ -135,6 +135,30 @@ BindIdentityToVuin(ruin:QQ:0:2870338968, 10001)
 
 > **2026-08-01 修复：** `ForceUnbindID` 原仅接受 OpenID 入参，但用户实际常传虚拟 ID（row 值），导致查正向 `uin:<虚拟ID>` 找不到直接返回，`unboundCount=0`（表现为 `getid type=18` 返回 false）。现已支持双形式入参：纯数字视为虚拟 ID，先反查 OpenID 再清理；非纯数字视为 OpenID 直接清理。同时去掉“正向条目存在检查”的提前返回，即便正向已被其他路径删除，也要扫删残留逆向条目，确保彻底清理。
 
+## 重绑定（UpdateVirtualValue）
+
+把某个身份从旧虚拟 ID 改绑到新虚拟 ID：`getid type=5`（单次）、`getid type=12`（两次 Pro）、
+gRPC `UpdateVirtualValueV2` / `UpdateVirtualValueV2Pro` 共用同一条语义。
+
+| 步骤 | Go（`idmap/service.go:1405`） | Rust（`IdMapStore::update_virtual_value`） |
+|------|------------------------------|------------------------------------------|
+| 旧值 → 身份 | 旧库反表 `uin:row-<old>` → 新库反表 `uin:row-<old>` → 新库正向扫描（值等于 old 的 key）→ 全落空 `不存在:<old>` | 反表前缀 `"<old>:"` 扫描 → 正表值等于 old 的 key → 全落空 `NotFound`；反表缺行时用 `last_seen` 还原原始身份串（Rust 没有旧库，第一段不存在） |
+| `new != 0` 前检查 | 目标反查 key 已存在 → `%v :已存在`（`new == 0` 跳过，否则解绑永远报已存在） | 同；错误是独立变体 `StorageError::AlreadyExists`，gRPC 映射 `AlreadyExists` |
+| `new != 0` 写入 | 删旧反查 key，写正向 `uin:<id>`=BE(new) + 新反查 key | 把旧 vUIN 的**全部**反表行迁到 `"<new>:"`（每条的原始身份串原样保留，正表一并改指 new；反表缺行时补上兜底选中的身份） |
+| `new == 0` | 删正向 `uin:<id>` + 扫删所有指向同一 OpenID 的反查条目 | 同（反表同时比对 key 后缀与 value，覆盖迁移遗留的重复行） |
+| 隔离模式 | 正向桶写 alias `uinKey(new)` → BE(old) 后**直接返回**（不删旧、不写反查、不查 exists） | 正表写 `raw:<new>` → BE(old)，其余映射不动 |
+| Pro 变体 | 顺序调两次 `UpdateVirtualValue`（**非原子**） | 同，非原子：第一次成功第二次失败会留下半完成状态；两次调用之间也可能被其它写入（别的重绑定/分配）穿插 |
+| 拒绝理由 | 旧值查不到 / 目标已存在 → HTTP 500 | 同（`/getid` 该分支没有 404） |
+
+- **缓存**：重绑定提交后先推进缓存代际号（`bump_epoch`）再精确失效身份 key 与 old/new 两个 vUIN，
+  因此「重绑定后立即读」在两个方向上都拿不到旧值，「查不到」的负缓存同样失效。
+- **Rust 与 Go 的差异**：Go 会同时写迁移期旧库（`row-<N>` / `idmap_legacy_compat` 的裸 `<new>` 键），
+  Rust 只有一份身份库，没有旧库、也没有「迁移完成」状态，故不双写；Go 只删 `uinRowKey(old)` 这
+  一条反查 key，Rust 把 `"<old>:"` 整个前缀家族删掉（redb 反表同一 vUIN 下可能有多条遗留 key）。
+- **未移植**：Go 的 lotus 远程分支（`UpdateVirtualValuev2` 在 `lotus && lotus_grpc` 时转发给远端
+  gRPC，或在 `lotus && !lotus_without_idmaps` 时打自己的 `/getid?type=5`）在 Rust 没有对应实现，
+  见 `reports/refactor/17-go-rust-parity.md` 的 lotus 行。
+
 ## 批量导出接口
 
 迁移调试或数据核查时，可一次性导出所有身份映射：
@@ -143,6 +167,10 @@ BindIdentityToVuin(ruin:QQ:0:2870338968, 10001)
 |------|---------|------|
 | `ListAllIdentities()` | Go 内部 | 返回 `*IdentitySnapshot`，包含所有 OpenID <-> 虚拟 ID 映射及用户名缓存 |
 | `getid type=19` | HTTP API | `GET /getid?type=19`，返回所有身份映射的 JSON 快照 |
+
+Rust 的 `list_identities` 与 Go 一样不把隔离重绑定的 alias 当身份列出。Go 的规则是"key 含 `:`
+就跳过"，而 redb 的真实身份 key 一律带 scheme 前缀（`openid:` / `ruin:` / `raw:`），照抄会一条
+不剩，因此只跳过 alias 形态（`raw:<十进制 vUIN>`）。
 
 **调用示例：**
 

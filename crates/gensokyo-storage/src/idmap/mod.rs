@@ -17,8 +17,7 @@ use std::sync::PoisonError;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use redb::{
-    Database, ReadOnlyTable, ReadTransaction, ReadableDatabase, ReadableTable, TableDefinition,
-    WriteTransaction,
+    Database, ReadTransaction, ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction,
 };
 use tracing::{debug, warn};
 
@@ -223,6 +222,12 @@ pub struct IdentityMapping {
     pub virtual_id: i64,
     /// 名称缓存，未缓存时为空串（Go `GetUserName` 未命中返回 `""`）。
     pub username: String,
+}
+
+/// [`IdMapStore::resolve_rebind_identity`] 的结果：正表 key + 反表要写的原始身份串。
+struct NormalizedRebind {
+    key: String,
+    raw: String,
 }
 
 /// idmap 本地存储。
@@ -558,7 +563,8 @@ impl IdMapStore {
     /// `real_id` 取反表里保存的原始身份串。Go 用的是 `stripUinPrefix(正向 key)`，也就是
     /// `openid:QQ:<AppID>:<raw>` 这种归一化 key，与其字段注释“OpenID（去除 uin: 前缀）”不符；
     /// 这里返回调用方真正想要的原始串（反表缺行时回退 key）。顺序与 Go 的 bbolt `ForEach`
-    /// 一致，都是 key 字节序。
+    /// 一致，都是 key 字节序。隔离重绑定写的 alias（`raw:<十进制 vUIN>`）不算身份，
+    /// 按 Go 跳过复合键的口径过滤。
     ///
     /// # Errors
     ///
@@ -571,6 +577,12 @@ impl IdMapStore {
         for entry in forward.iter().map_err(rb)? {
             let (key, value) = entry.map_err(rb)?;
             let identity_key = key.value();
+            // Go `ListAllIdentities` 跳过含 `:` 的复合键（隔离 alias 等）；redb 的真实身份
+            // key 一律带 scheme 前缀（`openid:` / `ruin:` / `raw:`），照抄会一条不剩，故只
+            // 跳过隔离模式下 `write_rebind_alias` 写的 `raw:<十进制 vUIN>`。
+            if self.options.uin.is_some() && is_isolation_alias(identity_key) {
+                continue;
+            }
             let virtual_id = decode_vuin(value.value())?;
             let reverse_key = vuin_identity_key(virtual_id, identity_key);
             let real_id = match reverse.get(reverse_key.as_str()).map_err(rb)? {
@@ -655,6 +667,247 @@ impl IdMapStore {
         dirty.extend(unbound_vuins.into_iter().map(LookupKey::Vuin));
         self.lookup_cache.invalidate(&dirty);
         Ok(removed)
+    }
+
+    /// 把身份重绑定到另一个 vUIN（Go `UpdateVirtualValue`，`idmap/service.go:1405`）。
+    ///
+    /// # Go 的桶 → 这里的表
+    ///
+    /// | Go（同一张 `IdentityBucketName`） | 这里（正表 + 反表） |
+    /// |----------------------------------|---------------------|
+    /// | 旧库反表 `uinRowKey(old)` / `row-<old>` | 无旧库：Rust 只有一份身份库，这一步不存在 |
+    /// | 新库反表 `uinRowKey(old)` → `stripUinPrefix` | 反表前缀 `"<old>:"` 扫描，取回原始身份串 |
+    /// | 新库正向扫描：值（8 字节）等于 old 的 key | 正表扫描 8 字节 BE 值等于 old 的 key |
+    /// | `uin:<id>` = BE(new) + `uin:row-<new>` = `uin:<id>` | 正表 `identity_key` = BE(new) + 反表 `"<new>:<identity_key>"` = 原始身份串 |
+    /// | `new == 0`：删 `uin:<id>`，再扫删所有指向同一身份的反查条目 | 同（反表比对 key 后缀与 value） |
+    ///
+    /// **隔离模式**（Go `GetIdmapIsolation`，这里体现为 [`IdMapOptions::uin`] 已配置）：
+    /// Go 在正向桶里写一条 alias `uinKey(new) → BE(old)` 后**直接返回**——不删旧行、不做
+    /// exists 检查、不写反查。这里同样只写正表 `raw:<new>`（`normalize_identity("<new>")`
+    /// 的结果）→ BE(old)，于是 `lookup_virtual_value("<uin>:<new>")` 命中旧 vUIN
+    /// （前缀会被 `normalize_identity` 剥掉），其余映射原样保留。
+    ///
+    /// 与 Go 的差异：Go 只删 `uinRowKey(old)` 这一个反查 key；redb 反表是
+    /// `"<vUIN>:<identity_key>"`，同一 vUIN 下可能挂着多条迁移遗留 key（1:N，见
+    /// [`IdMapStore::force_unbind`]）。这里把整个 `"<old>:"` 家族都当作该 vUIN 的身份：
+    /// `new != 0` 时整族迁到 `"<new>:"`，`new == 0` 时整族删除，否则会留下"正表仍指 old、
+    /// 反表已没有该行"的悬挂映射。
+    ///
+    /// # Errors
+    ///
+    /// 旧 vUIN 正反查都落空 → [`StorageError::NotFound`]（Go 的文案是 `不存在:%v`）；
+    /// `new` 已被占用 → [`StorageError::AlreadyExists`]（Go 是 `%v :已存在`）；
+    /// redb 事务失败 → [`StorageError::Redb`]。
+    pub fn update_virtual_value(&self, old_vuin: i64, new_vuin: i64) -> Result<(), StorageError> {
+        let identity = self.resolve_rebind_identity(old_vuin)?;
+        if self.options.uin.is_some() {
+            return self.write_rebind_alias(old_vuin, new_vuin);
+        }
+        let txn = self.identity_db.begin_write().map_err(rb)?;
+        // 要迁/要删的身份：反表 key 后缀 + 该行保存的原始身份串（正表要跟着一起改）
+        let mut migrated: Vec<(String, String)> = Vec::new();
+        // 被删反表行的 head（`"<vUIN>:"` 前缀）：反查缓存按 vUIN 存，必须一并失效
+        let mut unbound_vuins = vec![old_vuin];
+        {
+            let mut forward = txn.open_table(IDENTITY_TO_VUIN).map_err(rb)?;
+            let mut reverse = txn.open_table(VUIN_TO_IDENTITY).map_err(rb)?;
+            // Go 的 exists 检查：命中就直接返回，两表都不动。放进写事务里做——redb 同一
+            // 时刻只有一个写者，否则两个并发 type=5 会都通过读检查，把两个身份写进同一 new。
+            if new_vuin != 0 && prefix_exists(&reverse, new_vuin)? {
+                return Err(StorageError::AlreadyExists(new_vuin));
+            }
+            let prefix = vuin_prefix(old_vuin);
+            let mut stale = Vec::new();
+            for entry in reverse.range(prefix.as_str()..).map_err(rb)? {
+                let (key, value) = entry.map_err(rb)?;
+                if !key.value().starts_with(prefix.as_str()) {
+                    break;
+                }
+                let identity_key = key
+                    .value()
+                    .strip_prefix(prefix.as_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                migrated.push((identity_key, decode_text(value.value())?));
+                stale.push(key.value().to_owned());
+            }
+            for key in &stale {
+                reverse.remove(key.as_str()).map_err(rb)?;
+            }
+            // 反表缺行、只能靠正表兜底时，被选中的身份也要一起迁/删
+            if !migrated.iter().any(|(key, _)| key == &identity.key) {
+                migrated.push((identity.key.clone(), identity.raw.clone()));
+            }
+            if new_vuin != 0 {
+                let mapped = encode_i64(new_vuin);
+                for (key, raw) in &migrated {
+                    forward
+                        .insert(key.as_str(), mapped.as_slice())
+                        .map_err(rb)?;
+                    reverse
+                        .insert(vuin_identity_key(new_vuin, key).as_str(), raw.as_bytes())
+                        .map_err(rb)?;
+                }
+            } else {
+                // new == 0：彻底解绑——删正向映射，否则下次反查仍能拿到 OpenID，等于没解绑。
+                for (key, _) in &migrated {
+                    forward.remove(key.as_str()).map_err(rb)?;
+                }
+                // 再扫删所有指向同一身份的重复反表行（迁移期间可能 2 row ↔ 1 身份）
+                let mut duplicates = Vec::new();
+                for entry in reverse.iter().map_err(rb)? {
+                    let (key, value) = entry.map_err(rb)?;
+                    let key = key.value();
+                    let identity_of_key = key.split_once(':').map_or("", |(_, rest)| rest);
+                    // 字节比较：与 Go 的 `string(v) == string(key)` 同义，非 UTF-8 行不会
+                    // 让整次解绑失败
+                    if identity_of_key == identity.key || value.value() == identity.raw.as_bytes() {
+                        duplicates.push(key.to_owned());
+                    }
+                }
+                for key in &duplicates {
+                    if let Some(head) = key
+                        .split_once(':')
+                        .and_then(|(head, _)| head.parse::<i64>().ok())
+                    {
+                        unbound_vuins.push(head);
+                    }
+                    reverse.remove(key.as_str()).map_err(rb)?;
+                }
+            }
+        }
+        txn.commit().map_err(rb)?;
+        // 先 bump 关闭回填窗口，再精确失效：被迁/被删身份的 key 与全部受影响的 vUIN
+        self.lookup_cache.bump_epoch();
+        let mut dirty: Vec<LookupKey> = migrated
+            .into_iter()
+            .map(|(key, _)| LookupKey::Identity(key))
+            .collect();
+        dirty.push(LookupKey::Vuin(new_vuin));
+        dirty.extend(unbound_vuins.into_iter().map(LookupKey::Vuin));
+        self.lookup_cache.invalidate(&dirty);
+        Ok(())
+    }
+
+    /// 两次 [`IdMapStore::update_virtual_value`]（Go `UpdateVirtualValuev2Pro`，
+    /// `idmap/service.go:2036`）。
+    ///
+    /// **非原子**：第一次成功、第二次失败会留下半完成状态——Go 如此，这里照抄，不额外回滚。
+    ///
+    /// # Errors
+    ///
+    /// 任一次重绑定失败时返回该次的错误；第二次不会被尝试。
+    pub fn update_virtual_value_pro(
+        &self,
+        old_virtual_value_1: i64,
+        new_virtual_value_1: i64,
+        old_virtual_value_2: i64,
+        new_virtual_value_2: i64,
+    ) -> Result<(), StorageError> {
+        self.update_virtual_value(old_virtual_value_1, new_virtual_value_1)?;
+        self.update_virtual_value(old_virtual_value_2, new_virtual_value_2)
+    }
+
+    /// [`IdMapStore::update_virtual_value`] 的第一段：`old vUIN → (正向 key, 原始身份串)`。
+    ///
+    /// 与 Go 一样两段兜底：反表前缀扫描（Go 的 `uinRowKey(old)`），落空后扫正表里值等于
+    /// `old` 的 key。反表命中时 identity key 直接取 key 的后缀（比 `normalize_identity`
+    /// 再算一遍更准：迁移遗留 key 也能原样命中）。
+    fn resolve_rebind_identity(&self, vuin: i64) -> Result<NormalizedRebind, StorageError> {
+        let txn = self.identity_db.begin_read().map_err(rb)?;
+        let reverse = txn.open_table(VUIN_TO_IDENTITY).map_err(rb)?;
+        let prefix = vuin_prefix(vuin);
+        let mut fallback: Option<NormalizedRebind> = None;
+        for entry in reverse.range(prefix.as_str()..).map_err(rb)? {
+            let (key, value) = entry.map_err(rb)?;
+            let key = key.value();
+            if !key.starts_with(prefix.as_str()) {
+                break;
+            }
+            let identity_key = key.strip_prefix(prefix.as_str()).unwrap_or_default();
+            let raw = decode_text(value.value())?;
+            // 与 `read_row_by_id` 同口径：openid 形态优先，其余留作兜底
+            if identity_key.starts_with("openid:") || (is_openid(&raw) && !raw.starts_with("rUIN-"))
+            {
+                return Ok(NormalizedRebind {
+                    key: identity_key.to_owned(),
+                    raw,
+                });
+            }
+            if fallback.is_none() {
+                fallback = Some(NormalizedRebind {
+                    key: identity_key.to_owned(),
+                    raw,
+                });
+            }
+        }
+        if let Some(found) = fallback {
+            return Ok(found);
+        }
+        let forward = txn.open_table(IDENTITY_TO_VUIN).map_err(rb)?;
+        for entry in forward.iter().map_err(rb)? {
+            let (key, value) = entry.map_err(rb)?;
+            if decode_i64(value.value()) != Some(vuin) {
+                continue;
+            }
+            let identity_key = key.value().to_owned();
+            // Go 的反查值就是正向 key；redb 反查值才是原始身份串。反表缺行时先用
+            // `last_seen`（分配时写入的原始串）兜底，仍对不上才退回 key。
+            let raw = match reverse
+                .get(vuin_identity_key(vuin, &identity_key).as_str())
+                .map_err(rb)?
+            {
+                Some(guard) => decode_text(guard.value())?,
+                None => {
+                    let last_seen = txn.open_table(LAST_SEEN).map_err(rb)?;
+                    let seen = last_seen
+                        .get(last_seen_key(vuin).as_str())
+                        .map_err(rb)?
+                        .map(|guard| decode_text(guard.value()))
+                        .transpose()?;
+                    match seen {
+                        Some(raw)
+                            if normalize_identity(
+                                &raw,
+                                &self.options.app_id,
+                                self.options.uin.as_deref(),
+                            )
+                            .key == identity_key =>
+                        {
+                            raw
+                        }
+                        _ => identity_key.clone(),
+                    }
+                }
+            };
+            return Ok(NormalizedRebind {
+                key: identity_key,
+                raw,
+            });
+        }
+        Err(StorageError::NotFound(format!("vUIN={vuin}")))
+    }
+
+    /// 隔离模式的重绑定：只加一条 alias（Go `UpdateVirtualValue` 的 `GetIdmapIsolation` 分支）。
+    fn write_rebind_alias(&self, old_vuin: i64, new_vuin: i64) -> Result<(), StorageError> {
+        let alias = normalize_identity(
+            &new_vuin.to_string(),
+            &self.options.app_id,
+            self.options.uin.as_deref(),
+        );
+        let txn = self.identity_db.begin_write().map_err(rb)?;
+        {
+            let mut forward = txn.open_table(IDENTITY_TO_VUIN).map_err(rb)?;
+            let mapped = encode_i64(old_vuin);
+            forward
+                .insert(alias.key.as_str(), mapped.as_slice())
+                .map_err(rb)?;
+        }
+        txn.commit().map_err(rb)?;
+        self.lookup_cache.bump_epoch();
+        self.lookup_cache
+            .invalidate(&[LookupKey::Identity(alias.key)]);
+        Ok(())
     }
 
     /// vUIN 对应的 `last_seen` 原始身份串（Go `readLastSeenTx`）。
@@ -1120,10 +1373,12 @@ fn store_latest_tx(
 }
 
 /// 反表里是否存在 `"<vUIN>:"` 前缀的 key（Go `vuinExistsTx`）。
-pub(crate) fn prefix_exists(
-    table: &ReadOnlyTable<&'static str, &'static [u8]>,
-    vuin: i64,
-) -> Result<bool, StorageError> {
+///
+/// 泛型落在表类型上：读事务给 `ReadOnlyTable`，写事务（重绑定的 exists 检查）给 `Table`。
+pub(crate) fn prefix_exists<T>(table: &T, vuin: i64) -> Result<bool, StorageError>
+where
+    T: ReadableTable<&'static str, &'static [u8]>,
+{
     let prefix = vuin_prefix(vuin);
     let mut range = table.range(prefix.as_str()..).map_err(rb)?;
     match range.next() {
@@ -1147,6 +1402,13 @@ fn table_is_empty(
 
 fn is_openid(value: &str) -> bool {
     value.len() == encoding::OPENID_LEN
+}
+
+/// 隔离重绑定写的 alias key（`write_rebind_alias` 的 `raw:<十进制 vUIN>`）。
+fn is_isolation_alias(identity_key: &str) -> bool {
+    identity_key
+        .strip_prefix("raw:")
+        .is_some_and(|row| row.parse::<i64>().is_ok())
 }
 
 /// Go `lastSeenKey`：`"default:<十进制 vUIN>"`。

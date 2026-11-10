@@ -25,8 +25,8 @@
 //!   保存 / 拼 URL 逻辑（省掉一跳），成功响应完全一致。
 //! - `oss_type=0` 且 `lotus=true && !lotus_without_uploadpic` 时 Go 转发给远端 lotus 图床；
 //!   Rust 未移植 lotus 出站，返回 500 并说明原因（不伪造成功）。
-//! - `getid` 的 5、12、14 依赖 bbolt 迁移期数据结构，Rust idmap 未提供，回 **501**；
-//!   复合键类型 8~11 由本地 `IdMapStore` 两次单键调用组合实现（与 gRPC 服务端同一套语义），
+//! - `getid` 的 14 依赖已退役的 bbolt `ids` 桶（复合键 `id:sub`），Rust idmap 未提供，回 **501**；
+//!   复合键类型 8~11 与重绑定 5/12 由本地 `IdMapStore` 组合实现（与 gRPC 服务端同一套语义），
 //!   其余类型与 Go 同码同形状。Go 的 `switch` 无 `default`，未知 type 返回 **200 空响应体**，
 //!   此处照抄。
 //! - `getid` 18/19（Go `ForceUnbindID` / `ListAllIdentities`）：18 按 `normalize_identity` 删正表
@@ -406,7 +406,37 @@ async fn get_id(State(state): State<AppState>, request: Request) -> Response {
                 Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
             }
         }
-        5 => unsupported(type_value),
+        5 => {
+            let Some(old_row_value) = parse_param(&pairs, "oldRowValue") else {
+                return json_error(StatusCode::BAD_REQUEST, "invalid oldRowValue");
+            };
+            let Some(new_row_value) = parse_param(&pairs, "newRowValue") else {
+                return json_error(StatusCode::BAD_REQUEST, "invalid newRowValue");
+            };
+            let Some(idmap) = state.idmap() else {
+                return idmap_missing();
+            };
+            // Go `UpdateVirtualValue`：三段反查身份 → 迁移正反表（`new=0` 彻底解绑）。
+            match idmap.update_virtual_value(old_row_value, new_row_value) {
+                Ok(()) => Json(json!({ "status": "success" })).into_response(),
+                Err(err) => {
+                    tracing::warn!(
+                        %err,
+                        old = old_row_value,
+                        new = new_row_value,
+                        "getid type=5 重绑定失败"
+                    );
+                    // Go 的文案：旧值查不到是 `不存在:<old>`；目标被占用由
+                    // `StorageError::AlreadyExists` 自带 `<new> :已存在`。
+                    let message = if err.is_not_found() {
+                        format!("不存在:{old_row_value}")
+                    } else {
+                        err.to_string()
+                    };
+                    json_error(StatusCode::INTERNAL_SERVER_ERROR, message)
+                }
+            }
+        }
         6 => {
             let Some(virtual_value) = parse_param(&pairs, "virtualValue") else {
                 return json_error(StatusCode::BAD_REQUEST, "invalid virtualValue");
@@ -540,20 +570,30 @@ async fn get_id(State(state): State<AppState>, request: Request) -> Response {
             .into_response()
         }
         12 => {
-            for param in [
+            let mut values = [0_i64; 4];
+            for (slot, param) in values.iter_mut().zip([
                 "oldVirtualValue1",
                 "newVirtualValue1",
                 "oldVirtualValue2",
                 "newVirtualValue2",
-            ] {
-                if first(&pairs, param).unwrap_or("").parse::<i64>().is_err() {
+            ]) {
+                let Some(value) = parse_param(&pairs, param) else {
                     return json_error(
                         StatusCode::BAD_REQUEST,
                         format!("Invalid input values {param}"),
                     );
-                }
+                };
+                *slot = value;
             }
-            unsupported(type_value)
+            let Some(idmap) = state.idmap() else {
+                return idmap_missing();
+            };
+            // Go `UpdateVirtualValuev2Pro`：两次顺序重绑定，非原子。
+            match idmap.update_virtual_value_pro(values[0], values[1], values[2], values[3]) {
+                Ok(()) => Json(json!({ "message": "Virtual values updated successfully" }))
+                    .into_response(),
+                Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+            }
         }
         14 => unsupported(type_value),
         15 => {
@@ -1785,7 +1825,7 @@ mod tests {
             .with_idmap(idmap(&directory));
 
         for (uri, expected_status, message) in [
-            ("/getid?type=5", 501, "type=5"),
+            ("/getid?type=5", 400, "invalid oldRowValue"),
             (
                 "/getid?type=8",
                 400,
@@ -1832,6 +1872,121 @@ mod tests {
         let (status, body) = call(router(state), get_request("/getid?type=99", LOCAL_PEER)).await;
         assert_eq!(status, 200);
         assert_eq!(body, Value::Null);
+    }
+
+    #[tokio::test]
+    async fn getid_rebind_types_follow_go() {
+        let directory = TempDir::new().expect("临时目录");
+        let state =
+            AppState::with_builtin_handlers(manager(&directory, "  server_dir: example.com\n"))
+                .with_idmap(idmap(&directory));
+
+        let (_, body) = call(
+            router(state.clone()),
+            get_request("/getid?type=1&id=rebind-a", LOCAL_PEER),
+        )
+        .await;
+        let first = body["row"].as_i64().expect("row");
+        let (_, body) = call(
+            router(state.clone()),
+            get_request("/getid?type=1&id=rebind-b", LOCAL_PEER),
+        )
+        .await;
+        let second = body["row"].as_i64().expect("row");
+        let first_new = first + 100;
+
+        // type 5：重绑定成功 → 200 {"status":"success"}
+        let (status, body) = call(
+            router(state.clone()),
+            get_request(
+                &format!("/getid?type=5&oldRowValue={first}&newRowValue={first_new}"),
+                LOCAL_PEER,
+            ),
+        )
+        .await;
+        assert_eq!(status, 200, "{body:?}");
+        assert_eq!(body["status"], "success");
+
+        let (status, body) = call(
+            router(state.clone()),
+            get_request(
+                &format!("/getid?type=6&virtualValue={first_new}"),
+                LOCAL_PEER,
+            ),
+        )
+        .await;
+        assert_eq!(status, 200, "{body:?}");
+        assert_eq!(body["real"], "rebind-a");
+
+        // 旧 row 已下线：Go 该分支把存储错误一律映射成 500
+        let (status, body) = call(
+            router(state.clone()),
+            get_request(&format!("/getid?type=6&virtualValue={first}"), LOCAL_PEER),
+        )
+        .await;
+        assert_eq!(status, 500, "{body:?}");
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|text| text.contains("键不存在")),
+            "{body:?}"
+        );
+
+        // 目标已被占用 → 500（Go 的 `%v :已存在`）
+        let (status, body) = call(
+            router(state.clone()),
+            get_request(
+                &format!("/getid?type=5&oldRowValue={second}&newRowValue={first_new}"),
+                LOCAL_PEER,
+            ),
+        )
+        .await;
+        assert_eq!(status, 500, "{body:?}");
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|text| text.contains("已存在")),
+            "{body:?}"
+        );
+
+        // 旧值查不到 → 500，正文与 Go 一致是 `不存在:<old>`（内部细节只进日志）
+        let (status, body) = call(
+            router(state.clone()),
+            get_request("/getid?type=5&oldRowValue=999999&newRowValue=1", LOCAL_PEER),
+        )
+        .await;
+        assert_eq!(status, 500, "{body:?}");
+        assert_eq!(body["error"], "不存在:999999", "{body:?}");
+
+        // type 12：两次顺序重绑定 → 200 文案
+        let (status, body) = call(
+            router(state.clone()),
+            get_request(
+                &format!(
+                    "/getid?type=12&oldVirtualValue1={second}&newVirtualValue1={}\
+                     &oldVirtualValue2={first_new}&newVirtualValue2={}",
+                    second + 100,
+                    first_new + 100
+                ),
+                LOCAL_PEER,
+            ),
+        )
+        .await;
+        assert_eq!(status, 200, "{body:?}");
+        assert_eq!(body["message"], "Virtual values updated successfully");
+
+        // type 12 存储错误 → 500（第一次就失败）
+        let (status, body) = call(
+            router(state),
+            get_request(
+                "/getid?type=12&oldVirtualValue1=1&newVirtualValue1=2\
+                 &oldVirtualValue2=3&newVirtualValue2=4",
+                LOCAL_PEER,
+            ),
+        )
+        .await;
+        assert_eq!(status, 500, "{body:?}");
+        assert!(body["error"].as_str().is_some(), "{body:?}");
     }
 
     #[tokio::test]

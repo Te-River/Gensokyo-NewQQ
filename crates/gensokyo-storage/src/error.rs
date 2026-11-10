@@ -17,6 +17,11 @@ pub enum StorageError {
     /// [`StorageError::is_not_found`]。
     #[error("键已过期: {0}")]
     Expired(String),
+    /// 目标键已被占用（Go `UpdateVirtualValue` 的 `fmt.Errorf("%v :已存在", new)`）。
+    ///
+    /// 用变体而不是消息后缀区分，gRPC 层据此映射 `AlreadyExists`。
+    #[error("{0} :已存在")]
+    AlreadyExists(i64),
     /// 数据损坏或非法入参（整数字段不是 8 字节、非法 UTF-8、空消息 ID、空 AppID 等）。
     #[error("数据损坏: {0}")]
     Corrupt(String),

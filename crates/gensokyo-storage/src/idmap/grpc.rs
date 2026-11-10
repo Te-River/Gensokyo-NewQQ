@@ -19,16 +19,12 @@
 //! | `RetrieveRowByIDV2Pro` / `RetrieveRealValueV2Pro` | 两次 [`IdMapStore::retrieve_row_by_id`] |
 //! | `RetrieveVirtualValueV2Pro` | 两次 [`IdMapStore::lookup_virtual_value`]，只回两个 vUIN |
 //! | `StoreCacheV2` / `RetrieveRowByCacheV2` | [`IdMapStore::store_cache`] / [`IdMapStore::retrieve_row_by_cache`] |
-//! | `UpdateVirtualValueV2` / `UpdateVirtualValueV2Pro` | **未实现** → `Status::unimplemented`（见下） |
+//! | `UpdateVirtualValueV2` | [`IdMapStore::update_virtual_value`]（Go `UpdateVirtualValue`：三段反查身份 → 迁移正反表 / `new == 0` 彻底解绑 / 隔离模式写 alias）；"已存在"回 `Status::already_exists` |
+//! | `UpdateVirtualValueV2Pro` | 两次 [`IdMapStore::update_virtual_value`]（Go `UpdateVirtualValuev2Pro`：非原子顺序调用） |
 //! | `FindSubKeysByIdPro` | **未实现** → `Status::unimplemented`（见下） |
 //!
 //! # 未做的部分（明确列出）
 //!
-//! - `UpdateVirtualValueV2` / `UpdateVirtualValueV2Pro`：需要 `IdMapStore` 的 rebind 能力。
-//!   Go `UpdateVirtualValue`（`idmap/service.go:1404`）在隔离模式下写的是"新 vUIN → 旧 vUIN"
-//!   的 alias，非隔离模式下还要处理 `newRowValue == 0`（彻底解绑，扫删所有指向同一身份的
-//!   反查条目）。redb 身份库的反查 key 是 `"<vUIN>:<identity_key>"`，与 Go 的 `uin:row-<N>`
-//!   不同构，必须先把这套语义搬进 store 才谈得上接线，本里程碑不猜实现。
 //! - `FindSubKeysByIdPro`：Go 读的是**已退役** bbolt `ids` 桶里的 `id:sub` 复合键
 //!   （`idmap/service.go:2112`），redb 身份库没有等价表结构。
 //! - TLS/mTLS 与鉴权：不做。与 Go 侧一致（明文 h2c，内网/反向代理兜底）；监听地址、连接数、
@@ -37,7 +33,9 @@
 //! # 与 Go 的差异
 //!
 //! - **错误码**：Go handler 直接 `return nil, err`（gRPC 侧落到 `Unknown`）；本 crate 按
-//!   [`StorageError`] 分类映射为 `NotFound` / `InvalidArgument` / `Internal`。
+//!   [`StorageError`] 分类映射为 `NotFound` / `AlreadyExists` / `InvalidArgument` / `Internal`
+//!   （"目标 vUIN 已被占用"是独立变体 `StorageError::AlreadyExists`，Go 只回一句
+//!   `%v :已存在` 文案）。
 //! - **非数字行号**：Go `RetrieveRowByIDv2` 对解析失败回 `ErrKeyNotFound`；本 crate 回
 //!   `InvalidArgument`，调用方传错类型时更容易定位。
 //! - **`RetrieveRealValueV2Pro`**：Go 的**服务端** handler 调的是遗留 `RetrieveRealValuePro`
@@ -147,9 +145,15 @@ impl pb::id_map_service_server::IdMapService for IdMapService {
 
     async fn update_virtual_value_v2(
         &self,
-        _request: Request<pb::UpdateVirtualValueRequest>,
+        request: Request<pb::UpdateVirtualValueRequest>,
     ) -> Result<Response<pb::UpdateVirtualValueResponse>, Status> {
-        Err(Status::unimplemented(REBIND_UNIMPLEMENTED))
+        let request = request.into_inner();
+        self.store
+            .update_virtual_value(request.old_virtual_value, request.new_virtual_value)
+            .map_err(status)?;
+        Ok(Response::new(pb::UpdateVirtualValueResponse {
+            status: "success".to_owned(),
+        }))
     }
 
     async fn retrieve_real_value_v2(
@@ -235,9 +239,20 @@ impl pb::id_map_service_server::IdMapService for IdMapService {
 
     async fn update_virtual_value_v2_pro(
         &self,
-        _request: Request<pb::UpdateVirtualValueProRequest>,
+        request: Request<pb::UpdateVirtualValueProRequest>,
     ) -> Result<Response<pb::UpdateVirtualValueProResponse>, Status> {
-        Err(Status::unimplemented(REBIND_UNIMPLEMENTED))
+        let request = request.into_inner();
+        self.store
+            .update_virtual_value_pro(
+                request.old_virtual_value_1,
+                request.new_virtual_value_1,
+                request.old_virtual_value_2,
+                request.new_virtual_value_2,
+            )
+            .map_err(status)?;
+        Ok(Response::new(pb::UpdateVirtualValueProResponse {
+            message: "Virtual values updated successfully".to_owned(),
+        }))
     }
 
     async fn simplified_store_idv2(
@@ -290,11 +305,6 @@ impl pb::id_map_service_server::IdMapService for IdMapService {
         Ok(Response::new(pb::RetrieveRowByCacheResponse { id }))
     }
 }
-
-/// `UpdateVirtualValueV2` / `UpdateVirtualValueV2Pro` 的拒绝理由。
-const REBIND_UNIMPLEMENTED: &str = "UpdateVirtualValueV2 未实现：IdMapStore 尚无 rebind —— \
-     Go UpdateVirtualValue（idmap/service.go:1404）的隔离 alias 与 newRowValue==0 解绑语义、\
-     以及 redb 反查 key 布局（\"<vUIN>:<identity_key>\"）尚未搬进 store";
 
 /// `FindSubKeysByIdPro` 的拒绝理由。
 const SUB_KEYS_UNIMPLEMENTED: &str = "FindSubKeysByIdPro 未实现：Go 读的是已退役 bbolt `ids` \
@@ -424,11 +434,12 @@ impl IdMapClient {
             .map(Response::into_inner)
     }
 
-    /// RPC 5：`UpdateVirtualValueV2`（服务端当前恒回 `Unimplemented`）。
+    /// RPC 5：`UpdateVirtualValueV2`。
     ///
     /// # Errors
     ///
-    /// 服务端拒绝或传输失败时返回 [`Status`]。
+    /// 旧 vUIN 查不到回 `NotFound`、目标 vUIN 已被占用回 `AlreadyExists`；服务端拒绝或
+    /// 传输失败时返回 [`Status`]。
     pub async fn update_virtual_value_v2(
         &mut self,
         old_virtual_value: i64,
@@ -558,11 +569,12 @@ impl IdMapClient {
             .map(Response::into_inner)
     }
 
-    /// RPC 12：`UpdateVirtualValueV2Pro`（服务端当前恒回 `Unimplemented`）。
+    /// RPC 12：`UpdateVirtualValueV2Pro`。
     ///
     /// # Errors
     ///
-    /// 服务端拒绝或传输失败时返回 [`Status`]。
+    /// 任一次重绑定失败时返回该次的 `NotFound` / `AlreadyExists`；服务端拒绝或传输失败时
+    /// 返回 [`Status`]。
     pub async fn update_virtual_value_v2_pro(
         &mut self,
         old_virtual_value_1: i64,
@@ -685,6 +697,8 @@ fn status(err: StorageError) -> Status {
     let message = err.to_string();
     match err {
         StorageError::NotFound(_) | StorageError::Expired(_) => Status::not_found(message),
+        // Go 只有一句 `%v :已存在` 文案（idmap/service.go:1496），这里保留同一消息
+        StorageError::AlreadyExists(_) => Status::already_exists(message),
         StorageError::Corrupt(_) => Status::invalid_argument(message),
         StorageError::RetriesExhausted(_) => Status::resource_exhausted(message),
         StorageError::Redb(_) => Status::internal(message),
@@ -842,15 +856,70 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn unimplemented_rpcs_report_unimplemented() -> Result<(), Box<dyn Error>> {
+    async fn update_virtual_value_rpc_rebinds_and_maps_errors() -> Result<(), Box<dyn Error>> {
         let mut harness = harness().await?;
 
+        let first = harness.client.store_idv2("openid-user-1").await?.row;
+        let second = harness.client.store_idv2("openid-user-2").await?.row;
+        let first_new = first + 100;
+
+        let updated = harness
+            .client
+            .update_virtual_value_v2(first, first_new)
+            .await?;
+        assert_eq!(updated.status, "success");
+        assert_eq!(
+            harness.store.lookup_virtual_value("openid-user-1")?,
+            first_new
+        );
+        assert_eq!(
+            harness
+                .client
+                .retrieve_row_by_idv2(first_new.to_string())
+                .await?
+                .id,
+            "openid-user-1"
+        );
+        // 旧 vUIN 的正反查都下线（Go 删的是旧反查 key，这里把旧前缀家族一起删）
         let err = harness
             .client
-            .update_virtual_value_v2(1, 2)
+            .retrieve_row_by_idv2(first.to_string())
             .await
             .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::Unimplemented);
+        assert_eq!(err.code(), tonic::Code::NotFound);
+
+        // 目标已被占用 → AlreadyExists（Go 只有 `%v :已存在` 文案）
+        let err = harness
+            .client
+            .update_virtual_value_v2(second, first_new)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::AlreadyExists);
+
+        // 旧 vUIN 查不到身份 → NotFound
+        let err = harness
+            .client
+            .update_virtual_value_v2(999_999, 1)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+
+        // RPC 12：两次顺序重绑定（非原子），两次都成功才回成功文案
+        let second_new = second + 100;
+        let pro = harness
+            .client
+            .update_virtual_value_v2_pro(second, second_new, first_new, first_new + 100)
+            .await?;
+        assert_eq!(pro.message, "Virtual values updated successfully");
+        assert_eq!(
+            harness.store.lookup_virtual_value("openid-user-2")?,
+            second_new
+        );
+        assert_eq!(
+            harness.store.lookup_virtual_value("openid-user-1")?,
+            first_new + 100
+        );
+
         let err = harness
             .client
             .find_sub_keys_by_id_pro("id")
