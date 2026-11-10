@@ -40,6 +40,12 @@ use crate::cli::{
     Action, BIN_NAME, Cli, EXIT_IMPORT_CONFLICT, EXIT_IMPORT_FORMAT, EXIT_UNIMPLEMENTED,
 };
 use gensokyo_storage::{ImportError, ImportOptions};
+use mimalloc::MiMalloc;
+
+// P33：进程级分配器。mimalloc 的每线程堆在高并发下避开 CRT 堆的跨线程锁争用；
+// 只装在最终二进制，库 crate 保持用默认分配器，测试与 bench 口径不受影响。
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() -> ExitCode {
     let argv = cli::normalize_legacy_flags(std::env::args_os());

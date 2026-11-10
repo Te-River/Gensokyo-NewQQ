@@ -71,8 +71,10 @@
 //!   这些开关事件「伪装成 message」的业务转换，`ConvertGroupRejectToMessage` 等）未做：
 //!   两个开关打开时这里仍只上报 notice。
 //! - `echo` 的 `app_id/s` 映射、双路 echo、`is_binded_*`、`avatar`、master 角色提升、
-//!   idmap-pro（`StoreIDv2Pro`）与 `union_id` 切换；`GROUP_MEMBER_ADD` / `GROUP_JOIN_REQUEST`
-//!   的 `event_id` 只落在 `extra`，Go 侧 `echo.AddEvnetIDv2` 的被动回复缓存未做。
+//!   idmap-pro（`StoreIDv2Pro`）与 `union_id` 切换（`unioncache` 的 `id ↔ union_openid`
+//!   写入本身已接，见 `group_message`；缺的是把上报的 `author.id` 换成 union 那一步）；
+//!   `GROUP_MEMBER_ADD` / `GROUP_JOIN_REQUEST` 的 `event_id` 只落在 `extra`，Go 侧
+//!   `echo.AddEvnetIDv2` 的被动回复缓存未做。
 //! - `message_sent`、`request` 的 `flag` 审批链路（Go 侧 `GROUP_ADD_ROBOT` 的 `flag` 也是空串）。
 //! - `global_interaction_to_message`（`true` 时 Go `ConvertInteractionToMessage` 把按钮回调
 //!   「伪装成 message」）：`INTERACTION_CREATE` 只走上报 `notice.interaction` 的主路径。
@@ -92,7 +94,7 @@ use gensokyo_protocol::event::{
 };
 use gensokyo_protocol::{Event, Extra, MessageContent, Segment};
 use gensokyo_qq::dto::interaction::Interaction;
-use gensokyo_storage::{BotStatsStore, EchoStore, IdMapStore};
+use gensokyo_storage::{BotStatsStore, EchoStore, IdMapStore, UnionCache};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -143,6 +145,10 @@ struct QqMention {
 struct QqAuthor {
     #[serde(default)]
     id: String,
+    /// 联合 ID（`union_openid`）：`union_id` 模式下列给客户端的是它，markdown @ 只认 `id`，
+    /// 两者的对应关系交给 `unioncache`（`GROUP_MEMBER_*` 的负载没有这个字段）。
+    #[serde(default)]
+    union_openid: String,
     #[serde(default)]
     username: String,
     #[serde(default)]
@@ -795,6 +801,14 @@ impl Inbound {
         let payload = QqMessage::deserialize(data)?;
         let author = payload.author.as_ref();
         let user_raw = author.map_or("", |author| author.id.as_str());
+
+        // Go `ProcessGroupMessage.go:55` / `ProcessGroupNormalMessage.go:46`：在 ID 切换与
+        // idmap 转换**之前**用原始 id 建映射（顺序即语义：反查出来必须是原始 OpenID）。
+        // 空键由 `store` 自己忽略，与 Go 的 `if union != "" && id != ""` 等价。
+        UnionCache::shared().store(
+            user_raw,
+            author.map_or("", |author| author.union_openid.as_str()),
+        );
 
         let mut extra = Extra::new();
         if !settings.get_native_ob11() {
@@ -1834,6 +1848,47 @@ mod tests {
                 .expect("群应已注册"),
             "group"
         );
+    }
+
+    /// 群消息作者带 `union_openid` 时建 `id ↔ union` 映射（Go `ProcessGroupMessage.go:55` /
+    /// `ProcessGroupNormalMessage.go:46`），缺这个字段时不写。
+    #[test]
+    fn group_message_records_union_openid_pair() {
+        use gensokyo_storage::UnionCache;
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nsettings: {}\n").expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let inbound = Inbound::new(manager, None);
+
+        // 键用本用例独有的字面量：共享实例在同进程的并行用例间是同一张表
+        let raw = "u-union-cache-inbound-1";
+        let union = "union-cache-inbound-1";
+        let payload = json!({
+            "id": "m-union-1",
+            "group_id": "g-union-1",
+            "content": "hi",
+            "author": {"id": raw, "union_openid": union}
+        });
+        inbound
+            .convert("GROUP_AT_MESSAGE_CREATE", Some(&payload), None)
+            .expect("群消息应可转换");
+        assert_eq!(UnionCache::shared().union(raw).as_deref(), Some(union));
+        assert_eq!(UnionCache::shared().id(union).as_deref(), Some(raw));
+
+        // 没有 `union_openid` 的负载不建映射（空键由 `store` 忽略，行为零变化）
+        let bare = "u-union-cache-inbound-2";
+        let payload = json!({
+            "id": "m-union-2",
+            "group_id": "g-union-1",
+            "content": "hi",
+            "author": {"id": bare}
+        });
+        inbound
+            .convert("GROUP_MESSAGE_CREATE", Some(&payload), None)
+            .expect("全量群消息应可转换");
+        assert_eq!(UnionCache::shared().union(bare), None, "缺 union 不建映射");
     }
 
     /// 缺 `author` / 空 `id` 的群消息：空身份不写进 idmap，ID 原样回退空串。

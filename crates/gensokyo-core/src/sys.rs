@@ -16,8 +16,9 @@
 //! - **公网 IP**：`GetPublicIP`（`sys/re.go:62-97`）请求固定第三方地址再正则抓 IP，只有
 //!   `config.ComposeWebUIURLv2`（`config.go:1248`）使用；core 不引 HTTP 客户端，缺口在册。
 //!   用它拼展示地址还依赖该第三方站点存活，重写时宜换成本地探测。
-//! - **`SystemInfo` / `executable_name` 未接线**：两者已实现并有单测，但生产侧暂无消费者
-//!   （WebUI `/api/status` 未投影这些字段）；接线随 P36 处理。
+//! - **`SystemInfo` / `executable_name` 已接线**（P36）：WebUI `/api/status` 的扩展字段
+//!   （`os` / `arch` / `executable` / `local_ip`）由 [`SystemInfo::collect`] 投影；
+//!   `GetPublicIP` 不做（见上一条）。
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;

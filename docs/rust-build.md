@@ -145,3 +145,9 @@ cargo +1.99.1-x86_64-pc-windows-gnu run -p xtask -- build --no-upx   # 宿主 re
 ```
 
 单测只覆盖纯函数（三元组解析、产物命名、版本矩阵、占位目录），不启动 cargo，因此不需要交叉工具链。
+
+## 从 Go 版升级时的数据注意
+
+- **短链不迁移**：Go 存在 `gensokyo.db` bucket `shortURLs` 里的短码不会导入 Rust 的
+  `short-urls.redb`，旧短链在 Rust 版上直接 404，需要重新生成（idmap / echo 走 JSONL 导入，
+  短链没有对应导入器）。

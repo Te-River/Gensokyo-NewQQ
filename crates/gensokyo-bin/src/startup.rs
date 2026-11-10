@@ -23,7 +23,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use gensokyo_actions::{ActionContext, QqApi};
-use gensokyo_config::{ConfigManager, LoadError, Settings, TemplateError, ensure_config_file};
+use gensokyo_config::{
+    CompleteError, ConfigManager, LoadError, Settings, TemplateError, ensure_config_complete,
+    ensure_config_file,
+};
 use gensokyo_core::Error as CoreError;
 use gensokyo_qq::{HttpTransport, OpenApiClient, ReqwestTransport, TokenConfig, TokenManager};
 use gensokyo_runtime::{
@@ -87,13 +90,48 @@ pub struct Started {
 
 /// 读取（必要时按模板生成）`config.yml`。
 ///
+/// 顺序与 Go `LoadConfig` 一致：先补键（Go `config.go:350-407` 的 `ensureConfigComplete`），
+/// 再读进配置。Go 在补键写盘后**重启进程**才生效；这里把补键放在载入之前，本次启动直接
+/// 用补齐后的文件，不重启。
+///
 /// # Errors
 /// 模板生成或配置解析失败时返回 [`StartupError`]。
 pub fn load_config(path: impl AsRef<Path>) -> Result<LoadedConfig, StartupError> {
     let path = path.as_ref();
     let created = ensure_config_file(path)?;
+    complete_config(path);
     let config = Arc::new(ConfigManager::new(path)?);
     Ok(LoadedConfig { config, created })
+}
+
+/// 启动自愈：补 `config.yml` 缺失的 `settings` 直接子项（Go `config.go:350-407`）。
+///
+/// 任何失败都只 `warn`、不阻断启动，也**不动既有内容**：读失败、语法坏（含重复的顶层
+/// `settings:`——Go 靠未移植的 `cleanupDuplicateSettings` 修，见 parity §E）、顶层没有
+/// `settings:` 块映射（settings 正文 / 裸 `version: 1`，对它们追加会写出非法 YAML）时补全都在
+/// 写盘前放弃、文件保持原样，随后 [`ConfigManager::new`] 给出真正的加载错误（正文形态本身能
+/// 载入，则照常启动）。补键发生时文件只追加缺失块（[`ensure_config_complete`] 的口径），
+/// 已有取值与注释一个字节都不改。
+fn complete_config(path: &Path) {
+    match ensure_config_complete(path) {
+        Ok(report) if report.changed() => tracing::warn!(
+            path = %path.display(),
+            lines = report.lines_written,
+            keys = ?report.appended,
+            "config.yml 缺少这些项，已按模板追加（本次启动即生效）"
+        ),
+        Ok(_) => {}
+        Err(CompleteError::NoSettings { .. }) => tracing::warn!(
+            path = %path.display(),
+            "config.yml 顶层没有 `settings:` 块映射，启动自愈跳过（文件保持原样、绝不写盘）；\
+             补键需要顶层 `settings:` 块，见 parity §E"
+        ),
+        Err(err) => tracing::warn!(
+            path = %path.display(),
+            error = %err,
+            "config.yml 启动自愈跳过（文件保持原样）；若为重复的顶层 settings:，见 parity §E"
+        ),
+    }
 }
 
 /// 安装进程级 rustls provider（ring）。
@@ -119,16 +157,27 @@ pub fn install_crypto_provider() -> bool {
     }
 }
 
-/// 从配置快照提取 QQ 凭据；`app_id == 0` 或 `client_secret` 全空白视为未配置。
+/// 模板自带的占位 `app_id`（`templates/config.yml:11`，与 Go `template/config_template.go:14`
+/// 逐字一致）。
+///
+/// Go 拿它当"未配置"哨兵：`main.go:176` 命中时不取 token、只提示"请完成机器人配置后重启框架"，
+/// `main.go:554` 连正向 WS 都不启动。模板里的 `client_secret` 是非空占位符
+/// `"<YOUR_CLIENT_SECRET>"`（Go 模板同样如此，不特判），所以只判非空会把新生成的默认配置
+/// 当成"有凭据"。
+const TEMPLATE_APP_ID: u64 = 12345;
+
+/// 从配置快照提取 QQ 凭据；`app_id` 为 0 或模板哨兵 [`TEMPLATE_APP_ID`]、`client_secret`
+/// 全空白视为未配置。
 ///
 /// `token`（机器人令牌）不参与 OpenAPI v2 鉴权（上游用 `app_id` + `client_secret` 换
 /// access_token），所以不作为装配条件；`develop_access_token_dir` 暂无访问器，token 端点
-/// 固定官方地址。这里只做**非空**校验，不验证凭据真伪——占位符同样算已配置，无效凭据要到
+/// 固定官方地址。这里只做**非空 + 哨兵**校验，不验证凭据真伪——`app_id` 填了真实值但
+/// `client_secret` 仍是占位符时同样算已配置（Go 也是走到取 token 才失败），无效凭据要到
 /// 首次调用上游时才以 action 错误（`1500`）暴露。
 fn token_config(snapshot: &Settings) -> Option<TokenConfig> {
     let app_id = snapshot.get_app_id();
     let client_secret = snapshot.get_client_secret().trim();
-    if app_id == 0 || client_secret.is_empty() {
+    if app_id == 0 || app_id == TEMPLATE_APP_ID || client_secret.is_empty() {
         return None;
     }
     Some(
@@ -416,8 +465,13 @@ mod tests {
     };
 
     /// 两个 listener 都启用；绑定地址由 `RuntimeOptions` 覆盖成随机端口。
+    ///
+    /// 凭据显式置空：启动自愈会按模板补缺失的 `settings` 子项（模板里 `app_id: 12345` 与
+    /// `client_secret` 占位符都会被补进来，Go 同理），要测"无凭据降级"就必须两键都在场。
     const CONFIG: &str = r#"version: 1
 settings:
+  app_id: 0
+  client_secret: ""
   port: "5700"
   enable_ws_server: true
   ws_server_path: ws
@@ -465,6 +519,17 @@ settings:
         )
     }
 
+    /// 在 `dir` 里开一份临时短链库：`Runtime::start*` 的 `attach_short_url` 只会补缺，
+    /// 不先注入就会在工作目录建 `short-urls.redb`。
+    fn temp_short_url(dir: &tempfile::TempDir) -> Arc<gensokyo_storage::ShortUrlStore> {
+        Arc::new(
+            gensokyo_storage::ShortUrlStore::open(
+                dir.path().join(gensokyo_storage::DEFAULT_SHORT_URL_PATH),
+            )
+            .expect("打开临时短链库失败"),
+        )
+    }
+
     /// 加载（必要时生成 `config.yml`）+ 启动；端口压到 `127.0.0.1:0`。
     ///
     /// 与 `start_with_config` 等价，但先把 idmap / botstats 指到 `dir`——生产装配会落到
@@ -479,7 +544,8 @@ settings:
             .to_owned();
         let state = build_state(loaded.config)
             .with_idmap(temp_idmap(dir))
-            .with_botstats(temp_botstats(dir));
+            .with_botstats(temp_botstats(dir))
+            .with_short_url(temp_short_url(dir));
         let actions = state.registry().len();
         let qq = state.actions().is_some();
         let handle = Runtime::start_with(state, loopback_options())
@@ -557,6 +623,118 @@ settings:
             Ok(Ok(_)) => panic!("关闭后端口仍在监听: {http}"),
             Err(_) => panic!("关闭后连接一直挂起: {http}"),
         }
+    }
+
+    /// 启动自愈必须在 `ConfigManager::new` 之前落盘，本次运行的快照才能读到补出来的值。
+    #[test]
+    fn config_completion_runs_before_the_snapshot_is_loaded() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        // 只有 settings: 和一个既有值；ws_server_path 等子项都缺。
+        std::fs::write(&path, "settings:\n  port: \"5700\"\n").expect("写配置");
+
+        let loaded = load_config(&path).expect("加载配置失败");
+        let written = std::fs::read_to_string(&path).expect("读回配置失败");
+
+        assert!(
+            written.contains("ws_server_path"),
+            "缺失的 settings 子项应被追加: {written}"
+        );
+        assert!(
+            written.contains("port: \"5700\""),
+            "既有取值必须原样保留: {written}"
+        );
+        // 模板默认 ws_server_path: "ws"；没补键时快照会是空串。
+        assert_eq!(
+            loaded.config.snapshot().get_ws_server_path(),
+            "ws",
+            "补出来的值必须在本次启动的快照里生效（Go 靠重启，这里靠先后顺序）"
+        );
+        assert_eq!(loaded.config.snapshot().get_port().trim(), "5700");
+    }
+
+    /// 补键是幂等的：第二次加载不再追加，文件逐字节不变。
+    #[test]
+    fn config_completion_is_idempotent() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "settings:\n  port: \"5700\"\n").expect("写配置");
+
+        load_config(&path).expect("首次加载失败");
+        let once = std::fs::read_to_string(&path).expect("读回配置失败");
+        load_config(&path).expect("二次加载失败");
+        let twice = std::fs::read_to_string(&path).expect("读回配置失败");
+
+        assert_eq!(once, twice, "第二次加载不得再改文件");
+    }
+
+    /// 空文件：按模板补齐全部设置项，不得留下半截/坏 YAML。
+    #[test]
+    fn empty_config_file_is_completed_without_corruption() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "").expect("写空配置");
+
+        let loaded = load_config(&path).expect("空配置应能被补齐后加载");
+        let written = std::fs::read_to_string(&path).expect("读回配置失败");
+
+        assert!(!written.trim().is_empty(), "空文件应被补齐");
+        // 只有补出 Go 的 `{version, settings}` 外壳，补进来的子项才有挂载点；缺了外壳就是
+        // 「根级正文」形态（loader 也认，但不是 Go 的 config.yml）。
+        assert!(
+            written.starts_with("version: 1\nsettings:\n"),
+            "空文件必须先补顶层 version/settings 外壳: {:?}",
+            written.get(..40).unwrap_or(&written)
+        );
+        assert_eq!(
+            loaded.config.snapshot().get_ws_server_path(),
+            "ws",
+            "补出来的模板默认值应生效"
+        );
+    }
+
+    /// settings 正文（`port: "5700"`，没有顶层 `settings:`）：自愈必须放弃写盘，
+    /// 否则追加出的缩进子项会让这份本来能载入的配置变成 `did not find expected key`。
+    #[test]
+    fn settings_body_config_is_left_untouched_and_still_loads() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        let body = "port: \"5700\"\n";
+        std::fs::write(&path, body).expect("写配置");
+
+        let loaded = load_config(&path).expect("settings 正文必须仍能启动");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("读回配置失败"),
+            body,
+            "没有顶层 settings: 时自愈一个字节都不能写"
+        );
+        assert_eq!(loaded.config.snapshot().get_port().trim(), "5700");
+        assert_eq!(
+            loaded.config.snapshot().get_ws_server_path(),
+            "",
+            "正文形态没有补键，ws_server_path 保持缺省空串"
+        );
+    }
+
+    /// 结构损坏（重复顶层 `settings:`）：自愈放弃写盘，文件保持原样，错误交给配置加载。
+    #[test]
+    fn duplicate_settings_block_is_left_untouched() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        let broken = "settings:\n  port: \"5700\"\nsettings:\n  port: \"5701\"\n";
+        std::fs::write(&path, broken).expect("写坏配置");
+
+        // 自愈只 warn；真正的失败由 ConfigManager 报出来（Go 的 cleanupDuplicateSettings
+        // 未移植，见 parity §E）。
+        assert!(
+            load_config(&path).is_err(),
+            "重复 settings: 应在加载阶段报错，而不是被补键掩盖"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("读回配置失败"),
+            broken,
+            "自愈失败时不得改动文件"
+        );
     }
 
     #[tokio::test]
@@ -648,6 +826,15 @@ settings:
         let no_app_id =
             gensokyo_config::parse_str("app_id: 0\nclient_secret: s3cret\n").expect("解析配置失败");
         assert!(token_config(&no_app_id).is_none(), "app_id=0 应视为未配置");
+
+        // 新生成的默认配置：模板哨兵 app_id + 非空占位符 secret，Go 靠 app_id 拦住（main.go:176）。
+        let as_generated =
+            gensokyo_config::parse_str("app_id: 12345\nclient_secret: \"<YOUR_CLIENT_SECRET>\"\n")
+                .expect("解析配置失败");
+        assert!(
+            token_config(&as_generated).is_none(),
+            "模板哨兵 app_id=12345 应视为未配置"
+        );
 
         let blank_secret =
             gensokyo_config::parse_str("app_id: 102000001\nclient_secret: \"   \"\n")

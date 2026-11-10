@@ -38,11 +38,11 @@ pub fn state(settings: &str) -> (AppState, TempDir) {
     (AppState::with_builtin_handlers(manager), dir)
 }
 
-/// 在 `dir` 里开一份临时 idmap 与 botstats 并注入状态。
+/// 在 `dir` 里开一份临时 idmap / botstats / 短链库并注入状态。
 ///
-/// `Runtime::start*` 的 `attach_idmap` / `attach_botstats` 在状态没有对应句柄时按默认路径
-/// （工作目录）建库；集成测试必须先注入，否则 `cargo test` 会在 crate 目录留下
-/// `openid-map.redb` / `msgid-map.redb` / `bot-stats.redb`。
+/// `Runtime::start*` 的 `attach_idmap` / `attach_botstats` / `attach_short_url` 在状态没有
+/// 对应句柄时按默认路径（工作目录）建库；集成测试必须先注入，否则 `cargo test` 会在 crate
+/// 目录留下 `openid-map.redb` / `msgid-map.redb` / `bot-stats.redb` / `short-urls.redb`。
 pub fn with_temp_stores(state: AppState, dir: &TempDir) -> AppState {
     let idmap = gensokyo_storage::IdMapStore::open(
         gensokyo_storage::IdMapOptions::new(
@@ -56,9 +56,14 @@ pub fn with_temp_stores(state: AppState, dir: &TempDir) -> AppState {
         dir.path().join(gensokyo_storage::DEFAULT_BOTSTATS_PATH),
     )
     .expect("打开临时 botstats 失败");
+    let short_url = gensokyo_storage::ShortUrlStore::open(
+        dir.path().join(gensokyo_storage::DEFAULT_SHORT_URL_PATH),
+    )
+    .expect("打开临时短链库失败");
     state
         .with_idmap(Arc::new(idmap))
         .with_botstats(Arc::new(botstats))
+        .with_short_url(Arc::new(short_url))
 }
 
 /// 裸 HTTP `POST`（不走 reqwest：测试不需要额外依赖）。

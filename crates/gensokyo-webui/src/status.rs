@@ -6,6 +6,13 @@
 //! `process.pid`（`std::process::id()`）与 `process.status`（恒为 `running`）外一律返回 `0`。
 //! `0` 在这里表示"未采集"，不是真实读数；接入采集源时只改 [`SystemStatus::current`]，
 //! 路由与响应形状不变。
+//!
+//! # Rust 扩展字段（Go 没有）
+//!
+//! `os` / `arch` / `executable` / `local_ip` 来自 [`gensokyo_core::sys::SystemInfo`]（P36 接线），
+//! Go 的 `handleSysInfo` 没有这几项——它们是 [`gensokyo_core::sys`] 的消费点，补成额外字段
+//! 而不是改动既有 5 个字段：前端的 `SystemStatus` 只读自己认识的键，多出来的键无影响。
+//! `executable` 对应 Go `sys.GetExecutableName`（`sys/re.go:116-123`）。
 
 use std::sync::Arc;
 
@@ -14,6 +21,8 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
+
+use gensokyo_core::sys::SystemInfo;
 
 use crate::auth::{is_authenticated, unauthorized};
 use crate::state::WebUiState;
@@ -70,12 +79,21 @@ pub struct SystemStatus {
     pub boot_time: u64,
     /// 当前进程。
     pub process: RunningProcessDetail,
+    /// 操作系统（`std::env::consts::OS`）。Rust 扩展字段，Go 无。
+    pub os: &'static str,
+    /// CPU 架构（`std::env::consts::ARCH`）。Rust 扩展字段，Go 无。
+    pub arch: &'static str,
+    /// 可执行文件（去扩展名，Go `sys.GetExecutableName`）。Rust 扩展字段，Go 无。
+    pub executable: Option<String>,
+    /// 本机内网 IPv4（Go `sys.GetLocalIP`）。Rust 扩展字段，Go 无。
+    pub local_ip: Option<String>,
 }
 
 impl SystemStatus {
-    /// 采集一次状态；除 pid 与 status 外均为未采集占位值（见模块文档）。
+    /// 采集一次状态；除 pid / status 与 [`SystemInfo`] 的字段外均为未采集占位值（见模块文档）。
     #[must_use]
     pub fn current() -> Self {
+        let info = SystemInfo::collect();
         Self {
             cpu_percent: 0.0,
             memory: MemoryDetail {
@@ -91,12 +109,16 @@ impl SystemStatus {
             },
             boot_time: 0,
             process: RunningProcessDetail {
-                pid: std::process::id(),
+                pid: info.pid,
                 status: "running".to_owned(),
                 memory_used: 0,
                 cpu_percent: 0.0,
                 start_time: 0,
             },
+            os: info.os,
+            arch: info.arch,
+            executable: info.executable.map(|path| path.display().to_string()),
+            local_ip: info.local_ip.map(|ip| ip.to_string()),
         }
     }
 }
@@ -110,4 +132,26 @@ pub(crate) async fn system_status(
         return unauthorized();
     }
     Json(SystemStatus::current()).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SystemStatus;
+
+    #[test]
+    fn status_projects_system_info_into_rust_extension_fields() {
+        let status = SystemStatus::current();
+        assert_eq!(status.os, std::env::consts::OS);
+        assert_eq!(status.arch, std::env::consts::ARCH);
+        assert_eq!(status.process.pid, std::process::id());
+        assert_eq!(status.process.status, "running");
+        // Go 的那 5 个字段仍然齐全（形状不变，只是多了扩展键）。
+        let json = serde_json::to_value(&status).expect("序列化 status");
+        for key in ["cpu_percent", "memory", "disk", "boot_time", "process"] {
+            assert!(json.get(key).is_some(), "缺字段 {key}");
+        }
+        for key in ["os", "arch", "executable", "local_ip"] {
+            assert!(json.get(key).is_some(), "缺扩展字段 {key}");
+        }
+    }
 }

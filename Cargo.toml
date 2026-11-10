@@ -102,6 +102,11 @@ dashmap = "6.2.1"
 uuid = { version = "1.28.0", features = ["v4"] }
 time = { version = "0.3.55", features = ["formatting", "macros"] }
 
+# 全局分配器（P33）：mimalloc 的每线程堆在高并发 + 高频短命分配下避开 Windows CRT 堆的
+# 跨线程锁争用。crate 默认特性为空（`default = []`），这里显式写死：`override` 会顶掉 C 侧
+# malloc 符号、`secure` 加元数据校验，两者都不是本仓要的语义。构建需要 C 工具链（mingw gcc）。
+mimalloc = { version = "0.1.52", default-features = false }
+
 # TLS 安全下限（RustSec-2026-0382/0383 / CVE-2026-111943）
 # 低于下列版本的 rustls/webpki 禁止进入依赖图；`cargo xtask check-tls-floors` + CI 会再断言一次。
 # provider（ring / aws-lc-rs）显式不选：它决定是否需要 C 工具链与平台矩阵，留到 M1 定。

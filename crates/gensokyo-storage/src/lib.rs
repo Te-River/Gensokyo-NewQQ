@@ -107,8 +107,8 @@ pub use short_url::{
 };
 pub use union_cache::UnionCache;
 
-/// 小写十六进制编码（`importer` 的 `end.sha256` 校验与 `short_url` 的短码共用）。
-pub(crate) fn hex_lower(bytes: &[u8]) -> String {
+/// 小写十六进制编码（`short_url` 的短码与 `runtime` 的短链 token 校验共用）。
+pub fn hex_lower(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
 
     let mut text = String::with_capacity(bytes.len() * 2);

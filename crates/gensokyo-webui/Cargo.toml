@@ -9,6 +9,8 @@ publish.workspace = true
 
 [dependencies]
 gensokyo-config.workspace = true
+# `/api/status` 的 os/arch/executable/local_ip：`gensokyo_core::sys::SystemInfo`
+gensokyo-core.workspace = true
 # `ws`：日志流路由（`/api/logs`）用 `WebSocketUpgrade`（Go `mylog.WsHandler`）
 axum = { workspace = true, features = ["ws"] }
 # `sync`：日志广播（`broadcast`）；`time`：WS 心跳间隔

@@ -67,6 +67,7 @@ use gensokyo_core::{Error, Result};
 use gensokyo_qq::{ReqwestTransport, TokenConfig, TokenManager};
 use gensokyo_storage::idmap::grpc::{IdMapService, pb};
 use gensokyo_storage::idmap::{DEFAULT_IDENTITY_PATH, DEFAULT_MSG_PATH, IdMapOptions, IdMapStore};
+use gensokyo_storage::short_url::{DEFAULT_SHORT_URL_PATH, ShortUrlStore};
 use gensokyo_storage::{BotStatsStore, DEFAULT_BOTSTATS_PATH, EchoStore};
 use gensokyo_webui::{WebUi, WebUiState};
 use tokio::net::TcpListener;
@@ -200,6 +201,31 @@ impl Runtime {
         }
     }
 
+    /// 启动装配：打开短链库（`short-urls.redb`），给 `/url` 的两条路由用。
+    ///
+    /// Go 在 `url.init()` 里打开 `gensokyo.db`，失败直接 `panic`（`shorturl.go:48-76`）；
+    /// 这里只 `warn`：`/url` 回 500，其余功能照常启动。状态里已有库时原样返回（测试/嵌入
+    /// 方先用 [`AppState::with_short_url`] 注入临时库）。
+    ///
+    /// `/url` 与 Go 一样**不鉴权**（`main.go:566-567` 直接挂 handler，只靠 `lotus_password`
+    /// 的 token 规则），启动时提示一次，避免误把端口直接暴露到公网。
+    fn attach_short_url(state: AppState) -> AppState {
+        tracing::warn!("/url 无鉴权，与 Go 一致；请勿把该端口直接暴露到公网");
+        if state.short_url().is_some() {
+            return state;
+        }
+        match ShortUrlStore::open(DEFAULT_SHORT_URL_PATH) {
+            Ok(store) => state.with_short_url(Arc::new(store)),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "短链库打开失败，/url 不可用（发短链的调用会拿到空链接）"
+                );
+                state
+            }
+        }
+    }
+
     /// 启动装配：向 `GET /users/@me` 取机器人真实 ID 并注入状态与
     /// [`gensokyo_actions::ActionContext`]（Go `main.go:254` 的 `api.Me` → `main.go:304`）。
     ///
@@ -257,6 +283,7 @@ impl Runtime {
         let state = Self::attach_echo(state);
         let state = Self::attach_idmap(state);
         let state = Self::attach_botstats(state);
+        let state = Self::attach_short_url(state);
         let state = Self::attach_bot_id(state).await;
         let settings = state.config().snapshot();
 
@@ -330,6 +357,10 @@ impl Runtime {
         // 主 listener 不存在时兜底（见下方 `http` 分支）。
         let upload = crate::upload_http::router(state.clone(), idmap_grpc.is_none());
 
+        // 短链库（Go `url.init()` 打开 `gensokyo.db`，失败 `panic`）：打不开只 warn，
+        // `/url` 的 handler 回 500，其余功能照常——与各 `attach_*` 的口径一致。
+        let short_url = crate::http_api::short_url_router(state.clone());
+
         // 先把两个 listener 都绑好再 spawn：任一绑定失败时，已绑定的 socket 随局部变量
         // 释放关闭，不会出现「WS 已在跑、HTTP 启动失败」的半启动状态。
         let ws_listener = match &ws_target {
@@ -342,7 +373,8 @@ impl Runtime {
         };
 
         // `/uploadpic*` 与 `/getid` 归主 listener（Go 的 `r`）；主 listener 不存在时才落 HTTP API
-        let upload_on_http =
+        // 端口。短链 `/url` 同理（Go `main.go:566-567` 也挂在 `r` 上）。
+        let main_routes_on_http =
             upload_falls_back_to_http(ws_target.is_some(), http_listener.is_some());
 
         let ws = if let (Some((_, path)), Some((listener, addr))) = (ws_target, ws_listener) {
@@ -351,17 +383,17 @@ impl Runtime {
                 &webui,
             );
             // Go `main.go:508/523-524` 的 /getid、/uploadpic* 挂在主服务器 `r` 上
-            let app = merge_upload(app, &upload);
+            let app = merge_upload(app, &upload).merge(short_url.clone());
             Some(serve("正向 WS", listener, addr, app))
         } else {
             None
         };
         let http = http_listener.map(|(listener, addr)| {
             let app = http_app(&state, &webui, &webhook);
-            // 主 listener（WS 端口，对应 Go 始终存在的 `r`）不存在时，上传端点落到 HTTP API
-            // 端口，否则这些路由就没有监听者
-            let app = if upload_on_http {
-                merge_upload(app, &upload)
+            // 主 listener（WS 端口，对应 Go 始终存在的 `r`）不存在时，上传端点与短链落到
+            // HTTP API 端口，否则这些路由就没有监听者
+            let app = if main_routes_on_http {
+                merge_upload(app, &upload).merge(short_url.clone())
             } else {
                 app
             };

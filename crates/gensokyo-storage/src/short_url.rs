@@ -14,26 +14,36 @@
 //! 注意 Go 不做"同一长链复用同一短码"：第二次生成得到的是随机码，两条记录并存。
 //! 这里照抄（迁移期同 URL 会产生多条映射，与 Go 库内容一致）。
 //!
-//! # 只实现"库 + 纯函数"，HTTP 入口留给 runtime
+//! # HTTP 入口（P36 已接线）
 //!
 //! Go 的两个 gin handler 挂在主服务器（`main.go:566-567`：`POST /url`、
-//! `GET /url/:shortURL`）。Rust 的等价入口是 runtime 的 `http_api` / 主 listener——那是
-//! "已定稿"模块，本波次不动。接线时的契约：
+//! `GET /url/:shortURL`）。Rust 的等价路由是 `gensokyo_runtime::http_api::short_url_router`，
+//! 由 `boot` 挂到主 listener（主 listener 缺席时落到 HTTP API 端口），契约逐条照 Go：
 //!
-//! - 创建：`is_malicious` / `validate_url` 不过 → 400；否则 [`ShortUrlStore::create`]，
+//! - 创建：表单字段 `url` / `token`（`PostForm`，urlencoded 与 multipart 都收）→
+//!   `decodeBase64IfNeeded` → `is_malicious` / [`validate_url`] / token 校验（Go
+//!   `isValidToken`，实现已上移到 `gensokyo_runtime::http_api`，本层只留短码库）任一不过
+//!   → 400 `{"error":"Invalid URL or token"}`；否则 [`ShortUrlStore::create`]，
 //!   响应体 `{"shortURL": short_url_link(server_dir, code)}`；
-//! - 跳转：[`ShortUrlStore::resolve`] 查不到 → 404；查到 → `301` + [`redirect_target`]。
+//! - 跳转：[`ShortUrlStore::resolve`] 查不到 → 404 `{"error":"URL not found"}`；查到 →
+//!   `301` + `Location: ` [`redirect_target`]。
+//!
+//! 短链库打不开时两个 handler 都回 500（Go 在 `url.init()` 里 `panic`，这里降级为不阻断启动）。
 //!
 //! # 与 Go 的差异（明确列出）
 //!
 //! - **文件**：`gensokyo.db`（bbolt）→ `short-urls.redb`；表名 / 键值编码保持一致。
 //! - **Lotus 远程模式**：`lotus: true` 时 Go 把创建/查询转发给另一台 gensokyo（HTTP POST +
 //!   表单 + HMAC token）。本层不做网络调用，本地库路径始终生效；远程模式需要在 HTTP 层另接。
-//! - **token 校验**：Go `isValidToken`（`shorturl.go:350-364`）对 **token 本身**做
-//!   HMAC-SHA256 再与 token 比较（自指），密码非空时永远失败——属 Go 侧缺陷。接线时按注释
-//!   意图（对长链做 HMAC）实现，并在该处注明与 Go 的行为差异。
+//! - **token 校验**：Go `isValidToken`（`shorturl.go:303-324`）对 **token 本身**做
+//!   HMAC-SHA256 再与 token 比较（自指），密码非空时永远失败——属 Go 侧缺陷。按 P36 口径
+//!   **照抄实际行为**（实现在 `gensokyo_runtime::http_api::is_valid_token`：`ring::hmac` +
+//!   常量时间比较）：只要 `lotus_password` 非空，创建短链一律 400。
+//!   这不是 "忘了对长链做 HMAC"，而是 Go 发布版就是如此，改了会让接同一实例的 Go 客户端
+//!   行为分叉；要放行就把密码留空。修复需两端一起改，登记在 parity §E。
 //! - **Base64 入参归一**：Go `decodeBase64IfNeeded` 在 HTTP handler 里做（`shorturl.go:331`），
-//!   属入口层职责，本层不收；接线时补在 handler。
+//!   属入口层职责，本层不收；`gensokyo_runtime::http_api` 的 handler 已补。
+//!   解出的字节不是 UTF-8 时保留原串（Go 的 string 是字节串，这里收窄，不影响合法 URL）。
 //! - **随机源**：Go 用 `crypto/rand`，失败回退时间戳；本实现用 SHA-256 扩散
 //!   （`RandomState`（OS 种子）+ 纳秒时间 + 进程号 + 递增计数），冲突由重试兜底。
 //!   短码不是安全凭证，不为它新引 `rand` / `getrandom`。

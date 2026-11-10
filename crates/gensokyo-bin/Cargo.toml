@@ -31,6 +31,9 @@ tokio = { workspace = true, features = [
     "signal",
     "time",
 ] }
+# 全局分配器（P33）：`#[global_allocator]` 落在 `src/main.rs`，只有最终二进制会装；
+# 库 crate 与 xtask bench 口径不感知它。
+mimalloc.workspace = true
 # 日志时间戳（RFC3339，以及 WebUI 日志流要用的本地 12 小时制）；
 # `local-offset` 让 `OffsetDateTime::now_local` 可用，取不到时退回 UTC
 time = { workspace = true, features = ["local-offset"] }

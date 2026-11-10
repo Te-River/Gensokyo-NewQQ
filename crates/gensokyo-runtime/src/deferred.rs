@@ -177,7 +177,7 @@ use gensokyo_qq::dto::{
     FileUpload, FileUploadMergeRequest, FileUploadPartFinishRequest, FileUploadPrepareRequest,
     InputNotify, Markdown, Media, MessageResponse, MessageToCreate, StreamSse, file_type, msg_type,
 };
-use gensokyo_storage::EchoStore;
+use gensokyo_storage::{EchoStore, UnionCache};
 use gensokyo_storage::echo::{DEFAULT_MESSAGE_ID, MessageGroupPair};
 use serde_json::{Value, json};
 
@@ -1027,7 +1027,50 @@ fn compose_markdown(
         ));
     };
     let content = migrate_at_everyone(content, rendered_text);
+    // Go `send_group_msg.go:1531-1533`：`union_id` 打开时先把正文里的 union 反查回原始
+    // OpenID，**再**走 `ResolveMarkdownAtMentions`——顺序不能反：`[CQ:at]` 生成的就是
+    // 原始 OpenID，反查放在它后面等于对刚写好的值再做一次无意义查找。
+    let content = if context.config().snapshot().get_union_id() {
+        replace_union_at_user(&content)
+    } else {
+        content
+    };
     Ok(Some(Markdown::content(render_markdown(context, &content)?)))
+}
+
+/// 正文里的 `<qqbot-at-user id="union" />` → 原始 OpenID
+/// （Go `mdutil.ReplaceQQBotAtUserIDUnionToRaw`）。
+///
+/// `union_id` 模式下列给客户端的是 union，而 QQ 的 markdown @ 只认原始 OpenID。反查 miss
+/// 原样保留（Go 同口径）：这张表只装"近期活跃的群成员"，冷启动或未入站的用户必然 miss，
+/// 此时把 union 写进标签至少不会比改写前更差。
+///
+/// 单遍扫描，只动 `qqbot-at-user id="…"` 这一种标签，其余字节逐字保留（不重转义 `[` `]`，
+/// 否则会破坏 `[文本](链接)`）；不完整的标签把剩余部分原样写回（与 Go 的 `break` 一致）。
+fn replace_union_at_user(content: &str) -> String {
+    const PREFIX: &str = "<qqbot-at-user id=\"";
+    if !content.contains(PREFIX) {
+        return content.to_owned();
+    }
+    let mut out = String::with_capacity(content.len());
+    let mut from = 0;
+    while let Some(offset) = content[from..].find(PREFIX) {
+        let id_start = from + offset + PREFIX.len();
+        let Some(len) = content[id_start..].find('"') else {
+            // 不完整标签：剩余原样写回
+            break;
+        };
+        let union = &content[id_start..id_start + len];
+        out.push_str(&content[from..id_start]);
+        match UnionCache::shared().id(union) {
+            Some(raw) => out.push_str(&raw),
+            None => out.push_str(union),
+        }
+        // 结束引号随下一轮的 `content[from..]` 一起写出
+        from = id_start + len;
+    }
+    out.push_str(&content[from..]);
+    out
 }
 
 /// markdown 抢占正文时，把文本里的 @全员 标签并入 markdown 正文（Go `migrateAtEveryoneToMarkdown`）。
@@ -2230,7 +2273,7 @@ mod tests {
         MessageResponse, MessageToCreate, StreamSse, file_type, msg_type,
     };
     use gensokyo_storage::echo::MessageGroupPair;
-    use gensokyo_storage::{EchoStore, IdMapOptions, IdMapStore};
+    use gensokyo_storage::{EchoStore, IdMapOptions, IdMapStore, UnionCache};
     use serde_json::Value;
     use tempfile::TempDir;
 
@@ -4781,6 +4824,68 @@ mod tests {
             ],
             ..OutboundPlan::default()
         }
+    }
+
+    /// 取发出去的那条 markdown 正文。
+    fn sent_markdown(api: &FakeQqApi) -> String {
+        let sent = api.sent();
+        sent[0]
+            .markdown
+            .as_ref()
+            .and_then(|markdown| markdown.content.clone())
+            .expect("markdown 必须有正文")
+    }
+
+    #[tokio::test]
+    async fn markdown_union_at_user_is_rewritten_to_raw_openid() {
+        // P38：入站把 `id ↔ union_openid` 记进 UnionCache，出站 markdown 的 @ 要反查回原始
+        // OpenID（Go `mdutil.ReplaceQQBotAtUserIDUnionToRaw`，`send_group_msg.go:1531`）。
+        const UNION: &str = "union-markdown-read-1";
+        const RAW: &str = "u-markdown-read-1";
+        UnionCache::shared().store(RAW, UNION);
+
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context_with_settings(Arc::clone(&api), "  union_id: true\n");
+        let media = no_media();
+        let plan = request(
+            SendTarget::Group(OPENID.to_owned()),
+            markdown_plan(&format!("<qqbot-at-user id=\"{UNION}\" /> 你好")),
+        );
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("markdown union @ 应发送成功");
+
+        assert_eq!(
+            sent_markdown(&api),
+            format!("<qqbot-at-user id=\"{RAW}\" /> 你好"),
+            "union 必须反查成原始 OpenID"
+        );
+    }
+
+    #[tokio::test]
+    async fn markdown_union_at_user_is_untouched_when_union_id_is_off() {
+        // `union_id` 关闭时 Go 整段跳过：缓存里就算有映射也不改写（零行为变化）
+        const UNION: &str = "union-markdown-read-off-1";
+        UnionCache::shared().store("u-markdown-read-off-1", UNION);
+
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let plan = request(
+            SendTarget::Group(OPENID.to_owned()),
+            markdown_plan(&format!("<qqbot-at-user id=\"{UNION}\" /> 你好")),
+        );
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("markdown @ 应发送成功");
+
+        assert_eq!(
+            sent_markdown(&api),
+            format!("<qqbot-at-user id=\"{UNION}\" /> 你好"),
+            "关闭 union_id 时正文不得被改写"
+        );
     }
 
     #[tokio::test]

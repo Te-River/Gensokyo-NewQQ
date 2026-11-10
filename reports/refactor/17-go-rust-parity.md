@@ -44,11 +44,11 @@
 | P1 | acnode AC 自动机 | acnode/acnode.go:17-111 | core/acnode.rs（手写 AC、IN/OUT 双接入、词表回写） | **已对齐（P8）** |
 | P1 | messagequeue（发送队列/限速） | messagequeue/queue.go:96-122 | queue.rs（令牌桶+重试，限速可注入；Go 队列死代码） | **已对齐（P10/P10b）** |
 | P1 | botstats + Prometheus `/metrics` | botstats/botstats.go；main.go:522,1140-1175 | builtin.rs 6 指标 + `/metrics` + redb 统计 + received 打点（P12/P12b） | **已对齐** |
-| P2 | unioncache / url 短链 / sys 全量 | unioncache/*；url/shorturl.go；sys/* | union_cache.rs 1:1 双向缓存；short_url.rs redb 库 + 校验/301/恶意判定（HTTP 路由待接线 P36）；sys executable_name/SystemInfo（重启类不可移植，已文档化） | **库已对齐（P30）/接线待 P36** |
+| P2 | unioncache / url 短链 / sys 全量 | unioncache/*；url/shorturl.go；sys/* | union_cache.rs 1:1 双向缓存（P38 起入站写 + markdown @ 反查已接）；short_url.rs redb 库 + 校验/301/恶意判定/自指 token 规则 + `/url` 两条路由（P36）；sys executable_name/SystemInfo → WebUI `/api/status` 扩展字段（P36；重启类不可移植，已文档化） | **已对齐（P30 库 / P36 接线 / P38 unioncache 读写接线；剩余 inline search 与 union_id 入站切换见 §E-3）** |
 | P2 | 视频/QR/SSRF 防护 | images/*；sys/* | media/lib.rs:108-118 未做清单 | 缺失 |
 | — | idmap 核心/echo/config/热重载 | 见审计表 | 见审计表 | **已对齐**（Rust 多 `enable_at_everyone_limit` 1 键） |
 | — | Settings 字段/accessor/restart 34 项 | structs.go 184 键；config.go:38-48 | 185 键（多 1）/ 1:1 accessor / diff.rs 34 项 | **已对齐** |
-| — | 配置自愈 ensureConfigComplete | config.go:350 | config/complete.rs 文本补键回写（幂等/已有行零字节改动/块内注释带回/tmp+rename）；启动调用待接线（P36） | **已实现（P30）/接线待 P36** |
+| — | 配置自愈 ensureConfigComplete | config.go:350 | config/complete.rs 文本补键回写（幂等/已有行零字节改动/块内注释带回/tmp+rename）；`startup.rs::load_config` 在配置载入前调用（P36，补键即生效不重启） | **已实现（P30）/已接线（P36）** |
 
 ## B. 出站 action 与消息链
 
@@ -117,11 +117,14 @@
 
 P36 是「库 / 函数已落地、生产调用点未接」的收口波次。A 表里的「待接线 P36」即下列各项：
 
-| # | 项 | 现状 | 接线点 / 验收 |
-|---|---|---|---|
-| 1 | 短链 HTTP 路由 | `gensokyo-storage::short_url` 库 + 校验 / 恶意判定齐全（P30，模块头已写契约） | 主 listener 挂 `POST /url`（创建：400 或 `{"shortURL":…}`）与 `GET /url/:shortURL`（301 / 404） |
-| 2 | `ensure_config_complete` 启动调用 | `gensokyo-config::complete` 文本补键齐全（P30），模块头已标「未接线」 | `gensokyo-bin/src/startup.rs` 在 `ensure_config_file` 之后调用并处理 `CompletionReport`（Go `config.go:350` 的写后重启改为由 runtime 决定） |
-| 3 | unioncache 生产接线 | `gensokyo-storage::union_cache` 双向映射齐全（P30） | 入站群消息写 `id→union`；`mdutil` / inline search 反查 `union→id`（Go 调用点见模块头） |
-| 4 | `SystemInfo` / `executable_name` 消费者 | `gensokyo-core::sys` 只读信息齐全（P30） | WebUI `/api/status` 投影这两个字段（对齐 Go `sys.GetExecutableName` 的用途） |
+| # | 项 | 现状 | 接线点 / 验收 | P36 状态 |
+|---|---|---|---|---|
+| 1 | 短链 HTTP 路由 | `gensokyo-storage::short_url` 库 + 校验 / 恶意判定 / token 规则齐全（P30） | 主 listener 挂 `POST /url`（400 或 `{"shortURL":…}`）与 `GET /url/:shortURL`（301 / 404） | **已接线**：`runtime/http_api.rs::short_url_router`（urlencoded + multipart、base64 归一、301 手写 `Location`），`boot.rs::attach_short_url` 打开 `short-urls.redb` 并挂主 listener（主 listener 缺席时落 HTTP API 端口）；库打不开只 warn、两条路由回 500（Go 是 `url.init()` panic）。**挂载位置差异（只登记，不改）**：Go 挂在**永远存在**的主 server（`main.go:566-567` 注册、`:602` 起 `0.0.0.0:serverPort`，只过 `Recovery`），Rust 绑 WS listener（`enable_ws_server=true` 才有），WS 关闭时落 HTTP API 端口，两者都关则 `/url` 不存在——Rust 没有「恒存在的主 server」这一层，为一个路由新起监听器不合最小改动口径。**另两处已知差异（只登记，不改）**：301 无响应体（Go `c.Redirect` 带 `<a href=…>Moved Permanently</a>` 正文）；`/url/a/b` 等多段路径在 Rust 落 WebUI SPA 回退（Go 路由不匹配 → 404） |
+| 2 | `ensure_config_complete` 启动调用 | `gensokyo-config::complete` 文本补键齐全（P30） | `gensokyo-bin/src/startup.rs` 在 `ensure_config_file` 之后调用并处理 `CompletionReport`（Go `config.go:350` 的写后重启改为由 runtime 决定） | **已接线**：`startup.rs::load_config` 在 `ConfigManager::new` **之前**调用（本次启动即生效，不重启）；`changed()` → warn 继续；读失败 / 语法坏 → warn 且文件原样。**追加前提**：只有顶层 `settings:` 块映射能承接缩进两格的子项，其余形态（settings 正文如 `port: "5700"`、裸 `version: 1`、`settings: null` / 流式映射）返回 `CompleteError::NoSettings`，调用点 warn 且**绝不写盘**（否则会写出非法 YAML，进程直接起不来）；空文件 / 纯注释文件先补 `version: 1\nsettings:\n` 外壳再追加 |
+| 3 | unioncache 生产接线 | `gensokyo-storage::union_cache` 双向映射齐全（P30） | 入站群消息写 `id→union`；`mdutil` / inline search 反查 `union→id`（Go 调用点见模块头） | **写 + markdown 读已接（P38）**：`Inbound::group_message` 在建映射的同一位置 `store(id, union_openid)`（`ProcessGroupMessage.go:55` / `ProcessGroupNormalMessage.go:46`，两种群消息形态共用，`GROUP_MEMBER_*` 负载本身没有该字段）；出站 `deferred::compose_markdown` 在 `RenderMarkdown` 之前按 Go 顺序反查（`send_group_msg.go:1531-1533`），`union_id` 关闭时整段跳过。进程级共享实例 `UnionCache::shared()`（对位 Go 包级 `sync.Map`）。**剩余缺口**：`ProcessInlineSearch.go:113` 的 inline search 读点，以及 `union_id` 的**入站 ID 切换**本身仍未实现（`author.id ← union_openid` 无对应代码，故该映射在 Rust 侧目前只有 markdown 一侧消费） |
+| 4 | `SystemInfo` / `executable_name` 消费者 | `gensokyo-core::sys` 只读信息齐全（P30） | WebUI `/api/status` 投影这两个字段（对齐 Go `sys.GetExecutableName` 的用途） | **已接线**：`webui/status.rs` 增 `os` / `arch` / `executable` / `local_ip` 四个**Rust 扩展字段**（Go `handleSysInfo` 无此四项，前端多键无影响）；`GetPublicIP` 需外呼 `/` 固定第三方站点，**不做**（`banner::console_urls` 用 `server_dir` 拼公网地址，无需外呼） |
+| 5 | 存量短码导入（impact 评审） | Go 短码在 `gensokyo.db` bbolt bucket `shortURLs`；Rust 用独立 `short-urls.redb` | 复用既有 bbolt 读取通路 | **缺口（不迁移）**：仓内唯一的导入通路是 G1 `legacy-export` 的 idmap JSONL（`importer/mod.rs` 明确「不读 bbolt」，`kind` 表里没有短链行）；Go 侧 `legacy-export` 也**不导出** `shortURLs`（全仓 grep 仅 `url/shorturl.go` 命中该 bucket）。按边界不为它新写 bbolt 解析器或加依赖——**老短码不迁移，需重新生成** |
+| 6 | 短链 token 校验自指 bug | Go `isValidToken`（`shorturl.go:303-324`）比较 `hex(HMAC(pwd, token)) == token` | 保持 Go 实际行为 | **已照抄**：`http_api::is_valid_token`（实现随 P36 接线迁到 `runtime/http_api.rs`），`lotus_password` 非空时创建一律 400（Go 客户端送的是 `HMAC(pwd, 长链)`，两端口径从来不一致）。修复要两端同时改，不在 P36 |
+| 7 | `cleanupDuplicateSettings` | Go `config.go:717-792` 在 `LoadConfig` 早期删重复 `settings:`、补缺失顶层键 | 配置载入前清洗 | **缺口**：重复顶层 `settings:` 会让 `parse_str` 报 `Parse`（P30 已知）。P36 只保证启动自愈在这种情况下**不改文件**并在 warn 里指向本行；移植清洗是独立波次（属于 config 加载器，不在 P36 文件面） |
 
 （本文由三分域审计汇总；A/B/C/D 表与 §E 状态已按 R4g 波次回写，时点见 `docs/rust-m0.md`。）

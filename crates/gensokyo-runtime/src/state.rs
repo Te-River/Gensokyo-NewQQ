@@ -15,7 +15,7 @@ use gensokyo_actions::ActionContext;
 use gensokyo_config::ConfigManager;
 use gensokyo_protocol::Registry;
 use gensokyo_qq::{OpenApiClient, ReqwestTransport};
-use gensokyo_storage::{BotStatsStore, EchoStore, IdMapStore};
+use gensokyo_storage::{BotStatsStore, EchoStore, IdMapStore, ShortUrlStore};
 
 use crate::builtin;
 use crate::dispatcher::Dispatcher;
@@ -42,6 +42,7 @@ pub struct AppState {
     bot_id: Option<Arc<str>>,
     echo: Option<Arc<EchoStore>>,
     botstats: BotStatsSlot,
+    short_url: Option<Arc<ShortUrlStore>>,
     api: Option<Arc<OpenApiClient<ReqwestTransport>>>,
     media: Arc<MediaRuntime>,
     hosting: Arc<HostingRuntime>,
@@ -63,6 +64,7 @@ impl AppState {
             bot_id: None,
             echo: None,
             botstats: BotStatsSlot::default(),
+            short_url: None,
             api: None,
             media: Arc::new(MediaRuntime::default()),
             hosting: Arc::new(HostingRuntime::default()),
@@ -284,6 +286,21 @@ impl AppState {
     #[must_use]
     pub fn botstats_arc(&self) -> Option<Arc<BotStatsStore>> {
         self.botstats.get().cloned()
+    }
+
+    /// 注入短链库（`POST /url` / `GET /url/{code}` 的唯一消费者；未注入时两条路由回 500）。
+    ///
+    /// 生产路径由 [`crate::boot::Runtime::attach_short_url`] 打开 `short-urls.redb` 兜底注入。
+    #[must_use]
+    pub fn with_short_url(mut self, short_url: Arc<ShortUrlStore>) -> Self {
+        self.short_url = Some(short_url);
+        self
+    }
+
+    /// 短链库句柄（未注入时为 `None`：`/url` 回 500，其余功能不受影响）。
+    #[must_use]
+    pub fn short_url(&self) -> Option<&ShortUrlStore> {
+        self.short_url.as_deref()
     }
 
     /// deferred 的媒体下载器。

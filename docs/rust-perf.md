@@ -112,6 +112,43 @@ cargo run --release -p xtask -- bench
 
 **边界**：loopback 单机、入口形态不同（Go 路径分发 vs Rust 统一 action）、Rust 尚未覆盖全部 action/媒体；数字用于管线对比与回归基线，不是公网 SLA，也不代表 QQ 端到端延迟。
 
+### 4.3 全局分配器（P33，mimalloc，2026-11-09）
+
+**决策**：`mimalloc 0.1.52`，`default-features = false`（该 crate 默认特性本为空；`override` 会顶掉 C 侧
+`malloc` 符号、`secure` 加元数据校验，都不是本仓要的语义）。依赖声明在根 `Cargo.toml` 的
+`[workspace.dependencies]`，由 `crates/gensokyo-bin` 引用，`#[global_allocator] static GLOBAL: MiMalloc`
+落在 `crates/gensokyo-bin/src/main.rs` —— **只有最终二进制会装**，库 crate 与 `xtask` 不受影响
+（所以 `xtask bench` 的默认口径仍是系统分配器，与 §4 同口径；但两次测量的机器状态不同，
+绝对值仍以本节复测为准）。
+
+**工具链细节**：本机 rustc 1.99.1 里 `global_allocator` **不是** unsafe 属性，写成
+`#[unsafe(global_allocator)]` 会报 `error: 'global_allocator' is not an unsafe attribute`；普通写法也不会
+触发 workspace 的 `unsafe_code = "forbid"`。构建需要 C 工具链（本机 mingw gcc 16.1.0）。
+
+**度量口径**：生产分配器在 `gensokyo-bin` 里，`xtask` 是独立二进制、量不到它，因此 A/B 时把同一
+`#[global_allocator]` **临时**挂到 `xtask/src/main.rs`（取完数已移除，最终树里没有这段）。同一机器、
+同一 `--iters 100000`、独立 `CARGO_TARGET_DIR`，系统档 n=8（首轮 3 + 复测 5）、mimalloc 档 n=3。
+
+| 用例 | 系统分配器 中位 ns/op（区间） | mimalloc 中位 ns/op（区间） | 变化 |
+|------|------------------------------|----------------------------|------|
+| `cqcode::parse` 20 段混合 | **10 485**（10 164 – 12 086） | **5 169**（4 900 – 5 185） | **−51%** |
+| `Event::deserialize` 群消息 | **3 276**（3 186 – 4 150） | **2 578**（2 194 – 3 146） | **−21%** |
+| `plan_send_group_msg` 5 段 | **7 026**（6 883 – 10 463） | **3 757**（3 046 – 4 294） | **−47%** |
+
+**读法**：三条都远超本机 ±10% 噪声（`cqcode` 两档区间完全不重叠，两档最小值之间也差近 2×）。三条用例
+都是分配密集路径（`cqcode` 一轮约 169 次分配），Windows CRT 堆的跨线程争用被 mimalloc 的每线程堆吃掉。
+注意本次系统档实测 10.5 µs 与 §4 记录的 15.8 µs 不同，说明 §4 的数字还叠加了当时的机器状态差异；
+**跨会话比较仍然只能自己重测**，别把 §4 的历史值直接当对照。§6 第 1 条那类"把分配降到 0"的改动，
+收益上限会随本节落地而收窄，复测必须带同一分配器口径。
+
+**度量陷阱（本轮实测踩到）**：bench 期间并行跑 `cargo clippy` / `cargo test`，系统档立刻从 10.5 µs
+飙到 23.9–33.7 µs —— **同一档位能差 3×**。任何 A/B 都必须独占机器，否则会把编译争用读成分配器收益。
+
+**产物与构建耗时**：`cargo build --release -p gensokyo-bin` 产出 `gensokyo.exe` = 10 791 936 B
+（10.29 MiB / 10.79 MB）；依赖已缓存时本轮"编译本 crate + fat-LTO 链接"耗时 5 m 50 s。相对 P31 记录的
+10.06 基线：若该数是 MiB 则 +2.3%，若是十进制 MB 则 +7.3%（mimalloc 静态库带来的一次性体积，无运行期开销）。
+RSS 收益本节未测（§8 已列"内存峰值 / 分配次数未覆盖"）。
+
 ## 5. 发布配置
 
 `Cargo.toml` 根部：
@@ -151,7 +188,7 @@ strip = "symbols"
 | 2 | **`Arc<str>` 替代 `String`**：action 名、`message_type`、昵称等高频字段在 registry / dispatcher / event 之间被反复 clone | `gensokyo-protocol`、`gensokyo-runtime` | clone 退化为原子自增，事件分发路径不必逐字段深拷贝 | 基线 b + 分发路径集成测量（serde 需自定义 `Deserialize`，注意别为此牺牲可读性） |
 | 3 | **缓冲复用**：入站 WS 帧解析与出站 JSON 序列化每次新建 `Vec<u8>` / `String` | `gensokyo-runtime` 传输层、`gensokyo-qq` | 减少高频小分配；`bytes::BytesMut` 已在 workspace 依赖中 | 基线 c + 分配计数（后续可加 `#[global_allocator]` 计数版临时 bench） |
 | 4 | **连接池**：出站 HTTP 复用 `reqwest::Client` 与 keep-alive，禁止每 action 新建 | `gensokyo-qq` | 省掉每次 TLS 握手，长尾延迟收益远大于热点路径 | 网络路径 bench 覆盖不到，需集成测量（本地 mock server 跑 P50/P99） |
-| 5 | **jemalloc 评估**：Windows 上 jemalloc 需要完整 MSVC/编译工具链，落地成本高；先对照 `mimalloc`（更易构建、Windows 支持好） | `gensokyo-bin` 入口 | 分配密集场景（基线 a/c）吞吐与 RSS 的对照数据 | 三档 allocator 各跑 3 次基线 a/b/c + 常驻 RSS；结论写回本文 |
+| 5 | **分配器对照**：`mimalloc` 已落地（§4.3：a −51% / b −21% / c −47%）；jemalloc 在 Windows 需要完整 MSVC 工具链，本机不可评估 | `gensokyo-bin` 入口 | mimalloc 的时间收益已兑现；剩余缺口是 RSS 与分配次数的对照 | 系统档 / mimalloc 档各跑 3 次基线 a/b/c（数字见 §4.3）+ 常驻 RSS；**必须独占机器**，并行编译会让同一档位差 3× |
 
 **通用要求**：任何一项落地前先记录「改前」中位数，落地后用同一 `--iters`、同一机器重跑，
 数字写回 §4（保留历史行，别覆盖），否则优化无从复核。

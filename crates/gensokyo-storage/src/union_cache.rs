@@ -1,11 +1,16 @@
 //! 联合缓存（Go `unioncache/unioncache.go`）。
 //!
-//! `id` 与 `union_openid` 之间的一对一双向映射，写点与读点都在入站/消息工具侧：
+//! `id` 与 `union_openid` 之间的一对一双向映射。`union_id` 模式下列给客户端的 ID 是 union，
+//! 而 QQ 的 markdown @ 只认原始 OpenID，所以入站要存、出站 markdown 要反查：
 //!
-//! | 方向 | Go 调用点 |
-//! |------|-----------|
-//! | 写入 `id → union` | `ProcessGroupMessage.go:56`、`ProcessGroupNormalMessage.go:47`（群消息作者） |
-//! | 反查 `union → id` | `mdutil/markdown_at_replace.go:66`、`ProcessInlineSearch.go:114`（把 `@union` 还原成原始 ID） |
+//! | 方向 | Go 调用点 | 本仓接线点（P38） |
+//! |------|-----------|-------------------|
+//! | 写入 `id → union` | `ProcessGroupMessage.go:55`、`ProcessGroupNormalMessage.go:46`（群消息作者） | `gensokyo-runtime/src/inbound.rs` 的 `Inbound::group_message`（两种群消息形态共用） |
+//! | 反查 `union → id` | `mdutil/markdown_at_replace.go:66`（`send_group_msg.go:1531` 发送前） | `gensokyo-runtime/src/deferred.rs` 的 `compose_markdown` |
+//!
+//! 读点 `ProcessInlineSearch.go:113`（`union_id` 打开时把 `group_member_openid` 换成 union）
+//! 在 Rust 侧**仍未实现**：`inbound.rs` 的 `interaction()` 没有做 union 切换，缺口登记在
+//! `reports/refactor/17-go-rust-parity.md` §E。
 //!
 //! Go 用两个 `sync.Map` 存两张表，写路径由一把 `Mutex` 串行化，保证两张表原子一致
 //! （`unioncache.go:15-41`）；本实现用 `Mutex<Inner>` 同时保护两张 `HashMap`，语义相同。
@@ -14,16 +19,16 @@
 //!
 //! # 与 Go 的差异（明确列出）
 //!
-//! - **无全局单例**：Go 是包级变量；本 crate 用显式 [`UnionCache`] 实例（同 `echo` /
-//!   `botstats` 的口径），生产进程持有一份，单测互不干扰。
+//! - **生产用进程级共享实例**：[`UnionCache::shared`] 对位 Go 的包级变量——写入方（入站）
+//!   与读取方（出站 markdown）不共享任何别的句柄，只能靠同一张表见面；[`UnionCache::new`]
+//!   留给单测造独立实例（Go 没有这条路径）。
 //! - **没有过期/容量上限**：Go 也没有 TTL 或清理路径（`Clear` 注释写的是"仅用于测试或
 //!   受控重置"），条目只在 `store` 重绑与 `delete_*` 时消失；这里照抄，不引入 TTL。
 //! - **空键**：与 Go 一致，`store` 遇到空 `id` 或空 `union_openid` 直接忽略。
 //! - **锁中毒**：`Mutex` 中毒后用 `PoisonError::into_inner` 恢复，全模块没有 `unwrap`。
-//! - **本波次未接线**：全仓无生产消费者（入站 / 消息工具侧的调用点待 P36 接线）。
 
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 /// `id ↔ union_openid` 双向映射（Go `unioncache` 包级两张 `sync.Map`）。
 #[derive(Debug, Default)]
@@ -43,6 +48,15 @@ impl UnionCache {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 进程级共享实例（Go 的包级两张 `sync.Map`）。
+    ///
+    /// 入站群消息写入、出站 markdown 反查都取这一份：两边没有别的共同句柄，共享实例是它们
+    /// 唯一的会合点。单测要互不干扰时用 [`UnionCache::new`]。
+    pub fn shared() -> &'static Self {
+        static SHARED: OnceLock<UnionCache> = OnceLock::new();
+        SHARED.get_or_init(Self::new)
     }
 
     /// 建立 1:1 映射（Go `Store`）。
