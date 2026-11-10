@@ -11,7 +11,7 @@ use gensokyo_protocol::Event;
 use gensokyo_protocol::MessageContent;
 use gensokyo_protocol::event::MessageType;
 use gensokyo_runtime::Inbound;
-use gensokyo_storage::{IdMapOptions, IdMapStore};
+use gensokyo_storage::{EchoStore, IdMapOptions, IdMapStore, UnionCache};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -1037,3 +1037,211 @@ fn private_message_converts_other_mentions() {
     assert_eq!(message.raw_message, format!("[CQ:at,qq={}] hi", vids[0]));
 }
 
+/// `union_id = true`：群消息上报改用 `author.union_openid`（Go `ProcessGroupMessage.go:58-64`），
+/// 映射仍按切换前的原始 id 写入。
+#[test]
+fn union_id_switch_reports_union_and_keeps_reverse_lookup() {
+    let settings = BASE.replace("native_ob11: true", "native_ob11: false") + "  union_id: true\n";
+    let (inbound, _dir) = inbound(&settings);
+    // `UnionCache::shared()` 是进程级表：键用本用例独有的字面量，避免与其他用例互踩
+    let raw = "u-p42-group-raw";
+    let union = "u-p42-group-union";
+    let payload = json!({
+        "id": "M42",
+        "group_id": "G42",
+        "content": "hi",
+        "author": {"id": raw, "union_openid": union}
+    });
+
+    let events = inbound
+        .convert("GROUP_AT_MESSAGE_CREATE", Some(&payload), None)
+        .expect("转换失败");
+    let Event::Message(message) = &events[0] else {
+        panic!("应为 message 事件，实得 {events:?}");
+    };
+    assert_eq!(message.user_id, Ob11Id::str(union), "上报身份是 union");
+    assert_eq!(
+        message.extra.get("real_user_id"),
+        Some(&Value::String(union.to_owned())),
+        "Go 先 `data.Author.ID = UnionOpenID` 再赋 RealUserID（`:244`）"
+    );
+    assert_eq!(
+        message.extra.get("platform"),
+        Some(&Value::String("unionqq".to_owned())),
+        "Go `platform = \"unionqq\"`（`:61`）"
+    );
+    assert_eq!(
+        UnionCache::shared().id(union).as_deref(),
+        Some(raw),
+        "反查仍是原始 OpenID：映射在切换之前写入"
+    );
+}
+
+/// `union_id = false`（不写该键）：上报零变化，但映射照写。
+#[test]
+fn union_id_off_keeps_raw_id_but_still_caches_the_pair() {
+    let settings = BASE.replace("native_ob11: true", "native_ob11: false");
+    let (inbound, _dir) = inbound(&settings);
+    let raw = "u-p42-off-raw";
+    let union = "u-p42-off-union";
+    let payload = json!({
+        "id": "M42",
+        "group_id": "G42",
+        "content": "hi",
+        "author": {"id": raw, "union_openid": union}
+    });
+
+    let events = inbound
+        .convert("GROUP_AT_MESSAGE_CREATE", Some(&payload), None)
+        .expect("转换失败");
+    let Event::Message(message) = &events[0] else {
+        panic!("应为 message 事件，实得 {events:?}");
+    };
+    assert_eq!(message.user_id, Ob11Id::str(raw));
+    assert_eq!(
+        message.extra.get("real_user_id"),
+        Some(&Value::String(raw.to_owned()))
+    );
+    assert_eq!(
+        message.extra.get("platform"),
+        Some(&Value::String("qq".to_owned()))
+    );
+    assert_eq!(
+        UnionCache::shared().union(raw).as_deref(),
+        Some(union),
+        "关闭切换不影响建映射"
+    );
+}
+
+/// `union_id: true` + `string_action: true`：echo 的懒 message_id **群 × 用户**键必须是切换后
+/// 的 union id。Go `ProcessGroupMessage.go:302` 读的是 `data.Author.ID`，而它在 `:60` 已被改成
+/// `union_openid`；用原始 OpenID 去查必须查不到。
+#[test]
+fn union_id_switch_moves_the_echo_lazy_key_to_union() {
+    let settings = BASE.replace("native_ob11: true", "native_ob11: false")
+        + "  union_id: true\n  string_action: true\n";
+    let (state, _dir) = support::state(&settings);
+    // echo 是内存表，`Inbound::from_state` 只从 state 里取；用例自备一份，不碰进程级实例。
+    let echo = Arc::new(EchoStore::new());
+    let inbound = Inbound::from_state(&state.with_echo(echo.clone()));
+    let raw = "u-p42-echo-raw";
+    let union = "u-p42-echo-union";
+    let payload = json!({
+        "id": "M43",
+        "group_id": "G43",
+        "content": "hi",
+        "author": {"id": raw, "union_openid": union}
+    });
+
+    let events = inbound
+        .convert("GROUP_AT_MESSAGE_CREATE", Some(&payload), None)
+        .expect("转换失败");
+    let Event::Message(_) = &events[0] else {
+        panic!("应为 message 事件，实得 {events:?}");
+    };
+
+    assert_eq!(
+        echo.get_lazy_messages_id_v2("G43", union),
+        "M43",
+        "键是切换后的 union（Go `ProcessGroupMessage.go:302` 读 `data.Author.ID`）"
+    );
+    assert_eq!(
+        echo.get_lazy_messages_id_v2("G43", raw),
+        gensokyo_storage::echo::DEFAULT_MESSAGE_ID,
+        "原始 OpenID 键必须为空（回落默认值），说明键确实跟着切换走了"
+    );
+}
+
+/// 登记差异：`union_id` 打开但 `author.union_openid` 为空时，Go 会无条件把 `author.id`
+/// 置空（`ProcessGroupMessage.go:60`），这里保留原 id——不产出空 ID 事件。
+#[test]
+fn union_id_on_without_union_openid_keeps_raw_id() {
+    let settings = BASE.replace("native_ob11: true", "native_ob11: false") + "  union_id: true\n";
+    let (inbound, _dir) = inbound(&settings);
+    let raw = "u-p42-empty-raw";
+    let payload = json!({
+        "id": "M42",
+        "group_id": "G42",
+        "content": "hi",
+        "author": {"id": raw}
+    });
+
+    let events = inbound
+        .convert("GROUP_AT_MESSAGE_CREATE", Some(&payload), None)
+        .expect("转换失败");
+    let Event::Message(message) = &events[0] else {
+        panic!("应为 message 事件，实得 {events:?}");
+    };
+    assert_eq!(message.user_id, Ob11Id::str(raw), "不空置");
+    assert_eq!(
+        message.extra.get("real_user_id"),
+        Some(&Value::String(raw.to_owned()))
+    );
+}
+
+fn interaction_payload(member_openid: &str) -> Value {
+    json!({
+        "id": "i-42",
+        "event_id": "e-42",
+        "type": 11,
+        "chat_type": 1,
+        "group_openid": "G42",
+        "group_member_openid": member_openid,
+        "data": {
+            "name": "按钮",
+            "type": 9,
+            "resolved": {"button_data": "/菜单"}
+        }
+    })
+}
+
+/// `union_id` 的 inline search 读点（Go `ProcessInlineSearch.go:106-119`）：只把回显的
+/// `data.group_member_openid` 换成 union。`fromuid` 在 `:39`（替换之前）取值，所以
+/// `user_id` / `real_user_id` 仍是原始 OpenID——这是 Go 的实际行为，不是漏做。
+#[test]
+fn interaction_union_read_point_rewrites_only_the_echoed_group_member_openid() {
+    let raw = "u-p42-interaction-raw";
+    let union = "u-p42-interaction-union";
+    UnionCache::shared().store(raw, union);
+
+    let settings = BASE.replace("native_ob11: true", "native_ob11: false") + "  union_id: true\n";
+    let (on, _dir) = inbound(&settings);
+    let payload = interaction_payload(raw);
+    let events = on
+        .convert("INTERACTION_CREATE", Some(&payload), None)
+        .expect("转换失败");
+    let Event::Notice(notice) = &events[0] else {
+        panic!("应为 notice 事件，实得 {events:?}");
+    };
+    assert_eq!(
+        notice.user_id,
+        Some(Ob11Id::str(raw)),
+        "fromuid 在 union 替换之前取值"
+    );
+    assert_eq!(
+        notice.extra.get("real_user_id"),
+        Some(&Value::String(raw.to_owned()))
+    );
+    assert_eq!(notice.extra["data"]["group_member_openid"], json!(union));
+
+    // 缓存未命中：保持原值
+    let miss = "u-p42-interaction-miss";
+    let events = on
+        .convert("INTERACTION_CREATE", Some(&interaction_payload(miss)), None)
+        .expect("转换失败");
+    let Event::Notice(notice) = &events[0] else {
+        panic!("应为 notice 事件，实得 {events:?}");
+    };
+    assert_eq!(notice.extra["data"]["group_member_openid"], json!(miss));
+
+    // `union_id` 关闭：零变化
+    let (off, _off_dir) = inbound(&BASE.replace("native_ob11: true", "native_ob11: false"));
+    let events = off
+        .convert("INTERACTION_CREATE", Some(&payload), None)
+        .expect("转换失败");
+    let Event::Notice(notice) = &events[0] else {
+        panic!("应为 notice 事件，实得 {events:?}");
+    };
+    assert_eq!(notice.extra["data"]["group_member_openid"], json!(raw));
+    assert_eq!(notice.user_id, Some(Ob11Id::str(raw)));
+}

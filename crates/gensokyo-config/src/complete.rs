@@ -30,9 +30,9 @@
 //!   `config.go:430-433`），而第四轮又把"无父 key"的项全部丢掉——`version` 永远进不了
 //!   追加列表。因此行为等价，省掉一份结构体镜像比对。
 //! - **追加顺序**：Go 遍历 map，块顺序随机；这里按模板中的出现顺序追加，结果可复现。
-//! - **写盘**：Go 用 `O_APPEND` 直接追加；这里先在同目录写 `config.yml.<pid>.tmp` 再 rename，
-//!   避免写一半留下半截配置（与 [`crate::template`] 的首启生成同口径）；rename 前把原文件
-//!   的权限位搬到临时文件上，0600 的配置不会被放宽成 0644。
+//! - **写盘**：Go 用 `O_APPEND` 直接追加；这里走 [`crate::loader::write_atomic`]（同目录
+//!   `config.yml.<pid>.tmp` → rename，首启生成与加载期清洗共用同一套），避免写一半留下半截
+//!   配置；rename 前把原文件的权限位搬到临时文件上，0600 的配置不会被放宽成 0644。
 //! - **不补注释**：Go 的 `addCommentsToConfigTemp`（:268-331）只在 WebUI 重建整份配置时用，
 //!   不在本函数路径上；追加的块自带模板里的块内注释，其余行不动。
 //! - **追加前提（顶层 `settings:` 块映射）**：追加的是缩进两格的子项，只有顶层 `settings:`
@@ -304,61 +304,17 @@ fn indent_width(line: &str) -> usize {
     line.len() - line.trim_start_matches([' ', '\t']).len()
 }
 
-/// 原内容 + 追加段写入 `同一目录临时文件 → rename`。
+/// 原内容 + 追加段写入 `同一目录临时文件 → rename`（实现见 [`crate::loader::write_atomic`]，
+/// 加载期清洗的写回走同一份 temp + rename + 权限逻辑）。
 fn write_rewritten(path: &Path, original: &str, additions: &str) -> Result<(), CompleteError> {
-    let tmp = tmp_path(path);
     let mut content = String::with_capacity(original.len() + additions.len());
     content.push_str(original);
     content.push_str(additions);
 
-    fs::write(&tmp, content.as_bytes()).map_err(|source| CompleteError::Write {
-        path: tmp.clone(),
+    crate::loader::write_atomic(path, &content).map_err(|source| CompleteError::Write {
+        path: path.to_path_buf(),
         source,
-    })?;
-    // rename 连同权限一起替换原文件：不搬权限的话，0600 的 config.yml（含 client_secret）
-    // 会被放宽成新建文件默认的 0644。
-    if let Err(source) = inherit_permissions(path, &tmp) {
-        let _ = fs::remove_file(&tmp);
-        return Err(CompleteError::Write {
-            path: tmp.to_path_buf(),
-            source,
-        });
-    }
-    if let Err(source) = fs::rename(&tmp, path) {
-        let _ = fs::remove_file(&tmp);
-        return Err(CompleteError::Write {
-            path: path.to_path_buf(),
-            source,
-        });
-    }
-    Ok(())
-}
-
-/// 同目录临时文件名：`config.yml` → `config.yml.<pid>.tmp`。
-///
-/// 带进程号是为了两个实例同时启动时互不覆盖对方的半成品文件。
-fn tmp_path(path: &Path) -> PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_owned();
-    name.push(format!(".{}.tmp", std::process::id()));
-    path.with_file_name(name)
-}
-
-/// 把原文件的权限位复制到临时文件（原文件不存在时保持新建文件的默认权限）。
-///
-/// Unix 上 `fs::write` 新建的文件是 `0666 & !umask`（通常 0644），直接 rename 会把原本
-/// 0600 的 `config.yml` 放宽——里面存着 `client_secret`。
-#[cfg(unix)]
-fn inherit_permissions(from: &Path, to: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mode = fs::metadata(from)?.permissions().mode();
-    fs::set_permissions(to, fs::Permissions::from_mode(mode))
-}
-
-/// Windows 没有 Unix 权限位：权限由上级目录 ACL 继承，rename 不改动，故 no-op。
-#[cfg(not(unix))]
-fn inherit_permissions(_from: &Path, _to: &Path) -> std::io::Result<()> {
-    Ok(())
+    })
 }
 
 #[cfg(test)]

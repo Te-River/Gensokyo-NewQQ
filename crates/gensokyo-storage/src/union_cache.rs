@@ -3,14 +3,16 @@
 //! `id` 与 `union_openid` 之间的一对一双向映射。`union_id` 模式下列给客户端的 ID 是 union，
 //! 而 QQ 的 markdown @ 只认原始 OpenID，所以入站要存、出站 markdown 要反查：
 //!
-//! | 方向 | Go 调用点 | 本仓接线点（P38） |
-//! |------|-----------|-------------------|
-//! | 写入 `id → union` | `ProcessGroupMessage.go:55`、`ProcessGroupNormalMessage.go:46`（群消息作者） | `gensokyo-runtime/src/inbound.rs` 的 `Inbound::group_message`（两种群消息形态共用） |
-//! | 反查 `union → id` | `mdutil/markdown_at_replace.go:66`（`send_group_msg.go:1531` 发送前） | `gensokyo-runtime/src/deferred.rs` 的 `compose_markdown` |
+//! | 方向 | Go 调用点 | 本仓接线点 |
+//! |------|-----------|-----------|
+//! | 写入 `id → union` | `ProcessGroupMessage.go:55`、`ProcessGroupNormalMessage.go:46`（群消息作者） | `gensokyo-runtime/src/inbound.rs` 的 `Inbound::group_message`（两种群消息形态共用，P38） |
+//! | 反查 `union → id`（出站） | `mdutil/markdown_at_replace.go:66`（`send_group_msg.go:1531` 发送前） | `gensokyo-runtime/src/deferred.rs` 的 `compose_markdown`（P38） |
+//! | 反查 `id → union`（入站） | `ProcessInlineSearch.go:113`（`union_id` 打开时把 `group_member_openid` 换成 union） | `gensokyo-runtime/src/inbound.rs` 的 `Inbound::interaction`（P42） |
 //!
-//! 读点 `ProcessInlineSearch.go:113`（`union_id` 打开时把 `group_member_openid` 换成 union）
-//! 在 Rust 侧**仍未实现**：`inbound.rs` 的 `interaction()` 没有做 union 切换，缺口登记在
-//! `reports/refactor/17-go-rust-parity.md` §E。
+//! 三个读写点均已接（P42 补齐最后两项）。inline search 的替换范围与 Go 一致但比字面窄：
+//! `fromuid` 在 `ProcessInlineSearch.go:39` 就取走了 `GroupMemberOpenID`，`:112-116` 的替换
+//! 只改回显给客户端的 `data.group_member_openid`，`user_id` / `real_user_id` 仍是原始 OpenID。
+//! 群消息侧的 `union_id` 切换（上报与 idmap 改用 union）在 `inbound.rs` 的 `group_message`。
 //!
 //! Go 用两个 `sync.Map` 存两张表，写路径由一把 `Mutex` 串行化，保证两张表原子一致
 //! （`unioncache.go:15-41`）；本实现用 `Mutex<Inner>` 同时保护两张 `HashMap`，语义相同。
@@ -25,6 +27,8 @@
 //! - **没有过期/容量上限**：Go 也没有 TTL 或清理路径（`Clear` 注释写的是"仅用于测试或
 //!   受控重置"），条目只在 `store` 重绑与 `delete_*` 时消失；这里照抄，不引入 TTL。
 //! - **空键**：与 Go 一致，`store` 遇到空 `id` 或空 `union_openid` 直接忽略。
+//! - **`union_id` 打开但 `union_openid` 为空**：Go 群消息会无条件把 `author.id` 置空
+//!   （`ProcessGroupMessage.go:60`），`inbound.rs` 保留原 id（空 ID 事件对客户端只是噪声）。
 //! - **锁中毒**：`Mutex` 中毒后用 `PoisonError::into_inner` 恢复，全模块没有 `unwrap`。
 
 use std::collections::HashMap;

@@ -2,13 +2,15 @@
 //!
 //! 顺序对齐 Go `main.go`：
 //! 1. `ensure_config_file`（首启按模板生成 `config.yml`）；
-//! 2. `ConfigManager::new` 加载快照；
-//! 3. 装配 [`AppState`]（见 [`build_state`]）：有 `app_id` + `client_secret` 时装 QQ 客户端与
+//! 2. 结构清洗 [`cleanup_config_file`]（重复 `settings:` / 丢失顶层键）→ 补缺失的 `settings`
+//!    子项（[`complete_config`]）：两步都在加载快照之前落盘，本次启动就能读到修好的配置；
+//! 3. `ConfigManager::new` 加载快照；
+//! 4. 装配 [`AppState`]（见 [`build_state`]）：有 `app_id` + `client_secret` 时装 QQ 客户端与
 //!    action 全集（当前 81 个注册名 = 内置 3 + `gensokyo-actions` 75 + 别名 3），否则降级为
 //!    内置 3 个；
-//! 4. `Runtime::start` 按配置装配正向 WS / 正向 HTTP API / webhook / 反向 WS（见
+//! 5. `Runtime::start` 按配置装配正向 WS / 正向 HTTP API / webhook / 反向 WS（见
 //!    `gensokyo_runtime::boot`），并拉起 config 热重载监听；
-//! 5. 打印 action 数量、**实际**监听地址与启动横幅（[`crate::banner`]；`127.0.0.1:0` 这类
+//! 6. 打印 action 数量、**实际**监听地址与启动横幅（[`crate::banner`]；`127.0.0.1:0` 这类
 //!    覆盖后的真实端口），Ctrl-C 后按 [`DEFAULT_SHUTDOWN_TIMEOUT`] 优雅关闭（热重载监听随
 //!    运行时句柄一起停止）。
 //!
@@ -24,8 +26,8 @@ use std::sync::Arc;
 
 use gensokyo_actions::{ActionContext, QqApi};
 use gensokyo_config::{
-    CompleteError, ConfigManager, LoadError, Settings, TemplateError, ensure_config_complete,
-    ensure_config_file,
+    CompleteError, ConfigManager, LoadError, Settings, TemplateError, cleanup_config_file,
+    ensure_config_complete, ensure_config_file, warn_early,
 };
 use gensokyo_core::Error as CoreError;
 use gensokyo_qq::{HttpTransport, OpenApiClient, TokenConfig, TokenManager};
@@ -90,47 +92,69 @@ pub struct Started {
 
 /// 读取（必要时按模板生成）`config.yml`。
 ///
-/// 顺序与 Go `LoadConfig` 一致：先补键（Go `config.go:350-407` 的 `ensureConfigComplete`），
+/// 顺序对齐 Go `LoadConfig`：先补键（Go `config.go:350-407` 的 `ensureConfigComplete`），
 /// 再读进配置。Go 在补键写盘后**重启进程**才生效；这里把补键放在载入之前，本次启动直接
-/// 用补齐后的文件，不重启。
+/// 用补齐后的文件，不重启。结构清洗（Go `config.go:60-64`）排在补键前面：重复的顶层
+/// `settings:` 会被补键的预检查判成语法坏，不先修掉就没有机会补键。
+///
+/// 三条路径（模板生成 / 清洗 / 补键）都在 `logging::init` **之前**，告警统一走
+/// [`warn_early`]（订阅器未装好时直接写 stderr）：只发 `tracing::warn!` 会被静默丢弃，
+/// 生产上就成了「文件被改写了、日志里查不到」。
 ///
 /// # Errors
 /// 模板生成或配置解析失败时返回 [`StartupError`]。
 pub fn load_config(path: impl AsRef<Path>) -> Result<LoadedConfig, StartupError> {
     let path = path.as_ref();
     let created = ensure_config_file(path)?;
+    clean_config(path);
     complete_config(path);
     let config = Arc::new(ConfigManager::new(path)?);
     Ok(LoadedConfig { config, created })
 }
 
+/// 结构清洗：截断重复的顶层 `settings:`、补回丢失的 `version:` / `settings:` 外壳
+/// （Go `config.go:60-64` 的 `cleanupDuplicateSettings`，实现在
+/// [`gensokyo_config::cleanup_config_file`]）。
+///
+/// 任何失败都只 `warn`、不阻断启动，文件保持原样：紧接着的 [`complete_config`] 与
+/// [`ConfigManager::new`] 会各自报出真正的错误。
+fn clean_config(path: &Path) {
+    if let Err(err) = cleanup_config_file(path) {
+        warn_early(&format!(
+            "config.yml 结构清洗跳过（文件保持原样） path={} error={err}",
+            path.display()
+        ));
+    }
+}
+
 /// 启动自愈：补 `config.yml` 缺失的 `settings` 直接子项（Go `config.go:350-407`）。
 ///
-/// 任何失败都只 `warn`、不阻断启动，也**不动既有内容**：读失败、语法坏（含重复的顶层
-/// `settings:`——Go 靠未移植的 `cleanupDuplicateSettings` 修，见 parity §E）、顶层没有
-/// `settings:` 块映射（settings 正文 / 裸 `version: 1`，对它们追加会写出非法 YAML）时补全都在
-/// 写盘前放弃、文件保持原样，随后 [`ConfigManager::new`] 给出真正的加载错误（正文形态本身能
-/// 载入，则照常启动）。补键发生时文件只追加缺失块（[`ensure_config_complete`] 的口径），
-/// 已有取值与注释一个字节都不改。
+/// 任何失败都只 `warn`、不阻断启动，也**不动既有内容**：读失败、语法坏、顶层没有
+/// `settings:` 块映射（`settings: null` / 流式映射 / 裸 `version: 1`，对它们追加会写出非法
+/// YAML）时补全都在写盘前放弃、文件保持原样，随后 [`ConfigManager::new`] 给出真正的加载错误。
+/// 补键发生时文件只追加缺失块（[`ensure_config_complete`] 的口径），已有取值与注释一个字节
+/// 都不改。
+///
+/// 「settings 正文」（`port: "5700"` 这种根级正文）不在这条放弃清单里：它先被 [`clean_config`]
+/// 重建成带 `settings:` 外壳的形态，所以补键照常生效。
 fn complete_config(path: &Path) {
     match ensure_config_complete(path) {
-        Ok(report) if report.changed() => tracing::warn!(
-            path = %path.display(),
-            lines = report.lines_written,
-            keys = ?report.appended,
-            "config.yml 缺少这些项，已按模板追加（本次启动即生效）"
-        ),
+        Ok(report) if report.changed() => warn_early(&format!(
+            "config.yml 缺少这些项，已按模板追加（本次启动即生效） path={} lines={} keys={:?}",
+            path.display(),
+            report.lines_written,
+            report.appended
+        )),
         Ok(_) => {}
-        Err(CompleteError::NoSettings { .. }) => tracing::warn!(
-            path = %path.display(),
-            "config.yml 顶层没有 `settings:` 块映射，启动自愈跳过（文件保持原样、绝不写盘）；\
-             补键需要顶层 `settings:` 块，见 parity §E"
-        ),
-        Err(err) => tracing::warn!(
-            path = %path.display(),
-            error = %err,
-            "config.yml 启动自愈跳过（文件保持原样）；若为重复的顶层 settings:，见 parity §E"
-        ),
+        Err(CompleteError::NoSettings { .. }) => warn_early(&format!(
+            "config.yml 顶层没有 `settings:` 块映射（`settings: null` / 流式映射 / 裸 \
+             `version: 1`），启动自愈跳过（文件保持原样、绝不写盘） path={}",
+            path.display()
+        )),
+        Err(err) => warn_early(&format!(
+            "config.yml 启动自愈跳过（文件保持原样） path={} error={err}",
+            path.display()
+        )),
     }
 }
 
@@ -693,48 +717,63 @@ settings:
         );
     }
 
-    /// settings 正文（`port: "5700"`，没有顶层 `settings:`）：自愈必须放弃写盘，
-    /// 否则追加出的缩进子项会让这份本来能载入的配置变成 `did not find expected key`。
+    /// settings 正文（`port: "5700"`，没有顶层 `settings:`）：结构清洗先重建外壳，补键随后
+    /// 生效——一次启动就把这份根级正文修成 Go 的 `{version, settings}` 形态。
     #[test]
-    fn settings_body_config_is_left_untouched_and_still_loads() {
+    fn settings_body_config_is_rebuilt_then_completed() {
         let dir = tempfile::tempdir().expect("临时目录");
         let path = dir.path().join("config.yml");
-        let body = "port: \"5700\"\n";
-        std::fs::write(&path, body).expect("写配置");
+        std::fs::write(&path, "port: \"5700\"\n").expect("写配置");
 
-        let loaded = load_config(&path).expect("settings 正文必须仍能启动");
-        assert_eq!(
-            std::fs::read_to_string(&path).expect("读回配置失败"),
-            body,
-            "没有顶层 settings: 时自愈一个字节都不能写"
+        let loaded = load_config(&path).expect("正文形态应被重建后加载");
+        let written = std::fs::read_to_string(&path).expect("读回配置失败");
+
+        assert!(
+            written.starts_with("version: 1\nsettings:\n  port: \"5700\"\n"),
+            "正文必须被重建成 Go 的 config.yml 形态: {written}"
         );
         assert_eq!(loaded.config.snapshot().get_port().trim(), "5700");
         assert_eq!(
             loaded.config.snapshot().get_ws_server_path(),
-            "",
-            "正文形态没有补键，ws_server_path 保持缺省空串"
+            "ws",
+            "重建出 settings: 之后补键照常生效"
         );
     }
 
-    /// 结构损坏（重复顶层 `settings:`）：自愈放弃写盘，文件保持原样，错误交给配置加载。
+    /// 重复的顶层 `settings:` + 缺键：截断与补键要在同一次启动里都落到文件上
+    /// （清洗排在补键之前，否则补键的预检查会判语法坏）。
     #[test]
-    fn duplicate_settings_block_is_left_untouched() {
+    fn duplicate_settings_is_truncated_and_completed_in_one_start() {
         let dir = tempfile::tempdir().expect("临时目录");
         let path = dir.path().join("config.yml");
-        let broken = "settings:\n  port: \"5700\"\nsettings:\n  port: \"5701\"\n";
-        std::fs::write(&path, broken).expect("写坏配置");
+        std::fs::write(
+            &path,
+            "settings:\n  port: \"5700\"\nsettings:\n  port: \"5701\"\n",
+        )
+        .expect("写坏配置");
 
-        // 自愈只 warn；真正的失败由 ConfigManager 报出来（Go 的 cleanupDuplicateSettings
-        // 未移植，见 parity §E）。
+        let loaded = load_config(&path).expect("清洗后必须能加载");
+        let written = std::fs::read_to_string(&path).expect("读回配置失败");
+        let headers = written
+            .lines()
+            .filter(|line| line.trim() == "settings:")
+            .count();
+
+        assert_eq!(headers, 1, "重复的 settings: 必须被截断: {written}");
         assert!(
-            load_config(&path).is_err(),
-            "重复 settings: 应在加载阶段报错，而不是被补键掩盖"
+            written.contains("port: \"5700\""),
+            "首份内容必须原样保留: {written}"
         );
-        assert_eq!(
-            std::fs::read_to_string(&path).expect("读回配置失败"),
-            broken,
-            "自愈失败时不得改动文件"
+        assert!(
+            !written.contains("5701"),
+            "第二份 settings 必须整段丢弃: {written}"
         );
+        assert!(
+            written.contains("ws_server_path"),
+            "缺键必须同时补齐: {written}"
+        );
+        assert_eq!(loaded.config.snapshot().get_port().trim(), "5700");
+        assert_eq!(loaded.config.snapshot().get_ws_server_path(), "ws");
     }
 
     #[tokio::test]

@@ -19,11 +19,13 @@
 //! `b_audit=2`（先传本机 `/uploadpic` 再审核）依赖 runtime 的本地上传出口，本 crate 没有，
 //! 仍在发请求前返回 [`Error::HostingConfig`]（fail-closed）。
 //!
-//! # 未覆盖
+//! # 与 Go 的差异
 //!
-//! **语音上传**：Go `oss.UploadAndAuditRecord*`（`.amr`）只被 `POST /uploadrecord` →
-//! `images.UploadBase64RecordToServer` 这条链使用；本 crate 的上传入口没有调用方，
-//! 因此不提供无消费者的语音上传 API（runtime 的 `/uploadrecord` 尚未落地）。
+//! **语音上传不在这里**：Go 的 `oss.UploadAndAuditRecord*`（`.amr`）只服务
+//! `images.UploadBase64RecordToServer`，而那条函数在 Go 里**没有调用方**——`POST /uploadrecord`
+//! 的 handler（`server/uploadpic.go:186`）只把字节落到 `./channel_temp/<md5>.silk` 再拼静态 URL，
+//! 完全不看 `oss_type`。Rust 的 `/uploadrecord` 与 Go handler 逐行一致（见
+//! `gensokyo-runtime::upload_http`），因此这里不提供无消费者的语音上传 API。
 
 pub mod aliyun;
 mod audit;

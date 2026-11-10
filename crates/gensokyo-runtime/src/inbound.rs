@@ -46,6 +46,13 @@
 //! - **notice / request 事件**：Go 对这些 handler 一律 `idmap.StoreIDv2` 取**数字 vUIN**，
 //!   与 `string_ob11` 无关（string 形态只影响 message 事件），这里用
 //!   [`Inbound::vuid`]；idmap 未注入时回退原始字符串。
+//! - **`union_id` 切换（P42）**：群消息在写完 `id → union_openid` 映射之后，`union_id = true`
+//!   且 union 非空时，上报的 `user_id` / `real_user_id` / idmap 身份一律换成 union
+//!   （Go `ProcessGroupMessage.go:58-64` 的 `data.Author.ID = data.Author.UnionOpenID`），
+//!   string 形态的 `platform` 随之从 `"qq"` 变 `"unionqq"`。union 为空时保留原 id
+//!   （Go 会无条件置空，登记为差异）。`INTERACTION_CREATE` 只把回显的
+//!   `data.group_member_openid` 换成 union（Go `ProcessInlineSearch.go:112-116`），
+//!   `user_id` / `real_user_id` 仍是原始 OpenID——Go 的 `fromuid` 在 `:39` 取值，先于替换。
 //! - `!native_ob11` 时补 `real_user_id` / `real_group_id` / `real_message_type` 附加字段
 //!   （与 Go 的「增强配置」一致）。例外：`GROUP_MEMBER_ADD/REMOVE` 在 Go 里**不区分**
 //!   `native_ob11`（`RealUserID`/`RealGroupID` 只被 `omitempty` 省略空值），这里照搬。
@@ -71,15 +78,13 @@
 //!   这些开关事件「伪装成 message」的业务转换，`ConvertGroupRejectToMessage` 等）未做：
 //!   两个开关打开时这里仍只上报 notice。
 //! - `echo` 的 `app_id/s` 映射、双路 echo、`is_binded_*`、`avatar`、master 角色提升、
-//!   idmap-pro（`StoreIDv2Pro`）与 `union_id` 切换（`unioncache` 的 `id ↔ union_openid`
-//!   写入本身已接，见 `group_message`；缺的是把上报的 `author.id` 换成 union 那一步）；
-//!   `GROUP_MEMBER_ADD` / `GROUP_JOIN_REQUEST` 的 `event_id` 只落在 `extra`，Go 侧
-//!   `echo.AddEvnetIDv2` 的被动回复缓存未做。
+//!   idmap-pro（`StoreIDv2Pro`）；`GROUP_MEMBER_ADD` / `GROUP_JOIN_REQUEST` 的 `event_id`
+//!   只落在 `extra`，Go 侧 `echo.AddEvnetIDv2` 的被动回复缓存未做。
 //! - `message_sent`、`request` 的 `flag` 审批链路（Go 侧 `GROUP_ADD_ROBOT` 的 `flag` 也是空串）。
 //! - `global_interaction_to_message`（`true` 时 Go `ConvertInteractionToMessage` 把按钮回调
 //!   「伪装成 message」）：`INTERACTION_CREATE` 只走上报 `notice.interaction` 的主路径。
-//! - `auto_put_interaction` / `put_interaction_except`（自动回 `PutInteraction`）、
-//!   `union_id` 切换与 idmap-pro：回调的 `id` 原样留在 `data.id`，由客户端自己回应。
+//! - `auto_put_interaction` / `put_interaction_except`（自动回 `PutInteraction`）与
+//!   idmap-pro：回调的 `id` 原样留在 `data.id`，由客户端自己回应。
 //! - `MESSAGE_AUDIT_*`、`FORUM_*`、`AUDIO_*` 与频道 `GUILD_*`。
 
 use std::sync::Arc;
@@ -721,12 +726,14 @@ impl Inbound {
 
     /// 群消息喂 echo（Go `ProcessGroupMessage.go:283-302`、`ProcessGroupNormalMessage.go:262-273`）。
     ///
-    /// 数字形态用虚拟号做键；`string_action` 时再补一份原始 OpenID 键（Go string 分支只写后者）。
+    /// 数字形态用虚拟号做键；`string_action` 时再补一份原始 OpenID 键（Go string 分支只写后者），
+    /// 该键在 `union_id` 打开时是**切换后**的值（Go `:302` 读的是 `data.Author.ID`）。
     /// echo 是内存表、没有失败路径；未装配时静默跳过，绝不影响事件上报。
     fn feed_group_echo(
         &self,
         settings: &Settings,
         payload: &QqMessage,
+        user_raw: &str,
         group_id: &Ob11Id,
         user_id: &Ob11Id,
         message_id: &Ob11Id,
@@ -736,7 +743,6 @@ impl Inbound {
         };
         let app_id = settings.get_app_id().to_string();
         let now = SystemTime::now();
-        let raw_user = payload.author.as_ref().map_or("", |author| author.id.as_str());
 
         // 懒 message_id 池：群维度 + 群 × 用户维度（被动回复复用同一 msg_id）。
         let group_key = group_id.to_string();
@@ -744,7 +750,7 @@ impl Inbound {
         echo.add_lazy_message_id_v2(&group_key, &user_id.to_string(), &payload.id, now);
         if settings.get_string_action() && group_key != payload.group_id {
             echo.add_lazy_message_id(&payload.group_id, &payload.id, now);
-            echo.add_lazy_message_id_v2(&payload.group_id, raw_user, &payload.id, now);
+            echo.add_lazy_message_id_v2(&payload.group_id, user_raw, &payload.id, now);
         }
 
         // msg_id / msg_type 映射：数字形态用虚拟群号 / 群 × 用户做键。Go 的
@@ -800,15 +806,24 @@ impl Inbound {
     ) -> Result<Event, serde_json::Error> {
         let payload = QqMessage::deserialize(data)?;
         let author = payload.author.as_ref();
-        let user_raw = author.map_or("", |author| author.id.as_str());
+        let raw_user = author.map_or("", |author| author.id.as_str());
+        let union_openid = author.map_or("", |author| author.union_openid.as_str());
 
-        // Go `ProcessGroupMessage.go:55` / `ProcessGroupNormalMessage.go:46`：在 ID 切换与
+        // Go `ProcessGroupMessage.go:53-56` / `ProcessGroupNormalMessage.go:44-47`：在 ID 切换与
         // idmap 转换**之前**用原始 id 建映射（顺序即语义：反查出来必须是原始 OpenID）。
         // 空键由 `store` 自己忽略，与 Go 的 `if union != "" && id != ""` 等价。
-        UnionCache::shared().store(
-            user_raw,
-            author.map_or("", |author| author.union_openid.as_str()),
-        );
+        UnionCache::shared().store(raw_user, union_openid);
+
+        // 切换（Go `ProcessGroupMessage.go:58-64` / `ProcessGroupNormalMessage.go:49-54`）：
+        // `union_id` 打开时，上报与 idmap 一律用 union——下面所有 `user_raw` 都在切换之后取值，
+        // 与 Go 把它写回 `data.Author.ID` 后再算一致。
+        // 差异：Go 在 union 为空时会无条件置空 `author.id`（`:60`），这里保留原 id——空 ID
+        // 事件对客户端只是噪声，这条差异登记在 `reports/refactor/17-go-rust-parity.md` §E-3。
+        let user_raw = if settings.get_union_id() && !union_openid.is_empty() {
+            union_openid
+        } else {
+            raw_user
+        };
 
         let mut extra = Extra::new();
         if !settings.get_native_ob11() {
@@ -829,9 +844,15 @@ impl Inbound {
             extra.insert("is_full_group_message".to_owned(), Value::Bool(true));
         }
         // Go `OnebotGroupMessageS` 的 `platform` 非 omitempty：string 形态恒上报；
-        // 数字形态的 `OnebotGroupMessage` 根本没有该字段。
+        // 数字形态的 `OnebotGroupMessage` 根本没有该字段。`union_id` 打开时 Go 报 `unionqq`
+        // （`ProcessGroupMessage.go:58-64`）。
         if settings.get_string_ob11() {
-            extra.insert("platform".to_owned(), Value::String("qq".to_owned()));
+            let platform = if settings.get_union_id() {
+                "unionqq"
+            } else {
+                "qq"
+            };
+            extra.insert("platform".to_owned(), Value::String(platform.to_owned()));
         }
 
         // P35：用户/群身份、message_id 与群注册合并成一个写事务（成功路径逐项与逐条提交一致）
@@ -863,7 +884,14 @@ impl Inbound {
             ..Sender::default()
         };
 
-        self.feed_group_echo(settings, &payload, &group_id, &user_id, &message_id);
+        self.feed_group_echo(
+            settings,
+            &payload,
+            user_raw,
+            &group_id,
+            &user_id,
+            &message_id,
+        );
         let ctx = MentionContext {
             mentions: &payload.mentions,
             author_id: user_raw,
@@ -1360,7 +1388,19 @@ impl Inbound {
             payload.group_member_openid.as_str()
         };
         let mut extra = self.enhanced_extra(settings, user_raw, &payload.group_openid);
-        extra.insert("data".to_owned(), serde_json::to_value(&payload)?);
+        // Go `ProcessInlineSearch.go:106-119`：`union_id` 打开且缓存命中时，只把回显的
+        // `data.group_member_openid` 换成 union。`fromuid`（`:39`）在替换之前取值，因此
+        // `user_id` / `real_user_id` 仍是原始 OpenID——这是 Go 的实际行为，不是漏做。
+        let mut echoed = serde_json::to_value(&payload)?;
+        if settings.get_union_id()
+            && !payload.group_member_openid.is_empty()
+            && let Some(union) = UnionCache::shared().union(&payload.group_member_openid)
+            && !union.is_empty()
+            && let Value::Object(map) = &mut echoed
+        {
+            map.insert("group_member_openid".to_owned(), Value::String(union));
+        }
+        extra.insert("data".to_owned(), echoed);
 
         Ok(vec![Event::Notice(NoticeEvent {
             time: now_unix(),

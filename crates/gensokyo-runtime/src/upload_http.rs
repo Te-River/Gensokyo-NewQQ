@@ -1,4 +1,5 @@
-//! `/uploadpic` / `/uploadpicv2` / `/getid`（Go `server/uploadpic.go` + `server/getIDHandler.go`）。
+//! `/uploadpic` / `/uploadpicv2` / `/uploadrecord` / `/getid`（Go `server/uploadpic.go` +
+//! `server/getIDHandler.go`）。
 //!
 //! # 挂载位置
 //!
@@ -9,7 +10,7 @@
 //!
 //! # 鉴权（与 Go 逐条对齐）
 //!
-//! - `/uploadpic*`：`UploadAuthMiddleware`——`http_access_token` 非空时，`Authorization` 去掉
+//! - `/uploadpic*`、`/uploadrecord`：`UploadAuthMiddleware`——`http_access_token` 非空时，`Authorization` 去掉
 //!   首处 `"Bearer "` 后的值或 `?access_token=` 必须相等，否则 **403** `{"error":"鉴权失败"}`。
 //! - `/getid`：`IDMapAuthMiddleware`——有 `lotus_password` 时校验
 //!   `HMAC-SHA256(password, path[?sorted k=v&…]&timestamp=<ts>)`（`token` / `timestamp`
@@ -35,6 +36,10 @@
 //! - `getid` 的挂载与 gRPC 接管联动：Go 在 lotus gRPC 接管 idmap 时不注册该路由
 //!   （`main.go:507`）。是否接管由 [`crate::boot`] 按「服务端是否真的起来」决定——起不来时
 //!   仍挂本地路由（Go 那里会 `Fatalf`），避免远端 lotus 调用整条消失（见 [`router`]）。
+//! - `/uploadrecord`：Go 的 handler 只落 `./channel_temp/<md5>.silk` 再拼 `server_dir:port`，
+//!   不走 `images.UploadBase64RecordToServer`——那条链在 Go 里**没有调用方**
+//!   （`oss.UploadAndAuditRecord*` 同样是死代码），因此 `oss_type` 的任何取值都不影响语音，
+//!   这里逐行照抄（语音地址也**不**套 `frp_port` / `stun`，见 [`record_url`]）。
 //! - `/uploadpicv2` 的宽高：Go 对 0~3 按 URL 再下载一次取尺寸；这里统一读内存里的文件头
 //!   （`gensokyo_media::image_size`），少一次网络往返，结果对同一张图一致。
 //! - 图床短签名外链的 302→直链解析属 P7 的口径（`gensokyo_media::hosting` 未做），v2 复用
@@ -81,7 +86,8 @@ const TIMESTAMP_WINDOW: i64 = 300;
 pub(crate) fn router(state: AppState, mount_getid: bool) -> Router {
     let routes = Router::new()
         .route("/uploadpic", post(upload_pic))
-        .route("/uploadpicv2", post(upload_pic_v2));
+        .route("/uploadpicv2", post(upload_pic_v2))
+        .route("/uploadrecord", post(upload_record));
     let routes = if mount_getid {
         routes.route("/getid", get(get_id))
     } else {
@@ -104,7 +110,10 @@ async fn upload_pic(State(state): State<AppState>, request: Request) -> Response
         return json_error(StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded");
     }
 
-    let base64_image = form_field(request, &state, "base64Image").await;
+    let base64_image = match form_field(request, &state, "base64Image").await {
+        Ok(value) => value,
+        Err(FormFieldError::TooLarge) => return body_too_large(),
+    };
     tracing::debug!(chars = base64_image.len(), "收到 base64 图片");
 
     let (bytes, extension) = match decode_image(&base64_image) {
@@ -118,7 +127,7 @@ async fn upload_pic(State(state): State<AppState>, request: Request) -> Response
         }
     };
 
-    let file_name = match save_channel_image(&bytes, extension).await {
+    let file_name = match save_channel_file(&bytes, extension).await {
         Ok(name) => name,
         Err(message) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, message),
     };
@@ -157,7 +166,7 @@ fn go_extension(kind: ImageKind) -> Option<&'static str> {
 }
 
 /// 保存到 `./channel_temp/<md5>.<ext>`；同名文件已存在时跳过（Go 行为）。
-async fn save_channel_image(bytes: &[u8], extension: &str) -> Result<String, &'static str> {
+async fn save_channel_file(bytes: &[u8], extension: &str) -> Result<String, &'static str> {
     let file_name = format!("{}.{extension}", md5_hex(bytes));
     let directory = Path::new(CHANNEL_TEMP);
     tokio::fs::create_dir_all(directory)
@@ -217,7 +226,10 @@ async fn upload_pic_v2(State(state): State<AppState>, request: Request) -> Respo
         return json_error(StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded");
     }
 
-    let base64_image = form_field(request, &state, "base64Image").await;
+    let base64_image = match form_field(request, &state, "base64Image").await {
+        Ok(value) => value,
+        Err(FormFieldError::TooLarge) => return body_too_large(),
+    };
     if base64_image.is_empty() {
         return json_error(
             StatusCode::BAD_REQUEST,
@@ -287,7 +299,7 @@ async fn local_upload(
     let extension = sniff_image(bytes)
         .and_then(go_extension)
         .ok_or_else(|| "undefined picture format1".to_owned())?;
-    let file_name = save_channel_image(bytes, extension)
+    let file_name = save_channel_file(bytes, extension)
         .await
         .map_err(str::to_owned)?;
     channel_url(state, &file_name).map_err(str::to_owned)
@@ -298,6 +310,64 @@ fn is_public_address(address: &str) -> bool {
     !(address.contains("localhost")
         || address.starts_with("127.")
         || address.starts_with("192.168."))
+}
+
+// ------------------------------------------------------------ /uploadrecord
+
+async fn upload_record(State(state): State<AppState>, request: Request) -> Response {
+    // Go 中间件先于 handler，鉴权失败不会消耗频控额度
+    if !upload_authorized(&state, &request) {
+        return json_error(StatusCode::FORBIDDEN, "鉴权失败");
+    }
+    // 与 `/uploadpic` 共用同一个进程级计数表（Go 三条路由共用一个 `rateLimiter`）
+    let peer = peer_ip(&request);
+    if !allow_request(&peer, state.config().snapshot().get_image_limit()) {
+        return json_error(StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded");
+    }
+
+    let base64_record = match form_field(request, &state, "base64Record").await {
+        Ok(value) => value,
+        Err(FormFieldError::TooLarge) => return body_too_large(),
+    };
+    tracing::debug!(chars = base64_record.len(), "收到 base64 语音");
+
+    let bytes = match decode_base64(&base64_record) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            tracing::debug!(%err, "base64 解码失败");
+            return json_error(StatusCode::BAD_REQUEST, "invalid base64 data");
+        }
+    };
+
+    // Go 不看文件头：空串也能解码出空字节、写成 `<空串 md5>.silk` 并返回 200，这里照抄
+    let file_name = match save_channel_file(&bytes, "silk").await {
+        Ok(name) => name,
+        Err(message) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    };
+    match record_url(&state, &file_name) {
+        Ok(url) => Json(json!({ "url": url })).into_response(),
+        Err(message) => json_error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+/// `/uploadrecord` 的静态地址：Go `UploadBase64RecordHandler` 只拼 `server_dir:port`。
+///
+/// 与图片的 [`channel_url`] 不同——Go 的语音 handler 既不看 `frp_port`，也不看 `stun`。
+fn record_url(state: &AppState, file_name: &str) -> Result<String, &'static str> {
+    let settings = state.config().snapshot();
+    let server = settings.get_server_dir();
+    if server.is_empty() {
+        return Err("server address is not configured");
+    }
+    let port = settings.get_port_value();
+    let protocol = if port == "443" || settings.get_force_ssl() {
+        "https"
+    } else {
+        "http"
+    };
+    Ok(format!(
+        "{protocol}://{server}:{port}/channel_temp/{file_name}"
+    ))
 }
 
 // ------------------------------------------------------------------- /getid
@@ -731,30 +801,67 @@ fn upload_authorized(state: &AppState, request: &Request) -> bool {
     (header_token == expected) || (query_token == expected)
 }
 
-async fn form_field(request: Request, state: &AppState, field: &str) -> String {
+/// 取表单字段值。
+///
+/// 请求体超限（[`MAX_FORM_BYTES`] 的 `DefaultBodyLimit`）**不能**再降级成空字段：下游会把空
+/// base64 写成一个空文件再回 200（静默假成功）。超限显式报 413；其余解析错误仍按 Gin
+/// `PostForm` 忽略（降级成空字段，由下游回各自的 400）。
+async fn form_field(
+    request: Request,
+    state: &AppState,
+    field: &str,
+) -> Result<String, FormFieldError> {
     let is_multipart = request
         .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.starts_with("multipart/form-data"));
     if is_multipart {
-        let Ok(mut multipart) = Multipart::from_request(request, state).await else {
-            return String::new();
+        let mut multipart = match Multipart::from_request(request, state).await {
+            Ok(multipart) => multipart,
+            Err(rejection) => return ignore_unless_too_large(rejection.status()),
         };
-        while let Ok(Some(part)) = multipart.next_field().await {
-            let name = part.name().map(str::to_owned);
-            if name.as_deref() != Some(field) {
-                continue;
+        loop {
+            match multipart.next_field().await {
+                Ok(Some(part)) => {
+                    let name = part.name().map(str::to_owned);
+                    if name.as_deref() != Some(field) {
+                        continue;
+                    }
+                    return Ok(part.text().await.unwrap_or_default());
+                }
+                Ok(None) => return Ok(String::new()),
+                // 超限是在读流的中途才发现的（分块传输没有 Content-Length），同样不能吞。
+                Err(err) => return ignore_unless_too_large(err.status()),
             }
-            return part.text().await.unwrap_or_default();
         }
-        return String::new();
     }
     // Gin `PostForm` 忽略解析错误，这里同样降级成空字段（下游回各自 400）
     match Form::<HashMap<String, String>>::from_request(request, state).await {
-        Ok(Form(fields)) => fields.get(field).cloned().unwrap_or_default(),
-        Err(_) => String::new(),
+        Ok(Form(fields)) => Ok(fields.get(field).cloned().unwrap_or_default()),
+        Err(rejection) => ignore_unless_too_large(rejection.status()),
     }
+}
+
+/// 取字段时唯一的硬错误：请求体超限（其余提取器错误按 Gin `PostForm` 忽略）。
+enum FormFieldError {
+    /// `DefaultBodyLimit` 被突破。
+    TooLarge,
+}
+
+/// 提取器拒绝时的统一口径：413 走显式错误，其余按 Gin 的老行为吞成空字段。
+fn ignore_unless_too_large(status: StatusCode) -> Result<String, FormFieldError> {
+    if status == StatusCode::PAYLOAD_TOO_LARGE {
+        Err(FormFieldError::TooLarge)
+    } else {
+        Ok(String::new())
+    }
+}
+
+/// 超限请求体的显式响应（Go 没有对应文案：Gin 靠 `MaxMultipartMemory` 之外的读错误，
+/// 原实现则把它吞成了 200 空文件）。
+fn body_too_large() -> Response {
+    json_error(StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
 }
 
 fn decode_base64(encoded: &str) -> Result<Vec<u8>, base64::DecodeError> {
@@ -1083,6 +1190,249 @@ mod tests {
         .await;
         assert_eq!(allowed.0, 400);
         assert_eq!(allowed.1["error"], "undefined picture format1");
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "整个用例独占进程工作目录，必须跨 await 持有串行锁"
+    )]
+    async fn upload_record_saves_silk_and_returns_static_url() {
+        let _guard = CWD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let directory = TempDir::new().expect("临时目录");
+        let previous = std::env::current_dir().expect("读取工作目录");
+        std::env::set_current_dir(directory.path()).expect("切换工作目录");
+
+        // frp_port 非 0：Go 的语音 handler 不读它（图片 handler 会读）
+        let state = AppState::with_builtin_handlers(manager(
+            &directory,
+            "  server_dir: example.com\n  port: \"8080\"\n  frp_port: \"9000\"\n  image_limit: 100\n",
+        ));
+        let result = call(
+            router(state.clone()),
+            multipart_request("/uploadrecord", "base64Record", "aGVsbG8=", LOCAL_PEER),
+        )
+        .await;
+        let saved = directory
+            .path()
+            .join("channel_temp/5d41402abc4b2a76b9719d911017c592.silk");
+        let contents = std::fs::read(&saved).expect("语音文件应落盘");
+
+        // 同名重复上传不再写盘（Go 的 os.Stat 跳过）
+        let repeated = call(
+            router(state),
+            multipart_request("/uploadrecord", "base64Record", "aGVsbG8=", LOCAL_PEER),
+        )
+        .await;
+        let count = std::fs::read_dir(directory.path().join("channel_temp"))
+            .expect("channel_temp 应存在")
+            .count();
+        std::env::set_current_dir(previous).expect("恢复工作目录");
+
+        assert_eq!(result.0, 200, "{:?}", result.1);
+        assert_eq!(contents, b"hello");
+        assert_eq!(
+            result.1["url"],
+            "http://example.com:8080/channel_temp/5d41402abc4b2a76b9719d911017c592.silk"
+        );
+        assert_eq!(repeated.0, 200, "{:?}", repeated.1);
+        assert_eq!(repeated.1["url"], result.1["url"]);
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "整个用例独占进程工作目录，必须跨 await 持有串行锁"
+    )]
+    async fn upload_record_reports_go_error_shapes_and_ignores_oss_type() {
+        let _guard = CWD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let directory = TempDir::new().expect("临时目录");
+        let previous = std::env::current_dir().expect("读取工作目录");
+        std::env::set_current_dir(directory.path()).expect("切换工作目录");
+
+        // oss_type=1 且无任何 OSS 凭据：Go 的语音链不碰 oss（死代码），仍走本地
+        let state = AppState::with_builtin_handlers(manager(
+            &directory,
+            "  server_dir: example.com\n  port: \"8080\"\n  image_limit: 100\n  oss_type: 1\n",
+        ));
+        let invalid = call(
+            router(state.clone()),
+            multipart_request(
+                "/uploadrecord",
+                "base64Record",
+                "not base64!",
+                "127.0.0.2:5000",
+            ),
+        )
+        .await;
+
+        // 空 base64Record：Go 解码成功 → 写一个空文件 → 200
+        let empty = call(
+            router(state),
+            post_form("/uploadrecord", "base64Record=", "127.0.0.2:5000"),
+        )
+        .await;
+        let empty_size = std::fs::metadata(
+            directory
+                .path()
+                .join("channel_temp/d41d8cd98f00b204e9800998ecf8427e.silk"),
+        )
+        .map(|meta| meta.len())
+        .ok();
+
+        // port=443 → https（Go 只看端口与 force_ssl）
+        let secure = AppState::with_builtin_handlers(manager(
+            &directory,
+            "  server_dir: example.com\n  port: \"443\"\n  image_limit: 100\n",
+        ));
+        let https = call(
+            router(secure),
+            multipart_request("/uploadrecord", "base64Record", "aGk=", "127.0.0.4:5000"),
+        )
+        .await;
+
+        // 未配置 server_dir：Go 先落盘再报 500
+        let no_server = AppState::with_builtin_handlers(manager(
+            &directory,
+            "  port: \"8080\"\n  image_limit: 100\n",
+        ));
+        let missing_server = call(
+            router(no_server),
+            multipart_request("/uploadrecord", "base64Record", "aGk=", "127.0.0.6:5000"),
+        )
+        .await;
+        std::env::set_current_dir(previous).expect("恢复工作目录");
+
+        assert_eq!(invalid.0, 400);
+        assert_eq!(invalid.1["error"], "invalid base64 data");
+        assert_eq!(empty.0, 200, "{:?}", empty.1);
+        assert_eq!(
+            empty.1["url"],
+            "http://example.com:8080/channel_temp/d41d8cd98f00b204e9800998ecf8427e.silk"
+        );
+        assert_eq!(empty_size, Some(0));
+        assert!(https.1["url"].as_str().unwrap().starts_with("https://"));
+        assert_eq!(missing_server.0, 500);
+        assert_eq!(
+            missing_server.1["error"],
+            "server address is not configured"
+        );
+    }
+
+    /// 超过 `DefaultBodyLimit`（32 MiB）的请求体必须显式 413：原实现把提取器错误吞成空字段，
+    /// 下游据此写出 0 字节 `.silk` 再回 200（P44 评审实测的静默假成功）。
+    #[tokio::test]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "整个用例独占进程工作目录，必须跨 await 持有串行锁"
+    )]
+    async fn upload_record_rejects_oversized_body_instead_of_faking_success() {
+        let _guard = CWD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let directory = TempDir::new().expect("临时目录");
+        let previous = std::env::current_dir().expect("读取工作目录");
+        std::env::set_current_dir(directory.path()).expect("切换工作目录");
+
+        let state = AppState::with_builtin_handlers(manager(
+            &directory,
+            "  server_dir: example.com\n  port: \"8080\"\n  image_limit: 100\n",
+        ));
+        // 合法 multipart 前缀 + 超限字段体：上限要读到 32 MiB 才会被触发，分块传输（没有
+        // Content-Length）走的是同一条路径。
+        let boundary = "gensokyo-test-boundary";
+        let mut body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"base64Record\"\r\n\r\n"
+        )
+        .into_bytes();
+        body.resize(body.len() + super::MAX_FORM_BYTES + 1, b'a');
+        let request = axum::extract::Request::builder()
+            .method("POST")
+            .uri("/uploadrecord")
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(Body::from(body))
+            .expect("构造超限请求");
+
+        let result = call(router(state), with_peer(request, LOCAL_PEER)).await;
+        let written = std::fs::read_dir(directory.path().join("channel_temp"))
+            .map_or(0, |entries| entries.count());
+        std::env::set_current_dir(previous).expect("恢复工作目录");
+
+        assert_eq!(result.0, 413, "{:?}", result.1);
+        assert_eq!(result.1["error"], "request body too large");
+        assert_eq!(written, 0, "超限请求不得落任何文件");
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "整个用例独占进程工作目录，必须跨 await 持有串行锁"
+    )]
+    async fn upload_record_auth_rejects_with_403_like_go() {
+        let _guard = CWD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let directory = TempDir::new().expect("临时目录");
+        let previous = std::env::current_dir().expect("读取工作目录");
+        std::env::set_current_dir(directory.path()).expect("切换工作目录");
+
+        let state = AppState::with_builtin_handlers(manager(
+            &directory,
+            "  server_dir: example.com\n  port: \"8080\"\n  image_limit: 100\n  http_access_token: s3cret\n",
+        ));
+        let missing = call(
+            router(state.clone()),
+            post_form("/uploadrecord", "base64Record=", "127.0.0.5:5000"),
+        )
+        .await;
+        let wrong = call(
+            router(state.clone()),
+            post_form(
+                "/uploadrecord?access_token=wrong",
+                "base64Record=",
+                "127.0.0.5:5000",
+            ),
+        )
+        .await;
+        let allowed = call(
+            router(state),
+            post_form(
+                "/uploadrecord?access_token=s3cret",
+                "base64Record=aGk=",
+                "127.0.0.5:5000",
+            ),
+        )
+        .await;
+        std::env::set_current_dir(previous).expect("恢复工作目录");
+
+        assert_eq!(missing.0, 403);
+        assert_eq!(missing.1["error"], "鉴权失败");
+        assert_eq!(wrong.0, 403);
+        assert_eq!(allowed.0, 200, "{:?}", allowed.1);
+    }
+
+    #[tokio::test]
+    async fn upload_record_rate_limits_like_go() {
+        let directory = TempDir::new().expect("临时目录");
+        let state = AppState::with_builtin_handlers(manager(
+            &directory,
+            "  server_dir: example.com\n  port: \"8080\"\n  image_limit: 0\n",
+        ));
+        let rejected = call(
+            router(state),
+            post_form("/uploadrecord", "base64Record=", "127.0.0.9:5000"),
+        )
+        .await;
+        assert_eq!(rejected.0, 429);
+        assert_eq!(rejected.1["error"], "rate limit exceeded");
     }
 
     /// 记录请求的假传输：单次上传成功（ChatGLM 的响应形状）。

@@ -4,15 +4,14 @@
 //! （`templates/config.yml`，UTF-8）。这里只做"文件缺失时写出模板"；Go
 //! `ensureConfigComplete` 的补键回写见 [`crate::complete`]。
 //!
-//! 写盘走"同目录 `config.yml.tmp` + rename"：进程在写一半时崩溃不会留下半截
-//! `config.yml`，下次启动仍能重新生成。
+//! 写盘走 [`crate::loader::write_atomic`]（同目录 `config.yml.<pid>.tmp` → rename）：进程在
+//! 写一半时崩溃不会留下半截 `config.yml`，下次启动仍能重新生成。配置写盘全仓只有这一份
+//! temp + rename 实现。
 
 use std::fs;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
-use tracing::warn;
 
 /// 与 Go `ConfigTemplate` 一致的配置模板（编译期嵌入）。
 pub const CONFIG_TEMPLATE: &str = include_str!("../templates/config.yml");
@@ -60,37 +59,14 @@ pub fn ensure_config_file(path: impl AsRef<Path>) -> Result<bool, TemplateError>
         })?;
     }
 
-    let tmp = tmp_path(path);
-    let mut file = create_tmp(&tmp).map_err(|source| TemplateError::Write {
-        path: tmp.clone(),
-        source,
-    })?;
-
-    let content = render_template();
-    if let Err(source) = file
-        .write_all(content.as_bytes())
-        .and_then(|()| file.flush())
-        .and_then(|()| file.sync_all())
-    {
-        drop(file);
-        let _ = fs::remove_file(&tmp);
-        return Err(TemplateError::Write { path: tmp, source });
-    }
-    drop(file);
-
-    match fs::rename(&tmp, path) {
+    match crate::loader::write_atomic(path, &render_template()) {
         Ok(()) => Ok(true),
-        Err(source) => {
-            let _ = fs::remove_file(&tmp);
-            // 目标在此期间被别的进程创建：按"已存在、未生成"处理
-            if path.exists() {
-                return Ok(false);
-            }
-            Err(TemplateError::Write {
-                path: path.to_path_buf(),
-                source,
-            })
-        }
+        // 目标在此期间被别的进程创建：按"已存在、未生成"处理（rename 失败原因不重要了）
+        Err(_) if path.exists() => Ok(false),
+        Err(source) => Err(TemplateError::Write {
+            path: path.to_path_buf(),
+            source,
+        }),
     }
 }
 
@@ -101,40 +77,32 @@ fn render_template() -> String {
     match gensokyo_core::local_ip() {
         Some(ip) => CONFIG_TEMPLATE.replace(SERVER_DIR_PLACEHOLDER, &ip.to_string()),
         None => {
-            warn!("未能获取本机内网 IP，config.yml 中的 <YOUR_SERVER_DIR> 保留占位符，请手工填写");
+            crate::warn_early(
+                "未能获取本机内网 IP，config.yml 中的 <YOUR_SERVER_DIR> 保留占位符，请手工填写",
+            );
             CONFIG_TEMPLATE.to_owned()
         }
-    }
-}
-
-/// 同目录临时文件名：`config.yml` → `config.yml.tmp`。
-fn tmp_path(path: &Path) -> PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_owned();
-    name.push(".tmp");
-    path.with_file_name(name)
-}
-
-/// `create_new` 打开临时文件；上次异常退出留下的 tmp 先清掉再重试一次。
-fn create_tmp(tmp: &Path) -> std::io::Result<fs::File> {
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(tmp)
-    {
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            fs::remove_file(tmp)?;
-            fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(tmp)
-        }
-        result => result,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 目录里除 `config.yml` 之外的残留文件名（临时文件必须在成功后被清掉）。
+    fn leftovers(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .expect("读目录失败")
+            .map(|entry| {
+                entry
+                    .expect("目录项")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| name != "config.yml")
+            .collect()
+    }
 
     #[test]
     fn template_is_embedded_verbatim() {
@@ -167,7 +135,10 @@ mod tests {
             // 没有内网 IP 的机器保留占位符
             None => assert_eq!(generated, CONFIG_TEMPLATE),
         }
-        assert!(!tmp_path(&path).exists(), "成功后不得残留 tmp");
+        assert!(
+            leftovers(path.parent().expect("父目录")).is_empty(),
+            "成功后不得残留 tmp"
+        );
 
         fs::write(&path, "version: 2\n").expect("写测试文件失败");
         assert!(
@@ -177,18 +148,20 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).expect("读回失败"), "version: 2\n");
     }
 
+    /// 别的进程（别的 pid）留下的临时文件不在本进程的责任范围：不读它、也不删它。
     #[test]
-    fn stale_tmp_is_replaced() {
+    fn stale_tmp_from_another_pid_does_not_block_generation() {
         let dir = tempfile::tempdir().expect("临时目录");
         let path = dir.path().join("config.yml");
-        fs::write(tmp_path(&path), "半截").expect("写 tmp 失败");
+        let stale = dir.path().join("config.yml.1234.tmp");
+        fs::write(&stale, "半截").expect("写 tmp 失败");
 
         assert!(ensure_config_file(&path).expect("生成失败"));
-        assert!(!tmp_path(&path).exists());
         assert!(
             fs::read_to_string(&path)
                 .expect("读回失败")
                 .starts_with("version: 1")
         );
+        assert_eq!(fs::read_to_string(&stale).expect("读回失败"), "半截");
     }
 }
