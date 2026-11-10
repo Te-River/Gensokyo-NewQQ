@@ -85,6 +85,8 @@ cargo run --release -p xtask -- bench
 
 ### 4.2 同负载端到端对比（Rust vs Go，2026-10-25）
 
+> **历史口径**（`lto=thin`、无 mimalloc、`oha` 压测）：最新一次同机复测见 **§4.4**（2026-11-10，最终 release + 最新 Go）。
+
 **环境**：AMD Ryzen 5 5600U（6C/12T）、13.8 GB、Windows 11 26300、Go 1.26.4、rustc 1.99.1（release，**LTO=thin**——历史数字，当前口径已改为 `lto=fat`，见 §5）、oha 1.16.0。
 
 **场景**：本地 `get_login_info`（无 QQ 网络 I/O）；Go 走 HTTP API 路径 `/get_login_info`，Rust 走统一 action 入口 `POST /action`；两边均 `disable_webui: true`、`log_level: 3`（error）、无反向 WS，请求体相同。64 并发、50,000 请求/轮，Go/Rust 交替跑 **10 轮**，取均值 ± 标准差（括号内为 10 轮区间），预热 3,000。
@@ -148,6 +150,35 @@ cargo run --release -p xtask -- bench
 （10.29 MiB / 10.79 MB）；依赖已缓存时本轮"编译本 crate + fat-LTO 链接"耗时 5 m 50 s。相对 P31 记录的
 10.06 基线：若该数是 MiB 则 +2.3%，若是十进制 MB 则 +7.3%（mimalloc 静态库带来的一次性体积，无运行期开销）。
 RSS 收益本节未测（§8 已列"内存峰值 / 分配次数未覆盖"）。
+
+### 4.4 同负载端到端复测（Rust 最终 release vs 最新 Go，2026-11-10）
+
+**环境**：同一台本机（AMD Ryzen 5 5600U 6C/12T、Windows 11）、Go 1.26.10（`main` 仓 `0c151b6`，`go build` 产物 44.82 MiB）、Rust `Refactor` 仓 `2805da2`（release：`lto=fat` + `panic=abort` + mimalloc，产物 10.31 MiB）。
+
+**口径**：本地 `get_login_info`（无 QQ 网络 I/O）；Go 走 `/get_login_info`，Rust 走 `POST /action`；两边 `app_id: 12345`、`disable_webui: true`、`log_level: 3`、无 ws/webhook，请求体相同。64 并发、每轮 49,984 请求（`50000/64` 向下取整 × 64）、keep-alive、预热 3,000（c=8）、各跑 10 轮；**先 Go 全程单独跑完并关停，再 Rust 单独跑**（期间无并行编译/子代理，满足独占口径）。压测器为 Go stdlib 自写（`loadgen`，`oha` 本机不可用），两侧用同一二进制。
+
+| 指标 | Go（main@0c151b6） | Rust（@2805da2） | 对比 |
+|---|---|---|---|
+| 吞吐（10 轮均值） | 44,939 req/s（42,700–46,717） | **45,584 req/s（43,396–46,436）** | ≈1.014×，区间重叠 |
+| 平均 | 1.40 ms | **1.38 ms** | ≈1.4% 更低 |
+| P50（各轮均值） | **1.12 ms**（1.07–1.19） | 1.14 ms（1.12–1.17） | Go 低约 1.8% |
+| P99（各轮均值） | 5.43 ms（5.26–5.82） | **4.93 ms**（4.60–5.35） | ≈9.2% 更低 |
+| RSS | 39.8 MB | **17.3 MB** | ≈2.3× 更低 |
+| 二进制 | 44.82 MiB | **10.31 MiB** | ≈4.3× 更小 |
+| 成功率 | 100%（499,840） | 100%（499,840） | — |
+
+**读法**：吞吐与均值基本打平（区间高度重叠，不能宣称 Rust 显著领先）；稳定差异在**尾部延迟（P99 ≈ −9%）、内存（≈2.3× 更低）与体积（≈4.3× 更小）**，Go 的 P50 略低（≈2%）。与 §4.2（2026-10-25）相比绝对值整体下移（该轮 Rust 50.6k / Go 49.1k）——**不同会话的压测器与机器状态不同，跨会话绝对值不可比**，只用于本次同机同轮次的横向对照。
+
+**与 §4.2 的口径差异**：①压测器由 `oha` 换成本仓自写 Go 工具（stdlib，同 body、同并发、同 keep-alive）；②Rust 编译口径由 `lto=thin` 改为 `lto=fat` + `panic=abort` + mimalloc（§4.3）；③Go 用官方 `-faststart`（跳过 `InitBase` 的安全启动弹窗与控制台标题，不影响 HTTP 链路）；④每轮请求数 49,984（按并发数整除）。
+
+**复现要点**：
+
+```powershell
+# Go（必须先单独跑完；无控制台环境下 safelaunch 会弹窗，-faststart 跳过 InitBase）
+.\run-perf.ps1 -Exe <go>\gensokyo-go.exe -Port 5701 -WorkDir <go-dir> -Label go -ActionPath /get_login_info -ServerArgs '-faststart'
+# Rust（关停 Go 并静置后再跑）
+.\run-perf.ps1 -Exe <rust>\gensokyo.exe -Port 5702 -WorkDir <rust-dir> -Label rust -ActionPath /action
+```
 
 ## 5. 发布配置
 
