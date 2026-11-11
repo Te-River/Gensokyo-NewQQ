@@ -59,6 +59,18 @@
 //! - `time`：QQ 负载带 `timestamp` 时用它，否则取当前秒级时间戳。Go 群消息用 `time.Now()`，
 //!   这里偏向可复现（同一事件重放得到同一 `time`）。`GROUP_JOIN_REQUEST` 的 `apply_at`
 //!   优先按 RFC3339 解析（Go `time.Parse`），失败再按秒级数字解析。
+//! - **入站媒体段**（`attachments` / `ark_data` / `msg_elements` 通路，P50）：图片附件、
+//!   语音附件、结构化卡片、引用与嵌套正文按 Go 的两条路径各自成型——字符串路径把
+//!   `[CQ:image…]` / `[CQ:record…]` / `[CQ:ark…]` / `[CQ:reply…]` 与嵌套正文接在正文之后
+//!   （[`media_cq_text`]，Go `RevertTransformedText` `handlers/message_parser.go:2136-2157`），
+//!   段数组路径产出 image / record / ark / reply / text 段并排在正文段之后
+//!   （[`image_segments`] / [`message_event_segments`]，Go `ConvertToSegmentedMessage`
+//!   `:2211-2235, 2331-2334`）。两条路径的图片 `file` 口径本就不同：字符串路径去最后一个扩展名，
+//!   段路径删 `{` `}` `.png` `.jpg` `.gif` `-`；字符串路径的 `url` 缺协议头时补 `http://`。
+//!   登记差异：`ark` 段的 `fields` 在 Go 是 JSON 对象，本仓段的参数值只能是字符串，
+//!   落成紧凑 JSON 文本。P51 收口：CQ 值转义补齐 `[` → `&#91;`（[`encode_value`]，对齐 Go
+//!   `cqparse.EncodeValue`）；`attachments` / `msg_elements` 整数组 `null` 按空数组收
+//!   （[`null_as_default`]，对齐 Go `[]*T`）。
 //! - **正文明文处理**（`<@OpenID>` mention 反解 → 自身 @ 剥离 → trim → 去首个 `/`）见
 //!   [`Inbound::revert_mentions`]，字符串形态与段数组形态各按 Go 自己的路径算一遍。
 //!   @bot 判定用「事件 `mentions[]` 的 `is_you`/`bot` 标记 + BotID / AppID」，消息作者
@@ -70,10 +82,6 @@
 //!
 //! # 未做项
 //!
-//! - 消息段：`array_value = true` 时 `message` 按 CQ 解析成段数组（text / at / 其余入站码，
-//!   见 [`reported_message`]），但图片 / 语音 / 视频 / ark 卡片段仍未生成——Go
-//!   `ConvertToSegmentedMessage` 从 `attachments` / `msg_elements` 取图与事件段，这里没有
-//!   那条数据通路。
 //! - `global_group_msg_rre_to_message` / `global_c2c_msg_switch_to_message`（`true` 时 Go 把
 //!   这些开关事件「伪装成 message」的业务转换，`ConvertGroupRejectToMessage` 等）未做：
 //!   两个开关打开时这里仍只上报 notice。
@@ -100,7 +108,7 @@ use gensokyo_protocol::event::{
 use gensokyo_protocol::{Event, Extra, MessageContent, Segment};
 use gensokyo_qq::dto::interaction::Interaction;
 use gensokyo_storage::{BotStatsStore, EchoStore, IdMapStore, UnionCache};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
 use crate::state::AppState;
@@ -114,6 +122,16 @@ struct Envelope {
     t: Option<String>,
     #[serde(default)]
     d: Option<Value>,
+}
+
+/// `null` 数组按空数组收：Go 的 `[]*T` 反序列化容忍整数组 `null`，serde 的
+/// `Vec<Option<T>>` + `default` 只容忍缺字段与元素 `null`，整数组 `null` 会 Err 丢整条事件。
+fn null_as_default<'de, D, T>(d: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(d)?.unwrap_or_default())
 }
 
 /// QQ 消息负载（`GROUP_AT_MESSAGE_CREATE` / `GROUP_MESSAGE_CREATE` / `C2C_MESSAGE_CREATE`）。
@@ -131,6 +149,68 @@ struct QqMessage {
     author: Option<QqAuthor>,
     #[serde(default)]
     mentions: Vec<QqMention>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    attachments: Vec<Option<QqAttachment>>,
+    #[serde(default)]
+    ark_data: Option<QqArkData>,
+    /// `0`=普通文本 `3`=结构化卡片 `101`=并行消息 `102`=聊天记录 `103`=引用消息。
+    #[serde(default)]
+    message_type: i64,
+    #[serde(default, deserialize_with = "null_as_default")]
+    msg_elements: Vec<Option<QqMsgElement>>,
+}
+
+/// 消息附件（`attachments[]`，`botgo/dto/message.go:169-180`）。
+///
+/// 元素按 `Option` 收：Go 是 `[]*MessageAttachment`，nil 元素在两处循环里都被跳过，
+/// `null` 元素不该让整条事件解析失败。
+#[derive(Debug, Deserialize)]
+struct QqAttachment {
+    #[serde(default)]
+    content_type: String,
+    /// JSON 键是 `filename`（不是 `file_name`）。
+    #[serde(default, rename = "filename")]
+    file_name: String,
+    #[serde(default)]
+    url: String,
+    /// 语音消息 SILK 转 WAV 后的 URL。
+    #[serde(default)]
+    voice_wav_url: String,
+    /// 语音消息 ASR 参考结果。
+    #[serde(default)]
+    asr_refer_text: String,
+}
+
+/// 结构化卡片数据（`ark_data`，`botgo/dto/message.go:183-192`）。
+#[derive(Debug, Deserialize)]
+struct QqArkData {
+    #[serde(default)]
+    prompt: String,
+    #[serde(default)]
+    ark_type: String,
+    #[serde(default)]
+    ark_name: String,
+    /// 卡片字段（`tag` / `title` / `desc` / `jump_url` …），原样透传。
+    #[serde(default)]
+    fields: Option<Value>,
+}
+
+/// 嵌套消息元素（`msg_elements[]`，`botgo/dto/message.go:195-210`）：递归结构，
+/// 引用消息的 `msg_idx` 与正文都在这里。
+#[derive(Debug, Deserialize)]
+struct QqMsgElement {
+    #[serde(default)]
+    msg_idx: String,
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    message_type: i64,
+    #[serde(default)]
+    ark_data: Option<QqArkData>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    attachments: Vec<Option<QqAttachment>>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    msg_elements: Vec<Option<QqMsgElement>>,
 }
 
 /// 消息 `mentions[]` 的一项：群场景用 OpenID 标识被 @ 的用户，
@@ -897,9 +977,13 @@ impl Inbound {
             author_id: user_raw,
             full_group: flavor == GroupFlavor::Full,
         };
-        let content = bot_id_to_app_id(settings, payload.content, self.bot_id.as_deref());
+        // 媒体码在 `RevertTransformedText` 末尾追加（图片在前、事件码在后），`add_at_group`
+        // 前缀在其后才前置：字符串形态的 `message` 与 `raw_message` 都是这一串
+        let media = media_cq_text(&payload);
+        let content = bot_id_to_app_id(settings, &payload.content, self.bot_id.as_deref());
         let text = self.revert_mentions(settings, &content, &ctx, true);
-        let raw_message = reported_group_content(settings, &text, flavor);
+        let string_form = format!("{text}{media}");
+        let raw_message = reported_group_content(settings, &string_form, flavor);
         // 段数组形态与字符串形态不同源：Go `ConvertToSegmentedMessage` 从 `data.Content`
         // 重新处理，不做字符串路径的初始 trim、也不吃 `add_at_group` 前缀
         // （见 [`Inbound::revert_mentions`] 的 `string_form`）。关闭 `array_value` 时不读。
@@ -908,7 +992,7 @@ impl Inbound {
         } else {
             String::new()
         };
-        let message = reported_message(settings, &segment_source, &raw_message);
+        let message = reported_message(settings, &segment_source, &raw_message, &payload);
         Ok(Event::Message(MessageEvent {
             time: timestamp_of(payload.timestamp.as_ref()),
             self_id: Ob11Id::num(self.self_id_of(settings)),
@@ -972,16 +1056,18 @@ impl Inbound {
             author_id: user_raw,
             full_group: false,
         };
-        let content = bot_id_to_app_id(settings, payload.content, self.bot_id.as_deref());
+        let media = media_cq_text(&payload);
+        let content = bot_id_to_app_id(settings, &payload.content, self.bot_id.as_deref());
         // 单聊在 Go 里同样走 `RevertTransformedText`（`ProcessC2CMessage.go:104`），
-        // 只是没有 `mentions`、也不算全量群消息。
+        // 只是没有 `mentions`、也不算全量群消息；媒体码同样接在正文之后。
         let text = self.revert_mentions(settings, &content, &ctx, true);
+        let string_form = format!("{text}{media}");
         let segment_source = if settings.get_array_value() {
             self.revert_mentions(settings, &content, &ctx, false)
         } else {
             String::new()
         };
-        let message = reported_message(settings, &segment_source, &text);
+        let message = reported_message(settings, &segment_source, &string_form, &payload);
         Ok(Event::Message(MessageEvent {
             time: timestamp_of(payload.timestamp.as_ref()),
             self_id: Ob11Id::num(self.self_id_of(settings)),
@@ -991,7 +1077,7 @@ impl Inbound {
             user_id,
             group_id: None,
             message,
-            raw_message: text,
+            raw_message: string_form,
             font: Some(0),
             sender: Some(sender),
             anonymous: None,
@@ -1467,7 +1553,15 @@ fn reported_group_content(settings: &Settings, content: &str, flavor: GroupFlavo
 /// 段名不在入站码表（[`code_spec`] 查无此项或 `inbound` 为假，例如用户手打的 `[CQ:remove,…]`）
 /// 时折回 text 原文，不向客户端交出它不认识的段；相邻 text 段合并成一段，
 /// 与 Go 文本段「连续切片」的粒度一致。
-fn reported_message(settings: &Settings, content: &str, string_form: &str) -> MessageContent {
+///
+/// 段数组末尾还要接图片段与事件段（[`image_segments`] / [`message_event_segments`]）；
+/// 字符串形态的媒体码由调用方并进 `string_form`（[`media_cq_text`]），这里只管形态选择。
+fn reported_message(
+    settings: &Settings,
+    content: &str,
+    string_form: &str,
+    msg: &QqMessage,
+) -> MessageContent {
     if !settings.get_array_value() {
         return MessageContent::Text(string_form.to_owned());
     }
@@ -1479,6 +1573,9 @@ fn reported_message(settings: &Settings, content: &str, string_form: &str) -> Me
             _ => push_text_segment(&mut segments, segment.raw_or_cq().as_ref()),
         }
     }
+    // 图片段排在正文段之后，事件段再排图片段之后（Go `handlers/message_parser.go:2331-2334`）
+    segments.extend(image_segments(msg));
+    segments.extend(message_event_segments(msg));
     MessageContent::Array(segments)
 }
 
@@ -1495,6 +1592,264 @@ fn push_text_segment(segments: &mut Vec<Segment>, text: &str) {
     segments.push(Segment::text(text));
 }
 
+/// 消息事件新增字段（语音附件 / 结构化卡片 / 引用 / 嵌套正文）的降级单元。
+///
+/// 字符串路径与段数组路径共用同一份递归展开（Go `collectMessageEventExtras`
+/// `handlers/message_parser.go:2412-2429`）：这里只决定「有哪些单元、按什么顺序」，
+/// 两条路径各自决定落成什么形态。
+enum InboundExtra<'a> {
+    /// 语音附件：`file` 取 `voice_wav_url`，缺失时回退附件 `url`；两者都空时整条不产出。
+    Record {
+        file: &'a str,
+        url: &'a str,
+        asr: &'a str,
+    },
+    /// 结构化卡片：`ark_data` 缺失（只凭 `message_type == 3` 判定）时为 `None`。
+    Ark(Option<&'a QqArkData>),
+    Reply {
+        msg_idx: &'a str,
+        content: String,
+    },
+    Text(&'a str),
+}
+
+/// 语音附件降级为 record 单元（Go `voiceAttachmentExtra` `handlers/message_parser.go:2350-2365`）。
+fn voice_attachment_extra(attachment: &QqAttachment) -> Option<InboundExtra<'_>> {
+    if attachment.content_type != "voice" {
+        return None;
+    }
+    let file = if attachment.voice_wav_url.is_empty() {
+        attachment.url.as_str()
+    } else {
+        attachment.voice_wav_url.as_str()
+    };
+    (!file.is_empty()).then(|| InboundExtra::Record {
+        file,
+        url: &attachment.url,
+        asr: &attachment.asr_refer_text,
+    })
+}
+
+/// 引用单元：`msg_idx` 取元素列表里第一个非空索引，`content` 是各元素正文的拼接
+/// （Go `replyExtra` `handlers/message_parser.go:2368-2382`）。
+fn reply_extra(elements: &[Option<QqMsgElement>]) -> InboundExtra<'_> {
+    let mut msg_idx = "";
+    let mut content = String::new();
+    for element in elements.iter().flatten() {
+        if msg_idx.is_empty() {
+            msg_idx = element.msg_idx.as_str();
+        }
+        content.push_str(&element.content);
+    }
+    InboundExtra::Reply { msg_idx, content }
+}
+
+/// 递归降级 `msg_elements`（Go `collectElementExtras` `handlers/message_parser.go:2386-2410`）：
+/// 语音附件→record、卡片→ark、正文→text、嵌套引用→reply + 递归。
+fn collect_element_extras<'a>(
+    elements: &'a [Option<QqMsgElement>],
+    extras: &mut Vec<InboundExtra<'a>>,
+) {
+    for element in elements.iter().flatten() {
+        for attachment in element.attachments.iter().flatten() {
+            if let Some(extra) = voice_attachment_extra(attachment) {
+                extras.push(extra);
+            }
+        }
+        if element.ark_data.is_some() || element.message_type == 3 {
+            extras.push(InboundExtra::Ark(element.ark_data.as_ref()));
+        }
+        if !element.content.is_empty() {
+            extras.push(InboundExtra::Text(&element.content));
+        }
+        // `msg_elements` 为空时不产出空 reply 段（msg_idx 空，与 CQ 路径的跳过语义对齐）
+        if !element.msg_elements.is_empty() {
+            extras.push(reply_extra(&element.msg_elements));
+            collect_element_extras(&element.msg_elements, extras);
+        }
+    }
+}
+
+/// 一条消息的全部事件级降级单元（Go `collectMessageEventExtras`
+/// `handlers/message_parser.go:2412-2429`）：语音附件 → `ark_data` / `message_type == 3`
+/// → 顶层 `msg_elements` 的 reply + 递归。
+fn collect_message_event_extras(msg: &QqMessage) -> Vec<InboundExtra<'_>> {
+    let mut extras = Vec::new();
+    for attachment in msg.attachments.iter().flatten() {
+        if let Some(extra) = voice_attachment_extra(attachment) {
+            extras.push(extra);
+        }
+    }
+    if msg.ark_data.is_some() || msg.message_type == 3 {
+        extras.push(InboundExtra::Ark(msg.ark_data.as_ref()));
+    }
+    if !msg.msg_elements.is_empty() {
+        extras.push(reply_extra(&msg.msg_elements));
+        collect_element_extras(&msg.msg_elements, &mut extras);
+    }
+    extras
+}
+
+/// `ark` 段：`ark_type` / `ark_name` / `prompt` / `fields` 四个键恒定存在
+/// （Go `arkSegmentData` `handlers/message_parser.go:2431-2449`）。
+///
+/// 差异：`fields` 在 Go 里是 JSON 对象，本仓段的参数值只能是字符串
+/// （`Segment` 的 `Vec<(String, String)>` 契约），这里落成紧凑 JSON 文本，缺省 `{}`。
+fn ark_segment(ark: Option<&QqArkData>) -> Segment {
+    let (ark_type, ark_name, prompt) = ark.map_or(("", "", ""), |ark| {
+        (
+            ark.ark_type.as_str(),
+            ark.ark_name.as_str(),
+            ark.prompt.as_str(),
+        )
+    });
+    let fields = ark
+        .and_then(|ark| ark.fields.as_ref())
+        // 非对象在 Go 侧解码为 nil/空 map，折 "{}" 零影响
+        .filter(|fields| fields.is_object())
+        .map_or_else(|| "{}".to_owned(), Value::to_string);
+    Segment::new("ark")
+        .param("ark_type", ark_type)
+        .param("ark_name", ark_name)
+        .param("prompt", prompt)
+        .param("fields", fields)
+}
+
+/// 段数组路径的事件段（Go `messageEventSegments` `handlers/message_parser.go:2452-2477`）：
+/// record 的 `url` / `asr_refer_text` 只在非空时出现；reply 恒带 `msg_idx` + `content`。
+fn message_event_segments(msg: &QqMessage) -> Vec<Segment> {
+    collect_message_event_extras(msg)
+        .into_iter()
+        .map(|extra| match extra {
+            InboundExtra::Record { file, url, asr } => Segment::new("record")
+                .param("file", file)
+                .param_opt("url", (!url.is_empty()).then_some(url))
+                .param_opt("asr_refer_text", (!asr.is_empty()).then_some(asr)),
+            InboundExtra::Ark(ark) => ark_segment(ark),
+            InboundExtra::Reply { msg_idx, content } => Segment::new("reply")
+                .param("msg_idx", msg_idx)
+                .param("content", content),
+            InboundExtra::Text(text) => Segment::text(text),
+        })
+        .collect()
+}
+
+/// 入站 CQ 值转义（Go `cqparse.EncodeValue` `handlers/cqparse/escape.go:13-19`）：
+/// 在 [`cqcode::escape`]（`&` `,` `]`）之上补 `[` → `&#91;`。asr / ark_type / ark_name /
+/// prompt / msg_idx 来自远端卡片，含 `[CQ:…]` 形状时不转 `[` 会被下游重解析成段。
+/// `cqcode::escape` 本身刻意不转 `[`（服务 parse 往返），故这里单独补，不改它。
+fn encode_value(s: &str) -> String {
+    cqcode::escape(s).replace('[', "&#91;")
+}
+
+/// 字符串路径的事件码（Go `messageEventCQText` `handlers/message_parser.go:2480-2509`）：
+/// record 只带 `file` 与 `asr`（`url` 不进码），`message_type=3` 但无 `ark_data` 时保留
+/// `[CQ:ark]`（不静默丢弃卡片存在的事实），空 `msg_idx` 的 reply 整段跳过。
+fn message_event_cq_text(msg: &QqMessage) -> String {
+    let mut text = String::new();
+    for extra in collect_message_event_extras(msg) {
+        match extra {
+            InboundExtra::Record { file, asr, .. } => {
+                text.push_str("[CQ:record,file=");
+                text.push_str(file);
+                if !asr.is_empty() {
+                    text.push_str(",asr=");
+                    text.push_str(&encode_value(asr));
+                }
+                text.push(']');
+            }
+            InboundExtra::Ark(None) => text.push_str("[CQ:ark]"),
+            InboundExtra::Ark(Some(ark)) => {
+                text.push_str("[CQ:ark,ark_type=");
+                text.push_str(&encode_value(&ark.ark_type));
+                text.push_str(",ark_name=");
+                text.push_str(&encode_value(&ark.ark_name));
+                text.push_str(",prompt=");
+                text.push_str(&encode_value(&ark.prompt));
+                text.push(']');
+            }
+            InboundExtra::Reply { msg_idx, .. } => {
+                if !msg_idx.is_empty() {
+                    text.push_str("[CQ:reply,msg_idx=");
+                    text.push_str(&encode_value(msg_idx));
+                    text.push(']');
+                }
+            }
+            InboundExtra::Text(content) => text.push_str(content),
+        }
+    }
+    text
+}
+
+/// 图片附件判定：`content_type` 前缀 `image/`（Go 两条路径同一个过滤器）。
+fn is_image(attachment: &QqAttachment) -> bool {
+    attachment.content_type.starts_with("image/")
+}
+
+/// 段数组路径的图片段（Go `handlers/message_parser.go:2214-2235`）：`file` 是把 `{` `}`
+/// `.png` `.jpg` `.gif` `-` 全部删掉后的 `FileName` 加 `.image`，`url` 原样（不补协议头）。
+fn image_segments(msg: &QqMessage) -> Vec<Segment> {
+    msg.attachments
+        .iter()
+        .flatten()
+        .filter(|attachment| is_image(attachment))
+        .map(|attachment| {
+            let mut name = attachment.file_name.clone();
+            for piece in ["{", "}", ".png", ".jpg", ".gif", "-"] {
+                name = name.replace(piece, "");
+            }
+            Segment::new("image")
+                .param("file", format!("{name}.image"))
+                .param("subType", "0")
+                .param("url", attachment.url.as_str())
+        })
+        .collect()
+}
+
+/// 字符串路径的图片码（Go `handlers/message_parser.go:2137-2154`）：`file` 去掉最后一个
+/// 扩展名后加 `.image`，`url` 缺协议头时补 `http://`——与段数组路径口径不同，两条路径各自照搬。
+fn image_cq_text(msg: &QqMessage) -> String {
+    let mut text = String::new();
+    for attachment in msg.attachments.iter().flatten().filter(|a| is_image(a)) {
+        text.push_str("[CQ:image,file=");
+        text.push_str(strip_extension(&attachment.file_name));
+        text.push_str(".image,subType=0,url=");
+        if attachment.url.starts_with("http://") || attachment.url.starts_with("https://") {
+            text.push_str(&attachment.url);
+        } else {
+            text.push_str("http://");
+            text.push_str(&attachment.url);
+        }
+        text.push(']');
+    }
+    text
+}
+
+/// Go `filepath.Ext` + `strings.TrimSuffix`：去掉最后一个路径元素里最后一个 `.` 起的后缀
+/// （没有点时返回原文；`.` 是首字符时返回空串，与 Go 对 `.bashrc` 的处理一致）。
+/// `\` 也当路径分隔符是 Go `filepath.Ext` 在 Windows 的语义（`os.IsPathSeparator` 认双斜杠）；
+/// 对齐基准是 Go 的 Windows 行为，故不按宿主平台 `cfg!(windows)` 收敛。
+fn strip_extension(file_name: &str) -> &str {
+    let base_start = file_name
+        .rfind(['/', '\\'])
+        .map_or(0, |separator| separator + 1);
+    match file_name[base_start..].rfind('.') {
+        Some(dot) => &file_name[..base_start + dot],
+        None => file_name,
+    }
+}
+
+/// 字符串路径的媒体尾巴：图片码在前、事件码在后，接在正文末尾。
+///
+/// Go 这两步都在 `RevertTransformedText` 里（`handlers/message_parser.go:2136-2157`），
+/// 结果先成为 `messageText`，handler 之后才加 `add_at_group` 前缀（`:148-150`）——
+/// 所以前缀落在媒体码之前；`message` 与 `raw_message` 同源（`:205` / `:281`）。
+fn media_cq_text(msg: &QqMessage) -> String {
+    let mut text = image_cq_text(msg);
+    text.push_str(&message_event_cq_text(msg));
+    text
+}
+
 /// 入站正文 `BotID → AppID`（Go `RevertTransformedText` 的第一步，
 /// `message_parser.go:1850-1854`；消息段路径同口径 `:2236-2240`）。
 ///
@@ -1506,10 +1861,10 @@ fn push_text_segment(segments: &mut Vec<Segment>, text: &str) {
 /// 与 Go 的差异：Go 只在 `disable_error_chan=false` 时走 `RevertTransformedText`
 /// （群聊两条路径 `ProcessGroupNormalMessage.go:110-113` / `ProcessGroupMessage.go:119`，
 /// C2C 无条件），这里不跟这个开关——本仓的 `disable_error_chan` 只表示统计/错误通道开关。
-fn bot_id_to_app_id(settings: &Settings, content: String, bot_id: Option<&str>) -> String {
+fn bot_id_to_app_id(settings: &Settings, content: &str, bot_id: Option<&str>) -> String {
     let app_id = settings.get_app_id().to_string();
     let Some(bot_id) = bot_id.filter(|id| !id.is_empty() && *id != app_id.as_str()) else {
-        return content;
+        return content.to_owned();
     };
     content.replace(bot_id, &app_id)
 }
@@ -1698,8 +2053,28 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{auto_approved_pair, parse_rfc3339, scan_mentions, timestamp_of, verify_comment};
+    use super::{
+        auto_approved_pair, parse_rfc3339, scan_mentions, strip_extension, timestamp_of,
+        verify_comment,
+    };
     use serde_json::json;
+
+    /// `strip_extension` 对齐 Go `filepath.Ext` + `TrimSuffix`（go1.26.10 实测）：
+    /// 多重点只去最后一个；无扩展名原样；`.bashrc` 整串即扩展名 → 空串；`\` 也当分隔符。
+    #[test]
+    fn strip_extension_matches_go_filepath_ext() {
+        for (input, expected) in [
+            ("a.tar.gz", "a.tar"),
+            ("abc.png", "abc"),
+            ("noext", "noext"),
+            (".bashrc", ""),
+            ("dir/x.png", "dir/x"),
+            ("dir\\x.png", "dir\\x"),
+            ("", ""),
+        ] {
+            assert_eq!(strip_extension(input), expected, "input={input:?}");
+        }
+    }
 
     #[test]
     fn scan_mentions_matches_go_hex_character_class() {

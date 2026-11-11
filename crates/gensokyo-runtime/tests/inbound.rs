@@ -614,13 +614,14 @@ fn message_payload(content: &str) -> Value {
 
 /// 转换一条群消息，拆出 `message` 段数组（JSON 形态）并带上 `raw_message`。
 fn segments_of(settings: &str, content: &str) -> (Vec<Value>, String) {
+    segments_of_payload(settings, &message_payload(content))
+}
+
+/// 同上，负载自定（附件 / `ark_data` / `msg_elements` 需要自己拼 `d`）。
+fn segments_of_payload(settings: &str, payload: &Value) -> (Vec<Value>, String) {
     let (inbound, _dir) = inbound(settings);
     let events = inbound
-        .convert(
-            "GROUP_AT_MESSAGE_CREATE",
-            Some(&message_payload(content)),
-            None,
-        )
+        .convert("GROUP_AT_MESSAGE_CREATE", Some(payload), None)
         .expect("转换失败");
     let Event::Message(message) = &events[0] else {
         panic!("应为 message 事件，实得 {events:?}");
@@ -759,6 +760,363 @@ fn array_value_applies_to_private_message() {
     };
     assert!(message.message.is_array(), "单聊同样走段数组");
     assert_eq!(message.raw_message, "x[CQ:at,qq=7]");
+}
+
+// ---- 入站媒体段：attachments / ark_data / msg_elements（Go `ConvertToSegmentedMessage`）----
+
+/// 段数组路径的图片段：`file` 删掉 `{` `}` `.png` `.jpg` `.gif` `-` 后加 `.image`，
+/// `url` 原样（Go `handlers/message_parser.go:2214-2235`）；字符串路径另走
+/// `strip_extension` 口径 + 补协议头（同文件 `:2137-2154`）。
+#[test]
+fn array_value_maps_image_attachment_to_image_segment() {
+    let payload = json!({
+        "id": "M1",
+        "group_id": "G1",
+        "content": "hi",
+        "timestamp": "1700000000",
+        "author": {"id": "U1", "username": "alice"},
+        "attachments": [{
+            "content_type": "image/jpeg",
+            "filename": "A1B2{}.png",
+            "url": "https://gchat.qpic.cn/a.jpg"
+        }]
+    });
+    let (segments, raw) = segments_of_payload(&array_settings(true), &payload);
+    assert_eq!(
+        segments,
+        vec![
+            json!({"type": "text", "data": {"text": "hi"}}),
+            json!({"type": "image", "data": {
+                "file": "A1B2.image",
+                "subType": "0",
+                "url": "https://gchat.qpic.cn/a.jpg"
+            }}),
+        ],
+        "图片段排在正文段之后"
+    );
+    assert_eq!(
+        raw, "hi[CQ:image,file=A1B2{}.image,subType=0,url=https://gchat.qpic.cn/a.jpg]",
+        "字符串路径只去最后一个扩展名，不做花括号/短横线归一"
+    );
+}
+
+/// 视频附件不产段（Go M2-B 的 `image/` 前缀过滤）；语音附件降级为 record 段。
+#[test]
+fn non_image_attachments_are_not_reported_as_image() {
+    let payload = json!({
+        "id": "M1",
+        "group_id": "G1",
+        "content": "hi",
+        "timestamp": "1700000000",
+        "author": {"id": "U1", "username": "alice"},
+        "attachments": [
+            {"content_type": "video/mp4", "filename": "clip.mp4", "url": "https://x/clip.mp4"},
+            {
+                "content_type": "voice",
+                "url": "https://x/a.silk",
+                "voice_wav_url": "https://x/a.wav",
+                "asr_refer_text": "你好"
+            }
+        ]
+    });
+    let (segments, raw) = segments_of_payload(&array_settings(true), &payload);
+    assert_eq!(
+        segments,
+        vec![
+            json!({"type": "text", "data": {"text": "hi"}}),
+            json!({"type": "record", "data": {
+                "file": "https://x/a.wav",
+                "url": "https://x/a.silk",
+                "asr_refer_text": "你好"
+            }}),
+        ],
+        "视频不落段；语音走 record，file 取 voice_wav_url"
+    );
+    assert_eq!(raw, "hi[CQ:record,file=https://x/a.wav,asr=你好]");
+}
+
+/// `ark_data` → ark 段：`ark_type` / `ark_name` / `prompt` / `fields` 四键恒定存在
+/// （Go `arkSegmentData` `handlers/message_parser.go:2431-2449`）。
+///
+/// `fields` 在 Go 是 JSON 对象，本仓段的参数值只能是字符串，故落紧凑 JSON 文本。
+#[test]
+fn ark_data_becomes_ark_segment_with_four_keys() {
+    let payload = json!({
+        "id": "M1",
+        "group_id": "G1",
+        "content": "hi",
+        "timestamp": "1700000000",
+        "author": {"id": "U1", "username": "alice"},
+        "message_type": 3,
+        "ark_data": {
+            "ark_type": "tuwen",
+            "ark_name": "图文 H5",
+            "prompt": "点我",
+            "fields": {"title": "T"}
+        }
+    });
+    let (segments, raw) = segments_of_payload(&array_settings(true), &payload);
+    assert_eq!(
+        segments,
+        vec![
+            json!({"type": "text", "data": {"text": "hi"}}),
+            json!({"type": "ark", "data": {
+                "ark_type": "tuwen",
+                "ark_name": "图文 H5",
+                "prompt": "点我",
+                "fields": "{\"title\":\"T\"}"
+            }}),
+        ]
+    );
+    assert_eq!(
+        raw,
+        "hi[CQ:ark,ark_type=tuwen,ark_name=图文 H5,prompt=点我]"
+    );
+}
+
+/// `message_type=3` 但无 `ark_data`：段仍出四键（空值），字符串路径保留 `[CQ:ark]`
+/// ——卡片存在的事实不静默丢弃（Go `messageEventCQText` `:2490-2494`）。
+#[test]
+fn message_type_3_without_ark_data_keeps_ark_placeholder() {
+    let payload = json!({
+        "id": "M1",
+        "group_id": "G1",
+        "content": "hi",
+        "timestamp": "1700000000",
+        "author": {"id": "U1", "username": "alice"},
+        "message_type": 3
+    });
+    let (segments, raw) = segments_of_payload(&array_settings(true), &payload);
+    assert_eq!(
+        segments,
+        vec![
+            json!({"type": "text", "data": {"text": "hi"}}),
+            json!({"type": "ark", "data": {
+                "ark_type": "",
+                "ark_name": "",
+                "prompt": "",
+                "fields": "{}"
+            }}),
+        ]
+    );
+    assert_eq!(raw, "hi[CQ:ark]");
+}
+
+/// `msg_elements` 递归：顶层先出 reply（各元素正文拼接），再逐元素出 text / 嵌套 reply
+/// （Go `collectMessageEventExtras` + `collectElementExtras` `:2386-2429`）。
+#[test]
+fn msg_elements_expand_to_reply_and_text_in_go_order() {
+    let payload = json!({
+        "id": "M1",
+        "group_id": "G1",
+        "content": "hi",
+        "timestamp": "1700000000",
+        "author": {"id": "U1", "username": "alice"},
+        "message_type": 103,
+        "msg_elements": [{
+            "msg_idx": "R1",
+            "content": "引用正文",
+            "msg_elements": [{"msg_idx": "R2", "content": "更内层"}]
+        }]
+    });
+    let (segments, raw) = segments_of_payload(&array_settings(true), &payload);
+    assert_eq!(
+        segments,
+        vec![
+            json!({"type": "text", "data": {"text": "hi"}}),
+            json!({"type": "reply", "data": {"msg_idx": "R1", "content": "引用正文"}}),
+            json!({"type": "text", "data": {"text": "引用正文"}}),
+            json!({"type": "reply", "data": {"msg_idx": "R2", "content": "更内层"}}),
+            json!({"type": "text", "data": {"text": "更内层"}}),
+        ]
+    );
+    assert_eq!(
+        raw,
+        "hi[CQ:reply,msg_idx=R1]引用正文[CQ:reply,msg_idx=R2]更内层"
+    );
+}
+
+/// 空 `msg_idx`：段数组照出 reply（`msg_idx` 空串），字符串路径整段跳过
+/// （Go `:2500-2503` 的 `extra.msgIdx == ""` 分支）。
+#[test]
+fn empty_msg_idx_reply_is_skipped_in_string_form_only() {
+    let payload = json!({
+        "id": "M1",
+        "group_id": "G1",
+        "content": "hi",
+        "timestamp": "1700000000",
+        "author": {"id": "U1", "username": "alice"},
+        "msg_elements": [{"content": "x"}]
+    });
+    let (segments, raw) = segments_of_payload(&array_settings(true), &payload);
+    assert_eq!(
+        segments,
+        vec![
+            json!({"type": "text", "data": {"text": "hi"}}),
+            json!({"type": "reply", "data": {"msg_idx": "", "content": "x"}}),
+            json!({"type": "text", "data": {"text": "x"}}),
+        ]
+    );
+    assert_eq!(raw, "hix", "空 msg_idx 不产出 [CQ:reply]");
+}
+
+/// 字符串路径：图片码在前、事件码在后，接在正文末尾；缺协议头的 url 补 `http://`，
+/// `file` 用去扩展名的 `filename`（Go `RevertTransformedText` `:2137-2157`）。
+#[test]
+fn string_form_appends_image_and_event_codes_after_body() {
+    let (inbound, _dir) = inbound(BASE);
+    let payload = json!({
+        "id": "M1",
+        "group_id": "G1",
+        "content": "hi",
+        "timestamp": "1700000000",
+        "author": {"id": "U1", "username": "alice"},
+        "attachments": [
+            {"content_type": "image/png", "filename": "abc.png", "url": "gchat.qpic.cn/abc"},
+            {"content_type": "voice", "voice_wav_url": "https://x/a.wav"}
+        ]
+    });
+    let events = inbound
+        .convert("GROUP_AT_MESSAGE_CREATE", Some(&payload), None)
+        .expect("转换失败");
+    let Event::Message(message) = &events[0] else {
+        panic!("应为 message 事件，实得 {events:?}");
+    };
+    let expected = concat!(
+        "hi",
+        "[CQ:image,file=abc.image,subType=0,url=http://gchat.qpic.cn/abc]",
+        "[CQ:record,file=https://x/a.wav]"
+    );
+    assert_eq!(message.raw_message, expected);
+    let MessageContent::Text(text) = &message.message else {
+        panic!(
+            "array_value 关闭时应为字符串形态，实得 {:?}",
+            message.message
+        );
+    };
+    assert_eq!(text, expected, "message 与 raw_message 同源");
+}
+
+/// 整数组 `null` 不丢事件（Go `[]*T` 容忍 null，P51）：顶层与嵌套的
+/// `attachments` / `msg_elements` 都按空数组收。
+#[test]
+fn null_arrays_are_tolerated_like_go_slices() {
+    let mut payload = message_payload("hi");
+    payload["attachments"] = json!(null);
+    payload["msg_elements"] = json!(null);
+    let (segments, raw) = segments_of_payload(&array_settings(true), &payload);
+    assert_eq!(
+        segments,
+        vec![json!({"type": "text", "data": {"text": "hi"}})],
+        "顶层 null 数组按空数组收，事件不丢"
+    );
+    assert_eq!(raw, "hi");
+
+    let mut nested = message_payload("hi");
+    nested["msg_elements"] = json!([{
+        "msg_idx": "R1",
+        "content": "引用",
+        "attachments": null,
+        "msg_elements": null
+    }]);
+    let (segments, raw) = segments_of_payload(&array_settings(true), &nested);
+    assert_eq!(
+        segments,
+        vec![
+            json!({"type": "text", "data": {"text": "hi"}}),
+            json!({"type": "reply", "data": {"msg_idx": "R1", "content": "引用"}}),
+            json!({"type": "text", "data": {"text": "引用"}}),
+        ],
+        "嵌套元素里的 null 数组同样容忍"
+    );
+    assert_eq!(raw, "hi[CQ:reply,msg_idx=R1]引用");
+}
+
+/// 远端卡片字段含 `[CQ:…]` 形状时按 Go `EncodeValue` 四字符转义（P51）：
+/// `[` → `&#91;`、`,` → `&#44;`、`]` → `&#93;`、`&` → `&amp;`，下游不会重解析成段。
+#[test]
+fn remote_card_values_escape_cq_shape() {
+    let payload = json!({
+        "id": "M1",
+        "group_id": "G1",
+        "content": "hi",
+        "timestamp": "1700000000",
+        "author": {"id": "U1"},
+        "attachments": [{
+            "content_type": "voice",
+            "voice_wav_url": "https://x/a.wav",
+            "asr_refer_text": "[CQ:at,qq=123]"
+        }],
+        "message_type": 3,
+        "ark_data": {"ark_type": "[CQ:at,qq=123]", "ark_name": "n[1]", "prompt": "a&b"},
+        "msg_elements": [{"msg_idx": "[CQ:at,qq=123]", "content": "x"}]
+    });
+    let (inbound, _dir) = inbound(BASE);
+    let events = inbound
+        .convert("GROUP_AT_MESSAGE_CREATE", Some(&payload), None)
+        .expect("转换失败");
+    let Event::Message(message) = &events[0] else {
+        panic!("应为 message 事件，实得 {events:?}");
+    };
+    assert_eq!(
+        message.raw_message,
+        concat!(
+            "hi",
+            "[CQ:record,file=https://x/a.wav,asr=&#91;CQ:at&#44;qq=123&#93;]",
+            "[CQ:ark,ark_type=&#91;CQ:at&#44;qq=123&#93;,ark_name=n&#91;1&#93;,prompt=a&amp;b]",
+            "[CQ:reply,msg_idx=&#91;CQ:at&#44;qq=123&#93;]",
+            "x"
+        ),
+        "asr/ark_type/ark_name/prompt/msg_idx 五处都补 [ 转义"
+    );
+}
+
+/// 语音 `file` 回退链（Go `voiceAttachmentExtra`）：`voice_wav_url` 空 → 用 `url`；
+/// 两者皆空 → 不产 record。
+#[test]
+fn voice_file_falls_back_to_url_and_skips_when_both_empty() {
+    let mut payload = message_payload("hi");
+    payload["attachments"] = json!([
+        {"content_type": "voice", "url": "https://x/a.silk"},
+        {"content_type": "voice"}
+    ]);
+    let (segments, raw) = segments_of_payload(&array_settings(true), &payload);
+    assert_eq!(
+        segments,
+        vec![
+            json!({"type": "text", "data": {"text": "hi"}}),
+            json!({"type": "record", "data": {
+                "file": "https://x/a.silk",
+                "url": "https://x/a.silk"
+            }}),
+        ],
+        "voice_wav_url 空时 file 回退 url；两者皆空的附件不产 record"
+    );
+    assert_eq!(raw, "hi[CQ:record,file=https://x/a.silk]");
+}
+
+/// `add_at_group=true` 的字符串路径：前缀在媒体码之前（Go handler 在
+/// `RevertTransformedText` 之后才前置，`ProcessGroupNormalMessage.go:148-150`）。
+#[test]
+fn add_at_group_prefix_precedes_media_codes_in_string_form() {
+    let settings = format!("{BASE}  add_at_group: true\n");
+    let (inbound, _dir) = inbound(&settings);
+    let mut payload = message_payload("hi");
+    payload["attachments"] = json!([
+        {"content_type": "image/png", "filename": "abc.png", "url": "https://x/abc.png"}
+    ]);
+    let events = inbound
+        .convert("GROUP_MESSAGE_CREATE", Some(&payload), None)
+        .expect("转换失败");
+    let Event::Message(message) = &events[0] else {
+        panic!("应为 message 事件，实得 {events:?}");
+    };
+    let expected = "[CQ:at,qq=12345] hi[CQ:image,file=abc.image,subType=0,url=https://x/abc.png]";
+    assert_eq!(message.raw_message, expected, "前缀落在媒体码之前");
+    let MessageContent::Text(text) = &message.message else {
+        panic!("array_value 关闭应为字符串形态，实得 {:?}", message.message);
+    };
+    assert_eq!(text, expected, "message 与 raw_message 同源");
 }
 
 // ---- 入站正文：mention 反解 / remove_at / remove_prefix（Go `RevertTransformedText`）----
