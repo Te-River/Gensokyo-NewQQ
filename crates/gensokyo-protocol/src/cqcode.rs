@@ -508,6 +508,7 @@ fn parse_body(body: &str) -> Option<Segment> {
     Some(Segment {
         kind,
         params,
+        json_keys: Vec::new(),
         // raw 由调用方挂载（parse / parse_one 有整段原文）；自产段保持 None，透传回退规范化
         raw: None,
     })
@@ -639,6 +640,7 @@ impl CqCode {
                 .into_iter()
                 .map(|(key, value)| (key, unescape(&value)))
                 .collect(),
+            json_keys: Vec::new(),
             // 转义形态来自 CqCode 构造而非 parse 原文：按自产段处理（透传输出 = 规范化）
             raw: None,
         }

@@ -7,7 +7,9 @@
 //! 参数值一律存**未转义**的原文；转义只发生在生成 CQ 文本时，与解析侧互为逆操作。
 //! `data` 里的嵌套对象 / 数组同样落成字符串（紧凑 JSON），因此 `params` 仍是键序稳定的
 //! `Vec<(String, String)>`——与 Go `Segment.Data` 的 `map[string]string` 同构，而嵌套形态
-//! 由 `foundItems` 契约（base64 / JSON 串）承载。
+//! 由 `foundItems` 契约（base64 / JSON 串）承载。唯一例外是 ark 段的 `fields`（P52）：
+//! Go `arkSegmentData` 出真 JSON 对象，经 [`Segment::param_json`] 标记，序列化时按解析后的
+//! JSON 值输出。
 
 use std::borrow::Cow;
 use std::fmt;
@@ -36,6 +38,9 @@ pub struct Segment {
     pub kind: String,
     /// 参数，保持插入（线上）顺序。
     pub params: Vec<(String, String)>,
+    /// raw JSON 参数键（P52）：序列化时这些键的值按解析后的 JSON 值输出
+    /// （ark 的 `fields`，Go `arkSegmentData` 的 `map[string]interface{}` 契约），解析失败回退字符串。
+    pub(crate) json_keys: Vec<String>,
     /// 透传原文切片：`cqcode::parse` 命中码段时记录的**整段原始字节**（含 `[CQ:` 与收尾 `]`）。
     /// 透传臂经 [`Segment::raw_or_cq`] 输出它，保证用户输入不被规范化改写（Major 修复）。
     /// 协议层自产段（builder 构造 / JSON 反序列化）为 `None`，透传输出回退到规范化序列化，
@@ -43,8 +48,8 @@ pub struct Segment {
     pub(crate) raw: Option<String>,
 }
 
-/// 语义相等只看 `kind` + `params`：`raw` 是字节保真载体，不参与比较——
-/// 同一段码「parse 而来」与「代码构造」必须判等（码表往返与计划比对的既有口径）。
+/// 语义相等只看 `kind` + `params`：`raw` 是字节保真载体、`json_keys` 是序列化形态标记，
+/// 都不参与比较——同一段码「parse 而来」与「代码构造」必须判等（码表往返与计划比对的既有口径）。
 impl PartialEq for Segment {
     fn eq(&self, other: &Self) -> bool {
         self.kind == other.kind && self.params == other.params
@@ -60,6 +65,7 @@ impl Segment {
         Self {
             kind: kind.into(),
             params: Vec::new(),
+            json_keys: Vec::new(),
             raw: None,
         }
     }
@@ -77,6 +83,18 @@ impl Segment {
         if let Some(value) = value {
             self.params.push((key.to_owned(), value.into()));
         }
+        self
+    }
+
+    /// 追加 raw JSON 参数：值按紧凑 JSON 文本存储，序列化时按解析后的 JSON 值输出（P52）。
+    ///
+    /// 供 ark 段 `fields` 这类 Go `map[string]interface{}` 契约
+    /// （`handlers/message_parser.go:2445-2447`）；解析失败回退字符串输出，保证不丢内容。
+    #[must_use]
+    pub fn param_json(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        let key = key.into();
+        self.params.push((key.clone(), value.into()));
+        self.json_keys.push(key);
         self
     }
 
@@ -298,7 +316,13 @@ impl Serialize for Segment {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut map = serializer.serialize_map(Some(2))?;
         map.serialize_entry("type", &self.kind)?;
-        map.serialize_entry("data", &ParamsRef(&self.params))?;
+        map.serialize_entry(
+            "data",
+            &ParamsRef {
+                params: &self.params,
+                json_keys: &self.json_keys,
+            },
+        )?;
         map.end()
     }
 }
@@ -306,42 +330,65 @@ impl Serialize for Segment {
 impl<'de> Deserialize<'de> for Segment {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let wire = SegmentWire::deserialize(deserializer)?;
+        let (params, json_keys) = wire.data.map(|data| (data.0, data.1)).unwrap_or_default();
+        // 只有 ark 段的 `fields` 在 Go 里是真对象（`arkSegmentData`）；其余段的嵌套值按
+        // `map[string]string` 契约保持字符串化（markdown / keyboard / node 往返不变）
+        let json_keys = if wire.kind == "ark" {
+            json_keys.into_iter().filter(|key| key == "fields").collect()
+        } else {
+            Vec::new()
+        };
         Ok(Self {
             kind: wire.kind,
-            params: wire.data.map(|data| data.0).unwrap_or_default(),
+            params,
+            json_keys,
             // JSON 数组形态没有 CQ 原文：按自产段处理（透传输出 = 规范化序列化）
             raw: None,
         })
     }
 }
 
-/// 以 `data` 对象形态序列化参数（顺序 == `Vec` 顺序）。
-struct ParamsRef<'a>(&'a [(String, String)]);
+/// 以 `data` 对象形态序列化参数（顺序 == `Vec` 顺序）；`json_keys` 里的键按解析后的 JSON 值输出。
+struct ParamsRef<'a> {
+    params: &'a [(String, String)],
+    json_keys: &'a [String],
+}
 
 impl Serialize for ParamsRef<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut map = serializer.serialize_map(Some(self.0.len()))?;
-        for (key, value) in self.0 {
-            map.serialize_entry(key, value)?;
+        let mut map = serializer.serialize_map(Some(self.params.len()))?;
+        for (key, value) in self.params {
+            if self.json_keys.contains(key) {
+                // 解析失败回退字符串输出，保证不丢内容
+                match serde_json::from_str::<serde_json::Value>(value) {
+                    Ok(parsed) => map.serialize_entry(key, &parsed)?,
+                    Err(_) => map.serialize_entry(key, value)?,
+                }
+            } else {
+                map.serialize_entry(key, value)?;
+            }
         }
         map.end()
     }
 }
 
-/// `data` 反序列化结果（顺序由反序列化器给出；JSON 对象按书写顺序）。
+/// `data` 反序列化结果（顺序由反序列化器给出；JSON 对象按书写顺序）；
+/// 第二元是值为对象/数组的键（raw JSON 候选，P52，是否生效由 `Segment::deserialize` 按段类型收口）。
 #[derive(Debug)]
-struct Params(Vec<(String, String)>);
+struct Params(Vec<(String, String)>, Vec<String>);
 
 impl<'de> Deserialize<'de> for Params {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_map(ParamsVisitor).map(Self)
+        deserializer
+            .deserialize_map(ParamsVisitor)
+            .map(|(params, json_keys)| Self(params, json_keys))
     }
 }
 
 struct ParamsVisitor;
 
 impl<'de> Visitor<'de> for ParamsVisitor {
-    type Value = Vec<(String, String)>;
+    type Value = (Vec<(String, String)>, Vec<String>);
 
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("消息段 data 对象")
@@ -349,10 +396,17 @@ impl<'de> Visitor<'de> for ParamsVisitor {
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let mut out = Vec::with_capacity(map.size_hint().unwrap_or(0));
+        let mut json_keys = Vec::new();
         while let Some((key, value)) = map.next_entry::<String, Option<Scalar>>()? {
-            out.push((key, value.map(Scalar::into_string).unwrap_or_default()));
+            match value {
+                Some(Scalar::Json(value)) => {
+                    json_keys.push(key.clone());
+                    out.push((key, value.to_string()));
+                }
+                other => out.push((key, other.map(Scalar::into_string).unwrap_or_default())),
+            }
         }
-        Ok(out)
+        Ok((out, json_keys))
     }
 }
 
@@ -696,5 +750,95 @@ mod tests {
             serde_json::to_string(&text).expect("序列化失败"),
             "\"hi[CQ:at,qq=1]\""
         );
+    }
+
+    #[test]
+    fn ark_fields_param_json_serializes_as_object() {
+        let segment = Segment::new("ark")
+            .param("ark_type", "tuwen")
+            .param("ark_name", "")
+            .param("prompt", "")
+            .param_json("fields", r#"{"tag":"t","title":"T"}"#);
+        assert_eq!(
+            serde_json::to_string(&segment).expect("序列化失败"),
+            r#"{"type":"ark","data":{"ark_type":"tuwen","ark_name":"","prompt":"","fields":{"tag":"t","title":"T"}}}"#
+        );
+
+        let empty = Segment::new("ark").param_json("fields", "{}");
+        assert_eq!(
+            serde_json::to_string(&empty).expect("序列化失败"),
+            r#"{"type":"ark","data":{"fields":{}}}"#,
+            "空 fields 出对象 {{}} 而非字符串"
+        );
+    }
+
+    #[test]
+    fn ark_fields_json_round_trip_keeps_object() {
+        let json = r#"{"type":"ark","data":{"ark_type":"tuwen","ark_name":"","prompt":"","fields":{"title":"T","n":1}}}"#;
+        let segment: Segment = serde_json::from_str(json).expect("反序列化失败");
+        assert_eq!(
+            segment.get("fields"),
+            Some(r#"{"n":1,"title":"T"}"#),
+            "存储仍是紧凑 JSON 文本（键序同 Go json.Marshal）"
+        );
+        let back = serde_json::to_string(&segment).expect("序列化失败");
+        assert_eq!(
+            back,
+            r#"{"type":"ark","data":{"ark_type":"tuwen","ark_name":"","prompt":"","fields":{"n":1,"title":"T"}}}"#,
+            "fields 对象进 → 对象出"
+        );
+        assert_eq!(
+            segment,
+            serde_json::from_str::<Segment>(&back).expect("往返反序列化失败")
+        );
+    }
+
+    #[test]
+    fn param_json_falls_back_to_string_on_invalid_json() {
+        let segment = Segment::new("ark").param_json("fields", "not json");
+        assert_eq!(
+            serde_json::to_string(&segment).expect("序列化失败"),
+            r#"{"type":"ark","data":{"fields":"not json"}}"#,
+            "解析失败回退字符串，不丢内容"
+        );
+    }
+
+    #[test]
+    fn only_ark_fields_is_marked_on_deserialize() {
+        // P52 只标记 ark 的 fields：ark 的其它键与其它段的嵌套值仍按 map[string]string 字符串化
+        let segment: Segment = serde_json::from_str(
+            r#"{"type":"ark","data":{"fields":{"title":"T"},"extra":{"a":1}}}"#,
+        )
+        .expect("反序列化失败");
+        assert_eq!(
+            serde_json::to_string(&segment).expect("序列化失败"),
+            r#"{"type":"ark","data":{"fields":{"title":"T"},"extra":"{\"a\":1}"}}"#
+        );
+    }
+
+    #[test]
+    fn plain_segments_keep_string_params() {
+        // 回归锁（P52）：未标记段的参数值恒为字符串
+        for (segment, expected) in [
+            (
+                Segment::new("at").param("qq", "7"),
+                r#"{"type":"at","data":{"qq":"7"}}"#,
+            ),
+            (
+                Segment::text("hi"),
+                r#"{"type":"text","data":{"text":"hi"}}"#,
+            ),
+            (
+                Segment::new("image")
+                    .param("file", "a.image")
+                    .param("subType", "0"),
+                r#"{"type":"image","data":{"file":"a.image","subType":"0"}}"#,
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&segment).expect("序列化失败"),
+                expected
+            );
+        }
     }
 }

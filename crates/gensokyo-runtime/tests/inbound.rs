@@ -838,7 +838,7 @@ fn non_image_attachments_are_not_reported_as_image() {
 /// `ark_data` → ark 段：`ark_type` / `ark_name` / `prompt` / `fields` 四键恒定存在
 /// （Go `arkSegmentData` `handlers/message_parser.go:2431-2449`）。
 ///
-/// `fields` 在 Go 是 JSON 对象，本仓段的参数值只能是字符串，故落紧凑 JSON 文本。
+/// `fields` 出真 JSON 对象（P52，`Segment::param_json`），与 Go 逐字节对齐。
 #[test]
 fn ark_data_becomes_ark_segment_with_four_keys() {
     let payload = json!({
@@ -852,7 +852,7 @@ fn ark_data_becomes_ark_segment_with_four_keys() {
             "ark_type": "tuwen",
             "ark_name": "图文 H5",
             "prompt": "点我",
-            "fields": {"title": "T"}
+            "fields": {"tag": "tuwen", "title": "T"}
         }
     });
     let (segments, raw) = segments_of_payload(&array_settings(true), &payload);
@@ -864,9 +864,13 @@ fn ark_data_becomes_ark_segment_with_four_keys() {
                 "ark_type": "tuwen",
                 "ark_name": "图文 H5",
                 "prompt": "点我",
-                "fields": "{\"title\":\"T\"}"
+                "fields": {"tag": "tuwen", "title": "T"}
             }}),
         ]
+    );
+    assert!(
+        segments[1]["data"]["fields"].is_object(),
+        "fields 必须是真 JSON 对象"
     );
     assert_eq!(
         raw,
@@ -895,11 +899,41 @@ fn message_type_3_without_ark_data_keeps_ark_placeholder() {
                 "ark_type": "",
                 "ark_name": "",
                 "prompt": "",
-                "fields": "{}"
+                "fields": {}
             }}),
         ]
     );
+    assert!(
+        segments[1]["data"]["fields"].is_object(),
+        "空 fields 必须是对象而非字符串"
+    );
     assert_eq!(raw, "hi[CQ:ark]");
+}
+
+/// `fields` 缺失 / null / 非对象：一律出空对象 `{}`（Go `ark.Fields == nil` →
+/// `map[string]interface{}{}`，`arkSegmentData` `handlers/message_parser.go:2437,2445-2447`）。
+#[test]
+fn ark_fields_missing_or_non_object_becomes_empty_object() {
+    let cases: [Option<Value>; 4] = [None, Some(json!(null)), Some(json!("text")), Some(json!([1]))];
+    for fields in cases {
+        let mut ark = json!({"ark_type": "tuwen", "ark_name": "n", "prompt": "p"});
+        if let Some(fields) = fields {
+            ark["fields"] = fields;
+        }
+        let payload = json!({
+            "id": "M1",
+            "group_id": "G1",
+            "content": "hi",
+            "timestamp": "1700000000",
+            "author": {"id": "U1", "username": "alice"},
+            "message_type": 3,
+            "ark_data": ark
+        });
+        let (segments, _raw) = segments_of_payload(&array_settings(true), &payload);
+        let fields_value = &segments[1]["data"]["fields"];
+        assert!(fields_value.is_object(), "fields 应为对象，实得 {fields_value:?}");
+        assert_eq!(fields_value, &json!({}), "缺失/null/非对象一律折成空对象");
+    }
 }
 
 /// `msg_elements` 递归：顶层先出 reply（各元素正文拼接），再逐元素出 text / 嵌套 reply

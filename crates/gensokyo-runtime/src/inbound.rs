@@ -67,8 +67,8 @@
 //!   （[`image_segments`] / [`message_event_segments`]，Go `ConvertToSegmentedMessage`
 //!   `:2211-2235, 2331-2334`）。两条路径的图片 `file` 口径本就不同：字符串路径去最后一个扩展名，
 //!   段路径删 `{` `}` `.png` `.jpg` `.gif` `-`；字符串路径的 `url` 缺协议头时补 `http://`。
-//!   登记差异：`ark` 段的 `fields` 在 Go 是 JSON 对象，本仓段的参数值只能是字符串，
-//!   落成紧凑 JSON 文本。P51 收口：CQ 值转义补齐 `[` → `&#91;`（[`encode_value`]，对齐 Go
+//!   P52 收口：`ark` 段的 `fields` 出真 JSON 对象（[`Segment::param_json`]，对齐 Go
+//!   `arkSegmentData` 的 `map[string]interface{}`，空 fields 出 `{}`）。P51 收口：CQ 值转义补齐 `[` → `&#91;`（[`encode_value`]，对齐 Go
 //!   `cqparse.EncodeValue`）；`attachments` / `msg_elements` 整数组 `null` 按空数组收
 //!   （[`null_as_default`]，对齐 Go `[]*T`）。
 //! - **正文明文处理**（`<@OpenID>` mention 反解 → 自身 @ 剥离 → trim → 去首个 `/`）见
@@ -1693,8 +1693,8 @@ fn collect_message_event_extras(msg: &QqMessage) -> Vec<InboundExtra<'_>> {
 /// `ark` 段：`ark_type` / `ark_name` / `prompt` / `fields` 四个键恒定存在
 /// （Go `arkSegmentData` `handlers/message_parser.go:2431-2449`）。
 ///
-/// 差异：`fields` 在 Go 里是 JSON 对象，本仓段的参数值只能是字符串
-/// （`Segment` 的 `Vec<(String, String)>` 契约），这里落成紧凑 JSON 文本，缺省 `{}`。
+/// `fields` 在 Go 里是真 JSON 对象：经 [`Segment::param_json`] 标记，序列化出对象（P52），
+/// 缺省 `{}`。
 fn ark_segment(ark: Option<&QqArkData>) -> Segment {
     let (ark_type, ark_name, prompt) = ark.map_or(("", "", ""), |ark| {
         (
@@ -1712,7 +1712,7 @@ fn ark_segment(ark: Option<&QqArkData>) -> Segment {
         .param("ark_type", ark_type)
         .param("ark_name", ark_name)
         .param("prompt", prompt)
-        .param("fields", fields)
+        .param_json("fields", fields)
 }
 
 /// 段数组路径的事件段（Go `messageEventSegments` `handlers/message_parser.go:2452-2477`）：
