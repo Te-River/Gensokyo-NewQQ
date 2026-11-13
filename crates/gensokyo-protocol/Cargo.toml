@@ -11,6 +11,8 @@ publish.workspace = true
 gensokyo-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# P56-② xurls v1.1.0 正则手移植（workspace 已有 1.13.1，零新 crate）
+regex.workspace = true
 
 [dev-dependencies]
 # 响应序列化契约单测（data 恒出现，None → null）

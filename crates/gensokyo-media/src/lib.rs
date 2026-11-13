@@ -64,11 +64,42 @@
 //!   找不到程序返回 [`Error::SilkUnavailable`]，非零退出 / 产物缺失返回 [`Error::SilkCodec`]。
 //! - 临时 PCM 落在 `<os temp>/gensokyo-silk/`，成功与失败都由 `Drop` 清理。
 //!
+//! ## P56-T2：QR 码生成
+//! - [`qr::qr_png_base64`]：URL → QR PNG base64（容错级 Q、无静区），Go `generateQRCode`
+//!   （`handlers/qrcode_real.go`）的等价物；`size` 语义照 go-qrcode `PNG(size)`：
+//!   负数 = 每模块像素数、过小静默放大到模块数、否则恰好 size×size。
+//!
+//! # P56：下载路径 SSRF 守卫
+//! - [`fetch::HttpTransport`] 的下载出口关闭 `reqwest` 自动重定向，**手动逐跳跟随**：
+//!   每跳请求前（含首跳）复用 [`redirect`] 的逐跳判定——协议白名单 http(s)、IP 字面量直接判、
+//!   域名先解析再逐个 IP 判（任一命中即拒、解析失败也拒）。IP 组合复用
+//!   `gensokyo_core::net`（RFC1918 + 回环 / 链路本地 / 未指定 / ULA，IPv4-mapped 先归一），
+//!   守卫只有这一处实现。
+//! - 重定向跳数上限 5 跳（与 [`redirect::resolve_redirect`] 共用），整链总超时按请求的
+//!   `timeout`（默认 30s）；大小上限 / 只认 200 / 落盘语义不变。
+//! - 出站 URL 入口（image / record / video / file / QQ 音乐）都经 `Fetcher` → `HttpTransport`，
+//!   守卫在发起下载前生效；hosting 上传出口是另一个客户端，语义不变。
+//!
+//! # 与 Go 的差异（P56）
+//! - **跳数口径**：Go 新链 `Fetcher` 默认就是 5 跳（`internal/application/media/fetcher.go:37-38`），
+//!   与这里一致；10 跳只出现在 legacy 裸 `client.Get`（`handlers/reply_helpers.go:133-135`，
+//!   无 CheckRedirect）。这里所有下载路径统一 5 跳。
+//! - **逐跳复检收紧**：Go `handlers/reply_helpers.go:124-138` 的裸 `client.Get` 无逐跳复检；
+//!   这里所有下载路径一律逐跳复检（有意安全差异，lead 裁决）。
+//! - **拦截面扩大**：在 Go 口径（RFC1918 + 回环 + 链路本地 + ULA，`IsPrivate` 本就含 RFC4193，
+//!   `fetcher.go:210` 另有 fc/fd 前缀判）之外另拦 `0.0.0.0` / `::`；反向未拦 Go
+//!   `fetcher.go:203` 的链路本地组播（ff02::/16、224.0.0.0/24）——TCP 对组播建不起连接，
+//!   实际影响≈0，登记备查。
+//! - **无 DNS pinning**：建连时 `reqwest` 会再解析一次 DNS，存在 rebinding 窗口
+//!   （与 Go 一致的已知边界）。
+//! - **不建 FetchBytes 等价物**：Go `imagehosting/selffetch.go` 的字节自取在 Rust 无消费方
+//!   （hosting 上传期已解析直链，`hosting/chatglm.rs`；发送期 URL 媒体一律走守卫 `Fetcher`）。
+//! - **删除 `HttpTransport::from_client`**：旧 API 允许注入外部 client，无法保证关闭自动重定向，
+//!   是逐跳守卫的绕过缝；全树零调用方，已删。
+//!
 //! # 与 Go 的差异（M2a）
-//! - **SSRF / 重定向 / 私网拦截（下载路径）**：Go `internal/application/media/fetcher.go` 有
-//!   `checkSSRF`（DNS 解析 + 私网/回环拒绝）与 `MaxRedirects`。本 crate 的下载路径 **不做**
-//!   这些，`reqwest` 默认跟随最多 10 次重定向；SSRF 属于接入层的策略，M2a 不落地（见未做项）。
-//!   短签名外链的直链解析是例外：P25 的 [`redirect`] 逐跳手动跟随并做 SSRF 校验。
+//! - **SSRF / 重定向 / 私网拦截（下载路径）**：P56 已落地（见上节「P56」）；短签名外链
+//!   直链解析（[`redirect`]）与下载路径共用同一套逐跳判定。
 //! - **落盘策略**：Go `FetchToTempFile` 在 `threshold` 以下走内存、以上才写临时文件并返回
 //!   `path=""`；本 crate 不做阈值分流：URL 与内联 base64 一律写临时文件并返回路径，用
 //!   [`Fetched::bytes`] 表达字节数（不把内容复制进返回值），`file://` 直接复用原路径、不复制。
@@ -120,11 +151,28 @@
 //!   [`Error::SilkUnavailable`] / [`Error::SilkCodec`]。
 //! - **产物位置**：Go 写到临时目录再读回内存；这里 `pts` 直接写调用方给的输出路径。
 //!
+//! # 与 Go 的差异（P56-T2 QR）
+//! - **容错级命名陷阱**：Go `qrcode.High` 常量是 ISO **Q** 级（25%），go-qrcode 的
+//!   `Highest` 才是 ISO H 级（version.go:19-31）；本 crate 用 `EcLevel::Q` 对齐 Go 实际行为。
+//! - **矩阵级 parity**：模块矩阵与 go-qrcode（主仓 go.mod 同版本）金样 8/9 逐模块一致
+//!   （`tests/qr_golden.json`，9 URL × 5 尺寸），余 1 条为版本分歧（见下条）；PNG 字节不
+//!   跨库逐字节对齐——Go 是 2 色调色板 + BestCompression + 逐像素 floor 映射，这里是
+//!   Luma + image 默认压缩 + Nearest 重采样（lead 裁决接受，与 M2c「编码产物不逐字节对齐」同口径）。
+//! - **长混合内容版本分歧**：长混合字母数字内容两库分段优化器不同，可能选不同 QR 版本
+//!   （模块数不同，如 529 字符混合样 Go v22 / Rust v24）；**解码载荷相同**，由 rqrr
+//!   解码测试验证（lead 裁决 (a)）；同 URL / 同容错级 / 同尺寸语义的矩阵级 parity 口径不变。
+//! - **空 URL 不是错误**：两库都接受（version 1）；超出 version 40 Q 级容量才报
+//!   [`Error::QrEncode`]。
+//!
 //! # 依赖边界
 //! 只用 workspace 已锁定并已在本 crate 依赖图里的 crate（`reqwest` / `tokio` / `base64` /
 //! `thiserror` / `rustls` / `tracing`）。M2c 起新增 `image`（workspace 早已声明，此前未入图）——
 //! 这是 M2c 唯一的新依赖边。M2d 不新增依赖：silk 走 `std::process` + `std::env`。P7 的图床
 //! 签名同样不新增依赖：COS 的 HMAC-SHA1 与 QQ频道的 MD5 在 [`hosting`] 内按 RFC 实现。
+//! P56-T2 新增 `qrcode`（workspace 已声明；crate 级补隐式 `image` feature——workspace 行的
+//! `pic` 是空 feature，不出 image 渲染）：其对 image 的依赖是 default-features=false 的 0.25，
+//! 与 workspace 统一为单版本 0.25.10（cargo tree 核实）。`rqrr` 仅 dev-dep（解码等价验证），
+//! image 依赖同样统一到 0.25.10。
 //!
 //! # 未做项（留给 M2e+）
 //! - silk 编解码器的**内嵌二进制**（`silk/exec/` 的 8 个平台产物）：M2d 只调用外部 `ffmpeg` /
@@ -133,8 +181,6 @@
 //! - Bilibili 的分片 / 大文件上传（Go 也只有单请求 `imagehosting/bilibili.go`）。
 //! - 视频处理（抽帧 / 转码 / 体积压缩）。
 //! - 上传到 QQ（`/v2/.../files` 的 `file_data` / 分片上传）——由 `gensokyo-qq` + actions 负责。
-//! - QR 码生成。
-//! - 下载路径的 SSRF 防护、重定向次数限制、DNS 私网拦截（短签名外链直链解析已有，见 [`redirect`]）。
 
 pub mod compress;
 pub mod data_uri;
@@ -143,6 +189,7 @@ pub mod fetch;
 pub mod hosting;
 pub mod image;
 pub mod oss;
+pub mod qr;
 pub mod redirect;
 pub mod silk;
 pub mod sniff;
@@ -168,6 +215,7 @@ pub use image::image_size;
 pub use oss::{
     AliyunOssConfig, BaiduBosConfig, OssConfig, OssKind, TencentCosConfig, upload as oss_upload,
 };
+pub use qr::qr_png_base64;
 pub use redirect::{
     LazyHttpProbe, ProbeResponse, RedirectProbe, is_short_lived_image_url, resolve_redirect,
 };

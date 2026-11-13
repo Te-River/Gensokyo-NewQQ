@@ -20,6 +20,11 @@
 //! # 残余风险
 //! 判定用的是解析结果，真正建连时 `reqwest` 会再解析一次 DNS，理论上存在 rebinding 窗口；
 //! Go 的实现同样如此，这是与 Go 一致的已知边界。
+//!
+//! # 共用
+//! 逐跳判定（`target_allowed`）与跳数上限（`MAX_REDIRECTS`）同时被通用下载路径
+//! （`fetch::HttpTransport`，P56）复用：守卫只有这一处实现。下载路径与 Go 的差异
+//! （5 跳 vs 10 跳、reply_helpers 缺口收紧等）登记在 crate 级文档的「P56」节。
 
 use std::net::{IpAddr, ToSocketAddrs};
 use std::sync::OnceLock;
@@ -36,7 +41,8 @@ use crate::hosting::transport::USER_AGENT;
 const SHORT_LIVED_HOST_SUFFIXES: &[&str] = &["chatglm.cn"];
 
 /// 重定向跳数上限（不含首跳，对齐 Go `resolveMaxHops`）。
-const MAX_REDIRECTS: usize = 5;
+/// 通用下载路径（`fetch::HttpTransport`）共用同一上限。
+pub(crate) const MAX_REDIRECTS: usize = 5;
 
 /// 整条解析链的总超时（Go `resolveTimeout` 是 10s，这里按 P25 口径收紧到 5s）。
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -218,7 +224,8 @@ fn parse_target(raw: &str) -> Option<Url> {
 }
 
 /// 单跳目标是否允许访问：协议、host 与 SSRF 判定（域名先解析再逐个 IP 判）。
-async fn target_allowed(probe: &dyn RedirectProbe, url: &Url) -> bool {
+/// 通用下载路径（`fetch::HttpTransport`）逐跳复用本判定。
+pub(crate) async fn target_allowed(probe: &dyn RedirectProbe, url: &Url) -> bool {
     if !matches!(url.scheme(), "http" | "https") {
         return false;
     }
@@ -273,6 +280,7 @@ pub(crate) mod fixtures {
         calls: Mutex<Vec<String>>,
         responses: Mutex<HashMap<String, ProbeResponse>>,
         hosts: Mutex<HashMap<String, Vec<IpAddr>>>,
+        failures: Mutex<Vec<String>>,
     }
 
     impl FakeProbe {
@@ -303,6 +311,12 @@ pub(crate) mod fixtures {
             self
         }
 
+        /// 预置 `host` 解析失败（SSRF 口径：解析失败即拒绝）。
+        pub(crate) fn fail_resolve(self, host: &str) -> Self {
+            self.failures.lock().unwrap().push(host.to_owned());
+            self
+        }
+
         pub(crate) fn calls(&self) -> Vec<String> {
             self.calls.lock().unwrap().clone()
         }
@@ -319,6 +333,9 @@ pub(crate) mod fixtures {
 
         fn resolve(&self, host: String, _port: u16) -> BoxFuture<'_, Result<Vec<IpAddr>>> {
             Box::pin(async move {
+                if self.failures.lock().unwrap().iter().any(|failed| failed == &host) {
+                    return Err(Error::Transport(format!("DNS 解析失败（预置）: {host}")));
+                }
                 Ok(self
                     .hosts
                     .lock()

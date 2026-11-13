@@ -29,13 +29,24 @@ base64.workspace = true
 tracing.workspace = true
 # image：M2c 图片压缩（JPEG / PNG / WebP 解码，JPEG / PNG 编码）；M2b 之前只用文件头探测
 image.workspace = true
+# qrcode：P56-T2 QR 生成（EcLevel::H + quiet_zone(false)）。
+# workspace 行只带 pic（空 feature）；render::<image::Luma> 需要隐式 image feature，
+# 在 crate 级补上（qrcode 对 image 是 default-features=false 的 0.25，与 workspace 单版本统一）。
+qrcode = { workspace = true, features = ["image"] }
 # sha2：百度云 BOS 的 bce-auth-v1 签名要 HMAC-SHA256；workspace 已有（gensokyo-storage 同用）
 sha2.workspace = true
 # time：内置云 OSS 的 Date / x-bce-date 头格式化（RFC 1123 / ISO 8601 UTC）
 time.workspace = true
 
 [dev-dependencies]
+# 测试进程装 ring CryptoProvider（ssrf_tests 构建 reqwest 客户端需要，纯 HTTP 也要）；
+# 生产由二进制 startup 装（同 storage / runtime 的 dev-dep 口径）
+rustls = { workspace = true, features = ["ring"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# QR Go 矩阵金样（tests/qr_golden.json）解析
+serde_json.workspace = true
+# QR 解码等价验证（P56-T2 lead 裁决 (a)）：长混合内容两库版本分歧时以解码载荷为准
+rqrr = "0.11.0"
 
 [lints]
 workspace = true

@@ -81,6 +81,7 @@ webui/dist/js/*
 
 # cargo build cache
 target/
+target-*/
 
 # xtask 自动引导的交叉工具链缓存（zig / cargo-zigbuild，见 docs/rust-build.md）
 .tools/

@@ -38,6 +38,13 @@ pub enum Error {
     /// 单次请求总超时（含响应体读取）。
     #[error("请求超时: {0:?}")]
     Timeout(Duration),
+    /// SSRF 守卫拒绝：目标命中私网 / 回环 / 链路本地 / 未指定 / ULA，
+    /// 域名解析失败，或协议不在 http(s) 白名单（口径与 redirect 逐跳校验共用）。
+    #[error("SSRF 守卫拒绝: {0}")]
+    SsrfBlocked(String),
+    /// 重定向次数超过上限（手动逐跳跟随，上限与 redirect 共用）。
+    #[error("重定向次数超过上限: {0}")]
+    TooManyRedirects(usize),
     /// 图床后端缺少必需配置（对齐 Go 各后端开头的「未配置」检查）。
     #[error("图床配置不完整: {0}")]
     HostingConfig(String),
@@ -56,6 +63,9 @@ pub enum Error {
     /// 图片编码失败。
     #[error("图片编码失败: {0}")]
     ImageEncode(String),
+    /// QR 码生成失败：内容超出编码容量，或尺寸参数超出可表示范围。
+    #[error("二维码生成失败: {0}")]
+    QrEncode(String),
     /// 压缩参数非法（如质量阶梯为空）。
     #[error("压缩参数非法: {0}")]
     InvalidCompressOptions(String),

@@ -16,6 +16,8 @@
 //!   keyboard / card / stream / input_notify 的载荷类型与「与 Go 的字段差异」见模块文档。
 //! - [`registry`]：`Handler` trait + 显式注册表、别名与 [`registry::KNOWN_ACTIONS`]。
 //!   handler 返回 [`registry::HandlerFuture`]，runtime 直接 await（无 `spawn_blocking`）。
+//! - [`xurls`]：xurls v1.1.0 `Relaxed` 正则手移植（[`xurls::find_urls`]），
+//!   leftmost-longest 模拟 + Go 金样逐 span 断言。
 //!
 //! # 与 Go 的口径差异
 //! - **出站转义只转 `,` `]` `&`**（[`cqcode::escape`]），不转 `[`——跟随 `handlers/cqcode.go`。
@@ -49,6 +51,7 @@ pub mod event;
 pub mod outbound;
 pub mod registry;
 pub mod segment;
+pub mod xurls;
 
 pub use action::{ActionRequest, ActionResponse, Echo, Status};
 pub use event::Event;

@@ -1,0 +1,1321 @@
+[
+  {
+    "text": "http://example.com",
+    "spans": [
+      [
+        0,
+        18
+      ]
+    ]
+  },
+  {
+    "text": "https://example.com/path",
+    "spans": [
+      [
+        0,
+        24
+      ]
+    ]
+  },
+  {
+    "text": "ftp://files.example.com/pub",
+    "spans": [
+      [
+        0,
+        27
+      ]
+    ]
+  },
+  {
+    "text": "HTTP://EXAMPLE.COM/PATH",
+    "spans": [
+      [
+        0,
+        23
+      ]
+    ]
+  },
+  {
+    "text": "hTtPs://Example.Com/Mixed",
+    "spans": [
+      [
+        0,
+        25
+      ]
+    ]
+  },
+  {
+    "text": "访问 https://www.example.com 获取详情",
+    "spans": [
+      [
+        7,
+        30
+      ]
+    ]
+  },
+  {
+    "text": "http://example.com.",
+    "spans": [
+      [
+        0,
+        18
+      ]
+    ]
+  },
+  {
+    "text": "http://example.com,",
+    "spans": [
+      [
+        0,
+        18
+      ]
+    ]
+  },
+  {
+    "text": "http://example.com;",
+    "spans": [
+      [
+        0,
+        18
+      ]
+    ]
+  },
+  {
+    "text": "http://example.com:",
+    "spans": [
+      [
+        0,
+        18
+      ]
+    ]
+  },
+  {
+    "text": "http://example.com!",
+    "spans": [
+      [
+        0,
+        18
+      ]
+    ]
+  },
+  {
+    "text": "http://example.com?",
+    "spans": [
+      [
+        0,
+        18
+      ]
+    ]
+  },
+  {
+    "text": "http://example.com'",
+    "spans": [
+      [
+        0,
+        18
+      ]
+    ]
+  },
+  {
+    "text": "(http://example.com)",
+    "spans": [
+      [
+        1,
+        19
+      ]
+    ]
+  },
+  {
+    "text": "http://example.com/a(b)c",
+    "spans": [
+      [
+        0,
+        24
+      ]
+    ]
+  },
+  {
+    "text": "http://example.com/a(b(c)d)e",
+    "spans": [
+      [
+        0,
+        28
+      ]
+    ]
+  },
+  {
+    "text": "http://example.com/wiki/Foo_(bar_(baz))",
+    "spans": [
+      [
+        0,
+        39
+      ]
+    ]
+  },
+  {
+    "text": "http://example.com/a[1][2]",
+    "spans": [
+      [
+        0,
+        26
+      ]
+    ]
+  },
+  {
+    "text": "http://example.com/a{b{c}d}",
+    "spans": [
+      [
+        0,
+        27
+      ]
+    ]
+  },
+  {
+    "text": "http://example.com/(a(b)c",
+    "spans": [
+      [
+        0,
+        19
+      ]
+    ]
+  },
+  {
+    "text": "http://example.com/a)b",
+    "spans": [
+      [
+        0,
+        20
+      ]
+    ]
+  },
+  {
+    "text": "http://example.com/path?query=1\u0026x=2#frag",
+    "spans": [
+      [
+        0,
+        40
+      ]
+    ]
+  },
+  {
+    "text": "http://example.com/a@b,c.d:e;f'g?h!i|j",
+    "spans": [
+      [
+        0,
+        38
+      ]
+    ]
+  },
+  {
+    "text": "http://example.com/price$5€3",
+    "spans": [
+      [
+        0,
+        30
+      ]
+    ]
+  },
+  {
+    "text": "http://example.com/a🎉b",
+    "spans": [
+      [
+        0,
+        25
+      ]
+    ]
+  },
+  {
+    "text": "http://example.com/路径/中文",
+    "spans": [
+      [
+        0,
+        32
+      ]
+    ]
+  },
+  {
+    "text": "http://例子.测试",
+    "spans": [
+      [
+        0,
+        20
+      ]
+    ]
+  },
+  {
+    "text": "http://例子.xn--0zwm56d",
+    "spans": [
+      [
+        0,
+        25
+      ]
+    ]
+  },
+  {
+    "text": "https://example.com/path/",
+    "spans": [
+      [
+        0,
+        25
+      ]
+    ]
+  },
+  {
+    "text": "https://example.com//",
+    "spans": [
+      [
+        0,
+        21
+      ]
+    ]
+  },
+  {
+    "text": "https://example.com/.",
+    "spans": [
+      [
+        0,
+        20
+      ]
+    ]
+  },
+  {
+    "text": "https://example.com/..",
+    "spans": [
+      [
+        0,
+        20
+      ]
+    ]
+  },
+  {
+    "text": "https://example.com/a.",
+    "spans": [
+      [
+        0,
+        21
+      ]
+    ]
+  },
+  {
+    "text": "https://example.com/a..",
+    "spans": [
+      [
+        0,
+        21
+      ]
+    ]
+  },
+  {
+    "text": "https://example.com/a!",
+    "spans": [
+      [
+        0,
+        21
+      ]
+    ]
+  },
+  {
+    "text": "https://example.com/a?",
+    "spans": [
+      [
+        0,
+        21
+      ]
+    ]
+  },
+  {
+    "text": "https://example.com/a'",
+    "spans": [
+      [
+        0,
+        21
+      ]
+    ]
+  },
+  {
+    "text": "https://example.com/a,b",
+    "spans": [
+      [
+        0,
+        23
+      ]
+    ]
+  },
+  {
+    "text": "https://example.com/a;b",
+    "spans": [
+      [
+        0,
+        23
+      ]
+    ]
+  },
+  {
+    "text": "https://example.com/a:b",
+    "spans": [
+      [
+        0,
+        23
+      ]
+    ]
+  },
+  {
+    "text": "example.com",
+    "spans": [
+      [
+        0,
+        11
+      ]
+    ]
+  },
+  {
+    "text": "www.example.co.uk",
+    "spans": [
+      [
+        0,
+        17
+      ]
+    ]
+  },
+  {
+    "text": "a.co",
+    "spans": [
+      [
+        0,
+        4
+      ]
+    ]
+  },
+  {
+    "text": "a.community",
+    "spans": [
+      [
+        0,
+        11
+      ]
+    ]
+  },
+  {
+    "text": "a.com.au",
+    "spans": [
+      [
+        0,
+        8
+      ]
+    ]
+  },
+  {
+    "text": "example.invalidtld",
+    "spans": []
+  },
+  {
+    "text": "foo.zzzzz",
+    "spans": []
+  },
+  {
+    "text": "site.xn--p1ai",
+    "spans": [
+      [
+        0,
+        13
+      ]
+    ]
+  },
+  {
+    "text": "例子.com",
+    "spans": [
+      [
+        0,
+        10
+      ]
+    ]
+  },
+  {
+    "text": "example.com.",
+    "spans": [
+      [
+        0,
+        11
+      ]
+    ]
+  },
+  {
+    "text": "example.com,",
+    "spans": [
+      [
+        0,
+        11
+      ]
+    ]
+  },
+  {
+    "text": "example.com!",
+    "spans": [
+      [
+        0,
+        11
+      ]
+    ]
+  },
+  {
+    "text": "example.com?",
+    "spans": [
+      [
+        0,
+        11
+      ]
+    ]
+  },
+  {
+    "text": "看 example.com/path 这个",
+    "spans": [
+      [
+        4,
+        20
+      ]
+    ]
+  },
+  {
+    "text": "example.com:8080",
+    "spans": [
+      [
+        0,
+        16
+      ]
+    ]
+  },
+  {
+    "text": "example.com:",
+    "spans": [
+      [
+        0,
+        12
+      ]
+    ]
+  },
+  {
+    "text": "example.com:abc",
+    "spans": [
+      [
+        0,
+        12
+      ]
+    ]
+  },
+  {
+    "text": "example.com:8080/path?q=1",
+    "spans": [
+      [
+        0,
+        25
+      ]
+    ]
+  },
+  {
+    "text": "sub.domain.example.org",
+    "spans": [
+      [
+        0,
+        22
+      ]
+    ]
+  },
+  {
+    "text": "a.b.c.d.e.com",
+    "spans": [
+      [
+        0,
+        13
+      ]
+    ]
+  },
+  {
+    "text": "example.com/path(with)paren",
+    "spans": [
+      [
+        0,
+        27
+      ]
+    ]
+  },
+  {
+    "text": "（example.com）",
+    "spans": [
+      [
+        3,
+        14
+      ]
+    ]
+  },
+  {
+    "text": "example.com（中文）",
+    "spans": [
+      [
+        0,
+        11
+      ]
+    ]
+  },
+  {
+    "text": "【example.com】",
+    "spans": [
+      [
+        3,
+        14
+      ]
+    ]
+  },
+  {
+    "text": "example.com/a【b】",
+    "spans": [
+      [
+        0,
+        13
+      ]
+    ]
+  },
+  {
+    "text": "1.2.3.4",
+    "spans": [
+      [
+        0,
+        7
+      ]
+    ]
+  },
+  {
+    "text": "255.255.255.255",
+    "spans": [
+      [
+        0,
+        15
+      ]
+    ]
+  },
+  {
+    "text": "0.0.0.0",
+    "spans": [
+      [
+        0,
+        7
+      ]
+    ]
+  },
+  {
+    "text": "192.168.1.1:8080",
+    "spans": [
+      [
+        0,
+        16
+      ]
+    ]
+  },
+  {
+    "text": "http://192.168.1.1:8080/x",
+    "spans": [
+      [
+        0,
+        25
+      ]
+    ]
+  },
+  {
+    "text": "256.1.1.1",
+    "spans": []
+  },
+  {
+    "text": "999.999.999.999",
+    "spans": []
+  },
+  {
+    "text": "1.2.3",
+    "spans": []
+  },
+  {
+    "text": "1.2.3.4.5",
+    "spans": [
+      [
+        0,
+        7
+      ]
+    ]
+  },
+  {
+    "text": "01.02.03.04",
+    "spans": []
+  },
+  {
+    "text": "x1.2.3.4",
+    "spans": []
+  },
+  {
+    "text": "1.2.3.4x",
+    "spans": []
+  },
+  {
+    "text": "1.2.3.4/path",
+    "spans": [
+      [
+        0,
+        12
+      ]
+    ]
+  },
+  {
+    "text": "1.2.3.4.",
+    "spans": [
+      [
+        0,
+        7
+      ]
+    ]
+  },
+  {
+    "text": "前缀10.0.0.1后缀",
+    "spans": [
+      [
+        6,
+        14
+      ]
+    ]
+  },
+  {
+    "text": "::1",
+    "spans": [
+      [
+        0,
+        3
+      ]
+    ]
+  },
+  {
+    "text": "2001:db8::1",
+    "spans": [
+      [
+        0,
+        11
+      ]
+    ]
+  },
+  {
+    "text": "2001:0db8:85a3:0000:0000:8a2e:0370:7334",
+    "spans": [
+      [
+        0,
+        39
+      ]
+    ]
+  },
+  {
+    "text": "::ffff:192.168.1.1",
+    "spans": [
+      [
+        0,
+        18
+      ]
+    ]
+  },
+  {
+    "text": "fe80::",
+    "spans": []
+  },
+  {
+    "text": "1:2:3:4:5:6:7:8",
+    "spans": [
+      [
+        0,
+        15
+      ]
+    ]
+  },
+  {
+    "text": "1:2:3:4:5:6:7:8:9",
+    "spans": [
+      [
+        0,
+        17
+      ]
+    ]
+  },
+  {
+    "text": "1:2",
+    "spans": []
+  },
+  {
+    "text": "1:2:3",
+    "spans": []
+  },
+  {
+    "text": "::",
+    "spans": []
+  },
+  {
+    "text": "1::",
+    "spans": []
+  },
+  {
+    "text": "http://[::1]:8080/x",
+    "spans": [
+      [
+        0,
+        19
+      ]
+    ]
+  },
+  {
+    "text": "[2001:db8::1]",
+    "spans": [
+      [
+        1,
+        12
+      ]
+    ]
+  },
+  {
+    "text": "::ffff:0:0",
+    "spans": [
+      [
+        0,
+        10
+      ]
+    ]
+  },
+  {
+    "text": "abcd:ef01:2345:6789:abcd:ef01:2345:6789",
+    "spans": [
+      [
+        0,
+        39
+      ]
+    ]
+  },
+  {
+    "text": "2001:db8::1/path",
+    "spans": [
+      [
+        0,
+        16
+      ]
+    ]
+  },
+  {
+    "text": "fe80::1%eth0",
+    "spans": [
+      [
+        0,
+        7
+      ]
+    ]
+  },
+  {
+    "text": "mailto:user@example.com",
+    "spans": [
+      [
+        0,
+        23
+      ]
+    ]
+  },
+  {
+    "text": "MAILTO:USER@EXAMPLE.COM",
+    "spans": [
+      [
+        0,
+        23
+      ]
+    ]
+  },
+  {
+    "text": "MailTo:mixed@example.com",
+    "spans": [
+      [
+        0,
+        24
+      ]
+    ]
+  },
+  {
+    "text": "mailto:用户@example.com",
+    "spans": [
+      [
+        0,
+        25
+      ]
+    ]
+  },
+  {
+    "text": "mailto:",
+    "spans": []
+  },
+  {
+    "text": "bitcoin:1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
+    "spans": [
+      [
+        0,
+        42
+      ]
+    ]
+  },
+  {
+    "text": "BITCOIN:1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
+    "spans": [
+      [
+        0,
+        42
+      ]
+    ]
+  },
+  {
+    "text": "magnet:?xt=urn:btih:0123456789abcdef\u0026dn=test",
+    "spans": [
+      [
+        0,
+        44
+      ]
+    ]
+  },
+  {
+    "text": "sms:+1234567890",
+    "spans": [
+      [
+        0,
+        15
+      ]
+    ]
+  },
+  {
+    "text": "tel:+86-138-0013-8000",
+    "spans": [
+      [
+        0,
+        21
+      ]
+    ]
+  },
+  {
+    "text": "xmpp:node@example.com",
+    "spans": [
+      [
+        0,
+        21
+      ]
+    ]
+  },
+  {
+    "text": "file:///C:/Users/test/file.txt",
+    "spans": [
+      [
+        0,
+        30
+      ]
+    ]
+  },
+  {
+    "text": "mailto:a@b.com?subject=hi\u0026body=yo",
+    "spans": [
+      [
+        0,
+        33
+      ]
+    ]
+  },
+  {
+    "text": "notascheme://example.com",
+    "spans": [
+      [
+        0,
+        24
+      ]
+    ]
+  },
+  {
+    "text": "1abc://example.com",
+    "spans": [
+      [
+        7,
+        18
+      ]
+    ]
+  },
+  {
+    "text": "abc+def://example.com",
+    "spans": [
+      [
+        0,
+        21
+      ]
+    ]
+  },
+  {
+    "text": "a.b-c://example.com",
+    "spans": [
+      [
+        0,
+        19
+      ]
+    ]
+  },
+  {
+    "text": "http://",
+    "spans": []
+  },
+  {
+    "text": "http:///",
+    "spans": [
+      [
+        0,
+        8
+      ]
+    ]
+  },
+  {
+    "text": "http://a",
+    "spans": [
+      [
+        0,
+        8
+      ]
+    ]
+  },
+  {
+    "text": "://example.com",
+    "spans": [
+      [
+        3,
+        14
+      ]
+    ]
+  },
+  {
+    "text": "[CQ:at,qq=123456]看看 http://t.cn/abc",
+    "spans": [
+      [
+        24,
+        39
+      ]
+    ]
+  },
+  {
+    "text": "[CQ:image,file=http://img.example.com/a.png]",
+    "spans": [
+      [
+        15,
+        43
+      ]
+    ]
+  },
+  {
+    "text": "[CQ:share,url=https://example.com/x,title=标题]",
+    "spans": [
+      [
+        14,
+        48
+      ]
+    ]
+  },
+  {
+    "text": "qq=123456789",
+    "spans": []
+  },
+  {
+    "text": "1234567890",
+    "spans": []
+  },
+  {
+    "text": "[CQ:face,id=123]http://example.com",
+    "spans": [
+      [
+        16,
+        34
+      ]
+    ]
+  },
+  {
+    "text": "https://example.com/a?x=1[CQ:at,qq=1]",
+    "spans": [
+      [
+        0,
+        37
+      ]
+    ]
+  },
+  {
+    "text": "文本http://example.com文本",
+    "spans": [
+      [
+        6,
+        30
+      ]
+    ]
+  },
+  {
+    "text": "链接https://example.com/结束",
+    "spans": [
+      [
+        6,
+        32
+      ]
+    ]
+  },
+  {
+    "text": "http://a.com 和 https://b.org/path",
+    "spans": [
+      [
+        0,
+        12
+      ],
+      [
+        17,
+        35
+      ]
+    ]
+  },
+  {
+    "text": "a.com b.com c.com",
+    "spans": [
+      [
+        0,
+        5
+      ],
+      [
+        6,
+        11
+      ],
+      [
+        12,
+        17
+      ]
+    ]
+  },
+  {
+    "text": "mailto:x@y.com 或 tel:12345 或 example.com",
+    "spans": [
+      [
+        0,
+        14
+      ],
+      [
+        19,
+        28
+      ],
+      [
+        33,
+        44
+      ]
+    ]
+  },
+  {
+    "text": "http://a.com/http://b.com",
+    "spans": [
+      [
+        0,
+        25
+      ]
+    ]
+  },
+  {
+    "text": "",
+    "spans": []
+  },
+  {
+    "text": "纯文本没有链接",
+    "spans": []
+  },
+  {
+    "text": "。。。！！！",
+    "spans": []
+  },
+  {
+    "text": "http://a.com\nhttps://b.com",
+    "spans": [
+      [
+        0,
+        12
+      ],
+      [
+        13,
+        26
+      ]
+    ]
+  },
+  {
+    "text": "\thttps://tab.example.com\t",
+    "spans": [
+      [
+        1,
+        24
+      ]
+    ]
+  },
+  {
+    "text": "https://example.com/a b",
+    "spans": [
+      [
+        0,
+        21
+      ]
+    ]
+  },
+  {
+    "text": "https://例え.テスト",
+    "spans": [
+      [
+        0,
+        24
+      ]
+    ]
+  },
+  {
+    "text": "https://example.com:0",
+    "spans": [
+      [
+        0,
+        21
+      ]
+    ]
+  },
+  {
+    "text": "https://example.com:99999",
+    "spans": [
+      [
+        0,
+        25
+      ]
+    ]
+  },
+  {
+    "text": "a.com:65536",
+    "spans": [
+      [
+        0,
+        11
+      ]
+    ]
+  },
+  {
+    "text": "https://a.com/(a)(b)",
+    "spans": [
+      [
+        0,
+        20
+      ]
+    ]
+  },
+  {
+    "text": "https://a.com/[a][b]",
+    "spans": [
+      [
+        0,
+        20
+      ]
+    ]
+  },
+  {
+    "text": "https://a.com/{a}{b}",
+    "spans": [
+      [
+        0,
+        20
+      ]
+    ]
+  },
+  {
+    "text": "https://a.com/(a[b{c}d]e)",
+    "spans": [
+      [
+        0,
+        14
+      ]
+    ]
+  },
+  {
+    "text": "https://a.com/((((a))))",
+    "spans": [
+      [
+        0,
+        14
+      ]
+    ]
+  },
+  {
+    "text": "https://a.com/a(b)c(d)e",
+    "spans": [
+      [
+        0,
+        23
+      ]
+    ]
+  },
+  {
+    "text": "https://a.com/)",
+    "spans": [
+      [
+        0,
+        14
+      ]
+    ]
+  },
+  {
+    "text": "https://a.com/(",
+    "spans": [
+      [
+        0,
+        14
+      ]
+    ]
+  },
+  {
+    "text": "https://a.com/a(b",
+    "spans": [
+      [
+        0,
+        15
+      ]
+    ]
+  },
+  {
+    "text": "https://a.com/x(y)z(w)v",
+    "spans": [
+      [
+        0,
+        23
+      ]
+    ]
+  },
+  {
+    "text": "https://a.com/αβγ.δε",
+    "spans": [
+      [
+        0,
+        25
+      ]
+    ]
+  },
+  {
+    "text": "https://a.com/100%25",
+    "spans": [
+      [
+        0,
+        20
+      ]
+    ]
+  },
+  {
+    "text": "https://a.com/a~b*c=d\u0026e_f-g+h",
+    "spans": [
+      [
+        0,
+        29
+      ]
+    ]
+  },
+  {
+    "text": "HTTPS://A.COM:443/B?C=D#E",
+    "spans": [
+      [
+        0,
+        25
+      ]
+    ]
+  }
+]

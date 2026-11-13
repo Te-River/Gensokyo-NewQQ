@@ -46,7 +46,9 @@
 | P1 | messagequeue（发送队列/限速） | messagequeue/queue.go:96-122 | queue.rs（令牌桶+重试，限速可注入；Go 队列死代码） | **已对齐（P10/P10b）** |
 | P1 | botstats + Prometheus `/metrics` | botstats/botstats.go；main.go:522,1140-1175 | builtin.rs 6 指标 + `/metrics` + redb 统计 + received 打点（P12/P12b） | **已对齐** |
 | P2 | unioncache / url 短链 / sys 全量 | unioncache/*；url/shorturl.go；sys/* | union_cache.rs 1:1 双向缓存（P38 起入站写 + markdown @ 反查已接，P42 补齐 `union_id` 入站切换与 inline search 读点）；short_url.rs redb 库 + 校验/301/恶意判定/自指 token 规则 + `/url` 两条路由（P36）；sys executable_name/SystemInfo → WebUI `/api/status` 扩展字段（P36；重启类不可移植，已文档化） | **已对齐（P30 库 / P36 接线 / P38 unioncache 读写接线 / P42 入站切换与 inline search）** |
-| P2 | 视频/QR/SSRF 防护 | images/*；sys/* | media/lib.rs:108-118 未做清单 | 缺失 |
+| P2 | 视频处理（抽帧/转码/压缩） | silk/silk.go:100-134 | Go 死代码且函数自身破损（EncodeMP4/ExtractCover 全仓零调用者、cmd 从未执行）；视频发送链（URL 直传/base64 上传 FileType=2）Rust 已覆盖（outbound.rs videos plan / qq dto FileUpload / deferred Media::Video） | **关闭（Go 死代码不可移植，P56 侦察判定）** | — |
+| P2 | QR + 出站 URL 转换管线 | message_parser.go:1765-1776；qrcode_real.go | config 字段/访问器已有但零消费方；整条管线（URL 扫描/短链分支/QR 发图）未接线（P56-② 设计中） | 缺失 |
+| P2 | SSRF 防护（通用下载/出站入口） | send_group_msg.go:1048-1070；selffetch.go:115-222 | core/net + media/redirect 已更严并接 hosting；通用 fetch/出站 URL 入口补齐中（P56-①）；short_url 弱口径刻意对齐 Go | 部分 |
 | — | idmap 核心/echo/config/热重载 | 见审计表 | 见审计表 | **已对齐**（Rust 多 `enable_at_everyone_limit` 1 键） |
 | — | Settings 字段/accessor/restart 34 项 | structs.go 184 键；config.go:38-48 | 185 键（多 1）/ 1:1 accessor / diff.rs 34 项 | **已对齐** |
 | — | 配置自愈 ensureConfigComplete | config.go:350 | config/complete.rs 文本补键回写（幂等/已有行零字节改动/块内注释带回/tmp+rename）；`startup.rs::load_config` 在配置载入前调用（P36，补键即生效不重启） | **已实现（P30）/已接线（P36）** |

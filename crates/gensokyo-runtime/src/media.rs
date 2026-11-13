@@ -18,7 +18,9 @@
 //!   [`crate::deferred`] 改走分片上传（`upload_prepare` → `upload_part_finish` → `files`）。
 //! - 图片压缩 / 语音转码只在 [`MediaRuntime::prepare_image`] / [`MediaRuntime::prepare_record`]
 //!   里做，条件由调用方按 Go 的口径判定（`image_sizelimit` / 本地或 base64 来源）。
-//! - 不做 SSRF / 私网拦截，与 `gensokyo-media` 的既有边界一致。
+//! - SSRF / 私网拦截由 `gensokyo-media` 的下载出口（`HttpTransport`）逐跳执行：
+//!   私网 / 回环 / 链路本地 / 未指定 / ULA 与解析失败一律拒绝（口径与 Go 差异见该 crate
+//!   文档的「P56」节）。
 
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -213,6 +215,7 @@ fn map_fetch_error(err: gensokyo_media::Error, local: bool) -> Error {
         | MediaError::Base64(_)
         | MediaError::DataUri(_)
         | MediaError::UnsupportedScheme(_)
+        | MediaError::SsrfBlocked(_)
         | MediaError::TooLarge { .. }
         | MediaError::UnsupportedImageFormat(_)
         | MediaError::InvalidCompressOptions(_) => Error::Protocol(format!("媒体不可用: {err}")),
@@ -304,6 +307,25 @@ mod tests {
                     body: Vec::new(),
                 })
             })
+        }
+    }
+
+    #[tokio::test]
+    async fn url_media_pointing_at_private_network_is_rejected_at_entry() {
+        // 测试进程先装 provider（生产由二进制 startup 装）：否则客户端构建失败，断言方向反
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let runtime = MediaRuntime::default();
+        for url in [
+            "http://127.0.0.1/a.png",
+            "http://10.0.0.1/a.png",
+            "http://192.168.1.1/a.png",
+            "http://[::1]/a.png",
+        ] {
+            let err = runtime
+                .fetch(&MediaRef::Url(url.to_owned()))
+                .await
+                .expect_err("私网 URL 必须在下载前拒绝");
+            assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
         }
     }
 
