@@ -21,6 +21,8 @@ tracing.workspace = true
 tonic.workspace = true
 tonic-prost.workspace = true
 prost.workspace = true
+# lotus gRPC 客户端 RemoteBridge 专职桥线程（P55-P1）：独立 current_thread runtime + 超时
+tokio = { workspace = true, features = ["rt", "net", "time"] }
 
 [build-dependencies]
 tonic-prost-build.workspace = true

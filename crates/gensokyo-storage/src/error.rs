@@ -36,6 +36,9 @@ pub enum StorageError {
     /// redb 原生错误（打开库、事务、表、提交；含底层 IO 错误）。
     #[error("redb 错误: {0}")]
     Redb(#[from] redb::Error),
+    /// 远程 idmap 桥失败：gRPC Status、RPC/等待超时或桥线程死亡（`idmap/remote.rs`）。
+    #[error("远程 idmap 错误: {0}")]
+    Remote(String),
 }
 
 impl StorageError {

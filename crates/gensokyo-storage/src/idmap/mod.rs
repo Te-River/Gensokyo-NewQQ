@@ -4,6 +4,7 @@
 
 pub(crate) mod encoding;
 pub mod grpc;
+pub mod remote;
 
 mod batch;
 mod lookup_cache;

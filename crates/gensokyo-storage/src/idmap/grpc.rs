@@ -701,12 +701,12 @@ fn status(err: StorageError) -> Status {
         StorageError::AlreadyExists(_) => Status::already_exists(message),
         StorageError::Corrupt(_) => Status::invalid_argument(message),
         StorageError::RetriesExhausted(_) => Status::resource_exhausted(message),
-        StorageError::Redb(_) => Status::internal(message),
+        StorageError::Redb(_) | StorageError::Remote(_) => Status::internal(message),
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::error::Error;
     use std::sync::Arc;
 
@@ -719,12 +719,14 @@ mod tests {
     use crate::idmap::IdMapStore;
 
     /// 只监听 `127.0.0.1:0` 的测试实例；drop 时 abort 服务端任务并删临时目录。
+    /// `pub(crate)`：`idmap/remote.rs` 的桥测试复用同一 Harness 做环回。
     #[derive(Debug)]
-    struct Harness {
-        _dir: tempfile::TempDir,
-        store: Arc<IdMapStore>,
-        client: IdMapClient,
-        server: tokio::task::JoinHandle<()>,
+    pub(crate) struct Harness {
+        pub(crate) _dir: tempfile::TempDir,
+        pub(crate) store: Arc<IdMapStore>,
+        pub(crate) client: IdMapClient,
+        pub(crate) server: tokio::task::JoinHandle<()>,
+        pub(crate) addr: std::net::SocketAddr,
     }
 
     impl Drop for Harness {
@@ -733,7 +735,7 @@ mod tests {
         }
     }
 
-    async fn harness() -> Result<Harness, Box<dyn Error>> {
+    pub(crate) async fn harness() -> Result<Harness, Box<dyn Error>> {
         let dir = tempfile::tempdir()?;
         let store = Arc::new(IdMapStore::open(
             IdMapOptions::new(
@@ -763,6 +765,7 @@ mod tests {
             store,
             client,
             server,
+            addr,
         })
     }
 
