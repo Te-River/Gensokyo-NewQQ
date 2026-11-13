@@ -74,6 +74,8 @@ linux-musl 也不在引导范围（cargo-zigbuild 只路由 linux-gnu；musl 需
 
 ## 迁移到新机器（整仓搬运）
 
+> 完整的换机清单（搬运体积实测数字、新机前提校验命令、门禁模板、验收基线、已知坑、自检脚本）见 [rust-migrate.md](./rust-migrate.md)；本节只留构建链视角的要点。
+
 - **只需拷贝/克隆仓库本身**：`target/`、`target-*/`、`.tools/` 都在 `.gitignore` 里，不必带
   （`target/` 可达数 GB）。走 git 克隆更省：`git clone -b Refactor <repo> && cd <repo>`。
 - 新机前提：装好 rustup（`rust-toolchain.toml` 钉 1.99.1，首次 `cargo` 会自动装工具链）、
