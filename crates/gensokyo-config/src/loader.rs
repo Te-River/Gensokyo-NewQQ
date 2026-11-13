@@ -274,7 +274,9 @@ fn cleanup_duplicate_settings(text: &str) -> Cleanup<'_> {
 /// `bucket` 拍平到与 `cos` 同级，子项静默丢失（Go `config.go:782-784` 同病，本仓有意修正）。
 fn rebuild_structure(lines: &[&str]) -> String {
     // 只认列 0 的 `version:`：缩进的 `version:` 是正文里的嵌套值，不能顶替外壳的版本行。
-    let has_version = lines.iter().any(|line| line.trim_end().starts_with("version:"));
+    let has_version = lines
+        .iter()
+        .any(|line| line.trim_end().starts_with("version:"));
     let mut rebuilt = String::new();
     if !has_version {
         rebuilt.push_str("version: 1\n");
@@ -392,7 +394,8 @@ mod tests {
     /// 两份 `settings:`：截断到第二份之前，首份内容零改动。
     #[test]
     fn duplicate_settings_is_truncated_to_the_first_block() {
-        let text = "version: 1\nsettings:\n  port: \"5700\"\nsettings:\n  port: \"5701\"\n  app_id: 42\n";
+        let text =
+            "version: 1\nsettings:\n  port: \"5700\"\nsettings:\n  port: \"5701\"\n  app_id: 42\n";
         let cleaned = cleanup_duplicate_settings(text);
 
         assert!(cleaned.truncated);
@@ -575,7 +578,8 @@ mod tests {
     /// 截断只认列 0 的 `settings:`：正文里缩进的 `settings:` 是嵌套值，不得把后面整段截掉。
     #[test]
     fn indented_settings_key_does_not_truncate() {
-        let text = "version: 1\nsettings:\n  menu:\n    settings:\n      theme: dark\n  port: \"5700\"\n";
+        let text =
+            "version: 1\nsettings:\n  menu:\n    settings:\n      theme: dark\n  port: \"5700\"\n";
         let cleaned = cleanup_duplicate_settings(text);
 
         assert!(!cleaned.truncated && !cleaned.rebuilt);

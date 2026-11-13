@@ -135,9 +135,9 @@ pub use interaction::{
 };
 pub use media::{GetImageHandler, GetRecordHandler, MediaFileData};
 pub use media_image::{
-    DeleteMediaImageData, DeleteMediaImageHandler, GetMediaImageListHandler, MediaImageListData,
-    MEDIA_REFERENCE_PREFIX, RETCODE_MEDIA_UPSTREAM, UploadMediaImageData, UploadMediaImageHandler,
-    upload_bytes_to_media_store,
+    DeleteMediaImageData, DeleteMediaImageHandler, GetMediaImageListHandler,
+    MEDIA_REFERENCE_PREFIX, MediaImageListData, RETCODE_MEDIA_UPSTREAM, UploadMediaImageData,
+    UploadMediaImageHandler, upload_bytes_to_media_store,
 };
 pub use messages::{DeleteMsgHandler, GetForwardMsgHandler, GetMsgHandler};
 pub use panels::{

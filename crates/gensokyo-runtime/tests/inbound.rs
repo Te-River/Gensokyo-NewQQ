@@ -916,7 +916,12 @@ fn message_type_3_without_ark_data_keeps_ark_placeholder() {
 /// `map[string]interface{}{}`，`arkSegmentData` `handlers/message_parser.go:2437,2445-2447`）。
 #[test]
 fn ark_fields_missing_or_non_object_becomes_empty_object() {
-    let cases: [Option<Value>; 4] = [None, Some(json!(null)), Some(json!("text")), Some(json!([1]))];
+    let cases: [Option<Value>; 4] = [
+        None,
+        Some(json!(null)),
+        Some(json!("text")),
+        Some(json!([1])),
+    ];
     for fields in cases {
         let mut ark = json!({"ark_type": "tuwen", "ark_name": "n", "prompt": "p"});
         if let Some(fields) = fields {
@@ -933,7 +938,10 @@ fn ark_fields_missing_or_non_object_becomes_empty_object() {
         });
         let (segments, _raw) = segments_of_payload(&array_settings(true), &payload);
         let fields_value = &segments[1]["data"]["fields"];
-        assert!(fields_value.is_object(), "fields 应为对象，实得 {fields_value:?}");
+        assert!(
+            fields_value.is_object(),
+            "fields 应为对象，实得 {fields_value:?}"
+        );
         assert_eq!(fields_value, &json!({}), "缺失/null/非对象一律折成空对象");
     }
 }
@@ -1331,7 +1339,10 @@ fn all_switches_off_keeps_content_verbatim() {
         &at_payload(&content, json!([])),
     );
     assert_eq!(raw, content, "三个开关全关时正文零变化");
-    assert!(!raw.contains("[CQ:at"), "convert_other_at 关闭时不得生成 at 码");
+    assert!(
+        !raw.contains("[CQ:at"),
+        "convert_other_at 关闭时不得生成 at 码"
+    );
 }
 
 #[test]

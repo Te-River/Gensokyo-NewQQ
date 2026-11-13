@@ -18,8 +18,8 @@ use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
-use tokio_tungstenite::tungstenite::Message as TungMessage;
 use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::Message as TungMessage;
 
 type ServerSocket = WebSocketStream<TcpStream>;
 
@@ -212,8 +212,15 @@ async fn identify_ready_and_dispatch_reach_hub() {
         .expect("mock 网关 panic");
     assert_eq!(identify["op"], 2, "应发 Identify");
     let token = identify["d"]["token"].as_str().expect("token 不是字符串");
-    assert!(token.starts_with("QQBot "), "token 需要 QQBot 前缀: {token}");
-    assert_eq!(identify["d"]["intents"], 1_i64 << 25, "GroupATMessageEventHandler");
+    assert!(
+        token.starts_with("QQBot "),
+        "token 需要 QQBot 前缀: {token}"
+    );
+    assert_eq!(
+        identify["d"]["intents"],
+        1_i64 << 25,
+        "GroupATMessageEventHandler"
+    );
     assert_eq!(identify["d"]["shard"], json!([0, 1]), "默认单分片 [0,1]");
     assert_eq!(identify["d"]["properties"]["$os"], std::env::consts::OS);
 
@@ -328,7 +335,10 @@ async fn op9_without_resume_reidentifies() {
         .await
         .expect("mock 网关超时")
         .expect("mock 网关 panic");
-    assert_eq!(frame["op"], 2, "op 9 d=false 后必须重新 Identify，不能 Resume");
+    assert_eq!(
+        frame["op"], 2,
+        "op 9 d=false 后必须重新 Identify，不能 Resume"
+    );
 
     handle.shutdown(Duration::from_secs(2)).await;
 }
@@ -385,9 +395,12 @@ async fn shutdown_stops_an_established_connection() {
         .expect("等待 Identify 超时")
         .expect("mock 网关提前退出");
 
-    timeout(Duration::from_secs(5), handle.shutdown(Duration::from_secs(2)))
-        .await
-        .expect("关闭信号未能让网关退出");
+    timeout(
+        Duration::from_secs(5),
+        handle.shutdown(Duration::from_secs(2)),
+    )
+    .await
+    .expect("关闭信号未能让网关退出");
     let _ = server.await;
 }
 
@@ -412,9 +425,8 @@ async fn runtime_skips_gateway_when_disabled_or_without_credentials() {
     stop(handle).await;
 
     // 2) 缺 client_secret + 默认开启：warn 后跳过，不阻断启动。
-    let (state, dir) = support::state(
-        "  app_id: 102000001\n  enable_ws_server: false\n  http_address: \"\"\n",
-    );
+    let (state, dir) =
+        support::state("  app_id: 102000001\n  enable_ws_server: false\n  http_address: \"\"\n");
     let state = support::with_temp_stores(state, &dir);
     let handle = Runtime::start_with(
         state,
@@ -477,7 +489,11 @@ async fn multi_shard_identifies_each_connection_with_its_shard() {
         })
         .collect();
     shards.sort_unstable();
-    assert_eq!(shards, vec![(0, 2), (1, 2)], "各分片 Identify 的 shard=[id,count]");
+    assert_eq!(
+        shards,
+        vec![(0, 2), (1, 2)],
+        "各分片 Identify 的 shard=[id,count]"
+    );
 
     handle.shutdown(Duration::from_secs(2)).await;
 }
@@ -521,9 +537,12 @@ async fn multi_shard_shutdown_closes_every_connection() {
         .expect("两个分片未在时限内连上")
         .expect("mock 网关提前退出");
 
-    timeout(Duration::from_secs(5), handle.shutdown(Duration::from_secs(3)))
-        .await
-        .expect("关闭信号未能让多分片网关退出");
+    timeout(
+        Duration::from_secs(5),
+        handle.shutdown(Duration::from_secs(3)),
+    )
+    .await
+    .expect("关闭信号未能让多分片网关退出");
     timeout(Duration::from_secs(5), closed_rx)
         .await
         .expect("关闭后两条连接都应有 close 帧")

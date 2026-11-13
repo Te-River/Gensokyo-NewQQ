@@ -449,7 +449,11 @@ mod tests {
         for file in [IN_WORDS_FILE, OUT_WORDS_FILE, WHITE_WORDS_FILE] {
             let path = scratch.path().join(file);
             assert!(path.exists(), "{file} 应被释放");
-            assert_eq!(std::fs::read_to_string(path).unwrap(), "", "{file} 应为空表");
+            assert_eq!(
+                std::fs::read_to_string(path).unwrap(),
+                "",
+                "{file} 应为空表"
+            );
         }
         assert_eq!(acnode.filter_in("正常文本"), "正常文本");
         assert_eq!(acnode.filter_out("正常文本"), "正常文本");
@@ -549,7 +553,11 @@ mod tests {
         assert_eq!(acnode.filter_out(""), "错误：缺少 'word' 参数");
 
         let base64 = format!("base64://{}", "A".repeat(MAX_CHARS));
-        assert_eq!(acnode.filter_out(&base64), base64, "出站遇 base64:// 整体放行");
+        assert_eq!(
+            acnode.filter_out(&base64),
+            base64,
+            "出站遇 base64:// 整体放行"
+        );
 
         let long = "坏".repeat(MAX_CHARS + 1);
         assert_eq!(

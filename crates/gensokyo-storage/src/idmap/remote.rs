@@ -154,9 +154,8 @@ impl RemoteBridge {
                     match runtime.block_on(IdMapClient::connect(endpoint.timeout(rpc_timeout))) {
                         Ok(client) => client,
                         Err(err) => {
-                            let _ = ready_tx.send(Err(StorageError::Remote(format!(
-                                "远端建连失败: {err}"
-                            ))));
+                            let _ = ready_tx
+                                .send(Err(StorageError::Remote(format!("远端建连失败: {err}"))));
                             return;
                         }
                     };
@@ -203,9 +202,9 @@ impl RemoteBridge {
                 "等待桥回复超时（{}s）",
                 self.recv_timeout.as_secs()
             ))),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                Err(StorageError::Remote("桥线程已死亡: 回复通道断开".to_string()))
-            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(StorageError::Remote(
+                "桥线程已死亡: 回复通道断开".to_string(),
+            )),
         }
     }
 
@@ -455,7 +454,11 @@ pub fn idmap_remote_mode(lotus: bool, lotus_grpc: bool, without_idmaps: bool) ->
 
 /// 桥循环：std mpsc 的阻塞 recv 放到 blocking 池，current_thread runtime 空闲时
 /// 仍能驱动 tonic 连接（重连/keepalive）；Job 到达后独占 `&mut client` 逐个 await。
-fn bridge_loop(runtime: &tokio::runtime::Runtime, rx: mpsc::Receiver<Job>, mut client: IdMapClient) {
+fn bridge_loop(
+    runtime: &tokio::runtime::Runtime,
+    rx: mpsc::Receiver<Job>,
+    mut client: IdMapClient,
+) {
     runtime.block_on(async move {
         let mut rx = rx;
         loop {
@@ -737,12 +740,8 @@ mod tests {
         );
         assert_eq!(h.store.lookup_virtual_value("openid-user-1")?, first_new);
         let second_new = second + 100;
-        let pro_update = bridge.update_virtual_value_v2_pro(
-            second,
-            second_new,
-            first_new,
-            first_new + 100,
-        )?;
+        let pro_update =
+            bridge.update_virtual_value_v2_pro(second, second_new, first_new, first_new + 100)?;
         assert_eq!(pro_update.message, "Virtual values updated successfully");
         assert_eq!(h.store.lookup_virtual_value("openid-user-2")?, second_new);
         // RPC 13
@@ -792,9 +791,8 @@ mod tests {
                 );
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let addr = listener.local_addr().unwrap();
-                let service = pb::id_map_service_server::IdMapServiceServer::new(
-                    IdMapService::new(store),
-                );
+                let service =
+                    pb::id_map_service_server::IdMapServiceServer::new(IdMapService::new(store));
                 addr_tx.send(addr).unwrap();
                 let incoming = TcpListenerStream::new(listener);
                 let _ = Server::builder()
@@ -880,9 +878,18 @@ mod tests {
     /// 验收 P2-a：模式矩阵全 8 种开关组合，含 Go 怪癖行。
     #[test]
     fn remote_mode_matrix_all_eight_combinations() {
-        assert_eq!(idmap_remote_mode(false, false, false), IdMapRemoteMode::Local);
-        assert_eq!(idmap_remote_mode(false, false, true), IdMapRemoteMode::Local);
-        assert_eq!(idmap_remote_mode(false, true, false), IdMapRemoteMode::Local);
+        assert_eq!(
+            idmap_remote_mode(false, false, false),
+            IdMapRemoteMode::Local
+        );
+        assert_eq!(
+            idmap_remote_mode(false, false, true),
+            IdMapRemoteMode::Local
+        );
+        assert_eq!(
+            idmap_remote_mode(false, true, false),
+            IdMapRemoteMode::Local
+        );
         assert_eq!(idmap_remote_mode(false, true, true), IdMapRemoteMode::Local);
         assert_eq!(
             idmap_remote_mode(true, false, false),
@@ -939,7 +946,10 @@ mod tests {
         let (_, row2) = store.retrieve_virtual_value("openid-user-2")?;
         store.update_virtual_value_pro(row2, row2 + 100, new_row, new_row + 100)?;
         assert_eq!(h.store.lookup_virtual_value("openid-user-2")?, row2 + 100);
-        assert_eq!(h.store.lookup_virtual_value("openid-user-1")?, new_row + 100);
+        assert_eq!(
+            h.store.lookup_virtual_value("openid-user-1")?,
+            new_row + 100
+        );
         // RPC 14（FindSubKeysByIdPro）：现代 schema 恒空
         assert!(store.find_sub_keys_by_id("openid-user-1")?.is_empty());
         // RPC 16/17（StoreCacheV2 / RetrieveRowByCacheV2）
@@ -1013,9 +1023,8 @@ mod tests {
                 );
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let addr = listener.local_addr().unwrap();
-                let service = pb::id_map_service_server::IdMapServiceServer::new(
-                    IdMapService::new(store),
-                );
+                let service =
+                    pb::id_map_service_server::IdMapServiceServer::new(IdMapService::new(store));
                 addr_tx.send(addr).unwrap();
                 let incoming = TcpListenerStream::new(listener);
                 let _ = Server::builder()

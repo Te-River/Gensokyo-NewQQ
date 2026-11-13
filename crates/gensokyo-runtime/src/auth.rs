@@ -79,7 +79,11 @@ pub(crate) fn missing_token() -> Response {
 
 /// 403：给了 token 但不匹配（Go `Incorrect token`）。
 pub(crate) fn incorrect_token() -> Response {
-    (StatusCode::FORBIDDEN, Json(json!({ "error": "Incorrect token" }))).into_response()
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({ "error": "Incorrect token" })),
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -130,12 +134,18 @@ mod tests {
         assert_eq!(provided_token(&HeaderMap::new(), None), None);
         assert_eq!(provided_token(&HeaderMap::new(), Some("")), None);
         // 给了错 token：403 分支
-        assert_eq!(provided_token(&HeaderMap::new(), Some("wrong")), Some("wrong"));
+        assert_eq!(
+            provided_token(&HeaderMap::new(), Some("wrong")),
+            Some("wrong")
+        );
         assert_eq!(
             provided_token(&headers_with("Bearer wrong"), None),
             Some("wrong")
         );
         // 头存在但剥完为空的通知按「没给」处理（Go token == ""）
-        assert_eq!(provided_token(&headers_with("Bearer "), Some("s3cret")), None);
+        assert_eq!(
+            provided_token(&headers_with("Bearer "), Some("s3cret")),
+            None
+        );
     }
 }

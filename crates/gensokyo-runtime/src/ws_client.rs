@@ -200,8 +200,7 @@ async fn run_address(
                 backoff = options.initial_backoff;
                 tracing::info!(address, "反向 WS 已连接");
 
-                let reason =
-                    serve(socket, &state, &inbound, heartbeat, stop, &mut failed).await;
+                let reason = serve(socket, &state, &inbound, heartbeat, stop, &mut failed).await;
                 tracing::info!(address, ?reason, "反向 WS 连接结束");
                 if reason == StopReason::Stopped {
                     break;
@@ -443,7 +442,11 @@ impl FailedMessages {
         if failed == 0 {
             tracing::info!(count = total, "补发缓冲事件完成");
         } else {
-            tracing::warn!(count = total, failed, "补发缓冲事件部分失败，已清空不再重试");
+            tracing::warn!(
+                count = total,
+                failed,
+                "补发缓冲事件部分失败，已清空不再重试"
+            );
         }
     }
 }
@@ -561,9 +564,7 @@ fn split_host_port(authority: &str) -> Result<(String, u16), String> {
             .split_once(']')
             .ok_or_else(|| format!("代理 URL 的 IPv6 地址非法: {authority}"))?;
         let port = match tail.strip_prefix(':') {
-            Some(port) => port
-                .parse()
-                .map_err(|_| format!("代理端口非法: {port}"))?,
+            Some(port) => port.parse().map_err(|_| format!("代理端口非法: {port}"))?,
             None => 8080,
         };
         return Ok((format!("[{host}]"), port));
@@ -668,10 +669,11 @@ fn target_authority(uri: &Uri) -> Result<String, String> {
 /// `wss://` 由 `client_async_tls_with_config` 的缺省 connector（webpki 根）在隧道上叠 TLS。
 async fn connect_tunneled(request: Request<()>, proxy: &ProxyEndpoint) -> Result<Socket, String> {
     let target = target_authority(request.uri())?;
-    let mut stream = tokio::time::timeout(PROXY_CONNECT_TIMEOUT, TcpStream::connect(&proxy.address))
-        .await
-        .map_err(|_| format!("连接代理 {} 超时", proxy.address))?
-        .map_err(|err| format!("连接代理 {} 失败: {err}", proxy.address))?;
+    let mut stream =
+        tokio::time::timeout(PROXY_CONNECT_TIMEOUT, TcpStream::connect(&proxy.address))
+            .await
+            .map_err(|_| format!("连接代理 {} 超时", proxy.address))?
+            .map_err(|err| format!("连接代理 {} 失败: {err}", proxy.address))?;
 
     let mut head = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n");
     if let Some(authorization) = &proxy.authorization {
@@ -838,7 +840,7 @@ impl Drop for WsClientHandle {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_HEARTBEAT_INTERVAL, FailedMessages, ProxyEnv, ProxyEndpoint, access_token_from_uri,
+        DEFAULT_HEARTBEAT_INTERVAL, FailedMessages, ProxyEndpoint, ProxyEnv, access_token_from_uri,
         connect_tunneled, proxy_for, send_event,
     };
     use std::pin::Pin;
@@ -969,7 +971,10 @@ mod tests {
         };
 
         failed.flush(&mut sink).await;
-        assert!(failed.entries.is_empty(), "重发失败也要无条件清空（对齐 Go）");
+        assert!(
+            failed.entries.is_empty(),
+            "重发失败也要无条件清空（对齐 Go）"
+        );
     }
 
     #[tokio::test]

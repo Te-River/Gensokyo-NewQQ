@@ -137,7 +137,11 @@ async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Bytes) 
     };
 
     if envelope.get("op").and_then(Value::as_i64) == Some(13) {
-        return (StatusCode::OK, axum::Json(validation_reply(&keys, &envelope))).into_response();
+        return (
+            StatusCode::OK,
+            axum::Json(validation_reply(&keys, &envelope)),
+        )
+            .into_response();
     }
 
     let inbound = Inbound::from_state(&state);
@@ -261,13 +265,15 @@ fn verify_signature(
     headers: &HeaderMap,
     body: &[u8],
 ) -> Result<(), &'static str> {
-    let signature = header_str(headers, SIGNATURE_HEADER).ok_or("missing X-Signature-Ed25519 header")?;
+    let signature =
+        header_str(headers, SIGNATURE_HEADER).ok_or("missing X-Signature-Ed25519 header")?;
     let signature = decode_hex(signature).ok_or("invalid hex encoding in signature")?;
     if signature.len() != SIGNATURE_LEN || (signature[63] & 224) != 0 {
         return Err("invalid signature size or format");
     }
 
-    let timestamp = header_str(headers, TIMESTAMP_HEADER).ok_or("missing X-Signature-Timestamp header")?;
+    let timestamp =
+        header_str(headers, TIMESTAMP_HEADER).ok_or("missing X-Signature-Timestamp header")?;
 
     // 待签串：timestamp ‖ body（`webhook.go:186-188`）。
     let mut message = Vec::with_capacity(timestamp.len() + body.len());
@@ -350,10 +356,12 @@ fn decode_hex(text: &str) -> Option<Vec<u8>> {
 fn encode_hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
 
-    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {
-        let _ = write!(out, "{byte:02x}");
-        out
-    })
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
 }
 
 fn hex_digit(byte: u8) -> Option<u8> {

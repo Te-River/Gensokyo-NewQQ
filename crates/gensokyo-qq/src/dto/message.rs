@@ -647,7 +647,10 @@ mod tests {
         let value = serde_json::to_value(&prepare).unwrap();
         assert_eq!(value["file_size"], "5000001", "file_size 必须是字符串");
         assert_eq!(value["md5_10m"], "b".repeat(32));
-        assert!(value.get("sha1").is_none(), "空 sha1 不序列化（Go omitempty）");
+        assert!(
+            value.get("sha1").is_none(),
+            "空 sha1 不序列化（Go omitempty）"
+        );
 
         let response: FileUploadPrepareResponse = serde_json::from_value(json!({
             "upload_id": "up-1",

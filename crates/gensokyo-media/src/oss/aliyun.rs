@@ -107,12 +107,7 @@ pub fn plan(config: &AliyunOssConfig, data: &[u8], timestamp: i64) -> Result<Ali
 }
 
 /// OSS V1 签名：`OSS <AccessKeyId>:<base64(hmac_sha1)>`。
-fn authorization(
-    config: &AliyunOssConfig,
-    key: &str,
-    content_md5: &str,
-    date: &str,
-) -> String {
+fn authorization(config: &AliyunOssConfig, key: &str, content_md5: &str, date: &str) -> String {
     let string_to_sign = format!(
         "PUT\n{content_md5}\n{IMAGE_CONTENT_TYPE}\n{date}\n/{}/{key}",
         config.bucket
@@ -156,14 +151,14 @@ mod tests {
     use std::sync::Arc;
 
     use super::{AliyunOssConfig, plan};
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD as BASE64;
     use crate::error::Error;
     use crate::hosting::UploadMethod;
     use crate::hosting::digest;
     use crate::hosting::fixtures::FakeTransport;
     use crate::oss::upload as upload_oss;
     use crate::oss::{OssConfig, OssKind};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
 
     const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0DIHDR";
 
@@ -200,11 +195,18 @@ mod tests {
         );
         assert_eq!(
             built.url,
-            format!("https://a-bucket.oss-cn-hangzhou.aliyuncs.com/{}", built.key)
+            format!(
+                "https://a-bucket.oss-cn-hangzhou.aliyuncs.com/{}",
+                built.key
+            )
         );
         assert_eq!(built.result_url, built.url);
         assert!(built.authorization.starts_with("OSS a-id:"));
-        assert_eq!(built.authorization.len(), "OSS a-id:".len() + 28, "base64 的 20 字节 hmac");
+        assert_eq!(
+            built.authorization.len(),
+            "OSS a-id:".len() + 28,
+            "base64 的 20 字节 hmac"
+        );
     }
 
     #[test]
@@ -320,7 +322,10 @@ mod tests {
         let text = String::from_utf8_lossy(&body.bytes);
         assert!(text.contains(r#""scenes":["porn"]"#), "{text}");
         assert!(
-            text.contains(&format!(r#""url":"oss://a-bucket/{}""#, url.rsplit('/').next().unwrap())),
+            text.contains(&format!(
+                r#""url":"oss://a-bucket/{}""#,
+                url.rsplit('/').next().unwrap()
+            )),
             "审核的是刚上传的对象：{text}"
         );
         assert_eq!(

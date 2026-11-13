@@ -207,9 +207,7 @@ impl PostUrlReporterHandle {
     /// 上报任务是否还在跑。
     #[must_use]
     pub fn is_running(&self) -> bool {
-        self.task
-            .as_ref()
-            .is_some_and(|task| !task.is_finished())
+        self.task.as_ref().is_some_and(|task| !task.is_finished())
     }
 
     /// 立即中止上报任务（不等在途 POST）。

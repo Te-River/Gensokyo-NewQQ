@@ -313,8 +313,14 @@ mod tests {
         let first = start.elapsed();
         assert!(limiter.wait_with_timeout(WAIT_TIMEOUT).await);
         let second = start.elapsed() - first;
-        assert!(first < Duration::from_millis(50), "首个令牌应即时：{first:?}");
-        assert!(second >= Duration::from_millis(60), "第二个令牌应节流：{second:?}");
+        assert!(
+            first < Duration::from_millis(50),
+            "首个令牌应即时：{first:?}"
+        );
+        assert!(
+            second >= Duration::from_millis(60),
+            "第二个令牌应节流：{second:?}"
+        );
     }
 
     #[tokio::test]
@@ -325,7 +331,10 @@ mod tests {
         for _ in 0..3 {
             assert!(limiter.wait_with_timeout(WAIT_TIMEOUT).await);
         }
-        assert!(start.elapsed() < Duration::from_millis(50), "burst 内应即时通过");
+        assert!(
+            start.elapsed() < Duration::from_millis(50),
+            "burst 内应即时通过"
+        );
     }
 
     #[tokio::test]
@@ -418,10 +427,9 @@ mod tests {
 
     #[tokio::test]
     async fn close_stops_the_worker_and_rejects_new_tasks() {
-        let (queue, worker) = SendQueue::spawn(
-            QueueOptions::default(),
-            |task: u32| async move { Ok(task.to_string()) },
-        );
+        let (queue, worker) = SendQueue::spawn(QueueOptions::default(), |task: u32| async move {
+            Ok(task.to_string())
+        });
         queue.close();
         assert!(queue.submit(1).is_none(), "关闭后不应再接收任务");
         worker.await.expect("worker 应正常退出");
@@ -429,10 +437,9 @@ mod tests {
 
     #[tokio::test]
     async fn worker_exits_when_every_handle_is_dropped() {
-        let (queue, worker) = SendQueue::spawn(
-            QueueOptions::default(),
-            |task: u32| async move { Ok(task.to_string()) },
-        );
+        let (queue, worker) = SendQueue::spawn(QueueOptions::default(), |task: u32| async move {
+            Ok(task.to_string())
+        });
         drop(queue);
         // 没有 close 也应随句柄释放一起收摊（否则进程里会留下空转任务）
         tokio::time::timeout(Duration::from_secs(1), worker)

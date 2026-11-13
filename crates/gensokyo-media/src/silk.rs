@@ -338,10 +338,7 @@ impl SilkCodec {
         let input = TempFile::new("raw")?;
         let output = TempFile::new("silk")?;
         std::fs::write(input.path(), bytes).map_err(|err| {
-            Error::SilkCodec(format!(
-                "写临时音频 {} 失败: {err}",
-                input.path().display()
-            ))
+            Error::SilkCodec(format!("写临时音频 {} 失败: {err}", input.path().display()))
         })?;
         self.encode_to_silk(input.path(), output.path(), sample_rate)?;
         std::fs::read(output.path()).map_err(|err| {
@@ -579,7 +576,10 @@ mod tests {
     #[test]
     fn amr_or_silk_headers_follow_go() {
         assert!(is_amr_or_silk(b"#!AMR\x0a"), "AMR 头应命中");
-        assert!(is_amr_or_silk(b"\x02#!SILK_V3rest"), "带 0x02 的 Silk 头应命中");
+        assert!(
+            is_amr_or_silk(b"\x02#!SILK_V3rest"),
+            "带 0x02 的 Silk 头应命中"
+        );
         assert!(
             !is_amr_or_silk(b"#!SILK_V3"),
             "Go IsAMRorSILK 只认带 0x02 的 Silk 头"
@@ -629,7 +629,10 @@ mod tests {
         let err = codec
             .encode_bytes_to_silk(b"", 24_000)
             .expect_err("空输入必须拒绝");
-        assert!(matches!(err, Error::SilkCodec(_)), "空输入应报 SilkCodec: {err}");
+        assert!(
+            matches!(err, Error::SilkCodec(_)),
+            "空输入应报 SilkCodec: {err}"
+        );
     }
 
     #[test]

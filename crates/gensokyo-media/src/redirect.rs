@@ -333,7 +333,13 @@ pub(crate) mod fixtures {
 
         fn resolve(&self, host: String, _port: u16) -> BoxFuture<'_, Result<Vec<IpAddr>>> {
             Box::pin(async move {
-                if self.failures.lock().unwrap().iter().any(|failed| failed == &host) {
+                if self
+                    .failures
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|failed| failed == &host)
+                {
                     return Err(Error::Transport(format!("DNS 解析失败（预置）: {host}")));
                 }
                 Ok(self

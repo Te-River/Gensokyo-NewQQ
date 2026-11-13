@@ -178,11 +178,7 @@ async fn read_any_json(client: &mut Client) -> Value {
     }
 }
 
-fn assert_handshake_status(
-    err: tokio_tungstenite::tungstenite::Error,
-    expected: u16,
-    note: &str,
-) {
+fn assert_handshake_status(err: tokio_tungstenite::tungstenite::Error, expected: u16, note: &str) {
     match err {
         tokio_tungstenite::tungstenite::Error::Http(response) => {
             assert_eq!(response.status().as_u16(), expected, "{note}");
@@ -672,7 +668,10 @@ async fn ws_forward_sends_lifecycle_and_streams_hub_events_and_heartbeats() {
 
     handle.hub().publish(support::hub_event());
     let event = read_json(&mut client).await;
-    assert_eq!(event["post_type"], "message", "hub 事件应推给正向 WS 客户端");
+    assert_eq!(
+        event["post_type"], "message",
+        "hub 事件应推给正向 WS 客户端"
+    );
     assert_eq!(event["raw_message"], "hub");
 
     // heart_beat_interval=1：等一条心跳，证明连接期间持续推送元事件。

@@ -558,8 +558,16 @@ mod tests {
         // `[CQ:` 与 `at` 之间的空白同样可跳（Go `cqAtSegRe` 段名前 `\s*`）
         assert_eq!(at_mention_id("[CQ: at,qq=1]"), Some("1"));
         assert_eq!(at_mention_id("[CQ: at , qq = ALL]"), Some("ALL"));
-        assert_eq!(at_mention_id("[CQ: at,foo]"), None, "段名前空白的裸参数不是 qq");
-        assert_eq!(at_mention_id("[CQ: at ]"), None, "段名前空白的裸 at 段：缺 qq");
+        assert_eq!(
+            at_mention_id("[CQ: at,foo]"),
+            None,
+            "段名前空白的裸参数不是 qq"
+        );
+        assert_eq!(
+            at_mention_id("[CQ: at ]"),
+            None,
+            "段名前空白的裸 at 段：缺 qq"
+        );
         assert_eq!(at_mention_id("[CQ: at x]"), None);
         assert_eq!(at_mention_id("[CQ: atx,qq=1]"), None);
     }
@@ -601,7 +609,11 @@ mod tests {
         // 都认这形态。漏判的代价在渲染层：@全员 静默丢、未绑定 qq 既不 1400 也不渲染（G2 回归）
         assert_eq!(find_at_code("[CQ: at,qq=1]", 0), Some(0));
         assert_eq!(find_at_code("[CQ: at ,qq=all]", 0), Some(0));
-        assert_eq!(find_at_code("[CQ: at ]", 0), Some(0), "段名前空白的裸 at 段");
+        assert_eq!(
+            find_at_code("[CQ: at ]", 0),
+            Some(0),
+            "段名前空白的裸 at 段"
+        );
         assert_eq!(find_at_code("x[CQ: at,qq=1]", 0), Some(1));
         // 段名前空白与大小写可叠加（`[cq:` 现状保持大小写不敏感）
         assert_eq!(find_at_code("[cq: at,qq=all]", 0), Some(0));

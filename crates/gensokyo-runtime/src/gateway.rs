@@ -39,8 +39,8 @@
 //! - 不处理 `t=RESUMED`（Inbound 视作未知事件忽略），与 botgo 只特判 READY 一致。
 
 use std::fmt;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use futures::stream::{SplitSink, SplitStream};
@@ -543,7 +543,11 @@ impl<T: HttpTransport + 'static> GatewayClient<T> {
                 )
             }
         };
-        tracing::info!(resuming, interval_ms = interval.as_millis(), "QQ 网关已连接，发送鉴权帧");
+        tracing::info!(
+            resuming,
+            interval_ms = interval.as_millis(),
+            "QQ 网关已连接，发送鉴权帧"
+        );
         if out.send(Message::text(payload.to_string())).is_err() {
             writer.abort();
             return Err(GatewayError("QQ 网关写通道已关闭".to_owned()));
@@ -699,9 +703,13 @@ impl<T: HttpTransport + 'static> GatewayClient<T> {
                 ready,
                 true,
             )),
-            Some(4009 | 1000 | 1001) | None => {
-                Ok(SessionOut::new(SessionEnd::Resume, session_id, seq, ready, false))
-            }
+            Some(4009 | 1000 | 1001) | None => Ok(SessionOut::new(
+                SessionEnd::Resume,
+                session_id,
+                seq,
+                ready,
+                false,
+            )),
             Some(other) => {
                 // botgo `IsUnexpectedCloseError`：非 4009 的异常关闭不能 resume。
                 tracing::warn!(code = other, "QQ 网关异常关闭，清空会话后重新 identify");
@@ -751,9 +759,8 @@ impl<T: HttpTransport + 'static> GatewayClient<T> {
                 .await
                 .map_err(|err| GatewayError(format!("请求 {url} 失败: {err}")))?;
             if (200..300).contains(&response.status) {
-                return serde_json::from_slice(&response.body).map_err(|err| {
-                    GatewayError(format!("{url} 响应不是合法 JSON: {err}"))
-                });
+                return serde_json::from_slice(&response.body)
+                    .map_err(|err| GatewayError(format!("{url} 响应不是合法 JSON: {err}")));
             }
             if !refreshed && is_auth_failure(response.status, &response.body) {
                 refreshed = true;
@@ -1019,16 +1026,17 @@ async fn next_text(stream: &mut SplitStream<Socket>) -> Option<Result<String>> {
             }
             Ok(_) => continue,
             Err(err) => {
-                return Some(Err(GatewayError(format!(
-                    "读取 QQ 网关帧失败: {err}"
-                ))));
+                return Some(Err(GatewayError(format!("读取 QQ 网关帧失败: {err}"))));
             }
         }
     }
 }
 
 /// 写任务：把通道里的帧顺序写进 socket；写失败即结束本次连接。
-async fn write_loop(mut sink: SplitSink<Socket, Message>, mut rx: mpsc::UnboundedReceiver<Message>) {
+async fn write_loop(
+    mut sink: SplitSink<Socket, Message>,
+    mut rx: mpsc::UnboundedReceiver<Message>,
+) {
     while let Some(message) = rx.recv().await {
         if let Err(err) = sink.send(message).await {
             tracing::warn!(%err, "QQ 网关写入失败，结束本次连接");
@@ -1088,7 +1096,9 @@ fn truncate(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{GatewayInfo, calc_start_interval, heartbeat_interval, is_auth_failure, resolve_shard};
+    use super::{
+        GatewayInfo, calc_start_interval, heartbeat_interval, is_auth_failure, resolve_shard,
+    };
     use gensokyo_protocol::Event;
     use serde_json::json;
     use std::time::Duration;
@@ -1143,10 +1153,18 @@ mod tests {
 
     #[test]
     fn shard_start_interval_matches_go_calc_interval() {
-        assert_eq!(calc_start_interval(0), Duration::from_secs(2), "0 按 1 处理");
+        assert_eq!(
+            calc_start_interval(0),
+            Duration::from_secs(2),
+            "0 按 1 处理"
+        );
         assert_eq!(calc_start_interval(1), Duration::from_secs(2));
         assert_eq!(calc_start_interval(2), Duration::from_secs(1));
-        assert_eq!(calc_start_interval(3), Duration::from_secs(1), "round(2/3)=1");
+        assert_eq!(
+            calc_start_interval(3),
+            Duration::from_secs(1),
+            "round(2/3)=1"
+        );
         assert_eq!(calc_start_interval(8), Duration::from_secs(1), "最少 1s");
     }
 

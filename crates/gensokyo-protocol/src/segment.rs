@@ -347,7 +347,10 @@ impl<'de> Deserialize<'de> for Segment {
         // 只有 ark 段的 `fields` 在 Go 里是真对象（`arkSegmentData`）；其余段的嵌套值按
         // `map[string]string` 契约保持字符串化（markdown / keyboard / node 往返不变）
         let json_keys = if wire.kind == "ark" {
-            json_keys.into_iter().filter(|key| key == "fields").collect()
+            json_keys
+                .into_iter()
+                .filter(|key| key == "fields")
+                .collect()
         } else {
             Vec::new()
         };
@@ -938,9 +941,8 @@ mod tests {
     #[test]
     fn ark_fields_array_shape_is_not_marked_as_object() {
         // P53：Go fields 是 map 契约——数组形态不标 raw JSON，输出保持字符串化
-        let segment: Segment =
-            serde_json::from_str(r#"{"type":"ark","data":{"fields":["a",1]}}"#)
-                .expect("反序列化失败");
+        let segment: Segment = serde_json::from_str(r#"{"type":"ark","data":{"fields":["a",1]}}"#)
+            .expect("反序列化失败");
         assert_eq!(
             serde_json::to_string(&segment).expect("序列化失败"),
             r#"{"data":{"fields":"[\"a\",1]"},"type":"ark"}"#

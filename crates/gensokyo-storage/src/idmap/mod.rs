@@ -26,8 +26,8 @@ use tracing::{debug, warn};
 use crate::StorageError;
 use crate::echo::generate_row_id;
 use encoding::{decode_i64, encode_i64, normalize_identity, vuin_identity_key, vuin_prefix};
-use lookup_cache::{LookupCache, LookupKey, LookupValue};
 use http_remote::HttpRemoteBridge;
+use lookup_cache::{LookupCache, LookupKey, LookupValue};
 use remote::RemoteBridge;
 
 /// 身份库默认文件名（Go `openid-map.db` 的 redb 等价物）。
@@ -393,7 +393,8 @@ impl IdMapStore {
         }
         let identity_db = Database::create(&options.identity_path).map_err(rb)?;
         let msg_db = Database::create(&options.msg_path).map_err(rb)?;
-        let lookup_cache = LookupCache::new(options.lookup_cache_capacity, options.lookup_cache_ttl);
+        let lookup_cache =
+            LookupCache::new(options.lookup_cache_capacity, options.lookup_cache_ttl);
         let store = Self {
             options,
             identity_db,

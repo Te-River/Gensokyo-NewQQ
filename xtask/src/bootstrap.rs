@@ -178,7 +178,8 @@ fn tool_version_output(dir: &Path, tool: &str) -> Option<String> {
 /// 防止宿主自装的其他版本击穿钉版。
 pub fn locate_tool(root: &Path, tool: &str, version: &str) -> Option<PathBuf> {
     if let Some(dir) = find_on_path(&exe_name(tool)) {
-        if tool_version_output(&dir, tool).is_some_and(|out| version_output_matches(&out, version)) {
+        if tool_version_output(&dir, tool).is_some_and(|out| version_output_matches(&out, version))
+        {
             return Some(dir);
         }
         eprintln!(
@@ -362,8 +363,7 @@ fn ensure_tool(root: &Path, host: HostPlatform, tool: &str, version: &str) -> Re
     let dir = tool_dir(root, tool, version);
     let archive = root.join(TOOLS_DIR).join(archive_name(&url));
     if let Some(parent) = archive.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("创建 {} 失败", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("创建 {} 失败", parent.display()))?;
     }
     let result = (|| -> Result<()> {
         download(&url, &archive)?;
@@ -412,7 +412,9 @@ pub fn bootstrap_linux_tools(root: &Path) -> Result<Vec<PathBuf>> {
         ZIG_VERSION,
     )?;
     let zigbuild_version = resolve_version(
-        std::env::var("GENSOKYO_CARGO_ZIGBUILD_VERSION").ok().as_deref(),
+        std::env::var("GENSOKYO_CARGO_ZIGBUILD_VERSION")
+            .ok()
+            .as_deref(),
         CARGO_ZIGBUILD_VERSION,
     )?;
     println!(
@@ -575,8 +577,7 @@ mod tests {
         // 版本不符：不用 PATH 命中，落回 .tools 钉版目录
         let mismatch = tool_dir(&root, "cargo", "0.0.0");
         std::fs::create_dir_all(&mismatch).expect("创建缓存目录失败");
-        std::fs::write(mismatch.join(super::exe_name("cargo")), b"stub")
-            .expect("写入假二进制失败");
+        std::fs::write(mismatch.join(super::exe_name("cargo")), b"stub").expect("写入假二进制失败");
         assert_eq!(
             locate_tool(&root, "cargo", "0.0.0"),
             Some(mismatch),
@@ -611,8 +612,10 @@ mod tests {
     #[test]
     fn hoist_leaves_root_layout_untouched() {
         // cargo-zigbuild 包布局：二进制在根部、无内层目录，不得误伤
-        let root = std::env::temp_dir()
-            .join(format!("gensokyo-bootstrap-hoist-root-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "gensokyo-bootstrap-hoist-root-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("docs")).expect("创建目录失败");
         let exe = super::exe_name("cargo-zigbuild");
@@ -630,8 +633,10 @@ mod tests {
 
     #[test]
     fn hoist_fails_when_the_exe_is_missing() {
-        let root = std::env::temp_dir()
-            .join(format!("gensokyo-bootstrap-hoist-miss-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "gensokyo-bootstrap-hoist-miss-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("创建目录失败");
         std::fs::write(root.join("README"), b"stub").expect("写入失败");
@@ -659,10 +664,15 @@ mod tests {
     fn sha256_parsing_handles_both_official_and_certutil_formats() {
         let hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
         assert_eq!(
-            parse_sha256(&format!("{hash}  cargo-zigbuild-x86_64-pc-windows-msvc.zip\n")).as_deref(),
+            parse_sha256(&format!(
+                "{hash}  cargo-zigbuild-x86_64-pc-windows-msvc.zip\n"
+            ))
+            .as_deref(),
             Some(hash)
         );
-        let certutil = format!("SHA256 hash of file:\n{hash}\nCertUtil: -hashfile command completed successfully.\n");
+        let certutil = format!(
+            "SHA256 hash of file:\n{hash}\nCertUtil: -hashfile command completed successfully.\n"
+        );
         assert_eq!(parse_sha256(&certutil).as_deref(), Some(hash));
         assert_eq!(parse_sha256("no hash here"), None);
     }

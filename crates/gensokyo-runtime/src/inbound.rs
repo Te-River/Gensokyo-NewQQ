@@ -861,7 +861,10 @@ impl Inbound {
             return;
         };
         let app_id = settings.get_app_id().to_string();
-        let raw_user = payload.author.as_ref().map_or("", |author| author.id.as_str());
+        let raw_user = payload
+            .author
+            .as_ref()
+            .map_or("", |author| author.id.as_str());
         let numeric = user_id.as_i64();
 
         echo.add_lazy_message_id(&user_id.to_string(), &payload.id, SystemTime::now());
@@ -941,7 +944,13 @@ impl Inbound {
             user_id,
             group_id,
             message_id,
-        } = self.derive_message_ids(settings, user_raw, Some(&payload.group_id), &payload.id, true);
+        } = self.derive_message_ids(
+            settings,
+            user_raw,
+            Some(&payload.group_id),
+            &payload.id,
+            true,
+        );
 
         let sender = Sender {
             // Go M1-B：string 形态不做 idmap 转换，`sender.user_id` 恒为 0（见 `derive_message_ids`）。
@@ -2079,10 +2088,7 @@ mod tests {
     #[test]
     fn scan_mentions_matches_go_hex_character_class() {
         let text = "<@ABC123> a <@!def456> b <@zzz> c <@> d <@ABC";
-        let found: Vec<&str> = scan_mentions(text)
-            .into_iter()
-            .map(|(_, id)| id)
-            .collect();
+        let found: Vec<&str> = scan_mentions(text).into_iter().map(|(_, id)| id).collect();
         // 与 Go `incomingAtRe = <@!?([0-9A-Fa-f]+)>` 一致：`!` 可选、只认十六进制、
         // 空 ID 与缺 `>` 都不匹配（原样留在正文）。
         assert_eq!(found, vec!["ABC123", "def456"]);
@@ -2637,8 +2643,8 @@ mod tests {
         let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
         let store = test_store(dir.path());
         let echo = Arc::new(EchoStore::new());
-        let inbound =
-            Inbound::new(Arc::clone(&manager), Some(Arc::clone(&store))).with_echo(Arc::clone(&echo));
+        let inbound = Inbound::new(Arc::clone(&manager), Some(Arc::clone(&store)))
+            .with_echo(Arc::clone(&echo));
 
         let events = inbound
             .convert("GROUP_AT_MESSAGE_CREATE", Some(&group_at_payload()), None)
@@ -2651,7 +2657,11 @@ mod tests {
         let group_num = group.as_i64().expect("有 idmap 时应为数字形态");
         let user_num = message.user_id.as_i64().expect("有 idmap 时应为数字形态");
 
-        assert_eq!(echo.get_lazy_messages_id(&group.to_string()), "m-1", "群维度懒池");
+        assert_eq!(
+            echo.get_lazy_messages_id(&group.to_string()),
+            "m-1",
+            "群维度懒池"
+        );
         assert_eq!(
             echo.get_lazy_messages_id_v2(&group.to_string(), &message.user_id.to_string()),
             "m-1",
@@ -2671,7 +2681,10 @@ mod tests {
             echo.get_message_type_by_group_id_v2(&app_id, &group.to_string()),
             "group"
         );
-        let msg_num = message.message_id.as_i64().expect("有 idmap 时应为数字形态");
+        let msg_num = message
+            .message_id
+            .as_i64()
+            .expect("有 idmap 时应为数字形态");
         assert_eq!(echo.get_msg_id_by_key(&echo_key(&app_id, msg_num)), "m-1");
     }
 
@@ -2679,7 +2692,7 @@ mod tests {
     #[test]
     fn c2c_message_feeds_echo_v1_slot_only() {
         use gensokyo_protocol::Event;
-        use gensokyo_storage::echo::{echo_key, DEFAULT_MESSAGE_ID};
+        use gensokyo_storage::echo::{DEFAULT_MESSAGE_ID, echo_key};
 
         let dir = tempfile::tempdir().expect("临时目录");
         let path = dir.path().join("config.yml");
@@ -2687,8 +2700,8 @@ mod tests {
         let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
         let store = test_store(dir.path());
         let echo = Arc::new(EchoStore::new());
-        let inbound =
-            Inbound::new(Arc::clone(&manager), Some(Arc::clone(&store))).with_echo(Arc::clone(&echo));
+        let inbound = Inbound::new(Arc::clone(&manager), Some(Arc::clone(&store)))
+            .with_echo(Arc::clone(&echo));
 
         let events = inbound
             .convert("C2C_MESSAGE_CREATE", Some(&c2c_payload()), None)
@@ -2701,7 +2714,10 @@ mod tests {
         let user_num = message.user_id.as_i64().expect("有 idmap 时应为数字形态");
 
         assert_eq!(echo.get_lazy_messages_id(&user), "m-c2c", "私聊复用 v1 槽");
-        assert_eq!(echo.get_msg_id_by_key(&echo_key(&app_id, user_num)), "m-c2c");
+        assert_eq!(
+            echo.get_msg_id_by_key(&echo_key(&app_id, user_num)),
+            "m-c2c"
+        );
         assert_eq!(
             echo.get_lazy_messages_id_v2(&user, &user),
             DEFAULT_MESSAGE_ID,
@@ -2721,8 +2737,8 @@ mod tests {
         let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
         let store = test_store(dir.path());
         let echo = Arc::new(EchoStore::new());
-        let inbound =
-            Inbound::new(Arc::clone(&manager), Some(Arc::clone(&store))).with_echo(Arc::clone(&echo));
+        let inbound = Inbound::new(Arc::clone(&manager), Some(Arc::clone(&store)))
+            .with_echo(Arc::clone(&echo));
         let app_id = manager.snapshot().get_app_id().to_string();
         let group_openid = "g0123456789abcdef0123456789abcdef";
 

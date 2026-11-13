@@ -9,8 +9,8 @@ mod support;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gensokyo_actions::qqapi::{QqApi, QqFuture};
 use gensokyo_actions::ActionContext;
+use gensokyo_actions::qqapi::{QqApi, QqFuture};
 use gensokyo_core::{Error, Ob11Id};
 use gensokyo_protocol::event::{MessageEvent, MessageType};
 use gensokyo_protocol::{Event, MessageContent};
@@ -67,7 +67,10 @@ impl QqApi for RecordingApi {
         Box::pin(async { Err(Error::Unsupported("未实现".to_owned())) })
     }
 
-    fn get_group_bot_state(&self, _group_openid: &str) -> QqFuture<'_, gensokyo_qq::BotInGroupState> {
+    fn get_group_bot_state(
+        &self,
+        _group_openid: &str,
+    ) -> QqFuture<'_, gensokyo_qq::BotInGroupState> {
         Box::pin(async { Err(Error::Unsupported("未实现".to_owned())) })
     }
 
@@ -110,7 +113,10 @@ fn settings(http_only_bot: bool, downtime_message: &str) -> String {
     )
 }
 
-fn state_for(http_only_bot: bool, downtime_message: &str) -> (AppState, Arc<RecordingApi>, tempfile::TempDir) {
+fn state_for(
+    http_only_bot: bool,
+    downtime_message: &str,
+) -> (AppState, Arc<RecordingApi>, tempfile::TempDir) {
     let (config, dir) = support::config(&settings(http_only_bot, downtime_message));
     let api = Arc::new(RecordingApi::default());
     let actions = Arc::new(ActionContext::new(api.clone(), Arc::clone(&config)));
@@ -196,7 +202,11 @@ async fn missing_downstream_sends_one_passive_group_reply() {
     let notice = state.downtime().notice(&event).expect("应该要兜底");
     assert_eq!(notice.target, Target::Group("G1".to_owned()));
     assert_eq!(notice.message.content.as_deref(), Some("bot-offline"));
-    assert_eq!(notice.message.msg_id.as_deref(), Some("M1"), "对齐 Go 的 MsgID: v.ID");
+    assert_eq!(
+        notice.message.msg_id.as_deref(),
+        Some("M1"),
+        "对齐 Go 的 MsgID: v.ID"
+    );
     assert_eq!(notice.message.msg_seq, Some(1));
     assert_eq!(notice.message.msg_type, Some(0));
     assert!(notice.message.event_id.is_none() && !notice.message.is_wakeup);
@@ -225,11 +235,7 @@ async fn empty_downtime_message_is_silent() {
     assert!(
         state
             .downtime()
-            .notice(&group_event(
-                Ob11Id::num(1),
-                Ob11Id::num(2),
-                Some(true)
-            ))
+            .notice(&group_event(Ob11Id::num(1), Ob11Id::num(2), Some(true)))
             .is_none()
     );
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -278,10 +284,16 @@ async fn numeric_ids_are_resolved_through_idmap() {
     let state = support::with_temp_stores(state, &dir);
     let idmap = state.idmap().expect("应注入 idmap");
 
-    let (raw_group, group_vuin) = idmap.retrieve_virtual_value("GROUP-OPENID").expect("虚拟群号");
+    let (raw_group, group_vuin) = idmap
+        .retrieve_virtual_value("GROUP-OPENID")
+        .expect("虚拟群号");
     let message_vuin = idmap.store_cache("MSG-RAW").expect("虚拟消息 ID");
 
-    let event = group_event(Ob11Id::num(message_vuin), Ob11Id::num(group_vuin), Some(true));
+    let event = group_event(
+        Ob11Id::num(message_vuin),
+        Ob11Id::num(group_vuin),
+        Some(true),
+    );
     let notice = state.downtime().notice(&event).expect("数字形态也要兜底");
     assert_eq!(notice.target, Target::Group(raw_group));
     assert_eq!(notice.message.msg_id.as_deref(), Some("MSG-RAW"));

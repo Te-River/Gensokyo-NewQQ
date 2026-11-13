@@ -370,7 +370,11 @@ fn uses_zigbuild(target: &Target) -> bool {
 
 /// cargo 调用构造：zigbuild 目标换子命令，其余参数（--release --locked -p …）不变。
 fn cargo_invocation(target: &Target, no_webui: bool) -> (&'static str, Vec<String>) {
-    let subcommand = if uses_zigbuild(target) { "zigbuild" } else { "build" };
+    let subcommand = if uses_zigbuild(target) {
+        "zigbuild"
+    } else {
+        "build"
+    };
     let mut args: Vec<String> = [
         "--release",
         "--locked",
@@ -414,7 +418,10 @@ fn cargo_build(
         .status()
         .with_context(|| format!("执行 cargo {subcommand} 失败"))?;
     if !status.success() {
-        bail!("cargo {subcommand} 失败（退出码 {status}）: {}", target.label());
+        bail!(
+            "cargo {subcommand} 失败（退出码 {status}）: {}",
+            target.label()
+        );
     }
     Ok(())
 }
@@ -799,7 +806,10 @@ mod tests {
         );
         // 精简版只多一个 --no-default-features
         let (_, slim) = cargo_invocation(&target, true);
-        assert_eq!(slim.last().map(String::as_str), Some("--no-default-features"));
+        assert_eq!(
+            slim.last().map(String::as_str),
+            Some("--no-default-features")
+        );
         assert_eq!(slim.len(), args.len() + 1);
 
         // 非 linux-gnu 目标子命令保持 build
@@ -808,7 +818,10 @@ mod tests {
         assert_eq!(subcommand, "build");
         let (subcommand, args) = cargo_invocation(&Target::host(), false);
         assert_eq!(subcommand, "build");
-        assert!(!args.iter().any(|arg| arg == "--target"), "宿主不带 --target");
+        assert!(
+            !args.iter().any(|arg| arg == "--target"),
+            "宿主不带 --target"
+        );
     }
 
     #[test]

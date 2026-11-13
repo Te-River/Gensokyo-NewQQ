@@ -181,10 +181,25 @@ async fn webhook_rejects_bad_signatures() {
             Some(TIMESTAMP),
             body.clone(),
         ),
-        ("签名非十六进制", Some("zzzz"), Some(TIMESTAMP), body.clone()),
-        ("签名长度不足", Some("deadbeef"), Some(TIMESTAMP), body.clone()),
+        (
+            "签名非十六进制",
+            Some("zzzz"),
+            Some(TIMESTAMP),
+            body.clone(),
+        ),
+        (
+            "签名长度不足",
+            Some("deadbeef"),
+            Some(TIMESTAMP),
+            body.clone(),
+        ),
         ("缺签名 header", None, Some(TIMESTAMP), body.clone()),
-        ("缺时间戳 header", Some(signature.as_str()), None, body.clone()),
+        (
+            "缺时间戳 header",
+            Some(signature.as_str()),
+            None,
+            body.clone(),
+        ),
     ];
 
     for (name, candidate, timestamp, payload) in cases {

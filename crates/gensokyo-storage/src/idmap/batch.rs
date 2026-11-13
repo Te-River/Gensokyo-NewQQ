@@ -64,7 +64,10 @@ impl<'a> IdMapWriteBatch<'a> {
     /// # Errors
     ///
     /// redb 事务失败或计数器/表数据损坏时返回 [`StorageError`]。
-    pub fn retrieve_virtual_value(&mut self, identity: &str) -> Result<(String, i64), StorageError> {
+    pub fn retrieve_virtual_value(
+        &mut self,
+        identity: &str,
+    ) -> Result<(String, i64), StorageError> {
         let store = self.store;
         let normalized = normalize_identity(
             identity,

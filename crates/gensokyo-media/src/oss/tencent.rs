@@ -121,8 +121,8 @@ mod tests {
     use crate::error::Error;
     use crate::hosting::UploadMethod;
     use crate::hosting::fixtures::FakeTransport;
-    use crate::oss::{OssConfig, OssKind};
     use crate::oss::upload as upload_oss;
+    use crate::oss::{OssConfig, OssKind};
 
     const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0DIHDR";
 
@@ -199,7 +199,11 @@ mod tests {
         let request = &calls[0];
         assert_eq!(request.method, UploadMethod::Put);
         assert_eq!(request.url, url);
-        assert!(request.url.starts_with("https://bucket-125.cos.ap-shanghai.myqcloud.com/"));
+        assert!(
+            request
+                .url
+                .starts_with("https://bucket-125.cos.ap-shanghai.myqcloud.com/")
+        );
         assert!(request.headers.iter().any(|(name, _)| name == "Host"));
         assert!(
             request
@@ -235,14 +239,10 @@ mod tests {
 
     #[tokio::test]
     async fn audits_after_upload_with_ci_recognition_request() {
-        let transport = Arc::new(
-            FakeTransport::new()
-                .respond(200, "")
-                .respond(
-                    200,
-                    "<RecognitionResult><JobId>j</JobId><Result>0</Result></RecognitionResult>",
-                ),
-        );
+        let transport = Arc::new(FakeTransport::new().respond(200, "").respond(
+            200,
+            "<RecognitionResult><JobId>j</JobId><Result>0</Result></RecognitionResult>",
+        ));
         let url = upload_oss(OssKind::TencentCos, transport.clone(), &audited(), PNG)
             .await
             .expect("审核通过");
@@ -274,11 +274,10 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_images_that_fail_audit() {
-        let transport = Arc::new(
-            FakeTransport::new()
-                .respond(200, "")
-                .respond(200, "<RecognitionResult><Result>1</Result></RecognitionResult>"),
-        );
+        let transport = Arc::new(FakeTransport::new().respond(200, "").respond(
+            200,
+            "<RecognitionResult><Result>1</Result></RecognitionResult>",
+        ));
         let error = upload_oss(OssKind::TencentCos, transport.clone(), &audited(), PNG)
             .await
             .unwrap_err();

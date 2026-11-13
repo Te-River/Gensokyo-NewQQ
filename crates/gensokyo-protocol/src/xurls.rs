@@ -125,7 +125,13 @@ mod tests {
     fn spans_are_byte_offsets() {
         let text = "看https://例子.com/a";
         let spans = find_urls(text);
-        assert_eq!(spans, vec![UrlSpan { start: 3, end: text.len() }]);
+        assert_eq!(
+            spans,
+            vec![UrlSpan {
+                start: 3,
+                end: text.len()
+            }]
+        );
         assert_eq!(&text[spans[0].start..spans[0].end], "https://例子.com/a");
     }
 

@@ -410,11 +410,7 @@ mod tests {
     struct FakeRunner;
 
     impl ProcessRunner for FakeRunner {
-        fn run(
-            &self,
-            program: &str,
-            args: &[String],
-        ) -> gensokyo_media::Result<ProcessOutput> {
+        fn run(&self, program: &str, args: &[String]) -> gensokyo_media::Result<ProcessOutput> {
             match program {
                 "ffmpeg" => {
                     std::fs::write(Path::new(args.last().expect("末参是 PCM 路径")), b"pcm")
@@ -440,8 +436,7 @@ mod tests {
 
     #[tokio::test]
     async fn prepare_record_encodes_non_silk_audio() {
-        let runtime =
-            MediaRuntime::default().with_silk_codec(SilkCodec::with_runner(FakeRunner));
+        let runtime = MediaRuntime::default().with_silk_codec(SilkCodec::with_runner(FakeRunner));
         let out = runtime
             .prepare_record(b"ID3\x04not-silk".to_vec(), 24_000)
             .await

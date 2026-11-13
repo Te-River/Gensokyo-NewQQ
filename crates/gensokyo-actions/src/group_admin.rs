@@ -925,7 +925,10 @@ mod tests {
     }
 
     /// 注册 `count` 个 32 位形态的群（`0000…0000`、`0000…0001`…，与枚举顺序一致）。
-    fn registry_with(prefix: &str, count: u32) -> (std::path::PathBuf, Arc<IdMapStore>, Vec<String>) {
+    fn registry_with(
+        prefix: &str,
+        count: u32,
+    ) -> (std::path::PathBuf, Arc<IdMapStore>, Vec<String>) {
         let (dir, store) = fresh_store(prefix);
         let ids: Vec<String> = (0..count).map(|i| format!("{i:032x}")).collect();
         for openid in &ids {

@@ -39,8 +39,8 @@ use time::format_description::FormatItem;
 use time::macros::format_description;
 
 use crate::error::{Error, Result};
-use crate::hosting::transport::{HostingTransport, UploadBody, UploadMethod, UploadRequest};
 use crate::hosting::DEFAULT_UPLOAD_TIMEOUT;
+use crate::hosting::transport::{HostingTransport, UploadBody, UploadMethod, UploadRequest};
 
 pub use aliyun::{AliyunOssConfig, AliyunPlan};
 pub use baidu::{BaiduBosConfig, BaiduPlan};
@@ -149,8 +149,9 @@ pub(crate) async fn put(
 
 /// `Date` 头（RFC 1123 / GMT，阿里云 OSS 的签名时间）：`Sun, 08 Nov 2026 10:00:00 GMT`。
 pub(crate) fn http_date(timestamp: i64) -> String {
-    const FORMAT: &[FormatItem<'static>] =
-        format_description!("[weekday repr:short], [day] [month repr:short] [year] [hour]:[minute]:[second] GMT");
+    const FORMAT: &[FormatItem<'static>] = format_description!(
+        "[weekday repr:short], [day] [month repr:short] [year] [hour]:[minute]:[second] GMT"
+    );
     // 格式描述是静态常量，`OffsetDateTime` 也由合法时间戳构造，格式化不会失败。
     moment(timestamp).format(FORMAT).unwrap_or_default()
 }

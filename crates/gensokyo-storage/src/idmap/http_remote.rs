@@ -171,23 +171,33 @@ impl HttpRemoteBridge {
                 "等待桥回复超时（{}s）",
                 self.recv_timeout.as_secs()
             ))),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                Err(StorageError::Remote("桥线程已死亡: 回复通道断开".to_string()))
-            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(StorageError::Remote(
+                "桥线程已死亡: 回复通道断开".to_string(),
+            )),
         }
     }
 
     /// type=1：`StoreIDv2`（service.go:696），`response["row"].(float64)` → int64。
     pub fn store_idv2(&self, id: impl Into<String>) -> Result<i64, StorageError> {
         let url = format!("{}/getid?type=1&id={}", self.base, id.into());
-        let value = self.call(url, ResponseStyle::JsonFirst { error_from_body: true })?;
+        let value = self.call(
+            url,
+            ResponseStyle::JsonFirst {
+                error_from_body: true,
+            },
+        )?;
         number_field(&value, "row")
     }
 
     /// type=2：`RetrieveRowByIDv2`（service.go:1035），取 `id` 字符串。
     pub fn retrieve_row_by_idv2(&self, rowid: impl Into<String>) -> Result<String, StorageError> {
         let url = format!("{}/getid?type=2&id={}", self.base, rowid.into());
-        let value = self.call(url, ResponseStyle::JsonFirst { error_from_body: true })?;
+        let value = self.call(
+            url,
+            ResponseStyle::JsonFirst {
+                error_from_body: true,
+            },
+        )?;
         string_field(&value, "id")
     }
 
@@ -253,11 +263,13 @@ impl HttpRemoteBridge {
         &self,
         virtual_value: i64,
     ) -> Result<(String, String), StorageError> {
-        let url = format!(
-            "{}/getid?type=6&virtualValue={virtual_value}",
-            self.base
-        );
-        let value = self.call(url, ResponseStyle::JsonFirst { error_from_body: false })?;
+        let url = format!("{}/getid?type=6&virtualValue={virtual_value}", self.base);
+        let value = self.call(
+            url,
+            ResponseStyle::JsonFirst {
+                error_from_body: false,
+            },
+        )?;
         let real = string_field(&value, "real")?;
         Ok((virtual_value.to_string(), real))
     }
@@ -270,7 +282,12 @@ impl HttpRemoteBridge {
     ) -> Result<(String, String), StorageError> {
         let real_value = real_value.into();
         let url = format!("{}/getid?type=7&id={real_value}", self.base);
-        let value = self.call(url, ResponseStyle::JsonFirst { error_from_body: true })?;
+        let value = self.call(
+            url,
+            ResponseStyle::JsonFirst {
+                error_from_body: true,
+            },
+        )?;
         let virtual_value = string_field(&value, "virtual")?;
         Ok((real_value, virtual_value))
     }
@@ -287,8 +304,16 @@ impl HttpRemoteBridge {
             id.into(),
             subid.into()
         );
-        let value = self.call(url, ResponseStyle::JsonFirst { error_from_body: true })?;
-        Ok((number_field(&value, "row")?, number_field(&value, "subRow")?))
+        let value = self.call(
+            url,
+            ResponseStyle::JsonFirst {
+                error_from_body: true,
+            },
+        )?;
+        Ok((
+            number_field(&value, "row")?,
+            number_field(&value, "subRow")?,
+        ))
     }
 
     /// type=9：`RetrieveRowByIDv2Pro`（service.go:937-963），`id` + `subid`。
@@ -325,7 +350,12 @@ impl HttpRemoteBridge {
         second_label: &str,
     ) -> Result<(String, String), StorageError> {
         let url = format!("{}/getid?type=9&id={}&subid={}", self.base, id, subid);
-        let value = self.call(url, ResponseStyle::JsonFirst { error_from_body: true })?;
+        let value = self.call(
+            url,
+            ResponseStyle::JsonFirst {
+                error_from_body: true,
+            },
+        )?;
         Ok((
             string_field_labeled(&value, "id", first_label)?,
             string_field_labeled(&value, "subid", second_label)?,
@@ -343,7 +373,12 @@ impl HttpRemoteBridge {
             "{}/getrealvalues?type=11&id={virtual_value}&subid={virtual_value_sub}",
             self.base
         );
-        let value = self.call(url, ResponseStyle::JsonFirst { error_from_body: true })?;
+        let value = self.call(
+            url,
+            ResponseStyle::JsonFirst {
+                error_from_body: true,
+            },
+        )?;
         Ok((
             string_field_labeled(&value, "firstRealValue", "first real value")?,
             string_field_labeled(&value, "secondRealValue", "second real value")?,
@@ -369,14 +404,27 @@ impl HttpRemoteBridge {
     /// type=13：`SimplifiedStoreIDv2`（service.go:589-610），取 `row`。
     pub fn simplified_store_idv2(&self, id: impl Into<String>) -> Result<i64, StorageError> {
         let url = format!("{}/getid?type=13&id={}", self.base, id.into());
-        let value = self.call(url, ResponseStyle::JsonFirst { error_from_body: true })?;
+        let value = self.call(
+            url,
+            ResponseStyle::JsonFirst {
+                error_from_body: true,
+            },
+        )?;
         number_field(&value, "row")
     }
 
     /// type=14：`FindSubKeysByIdPro`（service.go:2168-2199），`keys` 必须全为字符串。
-    pub fn find_sub_keys_by_id_pro(&self, id: impl Into<String>) -> Result<Vec<String>, StorageError> {
+    pub fn find_sub_keys_by_id_pro(
+        &self,
+        id: impl Into<String>,
+    ) -> Result<Vec<String>, StorageError> {
         let url = format!("{}/getid?type=14&id={}", self.base, id.into());
-        let value = self.call(url, ResponseStyle::JsonFirst { error_from_body: true })?;
+        let value = self.call(
+            url,
+            ResponseStyle::JsonFirst {
+                error_from_body: true,
+            },
+        )?;
         let keys = value
             .get("keys")
             .and_then(Value::as_array)
@@ -412,14 +460,27 @@ impl HttpRemoteBridge {
     /// type=16：`StoreCachev2`（service.go:745-766），取 `row`。
     pub fn store_cache_v2(&self, id: impl Into<String>) -> Result<i64, StorageError> {
         let url = format!("{}/getid?type=16&id={}", self.base, id.into());
-        let value = self.call(url, ResponseStyle::JsonFirst { error_from_body: true })?;
+        let value = self.call(
+            url,
+            ResponseStyle::JsonFirst {
+                error_from_body: true,
+            },
+        )?;
         number_field(&value, "row")
     }
 
     /// type=17：`RetrieveRowByCachev2`（service.go:1109-1130），取 `id`。
-    pub fn retrieve_row_by_cache_v2(&self, rowid: impl Into<String>) -> Result<String, StorageError> {
+    pub fn retrieve_row_by_cache_v2(
+        &self,
+        rowid: impl Into<String>,
+    ) -> Result<String, StorageError> {
         let url = format!("{}/getid?type=17&id={}", self.base, rowid.into());
-        let value = self.call(url, ResponseStyle::JsonFirst { error_from_body: true })?;
+        let value = self.call(
+            url,
+            ResponseStyle::JsonFirst {
+                error_from_body: true,
+            },
+        )?;
         string_field(&value, "id")
     }
 }
@@ -492,14 +553,15 @@ fn execute(client: &Client, url: &str, style: ResponseStyle) -> Result<Value, St
             })?;
             match value.get("value") {
                 Some(found) => Ok(Value::String(go_value_string(found))),
-                None => Err(StorageError::Remote("value not found in response".to_string())),
+                None => Err(StorageError::Remote(
+                    "value not found in response".to_string(),
+                )),
             }
         }
         ResponseStyle::JsonFirst { error_from_body } => {
             let body = read_limited(response)?;
-            let value: Value = serde_json::from_slice(&body).map_err(|err| {
-                StorageError::Remote(format!("failed to decode response: {err}"))
-            })?;
+            let value: Value = serde_json::from_slice(&body)
+                .map_err(|err| StorageError::Remote(format!("failed to decode response: {err}")))?;
             if status != StatusCode::OK {
                 return Err(StorageError::Remote(if error_from_body {
                     let detail = value
@@ -538,7 +600,11 @@ fn read_limited(response: reqwest::blocking::Response) -> Result<Vec<u8>, Storag
 fn number_field(value: &Value, field: &str) -> Result<i64, StorageError> {
     value
         .get(field)
-        .and_then(|found| found.as_i64().or_else(|| found.as_f64().map(|num| num as i64)))
+        .and_then(|found| {
+            found
+                .as_i64()
+                .or_else(|| found.as_f64().map(|num| num as i64))
+        })
         .ok_or_else(|| StorageError::Remote(format!("invalid response format for {field}")))
 }
 
@@ -567,7 +633,11 @@ fn go_value_string(value: &Value) -> String {
         Value::Number(number) => number.to_string(),
         Value::Array(items) => format!(
             "[{}]",
-            items.iter().map(go_value_string).collect::<Vec<_>>().join(" ")
+            items
+                .iter()
+                .map(go_value_string)
+                .collect::<Vec<_>>()
+                .join(" ")
         ),
         Value::Object(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
@@ -727,8 +797,10 @@ mod tests {
     /// 17 个 type 的罐头应答（字段名与 Go 服务端 getIDHandler.go 逐字一致）。
     fn table_response(target: &str) -> (u16, String) {
         let (path, query) = target.split_once('?').unwrap_or((target, ""));
-        let params: HashMap<&str, &str> =
-            query.split('&').filter_map(|kv| kv.split_once('=')).collect();
+        let params: HashMap<&str, &str> = query
+            .split('&')
+            .filter_map(|kv| kv.split_once('='))
+            .collect();
         let ty = params.get("type").copied().unwrap_or("");
         let body = match (path, ty) {
             ("/getid", "1") => r#"{"row":101}"#,
@@ -843,8 +915,7 @@ mod tests {
                 ("openid-group-1".to_string(), "openid-user-1".to_string())
             ); // type=9
             assert_eq!(
-                bridge
-                    .retrieve_virtual_value_v2_pro("openid-group-1", "openid-user-1")?,
+                bridge.retrieve_virtual_value_v2_pro("openid-group-1", "openid-user-1")?,
                 ("openid-group-1".to_string(), "openid-user-1".to_string())
             ); // type=9（同 URL）
             assert_eq!(
@@ -918,11 +989,23 @@ mod tests {
     #[test]
     fn force_ssl_and_port_443_build_https_base() {
         let bridge = spawn_test_bridge("8080".to_string(), true, Duration::from_secs(5));
-        assert!(bridge.base.starts_with("https://127.0.0.1:8080"), "{}", bridge.base);
+        assert!(
+            bridge.base.starts_with("https://127.0.0.1:8080"),
+            "{}",
+            bridge.base
+        );
         let bridge = spawn_test_bridge("443".to_string(), false, Duration::from_secs(5));
-        assert!(bridge.base.starts_with("https://127.0.0.1:443"), "{}", bridge.base);
+        assert!(
+            bridge.base.starts_with("https://127.0.0.1:443"),
+            "{}",
+            bridge.base
+        );
         let bridge = spawn_test_bridge("8080".to_string(), false, Duration::from_secs(5));
-        assert!(bridge.base.starts_with("http://127.0.0.1:8080"), "{}", bridge.base);
+        assert!(
+            bridge.base.starts_with("http://127.0.0.1:8080"),
+            "{}",
+            bridge.base
+        );
     }
 
     /// 验收 c-1：超 4MiB 响应 → Remote；桥不死。
@@ -1098,7 +1181,10 @@ mod tests {
         );
         // type=3/4/15
         retry_conn(|| store.write_config("lotus", "token", "abc")).unwrap();
-        assert_eq!(retry_conn(|| store.read_config("lotus", "token")).unwrap(), "abc");
+        assert_eq!(
+            retry_conn(|| store.read_config("lotus", "token")).unwrap(),
+            "abc"
+        );
         assert!(retry_conn(|| store.delete_config("lotus", "token")).unwrap());
         // type=5 / type=12
         retry_conn(|| store.update_virtual_value(101, 201)).unwrap();
@@ -1126,12 +1212,21 @@ mod tests {
         // 本地-only 方法不受影响（Go 同样无远程分支）
         store.store_user_name(101, "Alice");
         assert_eq!(store.get_user_name(101).as_deref(), Some("Alice"));
-        store.store_latest_msg_id("group-1", "user-1", "msg-1").unwrap();
-        assert_eq!(store.get_latest_msg_id("group-1", "user-1").unwrap(), "msg-1");
+        store
+            .store_latest_msg_id("group-1", "user-1", "msg-1")
+            .unwrap();
+        assert_eq!(
+            store.get_latest_msg_id("group-1", "user-1").unwrap(),
+            "msg-1"
+        );
 
         // 请求确实到了 stub：11 个分支点只用 /getid（type=11 不在分支点内）
         let targets = stub.targets();
-        assert!(targets.iter().any(|t| t == "/getid?type=1&id=openid-user-1"));
+        assert!(
+            targets
+                .iter()
+                .any(|t| t == "/getid?type=1&id=openid-user-1")
+        );
         assert!(targets.iter().any(|t| t == "/getid?type=16&id=real-msg-1"));
         assert!(targets.iter().all(|t| t.starts_with("/getid?")));
     }

@@ -1153,10 +1153,15 @@ mod ssrf_tests {
             else {
                 return;
             };
-            requests.lock().expect("requests 锁").push(target.to_owned());
+            requests
+                .lock()
+                .expect("requests 锁")
+                .push(target.to_owned());
             let (status, location, body) = responder(target);
-            let mut response =
-                format!("HTTP/1.1 {status} Status\r\nContent-Length: {}\r\n", body.len());
+            let mut response = format!(
+                "HTTP/1.1 {status} Status\r\nContent-Length: {}\r\n",
+                body.len()
+            );
             if let Some(location) = location {
                 response.push_str(&format!("Location: {location}\r\n"));
             }
@@ -1260,7 +1265,11 @@ mod ssrf_tests {
     async fn redirect_to_private_resolving_host_is_rejected_per_hop() {
         let stub = Stub::spawn(|target| {
             if target == "/start" {
-                (302, Some("http://intranet.test/a.png".to_owned()), Vec::new())
+                (
+                    302,
+                    Some("http://intranet.test/a.png".to_owned()),
+                    Vec::new(),
+                )
             } else {
                 (200, None, PNG.to_vec())
             }
@@ -1309,7 +1318,10 @@ mod ssrf_tests {
         let err = get_with_retry(&transport, &stub, &url)
             .await
             .expect_err("跳数上限必须拒绝");
-        assert!(matches!(err, Error::TooManyRedirects(MAX_REDIRECTS)), "{err:?}");
+        assert!(
+            matches!(err, Error::TooManyRedirects(MAX_REDIRECTS)),
+            "{err:?}"
+        );
         assert_eq!(
             stub.targets().len(),
             MAX_REDIRECTS + 1,
@@ -1348,7 +1360,10 @@ mod ssrf_tests {
         let err = get_with_retry(&transport, &stub, &format!("{base}/big"))
             .await
             .expect_err("超限必须拒绝");
-        assert!(matches!(err, Error::TooLarge { limit: 1024, .. }), "{err:?}");
+        assert!(
+            matches!(err, Error::TooLarge { limit: 1024, .. }),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]

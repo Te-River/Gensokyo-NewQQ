@@ -92,7 +92,11 @@ mod tests {
     fn zero_and_small_size_silently_grow_to_modules() {
         let m = modules(URL);
         for size in [0, 1, 5, i64::from(m) - 1] {
-            assert_eq!(png_side(&qr_png_base64(URL, size).unwrap()), m, "size={size}");
+            assert_eq!(
+                png_side(&qr_png_base64(URL, size).unwrap()),
+                m,
+                "size={size}"
+            );
         }
     }
 
@@ -123,8 +127,14 @@ mod tests {
 
     #[test]
     fn absurd_size_errors() {
-        assert!(matches!(qr_png_base64(URL, i64::MIN), Err(Error::QrEncode(_))));
-        assert!(matches!(qr_png_base64(URL, i64::MAX), Err(Error::QrEncode(_))));
+        assert!(matches!(
+            qr_png_base64(URL, i64::MIN),
+            Err(Error::QrEncode(_))
+        ));
+        assert!(matches!(
+            qr_png_base64(URL, i64::MAX),
+            Err(Error::QrEncode(_))
+        ));
     }
 
     /// rqrr 解码 PNG 回原文（lead 裁决 (a)：解码载荷等价是语义 parity 的充分证明）。
@@ -171,15 +181,35 @@ mod tests {
             for s in e["sizes"].as_array().unwrap() {
                 let size = s["size"].as_i64().unwrap();
                 // 尺寸语义按本库模块数断言（版本分歧条目的模块数与 Go 不同）
-                let expected = if size < 0 { -size * m_i64 } else { size.max(m_i64) };
+                let expected = if size < 0 {
+                    -size * m_i64
+                } else {
+                    size.max(m_i64)
+                };
                 let b64 = qr_png_base64(url, size).unwrap();
                 let bytes = decode_base64(&b64).unwrap();
                 let img = image::load_from_memory(&bytes).unwrap();
-                assert_eq!(img.width() as i64, expected, "尺寸语义宽: {url} size={size}");
-                assert_eq!(img.height() as i64, expected, "尺寸语义高: {url} size={size}");
+                assert_eq!(
+                    img.width() as i64,
+                    expected,
+                    "尺寸语义宽: {url} size={size}"
+                );
+                assert_eq!(
+                    img.height() as i64,
+                    expected,
+                    "尺寸语义高: {url} size={size}"
+                );
                 if matrix_match {
-                    assert_eq!(img.width() as i64, s["w"].as_i64().unwrap(), "Go 宽: {url} size={size}");
-                    assert_eq!(img.height() as i64, s["h"].as_i64().unwrap(), "Go 高: {url} size={size}");
+                    assert_eq!(
+                        img.width() as i64,
+                        s["w"].as_i64().unwrap(),
+                        "Go 宽: {url} size={size}"
+                    );
+                    assert_eq!(
+                        img.height() as i64,
+                        s["h"].as_i64().unwrap(),
+                        "Go 高: {url} size={size}"
+                    );
                 }
                 if size == -5 {
                     // 每模块整数倍像素、无重采样畸变，作解码验证样本

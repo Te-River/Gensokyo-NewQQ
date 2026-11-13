@@ -292,7 +292,11 @@ pub(crate) async fn login(
 
     if !matched {
         tracing::debug!("WebUI 登录失败");
-        return (StatusCode::UNAUTHORIZED, Json(json!({ "isLoggedIn": false }))).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "isLoggedIn": false })),
+        )
+            .into_response();
     }
 
     let token = match state.sessions().issue() {

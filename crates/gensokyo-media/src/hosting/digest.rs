@@ -113,8 +113,6 @@ pub(crate) fn md5_digest(data: &[u8]) -> [u8; 16] {
     md5(data)
 }
 
-
-
 /// SHA-1（RFC 3174）。
 fn sha1(data: &[u8]) -> [u8; SHA1_LEN] {
     let mut state: [u32; 5] = [

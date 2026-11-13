@@ -198,7 +198,10 @@ mod tests {
         assert_eq!(built.host, "bj.bcebos.com");
         assert!(built.key.ends_with("-42.jpg"), "{}", built.key);
         assert!(built.key.starts_with("qqbot-upload-"));
-        assert_eq!(built.url, format!("https://bj.bcebos.com/10001/{}", built.key));
+        assert_eq!(
+            built.url,
+            format!("https://bj.bcebos.com/10001/{}", built.key)
+        );
         assert_eq!(built.result_url, built.url);
         assert_eq!(built.date, "2026-11-08T10:00:00Z");
         let expected_prefix = "bce-auth-v1/bce-ak/2026-11-08T10:00:00Z/1800/host;x-bce-date/";
@@ -240,14 +243,8 @@ mod tests {
                 bucket: String::new(),
                 ..bos()
             },
-            BaiduBosConfig {
-                audit: 2,
-                ..bos()
-            },
-            BaiduBosConfig {
-                audit: 3,
-                ..bos()
-            },
+            BaiduBosConfig { audit: 2, ..bos() },
+            BaiduBosConfig { audit: 3, ..bos() },
         ] {
             let error = plan(&broken, PNG, 0, 1).unwrap_err();
             assert!(
@@ -269,7 +266,11 @@ mod tests {
         let request = &calls[0];
         assert_eq!(request.method, UploadMethod::Put);
         assert_eq!(request.url, url);
-        assert!(request.url.starts_with("https://bj.bcebos.com/10001/qqbot-upload-"));
+        assert!(
+            request
+                .url
+                .starts_with("https://bj.bcebos.com/10001/qqbot-upload-")
+        );
         for header in ["Host", "x-bce-date", "Authorization"] {
             assert!(
                 request.headers.iter().any(|(name, _)| name == header),
@@ -291,10 +292,7 @@ mod tests {
 
     fn audited() -> OssConfig {
         OssConfig {
-            baidu: BaiduBosConfig {
-                audit: 1,
-                ..bos()
-            },
+            baidu: BaiduBosConfig { audit: 1, ..bos() },
             ..OssConfig::default()
         }
     }

@@ -534,7 +534,11 @@ async fn account_config_patch_defers_restart_fields() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body={body}");
-    assert_eq!(app.state.config().snapshot().port, "5700", "重启项不进入快照");
+    assert_eq!(
+        app.state.config().snapshot().port,
+        "5700",
+        "重启项不进入快照"
+    );
     assert!(
         std::fs::read_to_string(app.state.config().path())
             .expect("读回配置失败")
@@ -605,7 +609,10 @@ async fn process_status_mirrors_go_shape() {
     assert_eq!(value["restarts"], 0, "没有进程守护: {body}");
     assert!(value["qr_uri"].is_null(), "Rust 无扫码登录: {body}");
     for key in ["pid", "status", "memory_used", "cpu_percent", "start_time"] {
-        assert!(!value["details"][key].is_null(), "缺少 details.{key}: {body}");
+        assert!(
+            !value["details"][key].is_null(),
+            "缺少 details.{key}: {body}"
+        );
     }
     assert_eq!(
         value["details"]["pid"].as_u64(),
@@ -822,8 +829,11 @@ async fn account_api_forward_rejects_every_name() {
     assert_eq!(status, StatusCode::UNAUTHORIZED, "未登录不得转发");
 
     let cookie = login_cookie(&app).await;
-    let (status, _, body) =
-        send(&app.router, post_json_with_cookie(&uri, "{}", Some(&cookie))).await;
+    let (status, _, body) = send(
+        &app.router,
+        post_json_with_cookie(&uri, "{}", Some(&cookie)),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
     assert_eq!(json_body(&body)["error"], "Invalid API name");
 }
@@ -838,7 +848,11 @@ async fn expired_session_is_rejected_and_cleaned_up() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json_body(&payload)["isLoggedIn"], false, "TTL=0 必须立即失效");
+    assert_eq!(
+        json_body(&payload)["isLoggedIn"],
+        false,
+        "TTL=0 必须立即失效"
+    );
     assert_eq!(app.state.sessions().cleanup(), 1);
     assert!(app.state.sessions().is_empty());
 }
@@ -862,13 +876,14 @@ async fn session_survives_restart_via_cookie_redb() {
     let state = state_with_db(&manager, &db);
     assert_eq!(state.sessions().len(), 1, "重启后会话应从 cookie.redb 恢复");
     let router = WebUi::router(Arc::clone(&state));
-    let (status, _, payload) = send(
-        &router,
-        get_with_cookie("/api/check-login-status", &cookie),
-    )
-    .await;
+    let (status, _, payload) =
+        send(&router, get_with_cookie("/api/check-login-status", &cookie)).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json_body(&payload)["isLoggedIn"], true, "重启后登录态应有效");
+    assert_eq!(
+        json_body(&payload)["isLoggedIn"],
+        true,
+        "重启后登录态应有效"
+    );
 }
 
 /// 过期会话既不能复活，也不能留在 `cookie.redb` 里。
@@ -891,8 +906,11 @@ async fn expired_sessions_are_dropped_from_cookie_redb() {
         let state = state_with_db(&manager, &db);
         assert!(state.sessions().is_empty(), "cleanup 后不得留下过期会话");
         let router = WebUi::router(Arc::clone(&state));
-        let (_, _, payload) =
-            send(&router, get_with_cookie("/api/check-login-status", &cleaned)).await;
+        let (_, _, payload) = send(
+            &router,
+            get_with_cookie("/api/check-login-status", &cleaned),
+        )
+        .await;
         assert_eq!(json_body(&payload)["isLoggedIn"], false);
     }
 

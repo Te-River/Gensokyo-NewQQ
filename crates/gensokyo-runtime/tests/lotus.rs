@@ -177,7 +177,9 @@ async fn dual_instance_idmap_consistency() {
         "openid-cross-instance"
     );
     // 消息缓存也走远端（StoreCacheV2 / RetrieveRowByCacheV2）。
-    let cache_row = client_store.store_cache("real-msg-cross").expect("缓存写入");
+    let cache_row = client_store
+        .store_cache("real-msg-cross")
+        .expect("缓存写入");
     assert_eq!(
         server_store
             .retrieve_row_by_cache(cache_row)

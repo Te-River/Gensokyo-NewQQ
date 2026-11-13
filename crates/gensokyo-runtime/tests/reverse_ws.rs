@@ -26,7 +26,10 @@ fn settings_with(address: &str, extra: &str) -> String {
 }
 
 /// 构造带注入 handler 的 `AppState`（内置 3 个 action + 注入项）。
-fn state_with(settings: &str, handlers: Vec<(&'static str, Arc<dyn Handler>)>) -> (AppState, TempDir) {
+fn state_with(
+    settings: &str,
+    handlers: Vec<(&'static str, Arc<dyn Handler>)>,
+) -> (AppState, TempDir) {
     let (manager, dir) = support::config(settings);
     let mut registry = Registry::new();
     gensokyo_runtime::builtin::register_all(
