@@ -14,6 +14,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 mod bench;
+mod bootstrap;
 mod build;
 mod pgo;
 

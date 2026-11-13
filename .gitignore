@@ -82,6 +82,9 @@ webui/dist/js/*
 # cargo build cache
 target/
 
+# xtask 自动引导的交叉工具链缓存（zig / cargo-zigbuild，见 docs/rust-build.md）
+.tools/
+
 # idmap redb 测试库（测试应使用临时路径；兜底忽略）
 *.redb
 *.redb-journal

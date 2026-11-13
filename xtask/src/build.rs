@@ -12,6 +12,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use clap::Args;
 
+use crate::bootstrap::{bootstrap_linux_tools, path_with_tools};
 use crate::find_lockfile;
 
 /// 发布目标矩阵（`--all` 使用），对齐 `.github/workflows/cross_compile.yml` 的 Go 矩阵。
@@ -241,12 +242,15 @@ pub(crate) fn ensure_webui_dist(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `rustup target list --installed`；rustup 不可用时返回 `None`（退化为直接尝试构建）。
-fn installed_targets() -> Option<Vec<String>> {
-    let output = Command::new("rustup")
-        .args(["target", "list", "--installed"])
-        .output()
-        .ok()?;
+/// `rustup target list --installed`（带与 add 相同的 `--toolchain`，避免查到默认工具链的清单）；
+/// rustup 不可用时返回 `None`（退化为直接尝试构建）。
+fn installed_targets(toolchain: Option<&str>) -> Option<Vec<String>> {
+    let mut command = Command::new("rustup");
+    command.args(["target", "list", "--installed"]);
+    if let Some(toolchain) = toolchain {
+        command.args(["--toolchain", toolchain]);
+    }
+    let output = command.output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -260,11 +264,41 @@ fn installed_targets() -> Option<Vec<String>> {
     )
 }
 
+/// 目标缺失时自动 `rustup target add`（幂等）；rustup 不可用或安装失败返回 false。
+/// `--toolchain` 必须带当前实际工具链，否则会装进 rust-toolchain.toml 的默认工具链。
+fn ensure_target_installed(
+    triple: &str,
+    installed: Option<&Vec<String>>,
+    toolchain: Option<&str>,
+) -> bool {
+    if installed.is_some_and(|list| list.iter().any(|value| value == triple)) {
+        return true;
+    }
+    let mut command = Command::new("rustup");
+    command.args(["target", "add"]);
+    if let Some(toolchain) = toolchain {
+        command.args(["--toolchain", toolchain]);
+    }
+    command.arg(triple);
+    println!("  [bootstrap] rustup target add {triple}（缺失自动补装）");
+    match command.status() {
+        Ok(status) if status.success() => true,
+        Ok(status) => {
+            eprintln!("  rustup target add {triple} 失败（退出码 {status}）");
+            false
+        }
+        Err(err) => {
+            eprintln!("  无法执行 rustup（{err}），跳过 target 预装");
+            false
+        }
+    }
+}
+
 /// 当前实际使用的 rustup 工具链（`<channel>-<host>`，如 `1.99.1-x86_64-pc-windows-gnu`）。
 ///
-/// 跳过提示必须带上它：`rust-toolchain.toml` 把默认工具链钉在 msvc 宿主上，`cargo +<gnu>`
+/// target 补装必须带上它：`rust-toolchain.toml` 把默认工具链钉在 msvc 宿主上，`cargo +<gnu>`
 /// 只是临时覆盖，不带 `--toolchain` 的 `rustup target add` 会把 target 装进 msvc 工具链，
-/// 重新构建时依旧跳过。来源依次为 `RUSTUP_TOOLCHAIN`（`cargo +<tc>` / `rustup run` 注入）、
+/// 重新构建时依旧缺失。来源依次为 `RUSTUP_TOOLCHAIN`（`cargo +<tc>` / `rustup run` 注入）、
 /// `rustc -vV`、`rust-toolchain.toml` 的 channel + 本机推断。
 fn active_toolchain(root: &Path) -> Option<String> {
     if let Ok(value) = std::env::var("RUSTUP_TOOLCHAIN") {
@@ -326,12 +360,18 @@ fn host_triple() -> Option<String> {
     Some(format!("{arch}-{rest}"))
 }
 
-/// `cargo build --release --locked`：交叉时加 `--target`，精简版加 `--no-default-features`。
-///
-/// 只构建 bin 包——工作区还有 10 个库 crate 与 xtask 自身，全量构建没有意义。
-fn cargo_build(root: &Path, target: &Target, no_webui: bool) -> Result<()> {
+/// linux-gnu 交叉目标走 `cargo zigbuild`（zig cc 当交叉 C 编译器，ring 等 C 依赖不再
+/// 需要各平台原生工具链）；其余目标（darwin/MSVC/android/musl/宿主）维持 `cargo build`。
+fn uses_zigbuild(target: &Target) -> bool {
+    target.triple.as_deref().is_some_and(|triple| {
+        triple.ends_with("-linux-gnu") || triple.ends_with("-linux-gnueabihf")
+    })
+}
+
+/// cargo 调用构造：zigbuild 目标换子命令，其余参数（--release --locked -p …）不变。
+fn cargo_invocation(target: &Target, no_webui: bool) -> (&'static str, Vec<String>) {
+    let subcommand = if uses_zigbuild(target) { "zigbuild" } else { "build" };
     let mut args: Vec<String> = [
-        "build",
         "--release",
         "--locked",
         "-p",
@@ -350,15 +390,31 @@ fn cargo_build(root: &Path, target: &Target, no_webui: bool) -> Result<()> {
         // `--no-default-features` 占位；特性落地后改这里即可，见 docs/rust-build.md。
         args.push("--no-default-features".to_owned());
     }
+    (subcommand, args)
+}
 
-    println!("  $ cargo {}", args.join(" "));
-    let status = Command::new(cargo())
-        .current_dir(root)
-        .args(&args)
+/// `cargo build|zigbuild --release --locked`：交叉时加 `--target`，精简版加 `--no-default-features`。
+///
+/// 只构建 bin 包——工作区还有 10 个库 crate 与 xtask 自身，全量构建没有意义。
+/// `tool_path` 非空时注入引导好的 PATH（zig / cargo-zigbuild 所在目录前置）。
+fn cargo_build(
+    root: &Path,
+    target: &Target,
+    no_webui: bool,
+    tool_path: Option<&std::ffi::OsStr>,
+) -> Result<()> {
+    let (subcommand, args) = cargo_invocation(target, no_webui);
+    println!("  $ cargo {subcommand} {}", args.join(" "));
+    let mut command = Command::new(cargo());
+    command.current_dir(root).arg(subcommand).args(&args);
+    if let Some(path) = tool_path {
+        command.env("PATH", path);
+    }
+    let status = command
         .status()
-        .context("执行 cargo build 失败")?;
+        .with_context(|| format!("执行 cargo {subcommand} 失败"))?;
     if !status.success() {
-        bail!("cargo build 失败（退出码 {status}）: {}", target.label());
+        bail!("cargo {subcommand} 失败（退出码 {status}）: {}", target.label());
     }
     Ok(())
 }
@@ -385,10 +441,11 @@ fn build_one(
     release_dir: &Path,
     target: &Target,
     no_webui: bool,
+    tool_path: Option<&std::ffi::OsStr>,
 ) -> Result<PathBuf> {
     let name = artifact_name(&target.os, &target.arch, no_webui);
     println!("[build] {} → release/{name}", target.label());
-    cargo_build(root, target, no_webui)?;
+    cargo_build(root, target, no_webui, tool_path)?;
 
     let built = built_binary(target_dir, target);
     if !built.is_file() {
@@ -426,10 +483,11 @@ fn compress(path: &Path, level: u8) -> Result<()> {
     }
 }
 
-/// `xtask build` 入口：解析目标 → 构建 → 复制 → 可选 UPX → 汇总。
+/// `xtask build` 入口：解析目标 → 引导交叉工具链 → 构建 → 复制 → 可选 UPX → 汇总。
 ///
-/// `--all` 下未安装的目标打印跳过原因并继续；真正编译失败的目标记入失败清单，
-/// 其余目标继续构建，最终以非零退出码汇总。
+/// linux-gnu 目标先自动引导 zig + cargo-zigbuild（见 bootstrap.rs），缺失的 rustup
+/// target 自动补装；补装失败的目标在矩阵模式下打印跳过原因并继续，真正编译失败的
+/// 目标记入失败清单，其余目标继续构建，最终以非零退出码汇总。
 pub fn run(args: BuildArgs) -> Result<()> {
     let root = workspace_root()?;
     let targets = plan(&args)?;
@@ -457,39 +515,62 @@ pub fn run(args: BuildArgs) -> Result<()> {
         }
     );
 
-    let installed = if matrix_mode {
-        installed_targets()
-    } else {
-        None
-    };
-    // 跳过提示要指明装到哪个工具链，否则会装进 rust-toolchain.toml 的默认工具链。
-    let toolchain = if matrix_mode {
-        active_toolchain(&root)
-    } else {
-        None
-    };
+    // 引导 linux-gnu 交叉工具链（zig + cargo-zigbuild）；全部命中 PATH/.tools 缓存时零网络。
+    let needs_zigbuild = targets.iter().any(uses_zigbuild);
+    let mut tool_path: Option<std::ffi::OsString> = None;
+    let mut bootstrap_failed = false;
+    if needs_zigbuild {
+        match bootstrap_linux_tools(&root) {
+            Ok(dirs) => tool_path = Some(path_with_tools(&dirs)?),
+            Err(err) if matrix_mode => {
+                // 不静默回退 plain cargo build（必败）：linux 目标记失败，其余平台继续。
+                eprintln!("[fail] Linux 交叉工具链引导失败: {err:#}");
+                bootstrap_failed = true;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    // target 查询与补装都要指明工具链，否则会落在 rust-toolchain.toml 的默认工具链上。
+    let toolchain = active_toolchain(&root);
+    let installed = installed_targets(toolchain.as_deref());
     let mut outputs = Vec::new();
     let mut skipped = Vec::new();
     let mut failures = Vec::new();
 
     for target in &targets {
-        if let (Some(installed), Some(triple)) = (&installed, &target.triple)
-            && !installed.iter().any(|value| value == triple)
+        if bootstrap_failed && uses_zigbuild(target) {
+            for &no_webui in flavors {
+                failures.push(format!("{}/{no_webui}", target.label()));
+            }
+            continue;
+        }
+        if let Some(triple) = &target.triple
+            && !ensure_target_installed(triple, installed.as_ref(), toolchain.as_deref())
+            && matrix_mode
         {
             let reason = match toolchain.as_deref() {
-                Some(toolchain) => {
-                    format!("{triple} 未安装 → rustup target add --toolchain {toolchain} {triple}")
-                }
+                Some(toolchain) => format!(
+                    "{triple} 自动补装失败 → 手动执行 rustup target add --toolchain {toolchain} {triple}"
+                ),
                 None => format!(
-                    "{triple} 未安装 → rustup target add {triple}（请确认加到当前使用的工具链）"
+                    "{triple} 自动补装失败 → 手动执行 rustup target add {triple}（请确认加到当前使用的工具链）"
                 ),
             };
             println!("[skip] {reason}");
             skipped.push(reason);
             continue;
         }
+        // 单目标模式补装失败不跳过：交给 cargo 真实尝试（rustup 缺失时 target 可能已就位）。
         for &no_webui in flavors {
-            match build_one(&root, &target_dir, &release_dir, target, no_webui) {
+            match build_one(
+                &root,
+                &target_dir,
+                &release_dir,
+                target,
+                no_webui,
+                tool_path.as_deref(),
+            ) {
                 Ok(path) => outputs.push(path),
                 Err(err) if matrix_mode => {
                     eprintln!("[fail] {err:#}");
@@ -522,15 +603,11 @@ pub fn run(args: BuildArgs) -> Result<()> {
         bail!("{} 个构建失败: {}", failures.len(), failures.join(", "));
     }
     if outputs.is_empty() {
-        let install = toolchain.as_deref().map_or_else(
-            || "rustup target add --toolchain <当前工具链> <target>".to_owned(),
-            |toolchain| format!("rustup target add --toolchain {toolchain} <target>"),
-        );
         bail!(
             "没有产出任何产物（跳过 {} 个目标）\n\
              本平台构建：.\\build.ps1（即 cargo xtask build），不需要安装任何 target\n\
-             全平台构建：按上面的 [skip] 提示逐个安装，形如 {install}\n\
-             Linux / Apple 目标还需对应的交叉链接器（Windows 宿主上通常不可行）",
+             Linux 目标会自动引导 zig/cargo-zigbuild 并补装 rustup target；\n\
+             darwin / MSVC / android 仍需各自的工具链（见 docs/rust-build.md）",
             skipped.len()
         );
     }
@@ -540,8 +617,8 @@ pub fn run(args: BuildArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BuildArgs, Target, artifact_name, built_binary, ensure_webui_dist, flavors, plan,
-        split_triple,
+        BuildArgs, Target, artifact_name, built_binary, cargo_invocation, ensure_webui_dist,
+        flavors, plan, split_triple, uses_zigbuild,
     };
 
     /// 测试用参数；未设置的字段一律取“不生效”的值。
@@ -673,6 +750,65 @@ mod tests {
             "宿主构建不应有 triple 层: {}",
             host_path.display()
         );
+    }
+
+    #[test]
+    fn only_linux_gnu_targets_route_to_zigbuild() {
+        let zigbuild = [
+            "x86_64-unknown-linux-gnu",
+            "i686-unknown-linux-gnu",
+            "armv7-unknown-linux-gnueabihf",
+            "aarch64-unknown-linux-gnu",
+        ];
+        for triple in zigbuild {
+            let target = Target::parse(triple).expect("三元组解析失败");
+            assert!(uses_zigbuild(&target), "{triple} 应走 zigbuild");
+        }
+        let plain = [
+            "x86_64-unknown-linux-musl",
+            "x86_64-apple-darwin",
+            "aarch64-apple-darwin",
+            "x86_64-pc-windows-msvc",
+            "i686-pc-windows-msvc",
+            "aarch64-linux-android",
+        ];
+        for triple in plain {
+            let target = Target::parse(triple).expect("三元组解析失败");
+            assert!(!uses_zigbuild(&target), "{triple} 不应走 zigbuild");
+        }
+        assert!(!uses_zigbuild(&Target::host()), "宿主构建不走 zigbuild");
+    }
+
+    #[test]
+    fn zigbuild_keeps_the_same_cargo_arguments() {
+        let target = Target::parse("aarch64-unknown-linux-gnu").expect("三元组解析失败");
+        let (subcommand, args) = cargo_invocation(&target, false);
+        assert_eq!(subcommand, "zigbuild");
+        assert_eq!(
+            args,
+            [
+                "--release",
+                "--locked",
+                "-p",
+                "gensokyo-bin",
+                "--bin",
+                "gensokyo",
+                "--target",
+                "aarch64-unknown-linux-gnu",
+            ]
+        );
+        // 精简版只多一个 --no-default-features
+        let (_, slim) = cargo_invocation(&target, true);
+        assert_eq!(slim.last().map(String::as_str), Some("--no-default-features"));
+        assert_eq!(slim.len(), args.len() + 1);
+
+        // 非 linux-gnu 目标子命令保持 build
+        let windows = Target::parse("x86_64-pc-windows-msvc").expect("三元组解析失败");
+        let (subcommand, _) = cargo_invocation(&windows, false);
+        assert_eq!(subcommand, "build");
+        let (subcommand, args) = cargo_invocation(&Target::host(), false);
+        assert_eq!(subcommand, "build");
+        assert!(!args.iter().any(|arg| arg == "--target"), "宿主不带 --target");
     }
 
     #[test]

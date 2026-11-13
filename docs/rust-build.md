@@ -11,9 +11,66 @@
 |----|------|
 | Rust 工具链 | `rust-toolchain.toml` 钉 `1.99.1`；MSRV 见根 `Cargo.toml`（1.90） |
 | 链接器 | 宿主 abi 必须有可用链接器：MSVC 需 VS Build Tools（`link.exe`），GNU 需 mingw。本仓库当前开发机走 GNU：`rustup override set 1.99.1-x86_64-pc-windows-gnu` |
+| Linux 交叉工具链 | **自动引导，无需预装**：linux-gnu×4 目标构建前 xtask 自动探测/下载 zig + cargo-zigbuild（见下节）；rustup target 缺失时自动 `rustup target add` |
+| 系统工具（仅首次下载需要） | `curl`、`tar`（Windows 10+ 自带两者；Linux 需发行版自带，zip 解压另可回退 `unzip`）、sha256 校验用 `certutil`（Windows）/ `sha256sum`（Linux）。全部系统自带，**不新增任何 cargo 依赖** |
 | `webui/dist` | **`rust-embed` 在编译期读取该目录**，目录缺失会直接编译失败。它以 `.gitignore` 忽略，xtask 会在缺失时自动写入 5 个占位文件（与旧 `build.ps1` 的 `Ensure-WebUIDist`、CI 占位步骤同一组文件） |
 | 前端产物（可选） | `cd frontend && npm run build` 会产出真实的 `webui/dist`；存在 `webui/dist/css/style.css` 时 xtask 不再写占位文件 |
 | UPX（可选） | 默认尝试压缩；PATH 里没有 `upx` 只提示并跳过，不是构建失败 |
+
+## Linux 交叉工具链自动引导（zig + cargo-zigbuild）
+
+linux-gnu×4 目标（`x86_64` / `i686` / `armv7-gnueabihf` / `aarch64`）改用 `cargo zigbuild`：
+zig cc 充当交叉 C 编译器，ring 等含 C 代码的依赖不再需要各平台原生工具链。
+引导逻辑在 `xtask/src/bootstrap.rs`，**跨平台（Windows / Linux 宿主均可）**，流程：
+
+1. **探测**：先 PATH（`where.exe` / `which`，命中后跑 `zig version` / `cargo-zigbuild --version`
+   与钉死版本比对，不符则 warn 并忽略 PATH 命中），再 `<workspace>/.tools/` 缓存
+   （`.tools/zig-<版本>/`、`.tools/cargo-zigbuild-<版本>/`，已 gitignore）；命中即用，不重复下载。
+2. **缺失则下载**：按宿主平台（x86_64/aarch64 × Windows/Linux）选官方 URL，
+   `curl --fail --location --retry 3 --connect-timeout 30 --max-time 900` 下载到 `.tools/`。
+3. **校验**：cargo-zigbuild 下载官方同名 `.sha256` 并用 `certutil`/`sha256sum` 逐字比对
+   （不符时清理归档与 `.sha256` 残留后报错）；
+   zig 官方下载索引不提供逐文件 sha256，退化为非空检查 + tar 解压完整性校验（损坏即报错）。
+4. **解压**：`tar -xf`（Windows 自带 bsdtar 同时支持 zip 与 tar.xz；Linux 解 zip 失败回退 `unzip`）。
+   二进制在一级子目录时把该子目录**全部条目**提升到根部（zig 包的 `lib/` 必须与可执行文件同目录，
+   zig 按相对路径找它）；根部布局（cargo-zigbuild）不动。失败时清掉半成品目录，重试即重新下载。
+5. **生效**：工具目录前置注入构建子进程的 PATH（不改 xtask 自身进程环境），
+   随后 `cargo zigbuild --release --locked -p gensokyo-bin --bin gensokyo --target <triple>`。
+
+`.tools/` 齐全时**零网络**；下载/校验失败直接报错（给出 URL 与原因），
+**不静默回退到必败的 plain `cargo build`**。`--all` 矩阵模式下引导失败只把 linux 目标记入
+失败清单，darwin/windows/android 目标照常继续。
+
+### 钉死版本与官方 URL（勿换源/勿加代理）
+
+zig **0.16.0**（cargo-zigbuild README 明确支持 0.15/0.16；0.17 兼容性未证实，勿升级）、
+cargo-zigbuild **v0.24.1** 预编译二进制（免 `cargo install` 编译）：
+
+| 宿主 | zig | cargo-zigbuild |
+|------|-----|----------------|
+| Windows x86_64 | `https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip` | `https://github.com/rust-cross/cargo-zigbuild/releases/download/v0.24.1/cargo-zigbuild-x86_64-pc-windows-msvc.zip` |
+| Windows aarch64 | `https://ziglang.org/download/0.16.0/zig-aarch64-windows-0.16.0.zip` | `https://github.com/rust-cross/cargo-zigbuild/releases/download/v0.24.1/cargo-zigbuild-aarch64-pc-windows-msvc.zip` |
+| Linux x86_64 | `https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz` | `https://github.com/rust-cross/cargo-zigbuild/releases/download/v0.24.1/cargo-zigbuild-x86_64-unknown-linux-gnu.tar.xz` |
+| Linux aarch64 | `https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz` | `https://github.com/rust-cross/cargo-zigbuild/releases/download/v0.24.1/cargo-zigbuild-aarch64-unknown-linux-gnu.tar.xz` |
+
+cargo-zigbuild 每个包另有同名 `.sha256` 校验文件（自动下载比对）。
+macOS / 32 位宿主没有官方预编译源：引导会报错并提示手动安装 zig 与 cargo-zigbuild 加入 PATH。
+
+### 版本覆盖开关（环境变量）
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `GENSOKYO_ZIG_VERSION` | `0.16.0` | 覆盖 zig 版本（只影响下载 URL 与缓存目录名） |
+| `GENSOKYO_CARGO_ZIGBUILD_VERSION` | `0.24.1` | 覆盖 cargo-zigbuild 版本 |
+
+只接受 `数字[.数字]*` 形式的版本号（按 `.` 分段、每段非空纯数字，拒绝 `.`/`1..2`/`.5` 等）；非法值直接报错。例：
+`$env:GENSOKYO_ZIG_VERSION="0.15.2"; .\build.ps1 -LinuxOnly`。
+
+### 不自动引导的目标（维持现状）
+
+darwin×2 仍需 macOS + Xcode CLT；windows-msvc×2 仍需 VS Build Tools；
+android 仍需 NDK（实验性）。这些目标缺工具链时按原口径报错/跳过，不自动下载。
+linux-musl 也不在引导范围（cargo-zigbuild 只路由 linux-gnu；musl 需自备工具链）。
 
 ## 本地构建
 
@@ -50,24 +107,27 @@ cargo xtask build --linux-only
 
 | 三元组 | os | arch | 产物 | 备注 |
 |--------|----|------|------|------|
-| `x86_64-unknown-linux-gnu` | linux | amd64 | `gensokyo-linux-amd64` | |
-| `i686-unknown-linux-gnu` | linux | 386 | `gensokyo-linux-386` | |
-| `armv7-unknown-linux-gnueabihf` | linux | arm | `gensokyo-linux-arm` | |
-| `aarch64-unknown-linux-gnu` | linux | arm64 | `gensokyo-linux-arm64` | |
-| `x86_64-apple-darwin` | darwin | amd64 | `gensokyo-darwin-amd64` | 需 macOS + Xcode CLT |
+| `x86_64-unknown-linux-gnu` | linux | amd64 | `gensokyo-linux-amd64` | `cargo zigbuild`，工具链自动引导 |
+| `i686-unknown-linux-gnu` | linux | 386 | `gensokyo-linux-386` | 同上 |
+| `armv7-unknown-linux-gnueabihf` | linux | arm | `gensokyo-linux-arm` | 同上 |
+| `aarch64-unknown-linux-gnu` | linux | arm64 | `gensokyo-linux-arm64` | 同上 |
+| `x86_64-apple-darwin` | darwin | amd64 | `gensokyo-darwin-amd64` | 需 macOS + Xcode CLT（不自动引导） |
 | `aarch64-apple-darwin` | darwin | arm64 | `gensokyo-darwin-arm64` | 同上 |
-| `x86_64-pc-windows-msvc` | windows | amd64 | `gensokyo-windows-amd64.exe` | |
-| `i686-pc-windows-msvc` | windows | 386 | `gensokyo-windows-386.exe` | |
-| `aarch64-linux-android` | android | arm64 | `gensokyo-android-arm64` | **实验性**（M0 裁决 2：失败不阻塞合入） |
+| `x86_64-pc-windows-msvc` | windows | amd64 | `gensokyo-windows-amd64.exe` | 需 VS Build Tools（不自动引导） |
+| `i686-pc-windows-msvc` | windows | 386 | `gensokyo-windows-386.exe` | 同上 |
+| `aarch64-linux-android` | android | arm64 | `gensokyo-android-arm64` | **实验性**（M0 裁决 2：失败不阻塞合入）；需 NDK（不自动引导） |
 
 `--all` 与 `--linux-only` 的语义：
 
-- 逐个目标执行；`rustup target list --installed` 里**没有**的目标打印
-  `[skip] <triple> 未安装 → rustup target add <triple>` 后继续，**不计失败**。
+- 逐个目标执行；rustup target 缺失时**自动 `rustup target add --toolchain <当前工具链>`**
+  （幂等）；补装失败才打印 `[skip] <triple> …` 后继续，**不计失败**。
+- linux-gnu×4 目标走自动引导的 `cargo zigbuild`（见上节）：**裸机上 `-All` / `-LinuxOnly`
+  的 linux 部分开箱即跑**，无需预装任何交叉工具链；首次运行会下载 zig + cargo-zigbuild
+  到 `.tools/`（之后零网络）。
 - 已安装但编译失败的目标记入失败清单并继续跑其余目标，结束时以非零退出码汇总
   （真编译错误不会被当成"环境缺失"吞掉）。
 - 宿主不在矩阵里时不会自动补进来；单独构建宿主用不带 `--all` 的命令。
-- 机器上没有 `rustup`（系统包管理器安装的 cargo）时无法预检，`--all` 会真实尝试每个目标，
+- 机器上没有 `rustup`（系统包管理器安装的 cargo）时无法预检/补装，`--all` 会真实尝试每个目标，
   缺失的目标表现为构建失败。
 
 ## `--no-webui` 的当前状态（重要）
@@ -110,7 +170,9 @@ dev/test 仍是 unwind：`dispatcher.rs` 的 `catch_unwind` handler 隔离只在
 ```
 
 `--locked` 落在 `cargo run` 上（同 `check-tls-floors` job 的理由：防止 cargo 在校验前改写 `Cargo.lock`）。
-交叉编译前记得 `rustup target add <triple>` 并准备对应链接器 / `cross` 容器。
+linux-gnu 交叉目标无需预装链接器 / `cross` 容器：xtask 自动引导 zig + cargo-zigbuild 并补装
+rustup target（runner 需能访问 ziglang.org 与 github.com；缓存 `.tools/` 可跨 job 复用）。
+darwin / MSVC / android 目标仍需各自工具链。
 
 ## 退出码
 
@@ -133,7 +195,7 @@ dev/test 仍是 unwind：`dispatcher.rs` 的 `catch_unwind` handler 隔离只在
 | 版本信息 | `-ldflags -X buildinfo.BuildType/BuildSpec` 注入 git commit | **暂未注入**，版本取自 crate `version`（0.1.0）；等 `buildinfo` 落地再接线 |
 | WebUI 占位 | 脚本内 `Ensure-WebUIDist` | xtask 内 `ensure_webui_dist`（同一组占位文件） |
 | `-NoWebUI` | `-tags=small`，真实裁剪 | `--no-default-features`，当前 no-op（见上节） |
-| 交叉编译 | Go 自带 | 需 `rustup target add` + 链接器/`cross` |
+| 交叉编译 | Go 自带 | linux-gnu×4 自动引导 zig + cargo-zigbuild；其余目标需 `rustup target add` + 各自工具链 |
 
 ## 验证命令
 
@@ -144,7 +206,8 @@ cargo +1.99.1-x86_64-pc-windows-gnu run -p xtask -- build --help
 cargo +1.99.1-x86_64-pc-windows-gnu run -p xtask -- build --no-upx   # 宿主 release 构建
 ```
 
-单测只覆盖纯函数（三元组解析、产物命名、版本矩阵、占位目录），不启动 cargo，因此不需要交叉工具链。
+单测只覆盖纯函数（三元组解析、产物命名、版本矩阵、占位目录、引导的 URL/版本选择、
+工具探测优先级、zigbuild 路由与命令构造），不启动 cargo、不发网络请求，因此不需要交叉工具链。
 
 ## 从 Go 版升级时的数据注意
 
