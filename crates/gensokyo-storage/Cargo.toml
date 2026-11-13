@@ -23,6 +23,15 @@ tonic-prost.workspace = true
 prost.workspace = true
 # lotus gRPC 客户端 RemoteBridge 专职桥线程（P55-P1）：独立 current_thread runtime + 超时
 tokio = { workspace = true, features = ["rt", "net", "time"] }
+# lotus HTTP 回退桥（P55-P3）：blocking 客户端在专职桥线程构造。TLS 沿用仓库惯例
+# rustls-no-provider，provider 由二进制侧进程级安装（gensokyo-bin startup 装 ring）；
+# 未安装 provider 的进程里构建客户端会 panic，桥 spawn 按建连失败同口径返回 Err。
+reqwest = { workspace = true, features = [
+    "blocking",
+    "http2",
+    "rustls-no-provider",
+    "system-proxy",
+] }
 
 [build-dependencies]
 tonic-prost-build.workspace = true
@@ -30,6 +39,8 @@ prost-build.workspace = true
 protoc-bin-vendored.workspace = true
 
 [dev-dependencies]
+# 测试进程装 ring CryptoProvider（spawn_test_bridge 幂等安装）；生产由二进制 startup 装
+rustls = { workspace = true, features = ["ring"] }
 tempfile = "3.27.0"
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
 tokio-stream = { version = "0.1.19", features = ["net"] }

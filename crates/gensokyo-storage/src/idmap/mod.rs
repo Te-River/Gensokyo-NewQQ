@@ -4,6 +4,7 @@
 
 pub(crate) mod encoding;
 pub mod grpc;
+pub mod http_remote;
 pub mod remote;
 
 mod batch;
@@ -26,6 +27,7 @@ use crate::StorageError;
 use crate::echo::generate_row_id;
 use encoding::{decode_i64, encode_i64, normalize_identity, vuin_identity_key, vuin_prefix};
 use lookup_cache::{LookupCache, LookupKey, LookupValue};
+use http_remote::HttpRemoteBridge;
 use remote::RemoteBridge;
 
 /// 身份库默认文件名（Go `openid-map.db` 的 redb 等价物）。
@@ -236,8 +238,8 @@ struct NormalizedRebind {
 ///
 /// `Send + Sync`：内部两个 redb [`Database`]（各自串行写事务）、一个名称缓存互斥锁，以及读
 /// 路径的有界热查询缓存（[`lookup_cache`]，写入提交后精确失效）。
-/// 可选经 [`IdMapStore::with_remote`] 挂 [`RemoteBridge`]：可远程方法改走远端、不再写本地
-/// （Go lotus 客户端模式）。
+/// 可选经 [`IdMapStore::with_remote`]（gRPC）/ [`IdMapStore::with_http_remote`]（HTTP
+/// 回退）挂远程桥：可远程方法改走远端、不再写本地（Go lotus 客户端模式）。
 #[derive(Debug)]
 pub struct IdMapStore {
     options: IdMapOptions,
@@ -245,7 +247,128 @@ pub struct IdMapStore {
     msg_db: Database,
     user_names: Mutex<HashMap<i64, UserNameEntry>>,
     lookup_cache: LookupCache,
-    remote: Option<RemoteBridge>,
+    remote: Option<RemoteBackend>,
+}
+
+/// 远程后端统一门面：gRPC（P1/P2）与 HTTP 回退（P3）共用同一批 11 个分支点。
+/// 返回类型取分支点所需的最小形态；gRPC 侧从 pb 响应投影，HTTP 侧直接解析
+/// /getid JSON（type 表见 `idmap/http_remote.rs`）。
+#[derive(Debug)]
+enum RemoteBackend {
+    Grpc(RemoteBridge),
+    Http(HttpRemoteBridge),
+}
+
+impl RemoteBackend {
+    fn store_idv2(&self, id: &str) -> Result<i64, StorageError> {
+        match self {
+            Self::Grpc(bridge) => Ok(bridge.store_idv2(id)?.row),
+            Self::Http(bridge) => bridge.store_idv2(id),
+        }
+    }
+
+    fn retrieve_row_by_idv2(&self, rowid: &str) -> Result<String, StorageError> {
+        match self {
+            Self::Grpc(bridge) => Ok(bridge.retrieve_row_by_idv2(rowid)?.id),
+            Self::Http(bridge) => bridge.retrieve_row_by_idv2(rowid),
+        }
+    }
+
+    fn retrieve_virtual_value_v2(&self, real_value: &str) -> Result<String, StorageError> {
+        match self {
+            Self::Grpc(bridge) => Ok(bridge.retrieve_virtual_value_v2(real_value)?.r#virtual),
+            Self::Http(bridge) => Ok(bridge.retrieve_virtual_value_v2(real_value)?.1),
+        }
+    }
+
+    fn update_virtual_value_v2(&self, old_vuin: i64, new_vuin: i64) -> Result<(), StorageError> {
+        match self {
+            Self::Grpc(bridge) => {
+                bridge.update_virtual_value_v2(old_vuin, new_vuin)?;
+                Ok(())
+            }
+            Self::Http(bridge) => bridge.update_virtual_value_v2(old_vuin, new_vuin),
+        }
+    }
+
+    fn update_virtual_value_v2_pro(
+        &self,
+        old_virtual_value_1: i64,
+        new_virtual_value_1: i64,
+        old_virtual_value_2: i64,
+        new_virtual_value_2: i64,
+    ) -> Result<(), StorageError> {
+        match self {
+            Self::Grpc(bridge) => {
+                bridge.update_virtual_value_v2_pro(
+                    old_virtual_value_1,
+                    new_virtual_value_1,
+                    old_virtual_value_2,
+                    new_virtual_value_2,
+                )?;
+                Ok(())
+            }
+            Self::Http(bridge) => bridge.update_virtual_value_v2_pro(
+                old_virtual_value_1,
+                new_virtual_value_1,
+                old_virtual_value_2,
+                new_virtual_value_2,
+            ),
+        }
+    }
+
+    fn find_sub_keys_by_id_pro(&self, id: &str) -> Result<Vec<String>, StorageError> {
+        match self {
+            Self::Grpc(bridge) => Ok(bridge.find_sub_keys_by_id_pro(id)?.keys),
+            Self::Http(bridge) => bridge.find_sub_keys_by_id_pro(id),
+        }
+    }
+
+    fn write_config_v2(
+        &self,
+        section: &str,
+        subtype: &str,
+        value: &str,
+    ) -> Result<(), StorageError> {
+        match self {
+            Self::Grpc(bridge) => {
+                bridge.write_config_v2(section, subtype, value)?;
+                Ok(())
+            }
+            Self::Http(bridge) => bridge.write_config_v2(section, subtype, value),
+        }
+    }
+
+    fn read_config_v2(&self, section: &str, subtype: &str) -> Result<String, StorageError> {
+        match self {
+            Self::Grpc(bridge) => Ok(bridge.read_config_v2(section, subtype)?.value),
+            Self::Http(bridge) => bridge.read_config_v2(section, subtype),
+        }
+    }
+
+    fn delete_config_v2(&self, section: &str, subtype: &str) -> Result<(), StorageError> {
+        match self {
+            Self::Grpc(bridge) => {
+                bridge.delete_config_v2(section, subtype)?;
+                Ok(())
+            }
+            Self::Http(bridge) => bridge.delete_config_v2(section, subtype),
+        }
+    }
+
+    fn store_cache_v2(&self, id: &str) -> Result<i64, StorageError> {
+        match self {
+            Self::Grpc(bridge) => Ok(bridge.store_cache_v2(id)?.row),
+            Self::Http(bridge) => bridge.store_cache_v2(id),
+        }
+    }
+
+    fn retrieve_row_by_cache_v2(&self, rowid: &str) -> Result<String, StorageError> {
+        match self {
+            Self::Grpc(bridge) => Ok(bridge.retrieve_row_by_cache_v2(rowid)?.id),
+            Self::Http(bridge) => bridge.retrieve_row_by_cache_v2(rowid),
+        }
+    }
 }
 
 impl IdMapStore {
@@ -307,7 +430,16 @@ impl IdMapStore {
     /// （名称缓存、最新消息、`list_identities` 等）不受影响。
     #[must_use]
     pub fn with_remote(mut self, bridge: RemoteBridge) -> Self {
-        self.remote = Some(bridge);
+        self.remote = Some(RemoteBackend::Grpc(bridge));
+        self
+    }
+
+    /// 挂 HTTP 回退桥（`lotus && !lotus_grpc && !without_idmaps`，设计 §2.3/§3.1）：
+    /// 与 [`IdMapStore::with_remote`] 同一批分支点改走远端 `/getid`，语义相同
+    /// （远程命中不写本地、Err 直抛不回退）。
+    #[must_use]
+    pub fn with_http_remote(mut self, bridge: HttpRemoteBridge) -> Self {
+        self.remote = Some(RemoteBackend::Http(bridge));
         self
     }
 
@@ -415,7 +547,7 @@ impl IdMapStore {
     /// redb 事务失败或计数器/表数据损坏时返回 [`StorageError`]。
     pub fn retrieve_virtual_value(&self, identity: &str) -> Result<(String, i64), StorageError> {
         if let Some(b) = &self.remote {
-            let row = b.store_idv2(identity)?.row;
+            let row = b.store_idv2(identity)?;
             // 远端响应只有 vUIN；归一化身份串在本地按同一规则派生（纯函数，不碰 redb），
             // 与本地路径的第一项保持一致。
             let normalized =
@@ -470,7 +602,7 @@ impl IdMapStore {
     /// 身份未登记返回 [`StorageError::NotFound`]；redb 事务失败或正表数据损坏返回对应变体。
     pub fn lookup_virtual_value(&self, identity: &str) -> Result<i64, StorageError> {
         if let Some(b) = &self.remote {
-            let virtual_value = b.retrieve_virtual_value_v2(identity)?.r#virtual;
+            let virtual_value = b.retrieve_virtual_value_v2(identity)?;
             return virtual_value.parse::<i64>().map_err(|err| {
                 StorageError::Remote(format!("远端返回非法 vUIN {virtual_value:?}: {err}"))
             });
@@ -521,7 +653,7 @@ impl IdMapStore {
     /// 查不到时返回 [`StorageError::NotFound`]。
     pub fn retrieve_row_by_id(&self, vuin: i64) -> Result<String, StorageError> {
         if let Some(b) = &self.remote {
-            return Ok(b.retrieve_row_by_idv2(vuin.to_string())?.id);
+            return b.retrieve_row_by_idv2(&vuin.to_string());
         }
         if vuin <= 0 {
             return Err(StorageError::NotFound(format!("vUIN={vuin}")));
@@ -656,7 +788,7 @@ impl IdMapStore {
     /// redb 事务失败时返回 [`StorageError::Redb`]。
     pub fn find_sub_keys_by_id(&self, id: &str) -> Result<Vec<String>, StorageError> {
         if let Some(b) = &self.remote {
-            return Ok(b.find_sub_keys_by_id_pro(id)?.keys);
+            return b.find_sub_keys_by_id_pro(id);
         }
         let txn = self.identity_db.begin_read().map_err(rb)?;
         let forward = txn.open_table(IDENTITY_TO_VUIN).map_err(rb)?;
@@ -1054,7 +1186,7 @@ impl IdMapStore {
     pub fn store_cache_with_ttl(&self, msg_id: &str, ttl: Duration) -> Result<i64, StorageError> {
         if let Some(b) = &self.remote {
             // 远程 StoreCacheV2 无 TTL 参数（Go type=16 同），TTL 由服务端自己的配置决定。
-            return Ok(b.store_cache_v2(msg_id)?.row);
+            return b.store_cache_v2(msg_id);
         }
         self.with_write_batch(|batch| batch.store_cache_with_ttl(msg_id, ttl))
     }
@@ -1107,7 +1239,7 @@ impl IdMapStore {
     /// 同样的单值语义）。
     pub fn retrieve_row_by_cache(&self, vuin: i64) -> Result<String, StorageError> {
         if let Some(b) = &self.remote {
-            return Ok(b.retrieve_row_by_cache_v2(vuin.to_string())?.id);
+            return b.retrieve_row_by_cache_v2(&vuin.to_string());
         }
         if vuin <= 0 {
             return Err(StorageError::NotFound(format!("虚拟消息 ID={vuin}")));
@@ -1244,7 +1376,7 @@ impl IdMapStore {
     /// 键不存在、value 不是合法 UTF-8、redb 事务失败时返回 [`StorageError`]。
     pub fn read_config(&self, section: &str, subtype: &str) -> Result<String, StorageError> {
         if let Some(b) = &self.remote {
-            return Ok(b.read_config_v2(section, subtype)?.value);
+            return b.read_config_v2(section, subtype);
         }
         let key = config_key(section, subtype);
         let txn = self.identity_db.begin_read().map_err(rb)?;
