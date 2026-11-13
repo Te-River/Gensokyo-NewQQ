@@ -72,6 +72,22 @@ darwin×2 仍需 macOS + Xcode CLT；windows-msvc×2 仍需 VS Build Tools；
 android 仍需 NDK（实验性）。这些目标缺工具链时按原口径报错/跳过，不自动下载。
 linux-musl 也不在引导范围（cargo-zigbuild 只路由 linux-gnu；musl 需自备工具链）。
 
+## 迁移到新机器（整仓搬运）
+
+- **只需拷贝/克隆仓库本身**：`target/`、`target-*/`、`.tools/` 都在 `.gitignore` 里，不必带
+  （`target/` 可达数 GB）。走 git 克隆更省：`git clone -b Refactor <repo> && cd <repo>`。
+- 新机前提：装好 rustup（`rust-toolchain.toml` 钉 1.99.1，首次 `cargo` 会自动装工具链）、
+  `curl` + `tar`（Windows 10+ 自带）。**不需要**预装 zig / cargo-zigbuild——首次
+  `.\build.ps1 -LinuxOnly` / `cargo xtask build --linux-only` 会自动下载到 `.tools/`
+  （见上文「自动引导」），之后缓存命中零网络。
+- **构建缓存已移出仓库**：本项目的 `CARGO_TARGET_DIR` 统一指向 `D:\rust-target\gensokyo`（不在仓内、
+  不在系统盘）。它是纯缓存，可随时整目录删除换取空间，代价是下次冷编译一次。新机自定义位置时
+  记住两件事：`protoc` 构建脚本对跨盘路径敏感（同一分区最稳），且别在 Go 主仓目录里跑 cargo
+  （历史上曾在此留下 68 GB 的 `target/`）。
+- 宿主构建直接可用；Linux×4 交叉由自动引导补齐；darwin / MSVC / android 仍需各自
+  工具链或 CI（见目标矩阵备注）。
+- 前端产物可选：`cd frontend && npm run build`；不构建时 xtask 自动写 `webui/dist` 占位文件。
+
 ## 本地构建
 
 ```powershell
