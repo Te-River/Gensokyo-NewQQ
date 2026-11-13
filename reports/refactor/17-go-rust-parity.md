@@ -12,14 +12,14 @@
 | 功能 | 正向 WS 不下发事件 | server/wsserver.go:111-112 + Processor.go:292-330 | ws_server.rs：lifecycle/hub 订阅/心跳/回执并行 | **已对齐（P4 `9e71c31`）** | — |
 | 功能 | 反向 WS 收到 action 不 dispatch | wsclient/ws.go:249-261 | ws_client.rs：dispatch_json + mpsc 回执写回 | **已对齐（P4 `9e71c31`）** | — |
 | 安全 | webhook ed25519 签名 / op13 | server/webhook.go:94,115-120,163-193 | webhook.rs：Go 同款 seed 派生/待签/401；op13 {plain_token,signature} | **已对齐（W1，待提交）** | — |
-| 功能 | union_webhook 扇出 | main.go:530,1046-1090 | 无 | 缺失 | 80-120 行 |
+| 功能 | union_webhook 扇出 | main.go:530,1046-1090 | webhook.rs `spawn_union_fanout`：配置非空且非 `"0"` 时本地处理前异步原样转发（同 method/过滤敏感头/超时/忽略结果/不影响主链，P17） | **已对齐（P17）** | — |
 | 功能 | 反向 WS TLS/代理 | ws.go:352-355 | wss 随 rustls feature；代理走环境变量 + CONNECT 隧道（P22） | **已对齐** | — |
 | 功能 | `array_value` 消息段 | ProcessGroupMessage.go:189-190；message_parser.go:2182-2335 | inbound 三事件段数组（P19 文本/at；P50 媒体段：attachments 图片段、语音附件 record、`ark_data`/`message_type=3` ark、`msg_elements` reply/text 递归，顺序同 Go「正文段 → 图片段 → 事件段」）；字符串路径同步追加对应 CQ 码（message_parser.go:2136-2157）。P52 收口：ark 段 `fields` 出真 JSON 对象（`Segment::param_json`，对齐 Go `arkSegmentData` 的 `map[string]interface{}`，空 fields 出 `{}`）。P51 收口：CQ 值转义补齐 `[` → `&#91;`（`encode_value`，对齐 Go `cqparse.EncodeValue` 四字符口径）；`attachments`/`msg_elements` 整数组 `null` 按空数组收（对齐 Go `[]*T`）。金样 fixture 不含媒体字段，媒体回归靠 tests/inbound.rs 新增用例；行号以 main 仓为准 | **已对齐（P19 文本/at + P50 媒体段 + P51 收口 + P52 fields 对象化）** | — |
 | 边角 | 段 JSON 键序（`json.Marshal` map 排序） | handlers/message_parser.go `messageEventSegments`/`arkSegmentData`（`map[string]interface{}` → 键字母序，外层 data < type） | P53：`Segment::serialize` 外层 `data` 先于 `type`；`ParamsRef` 内层键稳定字母序（`json_keys` 标记保留、重复键保持插入序）；ark/record/image 键序断言 + 数组 fields 字符串化用例锁定；CQ 路径仍按 Vec 序不变。**已知限制（概率极低，QQ fields 实为字符串文本）**：数值边缘（>2^53 整数、整数值浮点 `1.0` vs Go `1`、指数 `1e21` vs `1e+21`、浮点格式 ryu vs Go 'g'）与 HTML 转义 `<>&` 仍与 Go 有残留差异 | **已对齐（P53；数值/HTML 边缘登记为已知限制）** | — |
 | 功能 | `remove_at`/`convert_other_at` | message_parser.go:1679-1721,1877,1895 | revert_mentions：自身@剥离/还原、只查不分配、trim、去 /（P20） | **已对齐** | — |
 | 功能 | `enable_change_word` | main.go:765-770,787-792 | inbound/send 均接 acnode 开关（P8；审计时表项已过期） | **已对齐** | — |
 | 功能 | `add_at_group` 消费者 | ProcessGroupNormalMessage.go:148-150（**入站上报**变换，非出站） | inbound.rs reported_group_content（全量群消息加 `[CQ:at,qq=AppID]`，与 Go 同点） | **已对齐（W2，待提交）** | — |
-| 功能 | AppID→BotID | message_parser.go:1669-1683（需 `/users/@me` 的 BotID 注入） | 缺 BotID 来源（Go main.go:254/304），暂缓 | 缺失 | 中 |
+| 功能 | AppID→BotID | message_parser.go:1669-1683（需 `/users/@me` 的 BotID 注入） | boot.rs `attach_bot_id`：`GET /users/@me` 取 BotID 注入状态；出站 AppID→BotID（`do_not_replace_appid` 开关）+ 入站 BotID→AppID（P15） | **已对齐（P15）** | — |
 | 功能 | `op_user_id_type` | Processor.go:245-270（调用点 :293,311,334） | gateway.rs `apply_op_userid_type`（网关 dispatch / webhook 发布前改写；vuin/ruin/其余三态 + sender 跟随） | **已对齐（P24）** | — |
 | 功能 | `http_only_bot` | Processor.go:374-399（全 WS 失败时补 downtime 回复） | downtime.rs：无下游订阅者时按 Go 回群 AT/C2C（P26） | **已对齐** | — |
 | 边角 | 401/403 语义 | wsserver.go:85-94；httpapi.go:23-31 | auth.rs：WS 缺 token 401 `Missing token` / 错 token 403 `Incorrect token`；HTTP API 一律 403 `鉴权失败` | **已对齐（P24）** | — |
