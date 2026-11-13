@@ -10,6 +10,9 @@
 //! 由 `foundItems` 契约（base64 / JSON 串）承载。唯一例外是 ark 段的 `fields`（P52）：
 //! Go `arkSegmentData` 出真 JSON 对象，经 [`Segment::param_json`] 标记，序列化时按解析后的
 //! JSON 值输出。
+//!
+//! JSON 序列化的键序（P53）对齐 Go `json.Marshal` 的 map 排序：外层 `data` 先于 `type`，
+//! 内层 data 键按字母序；`Vec` 插入序只服务 CQ 文本路径。
 
 use std::borrow::Cow;
 use std::fmt;
@@ -30,7 +33,7 @@ pub const KIND_TEXT: &str = "text";
 
 /// 一个 OneBot 消息段。
 ///
-/// JSON 形态为 `{"type":"at","data":{"qq":"123"}}`；`data` 里的数字/布尔值反序列化时按
+/// JSON 形态为 `{"data":{"qq":"123"},"type":"at"}`（键序同 Go `json.Marshal`，P53）；`data` 里的数字/布尔值反序列化时按
 /// Go `stringify` 的语义转成字符串（QQ 侧两种写法都出现过）。
 #[derive(Debug, Clone)]
 pub struct Segment {
@@ -50,9 +53,18 @@ pub struct Segment {
 
 /// 语义相等只看 `kind` + `params`：`raw` 是字节保真载体、`json_keys` 是序列化形态标记，
 /// 都不参与比较——同一段码「parse 而来」与「代码构造」必须判等（码表往返与计划比对的既有口径）。
+/// params 语义上是 map：P53 之后键序只是序列化细节，判等与顺序无关（P54）；
+/// 重复键按多重集比较——每个 (key, value) 的重数须一致，不做 last-wins 去重。
 impl PartialEq for Segment {
     fn eq(&self, other: &Self) -> bool {
-        self.kind == other.kind && self.params == other.params
+        if self.kind != other.kind || self.params.len() != other.params.len() {
+            return false;
+        }
+        let mut lhs: Vec<&(String, String)> = self.params.iter().collect();
+        let mut rhs: Vec<&(String, String)> = other.params.iter().collect();
+        lhs.sort_unstable();
+        rhs.sort_unstable();
+        lhs == rhs
     }
 }
 
@@ -315,7 +327,7 @@ impl fmt::Display for Segment {
 impl Serialize for Segment {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut map = serializer.serialize_map(Some(2))?;
-        map.serialize_entry("type", &self.kind)?;
+        // Go json.Marshal 对 map 按键字母排序：data < type（P53）
         map.serialize_entry(
             "data",
             &ParamsRef {
@@ -323,6 +335,7 @@ impl Serialize for Segment {
                 json_keys: &self.json_keys,
             },
         )?;
+        map.serialize_entry("type", &self.kind)?;
         map.end()
     }
 }
@@ -348,7 +361,8 @@ impl<'de> Deserialize<'de> for Segment {
     }
 }
 
-/// 以 `data` 对象形态序列化参数（顺序 == `Vec` 顺序）；`json_keys` 里的键按解析后的 JSON 值输出。
+/// 以 `data` 对象形态序列化参数（键按字母排序，对齐 Go `json.Marshal` 的 map 键序，P53）；
+/// `json_keys` 里的键按解析后的 JSON 值输出。
 struct ParamsRef<'a> {
     params: &'a [(String, String)],
     json_keys: &'a [String],
@@ -356,8 +370,11 @@ struct ParamsRef<'a> {
 
 impl Serialize for ParamsRef<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut map = serializer.serialize_map(Some(self.params.len()))?;
-        for (key, value) in self.params {
+        // Go json.Marshal 对 map 按键字母排序（P53）；稳定排序保留重复键的插入序（现状行为）
+        let mut entries: Vec<&(String, String)> = self.params.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut map = serializer.serialize_map(Some(entries.len()))?;
+        for (key, value) in entries {
             if self.json_keys.contains(key) {
                 // 解析失败回退字符串输出，保证不丢内容
                 match serde_json::from_str::<serde_json::Value>(value) {
@@ -373,7 +390,7 @@ impl Serialize for ParamsRef<'_> {
 }
 
 /// `data` 反序列化结果（顺序由反序列化器给出；JSON 对象按书写顺序）；
-/// 第二元是值为对象/数组的键（raw JSON 候选，P52，是否生效由 `Segment::deserialize` 按段类型收口）。
+/// 第二元是值为对象的键（raw JSON 候选，P52；数组不标记，P53；是否生效由 `Segment::deserialize` 按段类型收口）。
 #[derive(Debug)]
 struct Params(Vec<(String, String)>, Vec<String>);
 
@@ -400,8 +417,12 @@ impl<'de> Visitor<'de> for ParamsVisitor {
         while let Some((key, value)) = map.next_entry::<String, Option<Scalar>>()? {
             match value {
                 Some(Scalar::Json(value)) => {
-                    json_keys.push(key.clone());
-                    out.push((key, value.to_string()));
+                    let text = value.to_string();
+                    // 只标对象形态（Go map 契约）；数组保持字符串化（P53）
+                    if text.starts_with('{') {
+                        json_keys.push(key.clone());
+                    }
+                    out.push((key, text));
                 }
                 other => out.push((key, other.map(Scalar::into_string).unwrap_or_default())),
             }
@@ -595,10 +616,11 @@ mod tests {
         );
 
         let back = serde_json::to_string(&segment).expect("序列化失败");
-        // data 是 map[string]string（Go `Segment.Data` 同构），数字被 stringify 成 "0"
+        // data 是 map[string]string（Go `Segment.Data` 同构），数字被 stringify 成 "0"；
+        // JSON 键序同 Go json.Marshal：外层 data 先、内层字母序（P53）
         assert_eq!(
             back,
-            r#"{"type":"image","data":{"file":"https://x.com/a.png","subType":"0","url":"https://y.com/b.png"}}"#
+            r#"{"data":{"file":"https://x.com/a.png","subType":"0","url":"https://y.com/b.png"},"type":"image"}"#
         );
     }
 
@@ -689,7 +711,7 @@ mod tests {
         let back = serde_json::to_string(&markdown).expect("序列化失败");
         assert_eq!(
             back,
-            r#"{"type":"markdown","data":{"data":"{\"content\":\"hi\",\"extra\":[\"a\",1]}"}}"#,
+            r#"{"data":{"data":"{\"content\":\"hi\",\"extra\":[\"a\",1]}"},"type":"markdown"}"#,
             "嵌套值序列化为 JSON 字符串"
         );
     }
@@ -761,13 +783,13 @@ mod tests {
             .param_json("fields", r#"{"tag":"t","title":"T"}"#);
         assert_eq!(
             serde_json::to_string(&segment).expect("序列化失败"),
-            r#"{"type":"ark","data":{"ark_type":"tuwen","ark_name":"","prompt":"","fields":{"tag":"t","title":"T"}}}"#
+            r#"{"data":{"ark_name":"","ark_type":"tuwen","fields":{"tag":"t","title":"T"},"prompt":""},"type":"ark"}"#
         );
 
         let empty = Segment::new("ark").param_json("fields", "{}");
         assert_eq!(
             serde_json::to_string(&empty).expect("序列化失败"),
-            r#"{"type":"ark","data":{"fields":{}}}"#,
+            r#"{"data":{"fields":{}},"type":"ark"}"#,
             "空 fields 出对象 {{}} 而非字符串"
         );
     }
@@ -784,7 +806,7 @@ mod tests {
         let back = serde_json::to_string(&segment).expect("序列化失败");
         assert_eq!(
             back,
-            r#"{"type":"ark","data":{"ark_type":"tuwen","ark_name":"","prompt":"","fields":{"n":1,"title":"T"}}}"#,
+            r#"{"data":{"ark_name":"","ark_type":"tuwen","fields":{"n":1,"title":"T"},"prompt":""},"type":"ark"}"#,
             "fields 对象进 → 对象出"
         );
         assert_eq!(
@@ -798,7 +820,7 @@ mod tests {
         let segment = Segment::new("ark").param_json("fields", "not json");
         assert_eq!(
             serde_json::to_string(&segment).expect("序列化失败"),
-            r#"{"type":"ark","data":{"fields":"not json"}}"#,
+            r#"{"data":{"fields":"not json"},"type":"ark"}"#,
             "解析失败回退字符串，不丢内容"
         );
     }
@@ -812,7 +834,7 @@ mod tests {
         .expect("反序列化失败");
         assert_eq!(
             serde_json::to_string(&segment).expect("序列化失败"),
-            r#"{"type":"ark","data":{"fields":{"title":"T"},"extra":"{\"a\":1}"}}"#
+            r#"{"data":{"extra":"{\"a\":1}","fields":{"title":"T"}},"type":"ark"}"#
         );
     }
 
@@ -822,17 +844,17 @@ mod tests {
         for (segment, expected) in [
             (
                 Segment::new("at").param("qq", "7"),
-                r#"{"type":"at","data":{"qq":"7"}}"#,
+                r#"{"data":{"qq":"7"},"type":"at"}"#,
             ),
             (
                 Segment::text("hi"),
-                r#"{"type":"text","data":{"text":"hi"}}"#,
+                r#"{"data":{"text":"hi"},"type":"text"}"#,
             ),
             (
                 Segment::new("image")
                     .param("file", "a.image")
                     .param("subType", "0"),
-                r#"{"type":"image","data":{"file":"a.image","subType":"0"}}"#,
+                r#"{"data":{"file":"a.image","subType":"0"},"type":"image"}"#,
             ),
         ] {
             assert_eq!(
@@ -840,5 +862,88 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn json_key_order_matches_go_marshal() {
+        // P53：Go json.Marshal 对 map 按键字母排序——外层 data < type，内层键也排序。
+        // 刻意按非字母插入序构造：JSON 排序输出，Vec 序不变（CQ 路径不受影响）
+        let ark = Segment::new("ark")
+            .param("ark_type", "tuwen")
+            .param("prompt", "点我")
+            .param_json("fields", r#"{"title":"T","tag":"tuwen"}"#)
+            .param("ark_name", "图文 H5");
+        assert_eq!(
+            serde_json::to_string(&ark).expect("序列化失败"),
+            r#"{"data":{"ark_name":"图文 H5","ark_type":"tuwen","fields":{"tag":"tuwen","title":"T"},"prompt":"点我"},"type":"ark"}"#,
+            "ark 四键字母序，fields 保持真对象（内层键也排序）"
+        );
+
+        let record = Segment::new("record")
+            .param("url", "https://x/a.silk")
+            .param("file", "https://x/a.wav")
+            .param("asr_refer_text", "你好");
+        assert_eq!(
+            serde_json::to_string(&record).expect("序列化失败"),
+            r#"{"data":{"asr_refer_text":"你好","file":"https://x/a.wav","url":"https://x/a.silk"},"type":"record"}"#
+        );
+
+        let image = Segment::new("image")
+            .param("url", "https://y/b.png")
+            .param("subType", "0")
+            .param("file", "https://x/a.png");
+        assert_eq!(
+            serde_json::to_string(&image).expect("序列化失败"),
+            r#"{"data":{"file":"https://x/a.png","subType":"0","url":"https://y/b.png"},"type":"image"}"#
+        );
+
+        let dup = Segment::new("x")
+            .param("b", "1")
+            .param("a", "2")
+            .param("b", "3");
+        assert_eq!(
+            serde_json::to_string(&dup).expect("序列化失败"),
+            r#"{"data":{"a":"2","b":"1","b":"3"},"type":"x"}"#,
+            "稳定排序：重复键保持插入序（现状行为）"
+        );
+    }
+
+    #[test]
+    fn segment_eq_is_param_order_independent() {
+        // P54：P53 排序序列化后，往返两次 parse 的 params Vec 序不同，
+        // 判等须按 map 语义忽略顺序；重复键按多重集比较（重数须一致）
+        let a = Segment::new("ark")
+            .param("ark_type", "tuwen")
+            .param("prompt", "p")
+            .param("ark_name", "");
+        let b = Segment::new("ark")
+            .param("ark_name", "")
+            .param("ark_type", "tuwen")
+            .param("prompt", "p");
+        assert_eq!(a, b, "键值集合相同、顺序不同必须判等");
+        assert_ne!(
+            a,
+            Segment::new("ark2")
+                .param("ark_name", "")
+                .param("ark_type", "tuwen")
+                .param("prompt", "p"),
+            "kind 仍须参与比较"
+        );
+
+        let dup = Segment::new("x").param("b", "1").param("b", "3");
+        assert_eq!(dup, Segment::new("x").param("b", "3").param("b", "1"));
+        assert_ne!(dup, Segment::new("x").param("b", "3"), "重复键重数须一致");
+    }
+
+    #[test]
+    fn ark_fields_array_shape_is_not_marked_as_object() {
+        // P53：Go fields 是 map 契约——数组形态不标 raw JSON，输出保持字符串化
+        let segment: Segment =
+            serde_json::from_str(r#"{"type":"ark","data":{"fields":["a",1]}}"#)
+                .expect("反序列化失败");
+        assert_eq!(
+            serde_json::to_string(&segment).expect("序列化失败"),
+            r#"{"data":{"fields":"[\"a\",1]"},"type":"ark"}"#
+        );
     }
 }

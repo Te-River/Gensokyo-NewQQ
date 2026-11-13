@@ -838,7 +838,9 @@ fn non_image_attachments_are_not_reported_as_image() {
 /// `ark_data` → ark 段：`ark_type` / `ark_name` / `prompt` / `fields` 四键恒定存在
 /// （Go `arkSegmentData` `handlers/message_parser.go:2431-2449`）。
 ///
-/// `fields` 出真 JSON 对象（P52，`Segment::param_json`），与 Go 逐字节对齐。
+/// `fields` 出真 JSON 对象（P52，`Segment::param_json`）；段 JSON 键序对齐 Go
+/// `json.Marshal`（P53：外层 `data` 先于 `type`、内层键字母序）。数值形态/HTML 转义
+/// 边缘仍有已知残留（见 `reports/refactor/17-go-rust-parity.md`）。
 #[test]
 fn ark_data_becomes_ark_segment_with_four_keys() {
     let payload = json!({
