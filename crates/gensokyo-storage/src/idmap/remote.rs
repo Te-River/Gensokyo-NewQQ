@@ -413,6 +413,39 @@ impl RemoteBridge {
     }
 }
 
+/// idmap 远程模式（设计 §3.1）：只由三个配置开关决定；gRPC 服务端的启动是 boot 的事，
+/// 不在本判定内。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdMapRemoteMode {
+    /// 全本地：lotus 关闭，或 lotus+HTTP 且 `without_idmaps`。
+    Local,
+    /// gRPC 客户端：可远程方法经 [`RemoteBridge`] 走远端。
+    GrpcClient,
+    /// HTTP 远端 `/getid`（`lotus && !lotus_grpc && !without_idmaps`）。
+    HttpRemote,
+}
+
+/// 按配置开关判定 idmap 远程模式（Go `idmap/service.go` 各 v2 函数的分支判定顺序）。
+///
+/// **Go 怪癖，照抄**：gRPC 分支不检查 `without_idmaps`——`lotus && lotus_grpc` 时即使
+/// `without_idmaps=true` 仍返回 [`IdMapRemoteMode::GrpcClient`]（Go `service.go:676`
+/// 只看 `GetLotusGrpc() && GetLotusValue()`）；`without_idmaps` 只挡 HTTP 分支。
+/// 该组合的 warn 日志留给 boot 装配处。
+#[must_use]
+pub fn idmap_remote_mode(lotus: bool, lotus_grpc: bool, without_idmaps: bool) -> IdMapRemoteMode {
+    if !lotus {
+        return IdMapRemoteMode::Local;
+    }
+    if lotus_grpc {
+        return IdMapRemoteMode::GrpcClient;
+    }
+    if without_idmaps {
+        IdMapRemoteMode::Local
+    } else {
+        IdMapRemoteMode::HttpRemote
+    }
+}
+
 /// 桥循环：std mpsc 的阻塞 recv 放到 blocking 池，current_thread runtime 空闲时
 /// 仍能驱动 tonic 连接（重连/keepalive）；Job 到达后独占 `&mut client` 逐个 await。
 fn bridge_loop(runtime: &tokio::runtime::Runtime, rx: mpsc::Receiver<Job>, mut client: IdMapClient) {
@@ -631,7 +664,7 @@ mod tests {
     use tokio_stream::wrappers::TcpListenerStream;
     use tonic::transport::{Endpoint, Server};
 
-    use super::{Job, RemoteBridge};
+    use super::{IdMapRemoteMode, Job, RemoteBridge, idmap_remote_mode};
     use crate::error::StorageError;
     use crate::idmap::grpc::tests::{Harness, harness};
     use crate::idmap::grpc::{IdMapService, pb};
@@ -829,6 +862,180 @@ mod tests {
         assert!(!bridge.is_alive());
         let err = bridge.store_idv2("openid-dead").unwrap_err();
         assert!(matches!(err, StorageError::Remote(_)), "{err:?}");
+        Ok(())
+    }
+
+    /// 验收 P2-a：模式矩阵全 8 种开关组合，含 Go 怪癖行。
+    #[test]
+    fn remote_mode_matrix_all_eight_combinations() {
+        assert_eq!(idmap_remote_mode(false, false, false), IdMapRemoteMode::Local);
+        assert_eq!(idmap_remote_mode(false, false, true), IdMapRemoteMode::Local);
+        assert_eq!(idmap_remote_mode(false, true, false), IdMapRemoteMode::Local);
+        assert_eq!(idmap_remote_mode(false, true, true), IdMapRemoteMode::Local);
+        assert_eq!(
+            idmap_remote_mode(true, false, false),
+            IdMapRemoteMode::HttpRemote
+        );
+        assert_eq!(idmap_remote_mode(true, false, true), IdMapRemoteMode::Local);
+        assert_eq!(
+            idmap_remote_mode(true, true, false),
+            IdMapRemoteMode::GrpcClient
+        );
+        // Go 怪癖：gRPC 分支不查 without_idmaps（service.go:676），照抄。
+        assert_eq!(
+            idmap_remote_mode(true, true, true),
+            IdMapRemoteMode::GrpcClient
+        );
+    }
+
+    /// 验收 P2-b：with_remote 后 11 个可远程方法（覆盖 17 RPC 语义）全走远端，
+    /// 本地 redb 一行不写；本地-only 方法不受影响。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn with_remote_routes_to_server_and_never_writes_local() -> Result<(), Box<dyn Error>> {
+        let (h, bridge) = bridge_harness().await?;
+        let dir = tempfile::tempdir()?;
+        let store = IdMapStore::open(
+            IdMapOptions::new(
+                dir.path().join("openid-map.redb"),
+                dir.path().join("msgid-map.redb"),
+            )
+            .with_app_id("10000001"),
+        )?
+        .with_remote(bridge);
+
+        // RPC 1（StoreIDv2）：分配在远端
+        let (raw, row) = store.retrieve_virtual_value("openid-user-1")?;
+        assert_eq!(raw, "openid-user-1");
+        assert!(row > 0);
+        assert_eq!(h.store.lookup_virtual_value("openid-user-1")?, row);
+        // RPC 2（RetrieveRowByIDv2）
+        assert_eq!(store.retrieve_row_by_id(row)?, "openid-user-1");
+        // RPC 8（RetrieveVirtualValueV2）：只查不分配
+        assert_eq!(store.lookup_virtual_value("openid-user-1")?, row);
+        assert!(store.lookup_virtual_value("openid-unknown").is_err());
+        // RPC 3/4/15（配置写/读/删）
+        store.write_config("lotus", "token", "abc")?;
+        assert_eq!(store.read_config("lotus", "token")?, "abc");
+        assert_eq!(h.store.read_config("lotus", "token")?, "abc");
+        assert!(store.delete_config("lotus", "token")?);
+        assert!(store.read_config("lotus", "token").is_err());
+        // RPC 5（UpdateVirtualValueV2）
+        let new_row = row + 100;
+        store.update_virtual_value(row, new_row)?;
+        assert_eq!(h.store.lookup_virtual_value("openid-user-1")?, new_row);
+        // RPC 12（UpdateVirtualValueV2Pro）：单次 RPC
+        let (_, row2) = store.retrieve_virtual_value("openid-user-2")?;
+        store.update_virtual_value_pro(row2, row2 + 100, new_row, new_row + 100)?;
+        assert_eq!(h.store.lookup_virtual_value("openid-user-2")?, row2 + 100);
+        assert_eq!(h.store.lookup_virtual_value("openid-user-1")?, new_row + 100);
+        // RPC 14（FindSubKeysByIdPro）：现代 schema 恒空
+        assert!(store.find_sub_keys_by_id("openid-user-1")?.is_empty());
+        // RPC 16/17（StoreCacheV2 / RetrieveRowByCacheV2）
+        let cache_row = store.store_cache("real-msg-1")?;
+        assert_eq!(store.retrieve_row_by_cache(cache_row)?, "real-msg-1");
+        assert_eq!(h.store.retrieve_row_by_cache(cache_row)?, "real-msg-1");
+        // store_cache_with_ttl 同样走远程（TTL 由服务端决定）
+        let cache_row2 = store.store_cache_with_ttl("real-msg-2", Duration::from_secs(60))?;
+        assert_eq!(h.store.retrieve_row_by_cache(cache_row2)?, "real-msg-2");
+
+        // 核心断言：远程全命中后本地 redb 一行未写（is_empty 查全部数据表）
+        assert!(store.is_empty()?);
+
+        // 本地-only 方法不受影响（Go 同样无远程分支）
+        store.store_user_name(row, "Alice");
+        assert_eq!(store.get_user_name(row).as_deref(), Some("Alice"));
+        store.store_latest_msg_id("group-1", "user-1", "msg-1")?;
+        assert_eq!(store.get_latest_msg_id("group-1", "user-1")?, "msg-1");
+        assert!(store.list_identities()?.is_empty());
+        assert_eq!(store.last_seen(row)?, None);
+        assert!(store.find_config_sections("token", "abc")?.is_empty());
+        assert_eq!(store.force_unbind("openid-nobody")?, 0);
+        Ok(())
+    }
+
+    /// 验收 P2-b'：远程错误直接上抛 Remote，不做运行时本地回退（设计 §4，避免双写分裂）。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn with_remote_error_does_not_fall_back_to_local() -> Result<(), Box<dyn Error>> {
+        let harness = harness().await?;
+        let endpoint = Endpoint::from_shared(format!("http://{}", harness.addr))?;
+        let bridge = RemoteBridge::spawn(endpoint, Duration::from_nanos(1))?;
+        let dir = tempfile::tempdir()?;
+        let store = IdMapStore::open(
+            IdMapOptions::new(
+                dir.path().join("openid-map.redb"),
+                dir.path().join("msgid-map.redb"),
+            )
+            .with_app_id("10000001"),
+        )?
+        .with_remote(bridge);
+        let err = store.retrieve_virtual_value("openid-timeout").unwrap_err();
+        assert!(matches!(err, StorageError::Remote(_)), "{err:?}");
+        // 没有回退本地分配
+        assert!(store.is_empty()?);
+        Ok(())
+    }
+
+    /// 验收 P2-d：current_thread flavor 的 async 上下文里经 with_remote 调用不 panic。
+    /// 门面阻塞调用方唯一 worker，进程内服务端必须跑在独立 runtime 上才不会饿死
+    /// （生产里服务端是远端进程，不存在此问题）。
+    #[tokio::test]
+    async fn with_remote_safe_in_current_thread_async_context() -> Result<(), Box<dyn Error>> {
+        let (addr_tx, addr_rx) = std::sync::mpsc::channel();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let dir = tempfile::tempdir().unwrap();
+                let store = Arc::new(
+                    IdMapStore::open(
+                        IdMapOptions::new(
+                            dir.path().join("openid-map.redb"),
+                            dir.path().join("msgid-map.redb"),
+                        )
+                        .with_app_id("10000001"),
+                    )
+                    .unwrap(),
+                );
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                let service = pb::id_map_service_server::IdMapServiceServer::new(
+                    IdMapService::new(store),
+                );
+                addr_tx.send(addr).unwrap();
+                let incoming = TcpListenerStream::new(listener);
+                let _ = Server::builder()
+                    .add_service(service)
+                    .serve_with_incoming_shutdown(incoming, async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await;
+            });
+        });
+        let addr = addr_rx.recv()?;
+        let endpoint = Endpoint::from_shared(format!("http://{addr}"))?;
+        let bridge = RemoteBridge::spawn(endpoint, Duration::from_secs(30))?;
+        let dir = tempfile::tempdir()?;
+        let store = IdMapStore::open(
+            IdMapOptions::new(
+                dir.path().join("openid-map.redb"),
+                dir.path().join("msgid-map.redb"),
+            )
+            .with_app_id("10000001"),
+        )?
+        .with_remote(bridge);
+        let (raw, row) = store.retrieve_virtual_value("openid-async")?;
+        assert_eq!(raw, "openid-async");
+        assert_eq!(store.retrieve_row_by_id(row)?, "openid-async");
+        assert_eq!(store.lookup_virtual_value("openid-async")?, row);
+        let cache_row = store.store_cache("msg-async")?;
+        assert_eq!(store.retrieve_row_by_cache(cache_row)?, "msg-async");
+        assert!(store.is_empty()?);
+        drop(store);
+        let _ = shutdown_tx.send(());
+        server.join().unwrap();
         Ok(())
     }
 }

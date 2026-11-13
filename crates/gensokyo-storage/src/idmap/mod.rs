@@ -26,6 +26,7 @@ use crate::StorageError;
 use crate::echo::generate_row_id;
 use encoding::{decode_i64, encode_i64, normalize_identity, vuin_identity_key, vuin_prefix};
 use lookup_cache::{LookupCache, LookupKey, LookupValue};
+use remote::RemoteBridge;
 
 /// 身份库默认文件名（Go `openid-map.db` 的 redb 等价物）。
 pub const DEFAULT_IDENTITY_PATH: &str = "openid-map.redb";
@@ -235,6 +236,8 @@ struct NormalizedRebind {
 ///
 /// `Send + Sync`：内部两个 redb [`Database`]（各自串行写事务）、一个名称缓存互斥锁，以及读
 /// 路径的有界热查询缓存（[`lookup_cache`]，写入提交后精确失效）。
+/// 可选经 [`IdMapStore::with_remote`] 挂 [`RemoteBridge`]：可远程方法改走远端、不再写本地
+/// （Go lotus 客户端模式）。
 #[derive(Debug)]
 pub struct IdMapStore {
     options: IdMapOptions,
@@ -242,6 +245,7 @@ pub struct IdMapStore {
     msg_db: Database,
     user_names: Mutex<HashMap<i64, UserNameEntry>>,
     lookup_cache: LookupCache,
+    remote: Option<RemoteBridge>,
 }
 
 impl IdMapStore {
@@ -273,6 +277,7 @@ impl IdMapStore {
             msg_db,
             user_names: Mutex::new(HashMap::new()),
             lookup_cache,
+            remote: None,
         };
         store.init_schema()?;
         debug!(
@@ -287,6 +292,23 @@ impl IdMapStore {
     #[must_use]
     pub fn options(&self) -> &IdMapOptions {
         &self.options
+    }
+
+    /// 挂远程桥：可远程方法改走桥，其余方法不变（Go lotus 客户端模式）。
+    ///
+    /// 17 个 gRPC RPC 在这里对应 11 个方法（Go 的 Pro 变体由服务端组合两次基本操作，
+    /// 见 `idmap/grpc.rs`）：`retrieve_virtual_value`、`lookup_virtual_value`、
+    /// `retrieve_row_by_id`、`update_virtual_value`、`update_virtual_value_pro`、
+    /// `find_sub_keys_by_id`、`write_config`、`read_config`、`delete_config`、
+    /// `store_cache_with_ttl`（含委托它的 `store_cache`）、`retrieve_row_by_cache`。
+    ///
+    /// 远程命中不写本地 redb；远程错误直接上抛 [`StorageError::Remote`]，不做运行时
+    /// 本地回退（避免双写分裂）。批量 API（[`IdMapWriteBatch`]）与本地-only 方法
+    /// （名称缓存、最新消息、`list_identities` 等）不受影响。
+    #[must_use]
+    pub fn with_remote(mut self, bridge: RemoteBridge) -> Self {
+        self.remote = Some(bridge);
+        self
     }
 
     /// 两个库是否都还没有任何记录（`meta` 内的 `schema_version` 不算数据）。
@@ -392,6 +414,14 @@ impl IdMapStore {
     ///
     /// redb 事务失败或计数器/表数据损坏时返回 [`StorageError`]。
     pub fn retrieve_virtual_value(&self, identity: &str) -> Result<(String, i64), StorageError> {
+        if let Some(b) = &self.remote {
+            let row = b.store_idv2(identity)?.row;
+            // 远端响应只有 vUIN；归一化身份串在本地按同一规则派生（纯函数，不碰 redb），
+            // 与本地路径的第一项保持一致。
+            let normalized =
+                normalize_identity(identity, &self.options.app_id, self.options.uin.as_deref());
+            return Ok((normalized.raw, row));
+        }
         self.with_write_batch(|batch| batch.retrieve_virtual_value(identity))
     }
 
@@ -439,6 +469,12 @@ impl IdMapStore {
     ///
     /// 身份未登记返回 [`StorageError::NotFound`]；redb 事务失败或正表数据损坏返回对应变体。
     pub fn lookup_virtual_value(&self, identity: &str) -> Result<i64, StorageError> {
+        if let Some(b) = &self.remote {
+            let virtual_value = b.retrieve_virtual_value_v2(identity)?.r#virtual;
+            return virtual_value.parse::<i64>().map_err(|err| {
+                StorageError::Remote(format!("远端返回非法 vUIN {virtual_value:?}: {err}"))
+            });
+        }
         let normalized =
             normalize_identity(identity, &self.options.app_id, self.options.uin.as_deref());
         let key = LookupKey::Identity(normalized.key.clone());
@@ -484,6 +520,9 @@ impl IdMapStore {
     ///
     /// 查不到时返回 [`StorageError::NotFound`]。
     pub fn retrieve_row_by_id(&self, vuin: i64) -> Result<String, StorageError> {
+        if let Some(b) = &self.remote {
+            return Ok(b.retrieve_row_by_idv2(vuin.to_string())?.id);
+        }
         if vuin <= 0 {
             return Err(StorageError::NotFound(format!("vUIN={vuin}")));
         }
@@ -616,6 +655,9 @@ impl IdMapStore {
     ///
     /// redb 事务失败时返回 [`StorageError::Redb`]。
     pub fn find_sub_keys_by_id(&self, id: &str) -> Result<Vec<String>, StorageError> {
+        if let Some(b) = &self.remote {
+            return Ok(b.find_sub_keys_by_id_pro(id)?.keys);
+        }
         let txn = self.identity_db.begin_read().map_err(rb)?;
         let forward = txn.open_table(IDENTITY_TO_VUIN).map_err(rb)?;
         let prefix = format!("{id}:");
@@ -733,6 +775,10 @@ impl IdMapStore {
     /// `new` 已被占用 → [`StorageError::AlreadyExists`]（Go 是 `%v :已存在`）；
     /// redb 事务失败 → [`StorageError::Redb`]。
     pub fn update_virtual_value(&self, old_vuin: i64, new_vuin: i64) -> Result<(), StorageError> {
+        if let Some(b) = &self.remote {
+            b.update_virtual_value_v2(old_vuin, new_vuin)?;
+            return Ok(());
+        }
         let identity = self.resolve_rebind_identity(old_vuin)?;
         if self.options.uin.is_some() {
             return self.write_rebind_alias(old_vuin, new_vuin);
@@ -849,6 +895,16 @@ impl IdMapStore {
         old_virtual_value_2: i64,
         new_virtual_value_2: i64,
     ) -> Result<(), StorageError> {
+        if let Some(b) = &self.remote {
+            // 单次 RPC（Go UpdateVirtualValuev2Pro 同样只发一次）；不分支会退化成两次远程重绑定。
+            b.update_virtual_value_v2_pro(
+                old_virtual_value_1,
+                new_virtual_value_1,
+                old_virtual_value_2,
+                new_virtual_value_2,
+            )?;
+            return Ok(());
+        }
         self.update_virtual_value(old_virtual_value_1, new_virtual_value_1)?;
         self.update_virtual_value(old_virtual_value_2, new_virtual_value_2)
     }
@@ -996,6 +1052,10 @@ impl IdMapStore {
     ///
     /// 消息 ID 为空、redb 事务失败或数据损坏时返回 [`StorageError`]。
     pub fn store_cache_with_ttl(&self, msg_id: &str, ttl: Duration) -> Result<i64, StorageError> {
+        if let Some(b) = &self.remote {
+            // 远程 StoreCacheV2 无 TTL 参数（Go type=16 同），TTL 由服务端自己的配置决定。
+            return Ok(b.store_cache_v2(msg_id)?.row);
+        }
         self.with_write_batch(|batch| batch.store_cache_with_ttl(msg_id, ttl))
     }
 
@@ -1046,6 +1106,9 @@ impl IdMapStore {
     /// （Go 把两者都映射为 `ErrKeyNotFound`，用 [`StorageError::is_not_found`] 可得到
     /// 同样的单值语义）。
     pub fn retrieve_row_by_cache(&self, vuin: i64) -> Result<String, StorageError> {
+        if let Some(b) = &self.remote {
+            return Ok(b.retrieve_row_by_cache_v2(vuin.to_string())?.id);
+        }
         if vuin <= 0 {
             return Err(StorageError::NotFound(format!("虚拟消息 ID={vuin}")));
         }
@@ -1167,6 +1230,10 @@ impl IdMapStore {
         subtype: &str,
         value: &str,
     ) -> Result<(), StorageError> {
+        if let Some(b) = &self.remote {
+            b.write_config_v2(section, subtype, value)?;
+            return Ok(());
+        }
         self.with_write_batch(|batch| batch.write_config(section, subtype, value))
     }
 
@@ -1176,6 +1243,9 @@ impl IdMapStore {
     ///
     /// 键不存在、value 不是合法 UTF-8、redb 事务失败时返回 [`StorageError`]。
     pub fn read_config(&self, section: &str, subtype: &str) -> Result<String, StorageError> {
+        if let Some(b) = &self.remote {
+            return Ok(b.read_config_v2(section, subtype)?.value);
+        }
         let key = config_key(section, subtype);
         let txn = self.identity_db.begin_read().map_err(rb)?;
         let table = txn.open_table(CONFIG).map_err(rb)?;
@@ -1193,6 +1263,12 @@ impl IdMapStore {
     ///
     /// redb 事务失败时返回 [`StorageError`]。
     pub fn delete_config(&self, section: &str, subtype: &str) -> Result<bool, StorageError> {
+        if let Some(b) = &self.remote {
+            b.delete_config_v2(section, subtype)?;
+            // Go DeleteConfigv2 只回 error（bbolt Delete 幂等）；远端响应没有"是否存在"
+            // 信息，成功一律 true。
+            return Ok(true);
+        }
         let key = config_key(section, subtype);
         let txn = self.identity_db.begin_write().map_err(rb)?;
         let removed = {
