@@ -18,7 +18,7 @@ M0 只新建 Rust 工作区与 CI，**不改动任何 Go 代码**。
 - 已建：workspace（10 库 crate + bin + xtask）、fmt/clippy/deny/audit 配置、`core`（error/ids/telemetry）、`config`（Settings + loader 骨架）、`protocol`（event/action/cqcode/outbound/registry 骨架）。
 - 未建（M1+）：M4 性能基线（72h 压测）。（黄金样本回放已建：`89befb6` 生成器 + `5d1d19f` 回放 harness，15 类事件 Go↔Rust 对齐；MSRV 独立 job 已建：`.github/workflows/rust.yml` 的 `msrv` job 钉 `toolchain: "1.90"`、只跑 `cargo build --workspace --locked` 验可编译，测试矩阵仍归 `test` job。热重载与全量配置字段、idmap/echo、四连接、媒体管线、WebUI 均已建：`ConfigWatcher`+`ConfigManager::reload` 带重启项 diff、`echo` 存储 M1e、`boot.rs` 四连接装配、`gensokyo-media`/`gensokyo-webui` crate 就位；action 实现明细见下文「里程碑状态」，接线明细以 `reports/refactor/16-official-api-audit.md` 为准。）
 
-## 里程碑状态（截至 2026-11-08，HEAD `b3612c9`）
+## 里程碑状态（截至 2026-11-13，P55 波次 P1~P5 已全部落地）
 
 - **M3 `a60c4ed`（Rust 端点补齐与出站段类型放开）**：22 个 action 由 1500 占位改真实端点（面板 6 / 自定义菜单 2 / 入群自动审批策略 6 / 群黑名单 2 / 踢人 / 撤回×2 / `set_group_add_request` / `put_interaction` / `get_robot_share_link`；提交标题与 `qqapi` trait 计数口径为 20，按模块表逐项核为 22）；`HttpMethod` 补 PUT/PATCH/DELETE；`gensokyo-qq` 新增 22 个端点方法与 panel DTO；出站段放开 keyboard / input_notify / stream（music 降级文本）。验证：`cargo test --workspace` 全 suite ok、`cargo clippy --workspace --all-targets -- -D warnings` 零告警，评审 approve 无 Critical/Major。
 - **R3a `bbee6d6`（`get_group_list` 真实化）**：`IdMapStore` 新增 `find_config_sections` 只读枚举、入站 4 群事件注册 `<上报形态ID>:type=group`、handler 逐群聚合（反查 / 信息 / 正查任一失败 = 整群跳过 + warn）。刻意差异：Go 留空字段行、不回 uin 前缀形态、无逐群节流。验证口径同 M3（全 suite ok + clippy 零告警），评审 approve 无 Critical/Major。
@@ -33,6 +33,29 @@ M0 只新建 Rust 工作区与 CI，**不改动任何 Go 代码**。
 - **R4h 波次（2026-11-10，接线与提效收口）**：P33 mimalloc 0.1.52 全局分配器（bench 中位：`cqcode::parse` −51%、`plan_send_group_msg` −47%、`Event::deserialize` −21%；产物 10.06→10.31 MiB；`cc` 早已被 ring 需要，构建链无新增门槛）、P36 短链 HTTP（`POST /url` + `GET /url/{code}`：301/404/400 照 Go、token 照抄 Go 自指语义、免鉴权同 Go）+ 启动配置自愈（`ensure_config_complete` 在配置载入前）+ WebUI `/api/status` 四扩展字段、P38 unioncache 真接线（入站群消息写、markdown `@union` 读）+ 测试 redb 隔离、P39 impact 三 Major（补键保留 0600 权限、`app_id 12345` 哨兵、HMAC 去重为 `ring::hmac` + 常量时间比较）、P40 correctness Major（顶层 `settings` 守卫：无 `settings:` 的正文配置返回 `NoSettings` 且文件原样，空/纯注释文件先写 `version: 1`+`settings:` 外壳）。验证：合并树 40 suites / 1187 passed、clippy 零告警、release 10.31 MiB。剩余缺口：`/url` 挂载位置与 Go 不同（两监听都关时不存在）、301 无正文、多段路径落 SPA 回退、老短码不迁移、`ProcessInlineSearch` 的 union 读点与 `union_id` 入站 ID 切换。
 - **R4i 波次（2026-11-10，接线收口与数据安全）**：P42 `union_id` 入站 ID 切换（群消息按 Go `store→switch→idmap`，`platform=unionqq`；inline search 按 Go 源码只回显 `data.group_member_openid`，`user_id`/`real_user_id` 保持原始；空 union 保留原 id 为登记差异）、P43 `cleanupDuplicateSettings` 移植（CRLF 归一、列 0 重复 `settings:` 截断、结构重建；**写回前 `parse_str` 自检**、`loader::write_atomic` 为全仓唯一 temp+rename）、P44 `POST /uploadrecord`（`base64Record` → `<md5>.silk` 落 `channel_temp/` → 独立 `record_url` → `{"url"}`；Go 的语音 OSS 链为死代码，不移植）、P45 评审修复（重建保留行内相对缩进、`---`/`...`/`null` 不再当内容、截断列 0 敏感、P42 echo 键用例、P44 超限 413）、P46 `warn_early` 让启动早期告警生产可见 + `template.rs` 并入唯一 `write_atomic`。验证：40 suites / 1213 passed、clippy 零告警、release 10.32 MiB。
 - **R4k 波次（2026-11-11，入站媒体段与评审收口）**：P50 入站媒体段（`attachments` 图片/语音、`ark_data`/`message_type=3` 卡片、`msg_elements` 引用/嵌套正文，字符串路径追加 CQ 码、段数组路径产 image/record/ark/reply/text 段，顺序同 Go「正文段 → 图片段 → 事件段」）+ P51 两路评审收口（① `attachments`/`msg_elements` 顶层与嵌套整数组 `null` 按空数组收，对齐 Go `[]*T`，不再丢整条事件；② 入站 CQ 值转义补 `[` → `&#91;`，对齐 Go `cqparse.EncodeValue` 四字符口径，防远端卡片 asr/ark_type/ark_name/prompt/msg_idx 携带 `[CQ:…]` 形状被下游重解析；③ 补 voice `file` 回退、`add_at_group` 前缀位置、`strip_extension` 表驱动用例；⑤ `strip_extension` 的 `\` 分隔符 Windows 语义注释、模块文档图片循环行号修正、`fields` 非对象注释、parity §A 金样说明）。**用户可见变化**：默认 `array_value=false` 下，入站 `message`/`raw_message` 现含媒体 CQ 码（`[CQ:image]`/`[CQ:record]`/`[CQ:ark]`/`[CQ:reply]`），此前静默丢弃；下游按 `url` 取图。验证：40 suites / 1235 passed（基线 1230 + P51 新增 5 用例）、clippy 零告警。
+- **R4l 波次（2026-11-13，lotus gRPC 客户端模式 P55）**：P55-P1 `RemoteBridge` 专职 OS 线程 + 独立 current_thread runtime（17 个同步门面，任意线程含 async worker 调用安全，`4fbfd5d`）、P55-P2 `IdMapStore::with_remote` 17 方法远程分支 + `idmap_remote_mode` 模式判定（`30c0c69`）、P55-P3 HTTP 回退桥（`lotus_grpc=false` 时自打远端 `/getid`，type 1~17 全表含 type=11 走 `/getrealvalues`，30s 超时 + 4MiB 响应上限，port=443/force_ssl → https，`5ca58f3`）、P55-P4 boot 装配（P28 服务端方向修正为 `!lotus && lotus_grpc`、`attach_idmap_remote`、/getid 按实际状态隐藏、`lotus=true` 主 listener 用 `backup_port`；本 commit 落地）。远程命中时 17 操作不写本地库（本地 redb 仍开，供无远程分支的函数使用，Go 同）；启动期建连失败 warn 降级本地，运行期远端不可达按 Go 语义返回 error、不自动切回。验证：41 suites / 1287 passed（含 HTTP 挂载态集成用例）、双实例集成（服务端实例 + 客户端实例虚拟 ID 跨实例一致，`crates/gensokyo-runtime/tests/lotus.rs`）。
+
+  **配置矩阵**（设计 §3.1）：
+
+  | lotus | lotus_grpc | without_idmaps | idmap 17 操作 | /getid | 本地 redb |
+  |---|---|---|---|---|---|
+  | false | false | * | 本地 | 挂载 | 写 |
+  | false | true | * | 本地 + 起 gRPC **服务端**（Go 专职阻塞；Rust 与 HTTP 共存，记录差异） | 服务端起来则隐藏 | 写（服务端的数据源） |
+  | true | false | false | HTTP 远端 /getid | 挂载（Go 同） | 开库，17 操作不写 |
+  | true | false | true | 全本地 | 挂载 | 写 |
+  | true | true | false | gRPC 客户端 | 隐藏 | 开库，17 操作不写 |
+  | true | true | true | **仍 gRPC 客户端**（Go 怪癖，照抄 + warn 日志提示） | 隐藏 | 同上 |
+
+  **与 Go 差异清单**（均已代码注释登记）：
+  - 建连失败 warn 降级本地 vs Go panic（Rust「可选能力失败只 warn」口径）
+  - gRPC RPC 30s 超时 + 5s 建连上限 vs Go context.Background() 无超时（有意安全性差异）
+  - 服务端模式不阻塞主线程（与 HTTP 共存）vs Go 专职进程 grpcServer.Serve 阻塞
+  - /getid 按实际状态隐藏（服务端真起或远程真挂）vs Go lotus_grpc=true 一律不挂；降级时保留挂载（仍带 IDMapAuthMiddleware）
+  - HTTP 回退不带 token/timestamp（Go buildGetIDURL 是死代码；设 lotus_password 会 401，存量缺陷照抄，修复另立任务）
+  - 怪癖照抄：lotus+lotus_grpc 时不查 lotus_without_idmaps（仍走 gRPC 客户端，装配处 warn）
+  - 语义微差：delete_config 远程恒 true（Go 只回 error）；store_cache_with_ttl 远程忽略 TTL（Go type=16 无参数）；update_virtual_value_pro 远程单次 RPC（非两次重绑定）
+  - 数字解析比 Go float64 中转更精确；超 4MiB 显式报错（Go 靠截断解码失败，同为 Err）
+  - backup_port 作用于 Rust 主 listener（正向 WS；Go 是主 HTTP 服务器 port），端口语义映射已注释
 - `gensokyo` 在 M0 只支持 `--version` / `version`；无子命令时打印提示并以退出码 2 结束（不假装启动成功）。
 - TLS 下限**接线**：`gensokyo-qq` 依赖 `rustls 0.23.46` / `webpki-root-certs 1.0.10` / `rustls-webpki 0.103.16`（provider 显式留空，M1 再选）；`cargo xtask check-tls-floors` 与 CI `tls-floors` job 断言 `Cargo.lock` 不低于下限；`deny.toml` 同时禁 `openssl`、`openssl-sys`。
 - CQ 转义口径**跟随 Go 而非规范**：出站只转 `,` `]` `&`，不转 `[`（OneBot v11 规范要求转 `[`）；入站 `unescape` 仍接受 `&#91;`。M1 勿"修正"为转 `[`，否则黄金样本整串不匹配。

@@ -218,3 +218,9 @@ cargo +1.99.1-x86_64-pc-windows-gnu run -p xtask -- build --no-upx   # 宿主 re
   与 Go 相同的三段反查与"目标已存在"拒绝），操作会直接改写 `openid-map.redb`——操作前先备份该文件。
   同时 gRPC `UpdateVirtualValueV2` / `UpdateVirtualValueV2Pro` 由 `Unimplemented` 变为真实实现，
   错误码从 `Unknown` 变为 `NotFound` / `AlreadyExists`（对应 Go 的 `不存在:<old>` / `<new> :已存在`）。
+- **lotus 远程模式运维注意（P55）**：`lotus=true` 时 idmap 17 操作走远端（gRPC 客户端或 HTTP 回退）。
+  启动期建连失败只 **warn 降级本地**（Go 是 panic），`/getid` 保留挂载；启动成功后远端不可达按 Go
+  语义返回错误，**无运行时自动切回本地**（避免双写分裂），需人工介入或重启。桥线程 panic 在 release
+  `panic = "abort"` 下**直接退出进程**（见上文「release 的 panic 语义」），生产部署必须有 supervisor。
+  `lotus=true` 时主 listener（正向 WS，缺席则 HTTP API 端口）改用 `backup_port`——Go 的 `backup_port`
+  作用于主 HTTP 服务器 port，端口语义映射与完整差异清单见 `docs/rust-m0.md` R4l 条目。

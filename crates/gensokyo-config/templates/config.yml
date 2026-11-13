@@ -52,7 +52,7 @@ settings:
   #Gensokyo互联类
   server_dir: "<YOUR_SERVER_DIR>"                    # Lotus地址.不带http头的域名或ip,提供图片上传服务的服务器(图床)需要带端口号. 如果需要发base64图,需为公网ip,且开放对应端口
   port: "15630"                                      # Lotus端口.idmaps和图床对外开放的端口号,若要连接到另一个gensokyo,也是链接端口
-  backup_port : "5200"                               # 当totus为ture时,port值不再是本地webui的端口,使用lotus_Port来访问webui
+  backup_port : "5200"                               # lotus=true时主listener(正向WS,含upload/getid/WebUI路由)用backup_port替代port;仅enable_ws_server=true生效,false时主路由落http_address
   lotus: false                                       # lotus特性默认为false,当为true时,将会连接到另一个lotus为false的gensokyo。使用它提供的图床和idmaps服务(场景:同一个机器人在不同服务器运行,或内网需要发送base64图)。如果需要发送base64图片,需要设置正确的公网server_dir和开放对应的port, lotus鉴权 设置后,从gsk需要保持相同密码来访问主gsk
   lotus_password : "" 
   lotus_without_idmaps: false       #lotus只通过url,图片上传,语音,不通过id转换,在本地当前gsk维护idmaps转换.

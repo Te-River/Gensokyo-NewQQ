@@ -14,8 +14,10 @@
 //!   远端 /getid 会 401——存量缺陷照抄，修复另立任务（lead 预验证笔记 §3）。
 //!
 //! TLS：reqwest `rustls-no-provider`，provider 由二进制侧进程级安装（gensokyo-bin
-//! startup 装 ring）。未安装 provider 的进程里构建客户端会 panic，桥线程死亡，
-//! [`HttpRemoteBridge::spawn`] 与建连失败同口径返回 Err（调用方决定降级本地）。
+//! startup 装 ring）。未安装 provider 时构建客户端会 panic，而 release `panic="abort"`
+//! 下桥线程 panic 直接中止进程——因此桥线程内先预检
+//! [`rustls::crypto::CryptoProvider::get_default`]，未安装时 [`HttpRemoteBridge::spawn`]
+//! 与建连失败同口径返回 Err（调用方决定降级本地），不走 panic 路径。
 
 use std::fmt::Write as _;
 use std::io::Read;
@@ -52,8 +54,10 @@ enum ResponseStyle {
     /// 非 200 报错。`error_from_body=false` 仅 type 6：非 200 用固定文案，不取
     /// error 字段（service.go:1722-1724）。
     JsonFirst { error_from_body: bool },
-    /// 只查状态码、不读 body（type 3/5/12/15）。
-    StatusOnly,
+    /// 只查状态码、不读 body（type 3/5/12/15）：`with_status=true` 仅 type 3/15，
+    /// 非 200 带 `resp.Status`（service.go:1215,1327）；type 5/12 固定文案
+    /// （service.go:1683,2070）。
+    StatusOnly { with_status: bool },
     /// type 4：先查状态码，再限长读 body，取 `value` 字段按 Go `%v` 字符串化
     /// （service.go:1369-1390）。
     ConfigValue,
@@ -82,8 +86,9 @@ impl HttpRemoteBridge {
     /// 是远端 port 配置（Go `GetPortValue`）；协议判定照抄 Go（见 [`protocol`]）。
     ///
     /// 与 gRPC 桥不同，HTTP 客户端**不预建连**（Go `http.Client` 同）：不可达在
-    /// 首次请求时才报错。构建客户端失败（含未安装 rustls provider 的 panic）返回
-    /// Err，由调用方决定降级。
+    /// 首次请求时才报错。构建客户端失败返回 Err，由调用方决定降级；未安装 rustls
+    /// provider 时预检直接回 Err（release `panic="abort"` 不允许桥线程 panic，
+    /// 见模块文档）。
     pub fn spawn(
         server_dir: impl Into<String>,
         port: impl Into<String>,
@@ -98,6 +103,15 @@ impl HttpRemoteBridge {
         let handle = std::thread::Builder::new()
             .name("idmap-http-remote-bridge".to_string())
             .spawn(move || {
+                // release `panic="abort"` 下桥线程 panic 会中止整个进程：provider
+                // 未安装时预检直接回 Err，不走 Client::builder() 的 panic 路径。
+                if rustls::crypto::CryptoProvider::get_default().is_none() {
+                    let _ = ready_tx.send(Err(StorageError::Remote(
+                        "未安装 rustls CryptoProvider，HTTP 客户端不构建（生产由二进制 startup 安装 ring）"
+                            .to_string(),
+                    )));
+                    return;
+                }
                 // blocking 客户端自带内部 runtime，必须在专职线程（非 async worker）构造。
                 let client = match Client::builder().timeout(timeout).build() {
                     Ok(client) => client,
@@ -195,7 +209,7 @@ impl HttpRemoteBridge {
                 ("value", &value.into()),
             ])
         );
-        self.call(url, ResponseStyle::StatusOnly)?;
+        self.call(url, ResponseStyle::StatusOnly { with_status: true })?;
         Ok(())
     }
 
@@ -229,7 +243,7 @@ impl HttpRemoteBridge {
             "{}/getid?type=5&oldRowValue={old_row_value}&newRowValue={new_row_value}",
             self.base
         );
-        self.call(url, ResponseStyle::StatusOnly)?;
+        self.call(url, ResponseStyle::StatusOnly { with_status: false })?;
         Ok(())
     }
 
@@ -283,24 +297,39 @@ impl HttpRemoteBridge {
         rowid: impl Into<String>,
         sub_rowid: impl Into<String>,
     ) -> Result<(String, String), StorageError> {
-        let url = format!(
-            "{}/getid?type=9&id={}&subid={}",
-            self.base,
-            rowid.into(),
-            sub_rowid.into()
-        );
-        let value = self.call(url, ResponseStyle::JsonFirst { error_from_body: true })?;
-        Ok((string_field(&value, "id")?, string_field(&value, "subid")?))
+        self.retrieve_type9(rowid.into(), sub_rowid.into(), "id", "subid")
     }
 
     /// type=9：`RetrieveVirtualValuev2Pro`（service.go:1818-1844）——与
-    /// `RetrieveRowByIDv2Pro` 同一 URL 同一解析（Go 两函数 HTTP 分支逐字相同）。
+    /// `RetrieveRowByIDv2Pro` 同一 URL 同一字段，仅字段错误文案不同
+    /// （Go 用 first/second value，service.go:1836,1841）。
     pub fn retrieve_virtual_value_v2_pro(
         &self,
         real_value: impl Into<String>,
         real_value_sub: impl Into<String>,
     ) -> Result<(String, String), StorageError> {
-        self.retrieve_row_by_idv2_pro(real_value, real_value_sub)
+        self.retrieve_type9(
+            real_value.into(),
+            real_value_sub.into(),
+            "first value",
+            "second value",
+        )
+    }
+
+    /// type=9 两门面的共用实现：URL 与响应字段相同，错误文案标签按 Go 各函数原文。
+    fn retrieve_type9(
+        &self,
+        id: String,
+        subid: String,
+        first_label: &str,
+        second_label: &str,
+    ) -> Result<(String, String), StorageError> {
+        let url = format!("{}/getid?type=9&id={}&subid={}", self.base, id, subid);
+        let value = self.call(url, ResponseStyle::JsonFirst { error_from_body: true })?;
+        Ok((
+            string_field_labeled(&value, "id", first_label)?,
+            string_field_labeled(&value, "subid", second_label)?,
+        ))
     }
 
     /// type=11：`RetrieveRealValuesv2Pro`（service.go:1956-1982）——**走
@@ -316,8 +345,8 @@ impl HttpRemoteBridge {
         );
         let value = self.call(url, ResponseStyle::JsonFirst { error_from_body: true })?;
         Ok((
-            string_field(&value, "firstRealValue")?,
-            string_field(&value, "secondRealValue")?,
+            string_field_labeled(&value, "firstRealValue", "first real value")?,
+            string_field_labeled(&value, "secondRealValue", "second real value")?,
         ))
     }
 
@@ -333,7 +362,7 @@ impl HttpRemoteBridge {
             "{}/getid?type=12&oldVirtualValue1={old_virtual_value_1}&newVirtualValue1={new_virtual_value_1}&oldVirtualValue2={old_virtual_value_2}&newVirtualValue2={new_virtual_value_2}",
             self.base
         );
-        self.call(url, ResponseStyle::StatusOnly)?;
+        self.call(url, ResponseStyle::StatusOnly { with_status: false })?;
         Ok(())
     }
 
@@ -376,7 +405,7 @@ impl HttpRemoteBridge {
                 ("type", "15"),
             ])
         );
-        self.call(url, ResponseStyle::StatusOnly)?;
+        self.call(url, ResponseStyle::StatusOnly { with_status: true })?;
         Ok(())
     }
 
@@ -439,11 +468,15 @@ fn execute(client: &Client, url: &str, style: ResponseStyle) -> Result<Value, St
         .map_err(|err| StorageError::Remote(format!("failed to send request: {err}")))?;
     let status = response.status();
     match style {
-        ResponseStyle::StatusOnly => {
+        ResponseStyle::StatusOnly { with_status } => {
             if status != StatusCode::OK {
-                return Err(StorageError::Remote(format!(
-                    "error response from server: {status}"
-                )));
+                // Go type 5/12 固定文案（service.go:1683,2070）；type 3/15 带
+                // resp.Status（service.go:1215,1327）。
+                return Err(StorageError::Remote(if with_status {
+                    format!("error response from server: {status}")
+                } else {
+                    "error response from server".to_string()
+                }));
             }
             Ok(Value::Null)
         }
@@ -511,11 +544,17 @@ fn number_field(value: &Value, field: &str) -> Result<i64, StorageError> {
 
 /// Go `response["id"].(string)` 一族的字符串字段断言。
 fn string_field(value: &Value, field: &str) -> Result<String, StorageError> {
+    string_field_labeled(value, field, field)
+}
+
+/// 同 [`string_field`]，但错误文案标签按 Go 各函数原文（未必是字段名，
+/// 如 type 9 虚拟变体 / type 11，service.go:1836,1974）。
+fn string_field_labeled(value: &Value, field: &str, label: &str) -> Result<String, StorageError> {
     value
         .get(field)
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .ok_or_else(|| StorageError::Remote(format!("invalid response format for {field}")))
+        .ok_or_else(|| StorageError::Remote(format!("invalid response format for {label}")))
 }
 
 /// Go `fmt.Sprintf("%v", value)`（ReadConfigv2，service.go:1387）：服务端实际只回
@@ -924,15 +963,38 @@ mod tests {
         assert!(bridge.is_alive());
     }
 
-    /// 验收 c-3：非 200 取响应 error 字段（JsonFirst）；StatusOnly 同样报错。
+    /// 验收 c-3：非 200 取响应 error 字段（JsonFirst）；StatusOnly 分两档——
+    /// type 3/15 带 resp.Status，type 5/12 固定文案（service.go:1215,1327,1683,2070）。
     #[test]
     fn non_200_error_field_is_propagated() {
         let stub = Stub::spawn(|_| (500, r#"{"error":"boom"}"#.to_string()));
         let bridge = bridge_to(&stub);
         let err = retry_conn(|| bridge.store_idv2("openid-x")).unwrap_err();
         assert!(err.to_string().contains("boom"), "{err}");
+        // type 3：带 resp.Status
+        let err = retry_conn(|| bridge.write_config_v2("lotus", "token", "abc")).unwrap_err();
+        assert!(
+            matches!(&err, StorageError::Remote(msg) if msg == "error response from server: 500 Internal Server Error"),
+            "{err:?}"
+        );
+        // type 15：带 resp.Status
+        let err = retry_conn(|| bridge.delete_config_v2("lotus", "token")).unwrap_err();
+        assert!(
+            matches!(&err, StorageError::Remote(msg) if msg == "error response from server: 500 Internal Server Error"),
+            "{err:?}"
+        );
+        // type 5：固定文案，不带状态码
         let err = retry_conn(|| bridge.update_virtual_value_v2(1, 2)).unwrap_err();
-        assert!(matches!(err, StorageError::Remote(_)), "{err:?}");
+        assert!(
+            matches!(&err, StorageError::Remote(msg) if msg == "error response from server"),
+            "{err:?}"
+        );
+        // type 12：固定文案，不带状态码
+        let err = retry_conn(|| bridge.update_virtual_value_v2_pro(1, 2, 3, 4)).unwrap_err();
+        assert!(
+            matches!(&err, StorageError::Remote(msg) if msg == "error response from server"),
+            "{err:?}"
+        );
     }
 
     /// Go 口径：先解码再查状态码——非 200 且 body 非法 JSON 时解码错误优先。

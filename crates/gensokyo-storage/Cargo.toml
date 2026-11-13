@@ -25,13 +25,17 @@ prost.workspace = true
 tokio = { workspace = true, features = ["rt", "net", "time"] }
 # lotus HTTP 回退桥（P55-P3）：blocking 客户端在专职桥线程构造。TLS 沿用仓库惯例
 # rustls-no-provider，provider 由二进制侧进程级安装（gensokyo-bin startup 装 ring）；
-# 未安装 provider 的进程里构建客户端会 panic，桥 spawn 按建连失败同口径返回 Err。
+# 未安装 provider 时桥 spawn 预检后按建连失败同口径返回 Err（release panic=abort
+# 不允许桥线程 panic）。
 reqwest = { workspace = true, features = [
     "blocking",
     "http2",
     "rustls-no-provider",
     "system-proxy",
 ] }
+# provider 预检直读 CryptoProvider::get_default；workspace 定义已是 no-provider
+#（default-features=false，无 ring/aws-lc-rs），不引入新 crate（经 reqwest 已在编译图）
+rustls.workspace = true
 
 [build-dependencies]
 tonic-prost-build.workspace = true

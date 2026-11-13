@@ -185,6 +185,16 @@ CQ 码识别层在**全部解析路径**（Go legacy 正则群、Go `cqparse` �
 - **上传上限**：直传统一 5,000,000 字节（十进制 5MB），与 Go `file_data` 口径一致
 - **出站**：支持 markdown（`msg_type=2`，只带 `content`）与卡片（`msg_type=8`，群聊 / 单聊）
 
+### Rust lotus gRPC 客户端模式（P55-P1~P4，2026-11-13）
+
+Rust 版补齐 lotus 客户端模式 parity：`lotus=true` 时 idmap 17 个操作走远端（gRPC 客户端或 HTTP 回退），对齐 Go `main_grpc.go` / `idmap/service.go` 的三分支语义；远程命中时不写本地库（本地 redb 仍开，供无远程分支的函数使用）：
+
+- **gRPC 客户端**：`RemoteBridge` 专职桥线程（独立 current_thread runtime，RPC 30s 超时 + 5s 建连上限），`IdMapStore::with_remote` 17 方法分支 + `idmap_remote_mode` 模式判定（P55-P1 `4fbfd5d` / P55-P2 `30c0c69`）
+- **HTTP 回退**：`lotus_grpc=false` 且 `lotus_without_idmaps=false` 时自打远端 `/getid`（type 1~17 全表，type=11 走 `/getrealvalues`；30s 超时 + 4MiB 响应上限；port=443/force_ssl → https；不带 token/timestamp，照抄 Go 存量缺陷——设 `lotus_password` 会 401，修复另立任务）（P55-P3 `5ca58f3`）
+- **boot 装配**：gRPC 服务端方向修正为 `!lotus && lotus_grpc`（P28 原方向相反）；`/getid` 按实际状态隐藏（服务端真起或远程真挂；降级保留挂载，仍带鉴权中间件）；`lotus=true` 主 listener（正向 WS）改用 `backup_port`（P55-P4）
+- **与 Go 差异（登记）**：建连失败 warn 降级 vs Go panic；gRPC 30s 超时 vs Go 无超时；服务端模式不阻塞主线程（与 HTTP 共存）；`lotus+lotus_grpc` 不查 `lotus_without_idmaps`（Go 怪癖照抄 + warn）；`delete_config` 远程恒 true / `store_cache_with_ttl` 远程忽略 TTL / `update_virtual_value_pro` 远程单次 RPC 等语义微差——完整清单与配置矩阵见 `docs/rust-m0.md` R4l 条目
+- **测试**：41 suites / 1286 passed（P55-P4 时点口径）；双实例集成（服务端实例 + 客户端实例，虚拟 ID 跨实例一致，`crates/gensokyo-runtime/tests/lotus.rs`）
+
 ---
 
 ## 📝 工程与文档变更
@@ -208,6 +218,12 @@ CQ 码识别层在**全部解析路径**（Go legacy 正则群、Go `cqparse` �
 - `template/config_template.go` / `crates/gensokyo-config/templates/config.yml`：新增 `enable_at_everyone_limit: true` 中文注释；`custom_template_id` 标注已废弃
 - `readme.md` / `docs/文档-markdown消息.md`：`custom_template_id` 可用描述改为「已废弃，不再生效」
 - `docs/文档-markdown消息.md` / 两个 config 模板：补 `native_md` 不再改变载荷形态、`params` 形态废弃；`docs/本版新增功能.md` 补 `native_md` 与 `[CQ:music]` 小节
+
+### 文档同步（lotus 客户端模式 P55-P5）
+
+- `reports/refactor/17-go-rust-parity.md`：lotus gRPC idmap 服务行、idmap 解绑/重绑定行的「客户端模式未实现 / lotus 远程分支未移植」缺口改为已移植（P55-P1~P4，注明 commit）；`/getid` 挂载判定表述更新为按实际状态隐藏
+- `docs/rust-m0.md`：追加 R4l 波次条目（能力概述 / 配置矩阵六行 / 与 Go 差异清单 / 测试证据），里程碑时点更新至 2026-11-13
+- `docs/rust-build.md`：「从 Go 版升级时的数据注意」补 lotus 运维注意（建连失败 warn 降级本地、无运行时自动切回、桥线程 panic 在 panic=abort 下退出进程需 supervisor、backup_port 端口语义映射）
 
 ### 新增测试文件
 

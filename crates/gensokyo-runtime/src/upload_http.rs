@@ -81,9 +81,10 @@ const TIMESTAMP_WINDOW: i64 = 300;
 
 /// 三条 idmap / 上传路由。
 ///
-/// `mount_getid=false` 对应 Go `main.go:507`：`lotus_grpc` 的 gRPC idmap 服务端接管后不再
-/// 注册本地 `/getid`（同一进程不摆两套 idmap 入口）。是否接管由 [`crate::boot`] 按服务端
-/// **是否真的起来**决定，监听失败时仍挂本地路由。
+/// `mount_getid=false` 对应 Go `main.go:507`：lotus gRPC 接管 idmap 后不再注册本地
+/// `/getid`（同一进程不摆两套 idmap 入口）。是否接管由 [`crate::boot`] 按「服务端是否真的
+/// 起来、远程客户端是否真挂上」决定——任一失败降级时仍挂本地路由（Go 那里会
+/// `Fatalf`/`panic`），避免远端 lotus 调用整条消失（见 [`router`]）。
 pub(crate) fn router(state: AppState, mount_getid: bool) -> Router {
     let routes = Router::new()
         .route("/uploadpic", post(upload_pic))

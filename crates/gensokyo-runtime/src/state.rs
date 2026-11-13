@@ -125,6 +125,11 @@ impl AppState {
         self
     }
 
+    /// 取出 idmap（boot 挂远程桥要按值消费 store，见 `crate::boot` 的 idmap 装配）。
+    pub fn take_idmap(&mut self) -> Option<Arc<IdMapStore>> {
+        self.idmap.take()
+    }
+
     /// 注入 echo 存储。
     #[must_use]
     pub fn with_echo(mut self, echo: Arc<EchoStore>) -> Self {

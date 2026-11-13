@@ -6,7 +6,8 @@
 //! `Handle::block_on` 在 async 上下文的 panic，也没有 `block_in_place` 的 flavor 限制。
 //!
 //! 超时口径：单次 RPC 超时由 [`RemoteBridge::spawn`] 的 `rpc_timeout` 经
-//! [`Endpoint::timeout`] 生效；门面等待回复另有 30s 上限（对齐 Go HTTP 客户端）。
+//! [`Endpoint::timeout`] 生效；门面等待回复 = `rpc_timeout` + 5s 余量（对齐 HTTP 桥
+//! `http_remote::RECV_MARGIN` 口径，排队 Job 不误报门面超时）。
 //! Go gRPC 用 `context.Background()` 无超时，Rust 加超时是有意的安全性差异
 //! （lotus gRPC 客户端设计 §2.2）。
 //!
@@ -22,8 +23,9 @@ use tonic::transport::Endpoint;
 use super::grpc::{IdMapClient, pb};
 use crate::error::StorageError;
 
-/// 门面等待回复的默认上限（对齐 Go HTTP 客户端的 30s）。
-const DEFAULT_RECV_TIMEOUT: Duration = Duration::from_secs(30);
+/// 门面等待回复的余量：单次 RPC 已有 `rpc_timeout` 上限，回复等待再加 5s 让 RPC
+/// 超时先触发，并发 + 慢远端下排队 Job 不误报门面超时（同 HTTP 桥 RECV_MARGIN 口径）。
+const RECV_MARGIN: Duration = Duration::from_secs(5);
 
 /// 一次 RPC 请求：方法参数 + 随 Job 走的回复通道，桥线程不持全局状态。
 enum Job {
@@ -122,13 +124,14 @@ enum Job {
 pub struct RemoteBridge {
     tx: mpsc::Sender<Job>,
     handle: JoinHandle<()>,
+    recv_timeout: Duration,
 }
 
 impl RemoteBridge {
     /// 在专职 OS 线程内建连并启动桥循环；建连失败返回 Err（调用方决定降级）。
     ///
-    /// `rpc_timeout` 作用于每次 RPC（[`Endpoint::timeout`]）；门面等待回复另有
-    /// 30s 上限。
+    /// `rpc_timeout` 作用于每次 RPC（[`Endpoint::timeout`]）；门面等待回复 =
+    /// `rpc_timeout` + 5s 余量（[`RECV_MARGIN`]）。
     pub fn spawn(endpoint: Endpoint, rpc_timeout: Duration) -> Result<Self, StorageError> {
         let (tx, rx) = mpsc::channel::<Job>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), StorageError>>();
@@ -163,7 +166,11 @@ impl RemoteBridge {
             })
             .map_err(|err| StorageError::Remote(format!("桥线程创建失败: {err}")))?;
         match ready_rx.recv() {
-            Ok(Ok(())) => Ok(Self { tx, handle }),
+            Ok(Ok(())) => Ok(Self {
+                tx,
+                handle,
+                recv_timeout: rpc_timeout + RECV_MARGIN,
+            }),
             Ok(Err(err)) => {
                 let _ = handle.join();
                 Err(err)
@@ -190,11 +197,11 @@ impl RemoteBridge {
         self.tx
             .send(make_job(reply_tx))
             .map_err(|_| StorageError::Remote("桥线程已死亡: Job 发送失败".to_string()))?;
-        match reply_rx.recv_timeout(DEFAULT_RECV_TIMEOUT) {
+        match reply_rx.recv_timeout(self.recv_timeout) {
             Ok(result) => result,
             Err(mpsc::RecvTimeoutError::Timeout) => Err(StorageError::Remote(format!(
                 "等待桥回复超时（{}s）",
-                DEFAULT_RECV_TIMEOUT.as_secs()
+                self.recv_timeout.as_secs()
             ))),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 Err(StorageError::Remote("桥线程已死亡: 回复通道断开".to_string()))
@@ -847,7 +854,11 @@ mod tests {
         let (_h, bridge) = bridge_harness().await?;
         // 拆掉真实发送端 → 桥线程 recv 断开后自行退出；再换一个接收端已 drop 的
         // 发送端，走"桥已死"时门面的 send 失败路径（同模块可访问私有字段）。
-        let RemoteBridge { tx, handle } = bridge;
+        let RemoteBridge {
+            tx,
+            handle,
+            recv_timeout,
+        } = bridge;
         drop(tx);
         // 等桥线程收尾（不消耗 handle，join 会 move 它）；发送端全断后必然退出。
         while !handle.is_finished() {
@@ -858,6 +869,7 @@ mod tests {
         let bridge = RemoteBridge {
             tx: dead_tx,
             handle,
+            recv_timeout,
         };
         assert!(!bridge.is_alive());
         let err = bridge.store_idv2("openid-dead").unwrap_err();

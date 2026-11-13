@@ -103,7 +103,7 @@ pub struct Settings {
     pub msgid_ttl_seconds: i64,
 
     // ---- gensokyo 互联类 ----
-    /// 数据目录（Go `string`，`server_dir`）。
+    /// 远端主机地址（Go `string`，`server_dir`；lotus 远程连接目标，Go `main_grpc.go:27`）。
     #[serde(deserialize_with = "de_string_lenient")]
     pub server_dir: String,
     /// 正向 WS / HTTP 服务端口（Go `string`，`port`）。
