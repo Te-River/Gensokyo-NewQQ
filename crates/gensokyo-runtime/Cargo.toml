@@ -28,6 +28,14 @@ md-5.workspace = true
 base64.workspace = true
 # webhook ed25519 验签（ring 已随 TLS 栈进树，这里只是直连）
 ring.workspace = true
+# lotus 短链 mint（`url_pipeline::LotusMint`）；workspace 声明 default-features=false，
+# 本 crate 只用无 feature 门槛的核心 API（手写 urlencoded body、text() + serde_json 解析），
+# 不开 form/json feature、不加新 crate（reqwest 已随 media/qq 在依赖图与 Cargo.lock）
+reqwest.workspace = true
+# LotusMint::try_new 的 provider 预检直读 CryptoProvider::get_default；workspace 定义
+# 已是 no-provider（default-features=false，无 ring/aws-lc-rs），不引入新 crate
+#（经 reqwest 已在编译图），与 gensokyo-storage 同款
+rustls.workspace = true
 # idmap gRPC 装配（`!lotus && lotus_grpc` 起服务端，`lotus` 时挂客户端桥）：服务端与
 # 17 个 RPC 实现都在 gensokyo-storage 的 `idmap::grpc`，这里只需要 tonic 的
 # `transport::Server` / `Endpoint` 装配与关闭信号

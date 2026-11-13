@@ -38,6 +38,8 @@ enum Sent {
 enum Outcome {
     Ok(MessageResponse),
     Fail,
+    /// 指定业务码的上游失败（错误分类分支用：`40034025` 事件过期 / `22009` 频控）。
+    Code(i64, &'static str),
 }
 
 /// 记录发送入参、按序注入结果的 `QqApi` 替身。
@@ -86,6 +88,10 @@ fn take(slot: &Mutex<VecDeque<Outcome>>) -> Result<MessageResponse, Error> {
         Outcome::Fail => Err(Error::Upstream {
             code: 40_054_005,
             message: "msgseq 去重".to_owned(),
+        }),
+        Outcome::Code(code, message) => Err(Error::Upstream {
+            code,
+            message: message.to_owned(),
         }),
     }
 }
@@ -328,6 +334,69 @@ async fn upstream_failure_is_1500_and_echo_kept() {
         "上游错误文案应回传: {:?}",
         response.message
     );
+}
+
+/// 40034025（`event_id` 失效）走 Go 的清空重发一次：重发成功即本次成功。
+/// （`event_id` 被清空这一步由 `deferred` 的单元测试直接盯消息体断言。）
+#[tokio::test]
+async fn event_expired_resends_once_through_the_action_chain() {
+    let (_dir, api, state) = state("app_id: 12345\n");
+    api.push_group(Outcome::Code(40_034_025, "请求参数event_id无效"));
+    api.push_group(api.ok("m-fallback"));
+
+    let response = state
+        .dispatcher()
+        .dispatch(&request(
+            "send_group_msg",
+            json!({ "group_id": OPENID, "message": "hello" }),
+            None,
+        ))
+        .await;
+
+    assert_eq!(response.retcode, 0, "重发成功应回 0");
+    assert_eq!(response.data, Some(json!({ "message_id": "m-fallback" })));
+    let sent = api.sent();
+    assert_eq!(sent.len(), 2, "Go：40034025 重发一次");
+    assert!(
+        matches!(&sent[0], Sent::Group(openid, message)
+            if openid == OPENID && message.content.as_deref() == Some("hello")),
+        "首打记录: {:?}",
+        sent[0]
+    );
+    assert!(
+        matches!(&sent[1], Sent::Group(_, message) if message.content.as_deref() == Some("hello")),
+        "重发记录: {:?}",
+        sent[1]
+    );
+}
+
+/// 重发仍失败：终局是上游原码（`retcode=1500` + 文案带 40034025），且只重发一次、不入 SSM 队列。
+#[tokio::test]
+async fn event_expired_final_failure_reports_the_upstream_code() {
+    let (_dir, api, state) = state("app_id: 12345\n");
+    api.push_group(Outcome::Code(40_034_025, "请求参数event_id无效"));
+    api.push_group(Outcome::Code(40_034_025, "请求参数event_id无效"));
+
+    let response = state
+        .dispatcher()
+        .dispatch(&request(
+            "send_group_msg",
+            json!({ "group_id": OPENID, "message": "hello" }),
+            Some(json!("e-expired")),
+        ))
+        .await;
+
+    assert_eq!(response.retcode, RETCODE_INTERNAL);
+    assert_eq!(response.echo, Some(json!("e-expired")));
+    assert!(
+        response
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("40034025")),
+        "终局错误应带原码: {:?}",
+        response.message
+    );
+    assert_eq!(api.sent().len(), 2, "重发只有一次，不构成循环");
 }
 
 #[tokio::test]

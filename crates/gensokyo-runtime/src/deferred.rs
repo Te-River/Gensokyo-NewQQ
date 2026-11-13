@@ -138,6 +138,16 @@
 //! 队列里，再次 `22009` 会重新入队。删除按下标**倒序**做——Go 边遍历边正序删会跳过元素
 //! （在册缺陷，不复刻）。
 //!
+//! ## 事件过期重发（`code:40034025`）
+//!
+//! 发送失败且上游 `code == 40034025`（`event_id` 无效）时，清空 `event_id` **重发一次**，
+//! 群 / 私聊同构（Go `postGroupMessageWithEventIDFallback` / `postC2CMessageWithEventIDFallback`，
+//! `outbound_bridge.go:896-916`；legacy `send_group_msg.go:491-504` / `send_private_msg.go:459-465`
+//! 同语义）。重发结果就是最终结果：不再判第二次过期、不叠加超时重试、也不过限流桶；SSM 入队
+//! 判定看的是重发之后的那个错误，入队载荷也就是清空 `event_id` 的那份消息体（Go push 的正是被
+//! 就地改过的 `gm`）。`40034026` 在 Go 的分类标志位里同属 `EventExpired`，但没有任何活消费点，
+//! 因此不移植（见 `is_event_expired` 的注释）。
+//!
 //! ## wakeup 终局回推
 //!
 //! 唤醒计划（`SendRequest::wakeup`）过了收件人还原之后的终局——成功，或合成 / 上传 /
@@ -171,14 +181,14 @@ use gensokyo_media::{HostingKind, ImageKind, MediaSource, OssKind, sniff_image};
 use gensokyo_protocol::cqcode;
 use gensokyo_protocol::event::NoticeEvent;
 use gensokyo_protocol::outbound::{InputNotifyPayload, StreamKind, StreamPayload};
-use gensokyo_protocol::{Event, MediaRef, OutboundPlan};
+use gensokyo_protocol::{Event, MediaRef, MessageContent, OutboundPlan};
 use gensokyo_qq::dto::message::{MessageCard, MessageCardContent};
 use gensokyo_qq::dto::{
     FileUpload, FileUploadMergeRequest, FileUploadPartFinishRequest, FileUploadPrepareRequest,
     InputNotify, Markdown, Media, MessageResponse, MessageToCreate, StreamSse, file_type, msg_type,
 };
-use gensokyo_storage::{EchoStore, UnionCache};
 use gensokyo_storage::echo::{DEFAULT_MESSAGE_ID, MessageGroupPair};
+use gensokyo_storage::{EchoStore, UnionCache};
 use serde_json::{Value, json};
 
 use crate::at_everyone::{self, Reservation};
@@ -219,6 +229,10 @@ pub struct DeferredDeps<'a> {
     /// [`queue::WAIT_TIMEOUT`] 等不到令牌、按失败尝试走重试，而重试会重取 `msg_seq`，
     /// 把「首条消息」的序号推高。
     pub limiter: Option<&'a queue::RateLimiter>,
+    /// 出站 URL 管线的短链 mint（P56-T4，[`crate::boot`] 按 `lotus` 装配）。`None` 即未
+    /// 装配：[`crate::url_pipeline::transform`] 的短链分支走 Rust-only 防御路径（URL
+    /// 原文保留不改写，整次变换最多一条告警），QR / IP 分支不受影响。
+    pub url_mint: Option<&'a crate::url_pipeline::UrlMint>,
 }
 
 /// 执行一条 deferred 计划，返回上游消息 ID。
@@ -240,7 +254,7 @@ pub async fn execute(
     deps: &DeferredDeps<'_>,
 ) -> Result<String> {
     let openid = context.resolve_send_target(&plan.target)?;
-    let result = execute_inner(context, plan, deps, openid.clone()).await;
+    let result = execute_inner(context, plan, deps, openid.clone(), 0).await;
     // 唤醒终局回推（对齐 Go `sendWakeupNotice`）：合成 / 上传 / 发送任一步失败都推 failed；
     // 收件人还原失败的早退不推（Go 该早退同样不推，口径一致）。
     if plan.wakeup {
@@ -259,7 +273,14 @@ async fn execute_inner(
     plan: &SendRequest,
     deps: &DeferredDeps<'_>,
     openid: String,
+    depth: usize,
 ) -> Result<String> {
+    // 出站 URL 变换（Go `transformMessageTextUrl`，`message_parser.go:1749-1793`）：位置
+    // 在 compose 之前，等价 Go 的 parseMessageContent 尾部（CQ 管线之后、文本最后）。
+    // `transfer_url=false`（默认配置）时返回 None，plan 原样进 compose，出站行为零变化。
+    // `execute_sse` 不挂：Go SSE 路径同样不过 parseMessageContent（登记，设计 §3.4）。
+    let transformed = url_transform_stage(context, plan, deps, &openid, depth).await;
+    let plan = transformed.as_ref().unwrap_or(plan);
     // 互动召回（Go `send_private_msg_wakeup.go`）：`is_wakeup` 与 `msg_id` / `event_id` 互斥，
     // 回复目标强制不带，正文合成完统一置标记。
     let (mut primary, mut extras) = if plan.wakeup {
@@ -325,6 +346,95 @@ async fn execute_inner(
     outcome
 }
 
+/// 出站 URL 变换阶段（[`execute_inner`] 的 compose 前置段，P56-T4）。
+///
+/// 门控只有 `depth == 0` 与 `transfer_url`（lead 裁决 2026-11-13：Go handler 不消费
+/// `auto_escape`，URL 路径在 Go 为死配置，Rust 同样不设该门控）。变换后的文本进 compose；
+/// 每个收集到的 QR URL 生成 PNG base64，构造「单 CQ 图片」子请求**递归重入**
+/// [`execute_inner`] 先行发送——Go `callapi.CallAPIFromDict`（`callapi.go:270-306`）重入
+/// 同一 handler 的语义：子请求独立解析被动身份、发在主消息之前、API 响应仅日志不回推
+/// OneBot 客户端（`message_parser.go:1770-1772`），而 `sendWakeupNotice` 照发（Go 重入
+/// 的是完整 handler，`processActionMessageWithBase64PicReplace` 只换 Message、不改
+/// action）。生成失败只告警，URL 仍已从文本删除
+/// （Go :1766-1775：err 分支的删除已在 transform 收集时做完）。
+///
+/// `depth` 防递归：QR 子请求以 depth=1 重入本阶段直接跳过变换。Go 靠「base64 文本不含
+/// 可被 xurls 命中的 URL」天然终止，这里加硬门防御病态 base64 恰含 URL 形态子串
+/// （Rust-only，Go 无 depth 概念）。
+///
+/// 返回 `None` 表示未启用**或本次变换毫无变化**（文本与原文一致且没收集到 QR URL），
+/// 两种都走零 clone 直通；`Some` 是仅正文文本被替换过的计划副本，target / wakeup /
+/// echo_context 与来件一致。
+async fn url_transform_stage(
+    context: &ActionContext,
+    plan: &SendRequest,
+    deps: &DeferredDeps<'_>,
+    openid: &str,
+    depth: usize,
+) -> Option<SendRequest> {
+    if depth > 0 {
+        return None;
+    }
+    // 门控与取值共用同一份快照（评审 Minor-2）：两次 `snapshot()` 之间落到热重载会让
+    // 门控读新值、QR 尺寸读旧值，同一阶段只 load_full 一次。
+    let settings = context.config().snapshot();
+    if !settings.get_transfer_url() {
+        return None;
+    }
+    let transformed =
+        crate::url_pipeline::transform(&plan.message.text, &settings, deps.url_mint).await;
+    for url in &transformed.qr_urls {
+        match gensokyo_media::qr::qr_png_base64(url, settings.get_qr_size()) {
+            Ok(base64_png) => {
+                // Go `processActionMessageWithBase64PicReplace`（message_parser.go:1796-1805）：
+                // 原请求只替换 Message 为单图 CQ，其余参数原样重入。图片上传链走 compose →
+                // compose_single_media 既有路径（msg_type=7 富媒体条、无 reply——子计划
+                // plan.reply_msg_id 由 from_content 解析单 image CQ 自然为空）。
+                let sub = SendRequest {
+                    target: plan.target.clone(),
+                    message: MessageOut::from_content(
+                        &MessageContent::Text(format!("[CQ:image,file=base64://{base64_png}]")),
+                        false,
+                    ),
+                    wakeup: plan.wakeup,
+                    echo_context: plan.echo_context.clone(),
+                };
+                // async fn 直接 await 自身递归没有有限 future 尺寸，必须装箱
+                let outcome = Box::pin(execute_inner(
+                    context,
+                    &sub,
+                    deps,
+                    openid.to_owned(),
+                    depth + 1,
+                ))
+                .await;
+                // 子发送同样推 wakeup 终局 notice（评审 Minor-4，对齐 Go）：Go 重入的是
+                // 完整 handler（`send_private_msg_wakeup` 的每个发送出口都调
+                // `sendWakeupNotice`，`send_private_msg_wakeup.go:138/156/176/227/275/297`），
+                // 二维码条与正文条各推一次。非召回计划照旧不推。
+                if plan.wakeup {
+                    publish_wakeup_notice(context, deps, openid, &outcome);
+                }
+                // 子发送失败可能是「二维码已发、正文失败」的残缺，口径升 warn（评审 Minor-5）。
+                tracing::warn!(result = ?outcome, "发送url转图片结果");
+            }
+            Err(err) => tracing::warn!(error = %err, "生成二维码失败"),
+        }
+    }
+    if transformed.text == plan.message.text && transformed.qr_urls.is_empty() {
+        // 文本没变化、也没收集到 QR：返回 None 让 compose 零拷贝直通原计划。
+        // `transfer_url=true` 而消息不含 URL 是常态，forward 逐 node 重入会放大这次 clone。
+        return None;
+    }
+    Some(SendRequest {
+        message: MessageOut {
+            text: transformed.text,
+            ..plan.message.clone()
+        },
+        ..plan.clone()
+    })
+}
+
 /// 按 target 发出单条消息，成功后回写 echo；失败原样上抛，由调用方决定回滚还是继续。
 ///
 /// 走 Go 的**活路径**（`messagequeue/queue.go` 的 worker 在 Go 里没有启动点，见 [`crate::queue`]
@@ -334,8 +444,9 @@ async fn execute_inner(
 ///   `postC2CMessageWithRetry` 同）；
 /// - 投递超时最多尝试 [`queue::MAX_ATTEMPTS`] 次、线性退避 [`queue::backoff`]，每次重试前重取
 ///   `msg_seq`（Go `postGroupMessageWithRetry` 在循环里调 `echo.NextMappingSeq`）；
-/// - 其余错误（频控 `22009`、事件过期等）**一次即返回**，群消息照旧落 SSM 队列
-///   （见 [`enqueue_ssm`]）——重试与 SSM 是两条互不影响的路径。
+/// - 其余错误（频控 `22009` 等）**一次即返回**，群消息照旧落 SSM 队列
+///   （见 [`enqueue_ssm`]）——重试与 SSM 是两条互不影响的路径；
+/// - `40034025`（`event_id` 失效）走 Go 的「清空 `event_id` 重发一次」分支，见 [`is_event_expired`]。
 async fn send_body(
     context: &ActionContext,
     target: &SendTarget,
@@ -345,12 +456,9 @@ async fn send_body(
 ) -> Result<String> {
     let echo = deps.echo;
     // 入队要用原始消息体，而发送会把它移走，所以群聊在发送前先序列化一份
-    let payload = match target {
-        SendTarget::Group(_) => serde_json::to_string(&message).ok(),
-        SendTarget::Private(_) => None,
-    };
+    let mut payload = ssm_payload(target, &message);
     let mut attempt: u32 = 0;
-    let sent = loop {
+    let mut sent = loop {
         let permitted = match (target, deps.limiter) {
             (SendTarget::Group(_), Some(limiter)) => {
                 limiter.wait_with_timeout(queue::WAIT_TIMEOUT).await
@@ -374,6 +482,19 @@ async fn send_body(
             Err(err) => break Err(err),
         }
     };
+
+    // `40034025`（`event_id` 失效）：Go `postGroupMessageWithEventIDFallback`
+    // （`outbound_bridge.go:898-905`，legacy `send_group_msg.go:491-504` 同语义）清空
+    // `EventID` 后**只重发一次**，重发的结果就是最终结果——不再判第二次过期、也不叠加超时
+    // 重试。重发既不过限流桶也不重取 `msg_seq`（Go 那边就是同一个 `PostGroupMessage` 再调一次）。
+    if sent.as_ref().err().is_some_and(is_event_expired) {
+        message.event_id = None;
+        // Go 的入队判定发生在重发之后、push 的是已清空 `EventID` 的那份 gm
+        // （`outbound_bridge.go:501-505`），所以载荷跟着重序列化一次。
+        payload = ssm_payload(target, &message);
+        sent = dispatch_body(context, target, openid, message.clone()).await;
+    }
+
     let response = match sent {
         Ok(response) => response,
         Err(err) => {
@@ -427,6 +548,33 @@ fn refresh_msg_seq(echo: Option<&EchoStore>, message: &mut MessageToCreate) {
 /// 上游业务码是否是需要 SSM 补发的频控（Go `retry_policy.go` 的 `IsQQError(err, 22009)`）。
 fn is_ssm_retry(err: &Error) -> bool {
     matches!(err, Error::Upstream { code: 22009, .. })
+}
+
+/// 上游业务码是否为「`event_id` 失效」（Go 活路径的 `IsQQError(err, 40034025)`）。
+///
+/// Go `ClassifyQQError`（`retry_policy.go:28`）把 `40034026` 也算进 `EventExpired` 标志位，
+/// 但那个标志位在全仓没有任何生产消费点（只有 `retry_policy_test.go` /
+/// `send_group_msg_test.go` 读它），真正触发重发的判定一律按 `40034025` 单码写——这里同口径。
+///
+/// 与 [`is_ssm_retry`] 一样按 [`Error::Upstream`] 的已归一码判定：`gensokyo-qq` 把 QQ 偶发的
+/// 字符串形态 `"code":"40034025"` 也解析成数字（Go 侧 `"code":(\d+)` 只认数字形态，字符串码
+/// 分类成 0 而不重发），口径与既有 22009 分支保持一致。
+fn is_event_expired(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::Upstream {
+            code: 40_034_025,
+            ..
+        }
+    )
+}
+
+/// SSM 入队用的载荷：只有群聊需要（私聊那条路 Go 只记日志），见 [`enqueue_ssm`]。
+fn ssm_payload(target: &SendTarget, message: &MessageToCreate) -> Option<String> {
+    match target {
+        SendTarget::Group(_) => serde_json::to_string(message).ok(),
+        SendTarget::Private(_) => None,
+    }
 }
 
 /// 把发送失败的群消息体放进 SSM 队列（Go `send_group_msg.go:483-490` 的入队分支）。
@@ -1192,7 +1340,10 @@ fn markdown_link_urls(content: &str) -> Vec<UrlSpan> {
     let mut spans = Vec::new();
     let mut index = 0;
     while let Some(open) = content[index..].find('[').map(|offset| index + offset) {
-        let Some(close) = content[open + 1..].find(']').map(|offset| open + 1 + offset) else {
+        let Some(close) = content[open + 1..]
+            .find(']')
+            .map(|offset| open + 1 + offset)
+        else {
             break;
         };
         // `](` 必须紧邻；否则正则从下一个字节重新尝试
@@ -1224,11 +1375,7 @@ fn html_img_urls(content: &str) -> Vec<UrlSpan> {
     while let Some(open) = find_ascii_ci(content, b"<img", index) {
         // `<img\b`：后面紧跟单词字符（`<imgx`）不算标签
         let after = open + 4;
-        if bytes
-            .get(after)
-            .copied()
-            .is_some_and(is_word_byte)
-        {
+        if bytes.get(after).copied().is_some_and(is_word_byte) {
             index = open + 1;
             continue;
         }
@@ -1270,8 +1417,7 @@ fn find_src_attr(bytes: &[u8], from: usize, to: usize) -> Option<usize> {
     // `[^>]*?` 至少要吃掉一个字符：`<imgsrc=` 里 `g` 与 `s` 之间没有边界
     let mut index = from + 1;
     while index + 4 <= to {
-        if bytes[index..index + 4].eq_ignore_ascii_case(b"src=")
-            && !is_word_byte(bytes[index - 1])
+        if bytes[index..index + 4].eq_ignore_ascii_case(b"src=") && !is_word_byte(bytes[index - 1])
         {
             return Some(index);
         }
@@ -2165,7 +2311,11 @@ async fn upload_media_chunked(
         // 分片 PUT 与素材直传同为「预签名 URL、不带 Authorization」，复用同一出口
         context
             .api()
-            .put_presigned_image(&part.presigned_url, "application/octet-stream", chunk.to_vec())
+            .put_presigned_image(
+                &part.presigned_url,
+                "application/octet-stream",
+                chunk.to_vec(),
+            )
             .await?;
         context
             .api()
@@ -2254,9 +2404,7 @@ mod tests {
     use gensokyo_core::{Error, Ob11Id, Result};
     use gensokyo_media::silk::{ProcessOutput, ProcessRunner, SilkCodec};
     use gensokyo_media::{BoxFuture, FetchRequest, Fetcher, MediaTransport, TransportResponse};
-    use gensokyo_media::{
-        HostingTransport, UploadMethod, UploadRequest, UploadResponse,
-    };
+    use gensokyo_media::{HostingTransport, UploadMethod, UploadRequest, UploadResponse};
     use gensokyo_protocol::outbound::{
         ActiveKind, CardFields, CardPayload, InputNotifyPayload, KeyboardPayload, MarkdownPayload,
         StreamKind, StreamPayload,
@@ -2268,9 +2416,9 @@ mod tests {
     };
     use gensokyo_qq::dto::{
         BotInGroupState, FileUpload, FileUploadMergeRequest, FileUploadPart,
-        FileUploadPartFinishRequest, FileUploadPrepareRequest, FileUploadPrepareResponse, GroupInfo,
-        GroupMember, GroupMemberList, InputNotify, JoinRequestList, Markdown, MediaResponse,
-        MessageResponse, MessageToCreate, StreamSse, file_type, msg_type,
+        FileUploadPartFinishRequest, FileUploadPrepareRequest, FileUploadPrepareResponse,
+        GroupInfo, GroupMember, GroupMemberList, InputNotify, JoinRequestList, Markdown,
+        MediaResponse, MessageResponse, MessageToCreate, StreamSse, file_type, msg_type,
     };
     use gensokyo_storage::echo::MessageGroupPair;
     use gensokyo_storage::{EchoStore, IdMapOptions, IdMapStore, UnionCache};
@@ -2278,7 +2426,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        DeferredDeps, execute, execute_forward, execute_sse, render_plain, resolve_markdown_images,
+        DeferredDeps, execute, execute_forward, execute_sse, is_event_expired, is_ssm_retry,
+        render_plain, resolve_markdown_images, send_body,
     };
     use crate::at_everyone::SECTION;
     use crate::event_hub::EventHub;
@@ -2430,7 +2579,10 @@ mod tests {
         }
 
         fn chunk_puts(&self) -> Vec<(String, usize)> {
-            self.chunk_puts.lock().expect("分片 PUT 记录锁未中毒").clone()
+            self.chunk_puts
+                .lock()
+                .expect("分片 PUT 记录锁未中毒")
+                .clone()
         }
 
         fn part_finishes(&self) -> Vec<FileUploadPartFinishRequest> {
@@ -2586,10 +2738,7 @@ mod tests {
             _is_group: bool,
             request: FileUploadMergeRequest,
         ) -> QqFuture<'_, MediaResponse> {
-            self.merges
-                .lock()
-                .expect("合并记录锁未中毒")
-                .push(request);
+            self.merges.lock().expect("合并记录锁未中毒").push(request);
             // 合并结果单独存放：prepare 已把整份分片脚本取走。
             let mut results = self.chunk_merge_results.lock().expect("合并槽锁未中毒");
             let result = results.take().expect("测试未配置分片合并结果");
@@ -2810,6 +2959,7 @@ mod tests {
             hub,
             forward_send_interval: Duration::ZERO,
             limiter: None,
+            url_mint: None,
         }
     }
 
@@ -3058,12 +3208,19 @@ mod tests {
         std::fs::write(&path, &source).expect("写本地图片失败");
         let media = MediaRuntime::default();
 
-        execute(&context, &group_request(image_plan(MediaRef::Local(path))), &deps(&media, None))
-            .await
-            .expect("压缩后应发送成功");
+        execute(
+            &context,
+            &group_request(image_plan(MediaRef::Local(path))),
+            &deps(&media, None),
+        )
+        .await
+        .expect("压缩后应发送成功");
 
         let uploads = api.uploads();
-        let data = uploads[0].file_data.as_deref().expect("直传路径应带 file_data");
+        let data = uploads[0]
+            .file_data
+            .as_deref()
+            .expect("直传路径应带 file_data");
         let decoded = gensokyo_media::decode_base64(data).expect("file_data 应是合法 base64");
         assert_ne!(decoded, source, "命中 image_sizelimit 必须重编码");
         assert!(decoded.starts_with(&[0xFF, 0xD8]), "JPEG 应保持 JPEG");
@@ -3088,8 +3245,11 @@ mod tests {
                         .iter()
                         .position(|arg| arg.as_str() == "-o")
                         .expect("pts 参数含 -o");
-                    std::fs::write(std::path::Path::new(&args[index + 1]), b"\x02#!SILK_V3-deferred")
-                        .expect("写 Silk");
+                    std::fs::write(
+                        std::path::Path::new(&args[index + 1]),
+                        b"\x02#!SILK_V3-deferred",
+                    )
+                    .expect("写 Silk");
                 }
                 other => panic!("意外的程序: {other}"),
             }
@@ -3136,10 +3296,8 @@ mod tests {
         let api = Arc::new(FakeQqApi::with_upload("FILE-INFO").with_send("MSG-1"));
         let (_dir, context) =
             context_with_settings(Arc::clone(&api), "  record_sampleRate: 24000\n");
-        let media = MediaRuntime::with_transport(Arc::new(FakeTransport::new(
-            b"ID3\x04url-audio",
-        )))
-        .with_silk_codec(SilkCodec::with_runner(FakeSilkRunner));
+        let media = MediaRuntime::with_transport(Arc::new(FakeTransport::new(b"ID3\x04url-audio")))
+            .with_silk_codec(SilkCodec::with_runner(FakeSilkRunner));
 
         execute(
             &context,
@@ -3180,9 +3338,7 @@ mod tests {
         let path = dir.path().join("cover.jpg");
         std::fs::write(&path, jpeg_fixture()).expect("写封面图失败");
         let hosting = HostingRuntime::with_transport(Arc::new(FakeHosting::ok()));
-        let plan = group_request(card_with_pic(Some(
-            path.to_string_lossy().into_owned(),
-        )));
+        let plan = group_request(card_with_pic(Some(path.to_string_lossy().into_owned())));
 
         execute(
             &context,
@@ -3210,9 +3366,7 @@ mod tests {
         let path = dir.path().join("cover.jpg");
         std::fs::write(&path, jpeg_fixture()).expect("写封面图失败");
         let hosting = HostingRuntime::with_transport(Arc::new(FakeHosting::with_status(400)));
-        let plan = group_request(card_with_pic(Some(
-            path.to_string_lossy().into_owned(),
-        )));
+        let plan = group_request(card_with_pic(Some(path.to_string_lossy().into_owned())));
 
         let err = execute(
             &context,
@@ -3228,11 +3382,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_images_without_markdown_send_two_rich_media_messages() {
-        let api = Arc::new(
-            FakeQqApi::default()
-                .with_send("MSG-A")
-                .with_send("MSG-B"),
-        );
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-A").with_send("MSG-B"));
         let (_dir, context) = context(Arc::clone(&api));
         let media = no_media();
         // `Unknown` 已是上游 file_info：免上传，只验拆条与顺序
@@ -5464,7 +5614,11 @@ mod tests {
 
             let sent = api.sent();
             assert_eq!(sent[0].msg_id, None, "「2000」分支必须清空 msg_id");
-            let expected = if string_ob11 { "EV-STRING" } else { "EV-LEGACY" };
+            let expected = if string_ob11 {
+                "EV-STRING"
+            } else {
+                "EV-LEGACY"
+            };
             assert_eq!(
                 sent[0].event_id.as_deref(),
                 Some(expected),
@@ -5528,7 +5682,10 @@ mod tests {
         echo.add_msg_id_v3("10001", "ECHO-KEY", "MSG-FROM-ECHO");
         echo.add_event_id_v2("10001", OPENID, "EV-1");
         let media = no_media();
-        let mut plan = text_plan(SendTarget::Private(OPENID.to_owned()), "[CQ:active] 强制主动");
+        let mut plan = text_plan(
+            SendTarget::Private(OPENID.to_owned()),
+            "[CQ:active] 强制主动",
+        );
         plan.echo_context.echo_key = Some("10001_ECHO-KEY".to_owned());
         plan.message.plan.active = Some(ActiveKind {
             active: true,
@@ -5546,11 +5703,7 @@ mod tests {
 
     #[tokio::test]
     async fn same_chain_replies_increment_msg_seq_on_one_msg_id() {
-        let api = Arc::new(
-            FakeQqApi::default()
-                .with_send("OUT-1")
-                .with_send("OUT-2"),
-        );
+        let api = Arc::new(FakeQqApi::default().with_send("OUT-1").with_send("OUT-2"));
         let (_dir, context) = echo_context(Arc::clone(&api), "");
         let echo = EchoStore::new();
         echo.add_msg_id_v3("10001", "CHAIN", "SAME-MSG");
@@ -5740,7 +5893,11 @@ mod tests {
     #[tokio::test]
     async fn unreadable_or_rejected_images_keep_the_original_reference() {
         let dir = tempfile::tempdir().expect("临时目录");
-        let missing = dir.path().join("missing.png").to_string_lossy().into_owned();
+        let missing = dir
+            .path()
+            .join("missing.png")
+            .to_string_lossy()
+            .into_owned();
 
         let api = Arc::new(FakeQqApi::default());
         let (_cfg, context) = context_with_settings(Arc::clone(&api), "  oss_type: 7\n");
@@ -5775,9 +5932,7 @@ mod tests {
         );
         let (_cfg, context) = context_with_settings(Arc::clone(&api), "  oss_type: 7\n");
         let media = no_media();
-        let plan = group_request(markdown_plan(&format!(
-            "![一]({first}) 和 ![二]({second})"
-        )));
+        let plan = group_request(markdown_plan(&format!("![一]({first}) 和 ![二]({second})")));
 
         execute(&context, &plan, &deps(&media, None))
             .await
@@ -5927,7 +6082,11 @@ mod tests {
             assert!(content.ends_with(".jpg)"), "oss_type={oss_type}: {content}");
 
             let requests = transport.requests();
-            assert_eq!(requests.len(), 1, "oss_type={oss_type}：一张图一次上传、不重试");
+            assert_eq!(
+                requests.len(),
+                1,
+                "oss_type={oss_type}：一张图一次上传、不重试"
+            );
             assert_eq!(requests[0].method, UploadMethod::Put);
             assert!(
                 requests[0].body.is_some(),
@@ -6425,5 +6584,261 @@ mod tests {
             .expect_err("未装配 echo 时行为与接线前一致");
 
         assert_eq!(api.sent().len(), 1);
+    }
+
+    // ---- 错误分类与重试分支（Go `handlers/retry_policy.go:18-30`，P57-①） ----
+
+    /// 分类谓词按已归一的数字码分派：频控走 SSM、事件过期走清空重发、其余两者皆否。
+    #[test]
+    fn upstream_codes_split_into_the_three_branches() {
+        let rate_limited = Error::Upstream {
+            code: 22009,
+            message: "频控".to_owned(),
+        };
+        let expired = Error::Upstream {
+            code: 40_034_025,
+            message: "请求参数event_id无效".to_owned(),
+        };
+        // Go `ClassifyQQError` 把 40034026 也记进 EventExpired 标志位，但活路径的重发判定
+        // 一律按 40034025 单码写（`IsQQError(err, 40034025)`），标志位本身没有生产消费点。
+        let adjacent = Error::Upstream {
+            code: 40_034_026,
+            message: "相邻码".to_owned(),
+        };
+        let other = Error::Upstream {
+            code: 1500,
+            message: "别的错".to_owned(),
+        };
+        let network = Error::Network("HTTP 传输失败: connection reset".to_owned());
+
+        assert!(is_ssm_retry(&rate_limited));
+        assert!(!is_event_expired(&rate_limited), "频控不清空 event_id 重发");
+        assert!(is_event_expired(&expired));
+        assert!(!is_ssm_retry(&expired), "过期不入 SSM");
+        assert!(!is_event_expired(&adjacent), "40034026 在 Go 无活消费点");
+        assert!(!is_event_expired(&other));
+        assert!(!is_ssm_retry(&other));
+        // 非业务码错误既不是频控也不算过期：超时那半由 `queue::should_retry` 判定（见下条用例）
+        assert!(!is_event_expired(&network));
+        assert!(!is_ssm_retry(&network));
+    }
+
+    /// 直接喂给发送收口一份带 `event_id` 的消息体，绕开被动身份解析（那半另有用例覆盖）。
+    fn event_message(text: &str) -> MessageToCreate {
+        MessageToCreate {
+            content: Some(text.to_owned()),
+            event_id: Some("EV-1".to_owned()),
+            ..MessageToCreate::default()
+        }
+    }
+
+    /// 上游事件过期错误（群 / 私聊共用同一个码）。
+    fn expired_error() -> Error {
+        Error::Upstream {
+            code: 40_034_025,
+            message: "请求参数event_id无效".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn event_expired_resends_once_with_the_event_id_cleared() {
+        let api = Arc::new(
+            FakeQqApi::default()
+                .with_send_error(expired_error())
+                .with_send("MSG-FALLBACK"),
+        );
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let echo = EchoStore::new();
+
+        let id = send_body(
+            &context,
+            &SendTarget::Group(OPENID.to_owned()),
+            OPENID,
+            event_message("正文"),
+            &deps(&media, Some(&echo)),
+        )
+        .await
+        .expect("重发成功应返回第二次的 message_id");
+
+        assert_eq!(id, "MSG-FALLBACK");
+        let sent = api.sent();
+        assert_eq!(sent.len(), 2, "Go：40034025 清空 EventID 重发一次");
+        assert_eq!(sent[0].event_id.as_deref(), Some("EV-1"));
+        assert_eq!(sent[1].event_id, None, "Go `gm.EventID = \"\"` 之后才重发");
+        assert_eq!(
+            sent[1].content.as_deref(),
+            Some("正文"),
+            "重发的是同一条消息体"
+        );
+        assert_eq!(echo.global_stack_len(), 0, "重发成功不入 SSM");
+    }
+
+    #[tokio::test]
+    async fn event_expired_second_failure_is_not_resended_again() {
+        let api = Arc::new(
+            FakeQqApi::default()
+                .with_send_error(expired_error())
+                .with_send_error(expired_error()),
+        );
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let echo = EchoStore::new();
+
+        let err = send_body(
+            &context,
+            &SendTarget::Group(OPENID.to_owned()),
+            OPENID,
+            event_message("正文"),
+            &deps(&media, Some(&echo)),
+        )
+        .await
+        .expect_err("重发仍失败要如实回报");
+
+        assert!(matches!(
+            err,
+            Error::Upstream {
+                code: 40_034_025,
+                ..
+            }
+        ));
+        assert_eq!(api.sent().len(), 2, "重发只有一次，不构成循环");
+        assert_eq!(echo.global_stack_len(), 0, "非 22009 不入队");
+    }
+
+    #[tokio::test]
+    async fn event_expired_then_22009_enqueues_the_cleared_body() {
+        // Go `outbound_bridge.go:501-505`：入队判定发生在重发之后、push 的是已清空 EventID
+        // 的那份 gm，所以最终错误 22009 会带着「无 event_id」的载荷入队。
+        let api = Arc::new(
+            FakeQqApi::default()
+                .with_send_error(expired_error())
+                .with_send_error(Error::Upstream {
+                    code: 22009,
+                    message: "频控".to_owned(),
+                }),
+        );
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let echo = EchoStore::new();
+
+        let err = send_body(
+            &context,
+            &SendTarget::Group(OPENID.to_owned()),
+            OPENID,
+            event_message("正文"),
+            &deps(&media, Some(&echo)),
+        )
+        .await
+        .expect_err("重发撞频控同样要回报失败");
+
+        assert!(matches!(err, Error::Upstream { code: 22009, .. }));
+        assert_eq!(api.sent().len(), 2);
+        assert_eq!(echo.global_stack_len(), 1, "最终错误是 22009 → 入队");
+        let pair = echo.pop_global_stack_multi(1).remove(0);
+        let body: MessageToCreate =
+            serde_json::from_str(pair.payload.as_deref().expect("payload 应是消息体 JSON"))
+                .expect("payload 应是 MessageToCreate");
+        assert_eq!(body.event_id, None, "入队载荷跟着重发那份一起清空 event_id");
+        assert_eq!(body.content.as_deref(), Some("正文"));
+    }
+
+    #[tokio::test]
+    async fn adjacent_event_expired_code_does_not_resend() {
+        let api = Arc::new(FakeQqApi::default().with_send_error(Error::Upstream {
+            code: 40_034_026,
+            message: "相邻码".to_owned(),
+        }));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let echo = EchoStore::new();
+
+        let err = send_body(
+            &context,
+            &SendTarget::Group(OPENID.to_owned()),
+            OPENID,
+            event_message("正文"),
+            &deps(&media, Some(&echo)),
+        )
+        .await
+        .expect_err("40034026 在 Go 无活消费点");
+
+        assert!(matches!(
+            err,
+            Error::Upstream {
+                code: 40_034_026,
+                ..
+            }
+        ));
+        assert_eq!(api.sent().len(), 1, "不重发");
+        assert_eq!(echo.global_stack_len(), 0);
+    }
+
+    #[tokio::test]
+    async fn private_event_expired_also_resends_once() {
+        // Go `postC2CMessageWithEventIDFallback`（`outbound_bridge.go:907-916`）：私聊同语义
+        let api = Arc::new(
+            FakeQqApi::default()
+                .with_send_error(expired_error())
+                .with_send("MSG-C2C"),
+        );
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let echo = EchoStore::new();
+
+        let id = send_body(
+            &context,
+            &SendTarget::Private(MEMBER_OPENID.to_owned()),
+            MEMBER_OPENID,
+            event_message("正文"),
+            &deps(&media, Some(&echo)),
+        )
+        .await
+        .expect("私聊重发成功");
+
+        assert_eq!(id, "MSG-C2C");
+        let sent = api.sent();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[1].event_id, None);
+        assert_eq!(
+            echo.global_stack_len(),
+            0,
+            "私聊任何情况都不入队（Go 只记日志）"
+        );
+    }
+
+    #[tokio::test]
+    async fn timeout_retry_refetches_msg_seq() {
+        // 投递超时：走 `queue::should_retry` 那条重试臂，重试前重取 `msg_seq`
+        // （Go `echo.NextMappingSeq`）。退避 1s × attempt，本条只重试一次，实际睡 1 秒。
+        let api = Arc::new(
+            FakeQqApi::default()
+                .with_send_error(Error::Network(
+                    "HTTP 传输失败: operation timed out".to_owned(),
+                ))
+                .with_send("MSG-RETRY"),
+        );
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let echo = EchoStore::new();
+        let mut message = event_message("正文");
+        message.event_id = None;
+        message.msg_id = Some("M-1".to_owned());
+
+        let id = send_body(
+            &context,
+            &SendTarget::Group(OPENID.to_owned()),
+            OPENID,
+            message,
+            &deps(&media, Some(&echo)),
+        )
+        .await
+        .expect("第 2 次成功");
+
+        assert_eq!(id, "MSG-RETRY");
+        let sent = api.sent();
+        assert_eq!(sent.len(), 2, "超时重试一次即成功");
+        assert!(sent[0].msg_seq.is_none());
+        assert!(sent[1].msg_seq.is_some(), "重试前重取 msg_seq");
     }
 }

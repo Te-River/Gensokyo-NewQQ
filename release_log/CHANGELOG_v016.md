@@ -97,6 +97,18 @@ CQ 码识别层在**全部解析路径**（Go legacy 正则群、Go `cqparse` �
 - **不变项**：CQ 转义口径（出站仅转 `,` `]` `&`、入站认 `&#91;`）、golden/回归样本、值内部空格保留、未闭合与配平失败按文本透传、legacy 键值不做实体解码（`cq_parse_mode=new` 才反转义，属模式设计本意）
 - **测试**：Go 25 包含测全绿（build/vet/small 全 0）；`cargo test --workspace` 33 suites / 719 passed / 0 failed、clippy 零告警；镜像契约矩阵 `handlers/cq_union_contract_test.go`、三模式矩阵、internal 状态机用例、Rust 形态表
 
+### 出站 URL 转换与二维码管线（Rust 侧 P56-T1~T4，2026-11-13）
+
+Rust 版接齐出站 URL 管线（对齐 Go `transformMessageTextUrl` + `generateQRCode` + `CallAPIFromDict` 侧发送）：出站文本按 xurls Relaxed 口径逐 URL 扫描，按 IP 隐藏 → QR 图 → 短链（lotus 远程 / 本地落库）互斥优先级原位替换；每个 QR URL 生成二维码图片构造单图子请求先行发送、响应仅日志不回推客户端：
+
+- **xurls 移植**（`crates/gensokyo-protocol/src/xurls.rs`，P56-T1）：gtld / otherScheme 常量逐字拷 xurls v1.1.0（MIT 署名注明），RE2 leftmost-longest 以 path 分支重排 + 同起点 strict/webURL 双式取最长模拟，`(?-u:\b)` 对齐 ASCII 词边界；Go 金样 harness corpus 逐 span 断言
+- **QR 码**（`crates/gensokyo-media/src/qr.rs`，P56-T2）：`qr_png_base64(url, qr_size)` 容错级=Go `qrcode.High`（ISO Q 级）、无静区、Go qrcode PNG 尺寸语义（负数=每模块像素数、过小静默放大到模块数）；模块矩阵与 Go `Bitmap()` 金样一致（PNG 字节跨库不可逐字节一致，lead 裁决接受矩阵级 parity）
+- **变换管线**（`crates/gensokyo-runtime/src/url_pipeline.rs`，P56-T3）：门控仅 `transfer_url`（lead 裁决：Go handler 不消费 `auto_escape`，URL 路径恒由 `transfer_url` 决定）；原位替换、周围空白不 trim；QR 开时 URL 删除且图片生成在 hook 侧做、失败也删（Go :1766-1775）；`UrlMint::Local` 短码落 `short-urls.redb` 替换 `https://{server_dir}/url/{短码}`，mint 失败**照抄 Go 怪癖仍拼悬空 `https://{server_dir}/url/`**（`message_parser.go:1784-1789`，同 HTTP 无 token 缺陷口径，修复另立任务）；`LotusMint` POST 远端 `/url`（form `url` + `token=hex(HMAC-SHA256(lotus_password, 长链))`、30s 超时、非 200/缺 shortURL → 空串、成功返回远端完整 shortURL 原位替换）；`mint: Option<&UrlMint>`——`None`（短链库未装配）为 Rust-only 防御路径：**保留 URL 原文不改写**，整次 `transform` 最多一条 `warn`（带 `count`、不含全 URL；Go idmap/db 恒存在，无对应态）；lotus mint 五个失败分支逐分支 `warn`（只带 `error`/`status`/`request_url`，**绝不**含 token/密码），返回值仍空串（Go 口径）；本地 mint 失败仍是悬空 base（同上）
+- **hook 与装配**（`crates/gensokyo-runtime/src/deferred.rs` / `boot.rs` / `state.rs` / `dispatcher.rs`，P56-T4）：`execute_inner` compose 前插 URL 变换阶段；每个 QR URL 生成 PNG 后构造 `[CQ:image,file=base64://…]` 单图子 SendRequest **递归重入执行链先行发送**（发送序 QR 图条在前、主消息在后；QR 条 `msg_type=7` 无 reply；子请求独立解析被动身份；返回值仅 `tracing::info` 日志、不回推 OneBot 客户端——客户端只收到原 action 一份响应，Go 同）；`depth` 参数防递归（QR 子请求 depth=1 跳过变换）；`execute` / `execute_forward` 自动覆盖；三类出站路径不挂、均与 Go 同：`execute_sse`（Go SSE 同样不过 parseMessageContent）、SSM 补发（`deferred.rs:560-563` 直发存量 DTO ↔ Go `send_group_msg.go:2676` `PostGroupMessage(pair.GroupMessage)`）、WS 掉线兜底（`downtime.rs:136/140` ↔ Go `Processor.go:379` `GetDowntimeMessage`）（登记）；boot `attach_url_mint` 按 `lotus` 选变体经 `AppState`→`Dispatcher`→`DeferredDeps` 传入
+- **行为边界与升级提示（M-A，重要）**：`transfer_url=false` 时代码层默认值零改写（集成回归锁用例钉桩）。但 `templates/config.yml` 模板的 `transfer_url` 默认值是 **true**，而本仓 Rust 侧此前不消费该键——**沿用模板配置升级的实例，本版起出站文本 URL 会开始被改写**（`server_dir` 为域名→替换成 `https://{server_dir}/url/{短码}`；为 IP 且 `visible_ip:false`→删除），这在对齐 Go 的意义上是正确的（Go 默认亦改写），但不想被改写的实例需**显式设 `transfer_url: false`**（即时回退、无编译期嵌入）；保持 true 则 `server_dir` 须为已在 q.qq.com 后台报备 `/url`、`/image` 校验的域名。QR 侧发送另受 `url_to_qrimage`（默认 false）控制，属 opt-in
+- **与 Go 差异（登记）**：mint 拼接参数（`server_dir`/`port`/`force_ssl`/`lotus_password`）逐调用现读 live 快照（Go `GenerateShortURL` 每次 `config.GetXxx()` 同口径），boot 只固化变体选择——`server_dir`/`lotus`/`lotus_password` 属重启项、改后快照整体冻结（`manager.rs:114-122`），残留差异只剩「Go 重启项变更→自动重启（`config.go:166-173` `sys.RestartApplication()`）vs Rust 手动重启」这一条 config 层既有口径；QR PNG 字节级跨库差异（矩阵级 parity）；PNG 生成失败/成功日志口径同 Go（`tracing` 替代 `mylog`）；`serde_json::from_str` 不容忍 JSON 尾随垃圾 vs Go `json.Decoder.Decode` 容忍（仅畸形响应有别）；长混合字母数字内容两库可能选不同 QR 版本（module 数不同、解码载荷相同、rqrr 已验）；lotus mint 最坏延迟 = 30s × URL 条数且未复用 `boot::shared_transport()`（本轮不做，后续项）；`transfer_url`+`url_to_qrimage` 同开时 QR 条与正文条各推一条 wakeup notice（对齐 Go 每出口 `sendWakeupNotice`，被动额度占 2）且存在「图已发、正文失败」残缺窗口（运维知悉）；**M-B 已闭环（P56-F3）**：`LotusMint::try_new` 在构造 client 前预检 `CryptoProvider::get_default()`，未安装 provider 返回 `Err`（`idmap/http_remote.rs` 同款口径，reqwest 0.13.5 无 provider 时 `build()` 直接 panic，`Result` 单独兜不住）并由 `attach_url_mint` 记 `error!` 不注入 mint；**不注入的后果**是短链分支保留 URL 原文（M-C 语义），不崩进程；runtime 的 `rustls` 依赖从 dev 升入 `[dependencies]`（workspace 定义无 provider，惯例不破）
+- **测试**：`url_pipeline` 单测 17（T3 的 15 + T4 悬空 base/None-mint 修正新增 2）+ runtime 集成 9（既有 7：`transfer_url=false` 回归锁、QR 发送序/`msg_type=7` 无 reply/单份响应/精确文本、IP 隐藏优先、本地短链落库、mint 未装配保留原文、lotus stub 原位替换、forward 逐 node 覆盖；P56-F2 增 2：管线 mint 短码→运行时 `GET /url/{code}` 301 闭环（与生产同款共用 `Arc<ShortUrlStore>`）、QR 生成失败仍删 URL）+ boot `attach_url_mint` 装配用例 4（P56-F3 落地 `try_new` provider 预检后全绿）；合并树 `cargo test --workspace` 43 suites / 1356 passed / 0 failed
+
 ---
 
 ## 🐛 修复
@@ -224,6 +236,12 @@ Rust 版补齐 lotus 客户端模式 parity：`lotus=true` 时 idmap 17 个操�
 - `reports/refactor/17-go-rust-parity.md`：lotus gRPC idmap 服务行、idmap 解绑/重绑定行的「客户端模式未实现 / lotus 远程分支未移植」缺口改为已移植（P55-P1~P4，注明 commit）；`/getid` 挂载判定表述更新为按实际状态隐藏
 - `docs/rust-m0.md`：追加 R4l 波次条目（能力概述 / 配置矩阵六行 / 与 Go 差异清单 / 测试证据），里程碑时点更新至 2026-11-13
 - `docs/rust-build.md`：「从 Go 版升级时的数据注意」补 lotus 运维注意（建连失败 warn 降级本地、无运行时自动切回、桥线程 panic 在 panic=abort 下退出进程需 supervisor、backup_port 端口语义映射）
+
+### 文档同步（出站 URL 管线 P56-T4 收口）
+
+- `reports/refactor/17-go-rust-parity.md`：§A「QR + 出站 URL 转换管线」行缺失 → **已对齐（P56-②）**，写明四层链路（xurls 扫描 / Q 级容错无静区 QR / mint 两分支 / 发送序与响应丢弃）；「SSRF 防护（通用下载/出站入口）」行 部分 → **已对齐（P56-① `53b81d9`）**；「视频处理」关闭行与 `crates/gensokyo-media/src/lib.rs` 未做项清单口径对齐（Go 死代码不移植、视频**发送链**已覆盖）
+- `docs/rust-m0.md`：追加 R4m 波次条目（能力概述 / 与 Go 差异清单 / 测试证据）
+- `crates/gensokyo-media/src/lib.rs`：未做项清单「视频处理」补「Go 死代码不移植」措辞（与 parity §A 关闭行同口径）；「QR 码生成」确认后本不在未做项清单（P56-T2 已交付）
 
 ### 新增测试文件
 

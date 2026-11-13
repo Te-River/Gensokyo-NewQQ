@@ -546,8 +546,7 @@ fn scan_params(params: &mut Vec<(String, String)>, input: &str, allow_colon: boo
     scan_regions(input, 0, false, &mut |chunk| {
         push_param(params, chunk, allow_colon);
     })
-    .1
-        == 0
+    .1 == 0
 }
 
 /// 单个参数片段落成参数。
@@ -700,14 +699,16 @@ pub const CODES: &[CodeSpec] = &[
         outbound: true,
     },
     CodeSpec {
+        // file 为空时兼容 url（Go resolveMediaValue handlers_media.go:51-55）
         name: "record",
-        params: &["file", "asr"],
+        params: &["file", "url", "asr"],
         inbound: true,
         outbound: true,
     },
     CodeSpec {
+        // 同 record/voice 口径的 url 兜底（Go message_parser.go:1218-1222）
         name: "video",
-        params: &["file"],
+        params: &["file", "url"],
         inbound: true,
         outbound: true,
     },
@@ -831,8 +832,9 @@ pub const CODES: &[CodeSpec] = &[
         outbound: true,
     },
     CodeSpec {
+        // voice 是 record 的同义码（出站 `record | voice` 同臂），参数口径与 record 一致
         name: "voice",
-        params: &["file"],
+        params: &["file", "url", "asr"],
         inbound: false,
         outbound: true,
     },
@@ -1029,7 +1031,10 @@ mod tests {
         );
 
         // 非 stream 段不再认 `:`：`action:run` 是无分隔裸片段且无前一键，丢弃（Go 同）
-        assert_eq!(parse("[CQ:custom,action:run]"), vec![Segment::new("custom")]);
+        assert_eq!(
+            parse("[CQ:custom,action:run]"),
+            vec![Segment::new("custom")]
+        );
         // 派发边界用例：music 的 `type:qq` 在 Go 冒号兜底之外，不识别为 `type` 键；Rust 同
         assert_eq!(
             parse("[CQ:music,type:qq,id=123]"),

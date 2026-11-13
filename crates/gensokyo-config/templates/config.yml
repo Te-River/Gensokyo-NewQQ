@@ -183,7 +183,7 @@ settings:
   visible_ip : false                #转换url时,如果server_dir是ip true将以ip形式发出url 默认隐藏url 将server_dir配置为自己域名可以转换url
   url_to_qrimage : false            #将信息中的url转换为二维码单独作为图片发出,需要同时设置  #SSL配置类 机器人发送URL设置 的 transfer_url 为 true visible_ip也需要为true
   qr_size : 200                     #二维码尺寸,单位像素
-  transfer_url : true                #默认开启,关闭后自理url发送,配置server_dir为你的域名,配置crt和key后,将域名/url和/image在q.qq.com后台通过校验,自动使用302跳转处理机器人发出的所有域名.
+  transfer_url : true                #默认开启,关闭后自理url发送,配置server_dir为你的域名,配置crt和key后,将域名/url和/image在q.qq.com后台通过校验,自动使用302跳转处理机器人发出的所有域名. 注(Rust主线P56起生效):本键此前Rust侧不消费,沿用本模板升级的实例出站文本URL将开始被改写(server_dir为域名时替换为https://{server_dir}/url/{短码},为IP且visible_ip为false时删除),与Go默认行为一致;若不希望改写请显式设为false(即时回退),保持true则server_dir须为已在q.qq.com后台报备/url与/image校验的域名.
 
   #框架修改
   title : "Gensokyo © 2023 - Hoshinonyaruko"              #程序的标题 如果多个机器人 可根据标题区分

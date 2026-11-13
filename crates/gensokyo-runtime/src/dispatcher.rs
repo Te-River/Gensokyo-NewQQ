@@ -64,6 +64,7 @@ pub struct Dispatcher {
     botstats: Option<Arc<BotStatsStore>>,
     hub: Option<EventHub>,
     forward_interval: Duration,
+    url_mint: Option<Arc<crate::url_pipeline::UrlMint>>,
 }
 
 impl Dispatcher {
@@ -78,6 +79,7 @@ impl Dispatcher {
             botstats: None,
             hub: None,
             forward_interval: crate::deferred::DEFAULT_FORWARD_SEND_INTERVAL,
+            url_mint: None,
         }
     }
 
@@ -116,6 +118,14 @@ impl Dispatcher {
     #[must_use]
     pub fn with_botstats(mut self, botstats: Option<Arc<BotStatsStore>>) -> Self {
         self.botstats = botstats;
+        self
+    }
+
+    /// 挂上出站 URL 管线的短链 mint（P56-T4；`transfer_url` 开启时 deferred 执行链才消费）。
+    /// 未挂时短链分支走 [`crate::url_pipeline::transform`] 的 Rust-only 防御路径。
+    #[must_use]
+    pub fn with_url_mint(mut self, url_mint: Option<Arc<crate::url_pipeline::UrlMint>>) -> Self {
+        self.url_mint = url_mint;
         self
     }
 
@@ -198,7 +208,11 @@ impl Dispatcher {
     ///
     /// 未装配 [`ActionContext`]、计划反序列化失败都算服务端问题（`1500`）；消息侧问题由
     /// [`crate::deferred::execute`] 的 [`CoreError`] 决定。
-    async fn run_deferred(&self, data: Value, echo: Option<&Value>) -> Result<Value, (i32, String)> {
+    async fn run_deferred(
+        &self,
+        data: Value,
+        echo: Option<&Value>,
+    ) -> Result<Value, (i32, String)> {
         let Some(context) = self.actions.as_ref() else {
             return Err((
                 RETCODE_INTERNAL,
@@ -212,6 +226,7 @@ impl Dispatcher {
             hub: self.hub.as_ref(),
             forward_send_interval: self.forward_interval,
             limiter: Some(crate::queue::RateLimiter::shared()),
+            url_mint: self.url_mint.as_deref(),
         };
         if data.get("forward").is_some() {
             let request = serde_json::from_value::<ForwardRequest>(data).map_err(bad_plan)?;

@@ -43,6 +43,7 @@ pub struct AppState {
     echo: Option<Arc<EchoStore>>,
     botstats: BotStatsSlot,
     short_url: Option<Arc<ShortUrlStore>>,
+    url_mint: Option<Arc<crate::url_pipeline::UrlMint>>,
     api: Option<Arc<OpenApiClient<ReqwestTransport>>>,
     media: Arc<MediaRuntime>,
     hosting: Arc<HostingRuntime>,
@@ -65,6 +66,7 @@ impl AppState {
             echo: None,
             botstats: BotStatsSlot::default(),
             short_url: None,
+            url_mint: None,
             api: None,
             media: Arc::new(MediaRuntime::default()),
             hosting: Arc::new(HostingRuntime::default()),
@@ -308,6 +310,27 @@ impl AppState {
         self.short_url.as_deref()
     }
 
+    /// 短链库的 `Arc`（[`crate::boot`] 装配 `UrlMint::Local` 要移动持有）。
+    #[must_use]
+    pub fn short_url_arc(&self) -> Option<Arc<ShortUrlStore>> {
+        self.short_url.clone()
+    }
+
+    /// 注入出站 URL 管线的短链 mint（P56-T4）。生产由 [`crate::boot`] 按 `lotus` 选定
+    /// 变体后注入；集成测试用它注入临时库的 `UrlMint::Local` / stub 远端的 Lotus。
+    #[must_use]
+    pub fn with_url_mint(mut self, url_mint: Option<Arc<crate::url_pipeline::UrlMint>>) -> Self {
+        self.url_mint = url_mint;
+        self
+    }
+
+    /// 短链 mint 句柄（`None` = 未装配：`transfer_url` 的短链分支走防御路径，见
+    /// [`crate::url_pipeline::transform`]）。
+    #[must_use]
+    pub fn url_mint(&self) -> Option<&crate::url_pipeline::UrlMint> {
+        self.url_mint.as_deref()
+    }
+
     /// deferred 的媒体下载器。
     #[must_use]
     pub fn media(&self) -> &MediaRuntime {
@@ -339,5 +362,6 @@ impl AppState {
             .with_echo(self.echo.clone())
             .with_botstats(self.botstats_arc())
             .with_hub(Some(self.hub.clone()))
+            .with_url_mint(self.url_mint.clone())
     }
 }

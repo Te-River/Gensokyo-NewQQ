@@ -800,6 +800,7 @@ dependencies = [
  "gensokyo-webui",
  "image",
  "md-5",
+ "reqwest",
  "ring",
  "rustls",
  "serde",

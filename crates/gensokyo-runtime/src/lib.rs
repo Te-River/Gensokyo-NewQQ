@@ -130,6 +130,8 @@ pub mod reporter;
 pub mod state;
 /// `/uploadpic` / `/uploadpicv2` / `/getid`（Go `server/uploadpic.go` + `server/getIDHandler.go`，P14）。
 pub mod upload_http;
+/// 出站 URL 转换管线：IP 隐藏 / QR 收集 / 短链替换（Go `transformMessageTextUrl`，P56-T3）。
+pub mod url_pipeline;
 /// 反向 HTTP 回调（`server/webhook.go`，M1h-b）。
 pub mod webhook;
 /// 反向 WS 客户端与重连（`wsclient/`，M1h-b）。

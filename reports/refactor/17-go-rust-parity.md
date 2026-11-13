@@ -47,8 +47,8 @@
 | P1 | botstats + Prometheus `/metrics` | botstats/botstats.go；main.go:522,1140-1175 | builtin.rs 6 指标 + `/metrics` + redb 统计 + received 打点（P12/P12b） | **已对齐** |
 | P2 | unioncache / url 短链 / sys 全量 | unioncache/*；url/shorturl.go；sys/* | union_cache.rs 1:1 双向缓存（P38 起入站写 + markdown @ 反查已接，P42 补齐 `union_id` 入站切换与 inline search 读点）；short_url.rs redb 库 + 校验/301/恶意判定/自指 token 规则 + `/url` 两条路由（P36）；sys executable_name/SystemInfo → WebUI `/api/status` 扩展字段（P36；重启类不可移植，已文档化） | **已对齐（P30 库 / P36 接线 / P38 unioncache 读写接线 / P42 入站切换与 inline search）** |
 | P2 | 视频处理（抽帧/转码/压缩） | silk/silk.go:100-134 | Go 死代码且函数自身破损（EncodeMP4/ExtractCover 全仓零调用者、cmd 从未执行）；视频发送链（URL 直传/base64 上传 FileType=2）Rust 已覆盖（outbound.rs videos plan / qq dto FileUpload / deferred Media::Video） | **关闭（Go 死代码不可移植，P56 侦察判定）** | — |
-| P2 | QR + 出站 URL 转换管线 | message_parser.go:1765-1776；qrcode_real.go | config 字段/访问器已有但零消费方；整条管线（URL 扫描/短链分支/QR 发图）未接线（P56-② 设计中） | 缺失 |
-| P2 | SSRF 防护（通用下载/出站入口） | send_group_msg.go:1048-1070；selffetch.go:115-222 | core/net + media/redirect 已更严并接 hosting；通用 fetch/出站 URL 入口补齐中（P56-①）；short_url 弱口径刻意对齐 Go | 部分 |
+| P2 | QR + 出站 URL 转换管线 | message_parser.go:1749-1805；qrcode_real.go；callapi.go:270-306 | 链路四层接线：xurls Relaxed 移植（`protocol/src/xurls.rs`，RE2 leftmost-longest 模拟 + Go 金样逐 span）→ `media/qr.rs`（容错级=Go `qrcode.High`（ISO Q 级）、**无静区**、Go PNG 尺寸语义，矩阵级金样一致；PNG 字节跨库不可逐字节一致，lead 裁决接受矩阵级 parity）→ `runtime/url_pipeline.rs`（门控仅 `transfer_url`；逐 URL 优先级 IP 隐藏 → QR 收集 → 短链 lotus/local 两分支；原位替换不 trim，mint 失败口径含 Go 悬空 base 怪癖照抄）→ `runtime/deferred.rs` hook（compose 前、QR 子请求递归重入先行发送：图条在前主消息在后、msg_type=7 无 reply、响应仅日志不回推客户端，Go `CallAPIFromDict` 同序同丢弃；depth 防递归；三类不挂路径=SSM 补发/WS 掉线兜底/execute_sse，均与 Go 同）；boot `attach_url_mint` 按 `lotus` 选 Local/Lotus。QR 入口双路证据：Go legacy `message_parser.go:1653` + `cq_parse_mode=new` `:804` 两模式各自调 transform；Rust hook 挂在 deferred 执行链、与解析模式无关，两模式天然覆盖 | **已对齐（P56-②）** |
+| P2 | SSRF 防护（通用下载/出站入口） | send_group_msg.go:1048-1070；selffetch.go:115-222 | core/net + media/redirect 已更严并接 hosting；通用 fetch/出站 URL 入口已补齐（P56-① `53b81d9`）；short_url 弱口径刻意对齐 Go | **已对齐（P56-① `53b81d9`）** |
 | — | idmap 核心/echo/config/热重载 | 见审计表 | 见审计表 | **已对齐**（Rust 多 `enable_at_everyone_limit` 1 键） |
 | — | Settings 字段/accessor/restart 34 项 | structs.go 184 键；config.go:38-48 | 185 键（多 1）/ 1:1 accessor / diff.rs 34 项 | **已对齐** |
 | — | 配置自愈 ensureConfigComplete | config.go:350 | config/complete.rs 文本补键回写（幂等/已有行零字节改动/块内注释带回/tmp+rename）；`startup.rs::load_config` 在配置载入前调用（P36，补键即生效不重启） | **已实现（P30）/已接线（P36）** |
@@ -70,7 +70,7 @@
 | 转义口径 | 出站只转 `,` `]` `&`，不转 `[`（handlers/cqcode.go） | cqcode.rs:7-12,58-73 显式跟随 Go | 已对齐（刻意偏离规范） | High |
 | 参数容错 | `:` 仅 stream 认、裸片段并入前一键值 | cqcode.rs:26-47 同口径；大小写不敏感 | 已对齐 | High |
 | 未知码 | 原样保留文本 | Segment::raw_or_cq 逐字节透传 | 已对齐 | High |
-| `voice` 别名 | voice≡record | 码表有 voice，OutboundPlan 归一需运行验证 | 部分 | Medium |
+| `voice` 别名 | voice≡record | `outbound.rs:571-575` `"record" \| "voice"` 同臂归一 + `:759-767` `media_from_segment` 的 file→url 兜底 + `:577-584` file 臂保持 file-only（对 Go `cqparse/handlers_media.go:48-55`、`message_parser.go:909/1318`、`:87/1187` 无 url 兜底）；原实现 `voice` 落 `_ => extra`，即 `[CQ:voice]` **从未走语音通道**、`url=` 形态值丢失（P57-②）。钉死用例 `from_segments_voice_alias_matches_record_every_shape`/`..._lands_on_record_channel_per_shape` + 家族不对称四例（`file_arm_does_not_fall_back_to_url` 等）；CODES 元数据补 `url`（`parse_body` 不查码表，纯元数据）；protocol 115 passed。**遗留（record 同型，另立 P59）**：裸媒体码 Go 保字面文本 vs Rust `Unknown("")`→空 `file_info` 外漏；Url 值键口径 Rust 统一 `url_record` vs Go 剥前缀分写 `url_record`/`url_records` | **已对齐（P57-②，原「部分/Medium」）** | High |
 | at 顺序 | 纯 at 回退原文 | 缺 qq/反查失败原样透传 | 已对齐 | High |
 | AppID→BotID | message_parser.go:1679-1682（do_not_replace_appid） | `/users/@me` + 出站替换 + `do_not_replace_appid`（P15） | **已对齐** | High |
 | node 出站 | CQ 管道无 outbound node | cqcode.rs:775-780 outbound:false | 已对齐 | High |
@@ -81,7 +81,7 @@
 |---|---|---|---|---|
 | 发送队列 | messagequeue/queue.go:96-122（Go 队列为**死代码**，活路径仅令牌桶+重试） | 无全局队列（与 Go 死代码同口径）；forward_send_interval + 令牌桶 + 3 次线性退避（P10/P10b） | **已对齐（按活路径）** | High |
 | 令牌桶 | ratelimit.go:26-33（5qps/burst10，WaitWithTimeout 5s） | queue.rs 令牌桶，`DeferredDeps::limiter` 可注入（P10/P10b） | **已对齐** | High |
-| 错误分类/重试 | retry_policy.go:18-30（22009/40034025/26）、默认 3 次 | 22009→SSM；40034025 无分支 | 部分 | High |
+| 错误分类/重试 | `retry_policy.go:18-30`：22009→SSM 入队；40034025→清空 event_id 重发一次（`outbound_bridge.go:898-916`）；**40034026 仅标志位、`IsQQEventExpired` 全仓零生产消费点＝死码不移植**（parity 原记的「码 26」系 40034026 被截断误读）；超时→`ShouldRetry` 3 次、`attempt×1s`（`:54-66`） | 22009→SSM（`is_ssm_retry`+`enqueue_ssm`，群入队/私聊只记日志，原已等价）；40034025→清空 `event_id` 重发一次（`deferred::send_body` 唯一归一点，不过限流桶、不重取 `msg_seq`、不再判第二次过期；入队判定看**重发后**最终 err——Go 怪癖照抄）；超时重试 `queue::should_retry`（原已等价）；7 单测 + 2 集成（`Outcome::Code`） | **已对齐（P57-①）** | High |
 | get_g_list_delay | config.go:2520；逐群 sleep | group_admin.rs 每请求读快照、N-1 次异步 sleep | **已对齐（P2 `e1f822c`）** | High |
 | SSM 队列 | send_group_msg.go:483-490 | deferred.rs:297-420 | 已对齐 | High |
 

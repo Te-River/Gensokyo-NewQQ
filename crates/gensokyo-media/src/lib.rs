@@ -179,7 +179,9 @@
 //!   `pts`，体积与平台矩阵留到 M4。
 //! - GIF 逐帧压缩（Go `compressGIF`），以及 BMP 解码。
 //! - Bilibili 的分片 / 大文件上传（Go 也只有单请求 `imagehosting/bilibili.go`）。
-//! - 视频处理（抽帧 / 转码 / 体积压缩）。
+//! - 视频处理（抽帧 / 转码 / 体积压缩）：**Go 死代码不移植**（`EncodeMP4`/`ExtractCover`
+//!   全仓零调用者、cmd 从未执行，P56 侦察判定），与 `reports/refactor/17-go-rust-parity.md`
+//!   §A「关闭」行同口径；视频**发送链**（URL 直传 / base64 上传 `FileType=2`）Rust 已覆盖。
 //! - 上传到 QQ（`/v2/.../files` 的 `file_data` / 分片上传）——由 `gensokyo-qq` + actions 负责。
 
 pub mod compress;
@@ -206,10 +208,10 @@ pub use fetch::{
 };
 pub use hosting::{
     BilibiliBackend, BilibiliConfig, BilibiliPlan, ChatGlmBackend, ChatGlmPlan, CosBackend,
-    CosConfig, CosPlan, HostingBackend, HostingConfig, HostingKind, HostingTransport, MultipartBody,
-    NatureBackend, NaturePlan, QqChannelBackend, QqChannelConfig, QqChannelPlan, RetryPolicy,
-    SignedPlan, UkakaBackend, UploadBody, UploadMethod, UploadRequest, UploadResponse, XingyeBackend,
-    is_retryable, upload, upload_with_retry,
+    CosConfig, CosPlan, HostingBackend, HostingConfig, HostingKind, HostingTransport,
+    MultipartBody, NatureBackend, NaturePlan, QqChannelBackend, QqChannelConfig, QqChannelPlan,
+    RetryPolicy, SignedPlan, UkakaBackend, UploadBody, UploadMethod, UploadRequest, UploadResponse,
+    XingyeBackend, is_retryable, upload, upload_with_retry,
 };
 pub use image::image_size;
 pub use oss::{

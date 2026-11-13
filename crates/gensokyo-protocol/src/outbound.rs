@@ -569,10 +569,14 @@ impl OutboundPlan {
                     }
                 }
                 "image" => plan.images.push(media_from_segment(segment)),
-                "record" => plan.records.push(media_from_segment(segment)),
+                // voice 与 record 同义：Go legacy `case "voice","record"` 同分支
+                // （message_parser.go:909/1318），cqparse 键归一 *_record
+                // （cqparse/handlers_media.go:48-50）
+                "record" | "voice" => plan.records.push(media_from_segment(segment)),
                 "video" => plan.videos.push(media_from_segment(segment)),
                 "file" => plan.files.push(FileRef {
-                    media: media_from_segment(segment),
+                    // file 码只读 file，无 url 兜底（Go resolveFileValue handlers_media.go:87）
+                    media: MediaRef::from_wire(segment.get("file").unwrap_or_default()),
                     file_name: segment
                         .get("file_name")
                         .or_else(|| segment.get("name"))
@@ -753,7 +757,13 @@ fn push_media<'a>(bucket: &mut Vec<MediaRef>, key: &str, values: impl Iterator<I
 }
 
 fn media_from_segment(segment: &Segment) -> MediaRef {
-    MediaRef::from_wire(segment.get("file").unwrap_or_default())
+    // Go resolveMediaValue 的 file（空时兼容 url）口径：
+    // handlers/cqparse/handlers_media.go:51-55、message_parser.go:870-874/914-918/1218-1222
+    let file = segment.get("file").unwrap_or_default();
+    if file.is_empty() {
+        return MediaRef::from_wire(segment.get("url").unwrap_or_default());
+    }
+    MediaRef::from_wire(file)
 }
 
 /// `[CQ:markdown,data=…]` → `foundItems["markdown"]` 契约（base64(JSON)）。
@@ -1128,6 +1138,207 @@ mod tests {
             "[CQ:at , qq = 123]",
             "重分词得到的 at 段应仍携带原文切片"
         );
+    }
+
+    /// P57-②：`voice` 与 `record` 同义（Go legacy `case "voice","record"` 同分支
+    /// `message_parser.go:909/1318`，cqparse 键归一 `cqparse/handlers_media.go:48-50`）。
+    /// 运行级钉死：各参数形态下 voice 码与同参 record 码逐字段等价，不落 extra、
+    /// 不产出 `*_voice` 键（对拍 Go `cq_parse_regression_test.go:688-717`、
+    /// `cq_threepath_matrix_test.go:181-203`）。
+    #[test]
+    fn from_segments_voice_alias_matches_record_every_shape() {
+        let shapes = [
+            "[CQ:voice,file=https://x.com/a.mp3]",
+            "[CQ:voice,file=http://x.com/b.mp3]",
+            "[CQ:voice,file=base64://dm9pY2U=]",
+            "[CQ:voice,file=file:///C:/tmp/a.wav]",
+            "[CQ:voice,file=weird://y]",
+            // Go resolveMediaValue：file 空时兼容 url（handlers_media.go:52-55）
+            "[CQ:voice,url=https://x.com/c.mp3]",
+            "[CQ:voice,file=,url=https://x.com/d.mp3]",
+            // 附加参数（asr）与 record 同口径：出站不读取，不影响归一
+            "[CQ:voice,file=abc.silk,asr=1]",
+            "[CQ:VOICE,file=https://x.com/e.mp3]",
+            // 裸码与裸 record 行为一致（两路都不应有 voice 特判）
+            "[CQ:voice]",
+        ];
+        for voice_code in shapes {
+            let record_code = voice_code
+                .replace("voice", "record")
+                .replace("VOICE", "RECORD");
+            let voice_plan = OutboundPlan::from_segments(&cqcode::parse(voice_code));
+            let record_plan = OutboundPlan::from_segments(&cqcode::parse(&record_code));
+            assert_eq!(
+                voice_plan, record_plan,
+                "voice 应与同参 record 等价: {voice_code}"
+            );
+            assert!(
+                voice_plan.extra.is_empty(),
+                "voice 不应落 extra: {voice_code}"
+            );
+            let items = voice_plan.to_found_items();
+            for key in items.keys() {
+                assert!(!key.contains("voice"), "不应产出 *_voice 键: {key}");
+            }
+            assert_eq!(
+                items,
+                record_plan.to_found_items(),
+                "foundItems 应与同参 record 一致: {voice_code}"
+            );
+            // 裸码无 file/url：Go 与 Rust 都与裸 record 同行为（本用例断言等价已覆盖），
+            // 仅带值形态才断言"落语音通道"
+            let bare = matches!(voice_code, "[CQ:voice]");
+            if !bare {
+                assert_eq!(voice_plan.records.len(), 1, "应落语音通道: {voice_code}");
+            }
+        }
+    }
+
+    /// 具名形态的通道断言：base64 / url / local 三形态分别落语音桶与
+    /// `base64_record` / `url_record` / `local_record` 键（Go legacy
+    /// `message_parser.go:921-946`；`file=` 与 `url=` 两参数来源同键）。
+    #[test]
+    fn from_segments_voice_lands_on_record_channel_per_shape() {
+        let plan = OutboundPlan::from_segments(&cqcode::parse("[CQ:voice,file=base64://QUJD]"));
+        assert_eq!(plan.records, vec![MediaRef::Base64("QUJD".to_owned())]);
+        assert!(plan.unknown_records.is_empty(), "base64 形态不该落兜底桶");
+        assert!(plan.unknown_images.is_empty(), "不该误落图片通道");
+        let items = plan.to_found_items();
+        assert_eq!(
+            items["base64_record"],
+            ["QUJD".to_owned()],
+            "base64_record 键与值"
+        );
+
+        let url_plan =
+            OutboundPlan::from_segments(&cqcode::parse("[CQ:voice,url=http://x/a.silk]"));
+        assert_eq!(
+            url_plan.records,
+            vec![MediaRef::Url("http://x/a.silk".to_owned())],
+            "url= 参数与 file= 同落到语音通道"
+        );
+
+        let local_plan =
+            OutboundPlan::from_segments(&cqcode::parse("[CQ:voice,file=file:///C:/tmp/a.wav]"));
+        assert_eq!(
+            local_plan.records,
+            vec![MediaRef::Local("C:/tmp/a.wav".into())]
+        );
+        assert_eq!(
+            local_plan.to_found_items()["local_record"],
+            ["C:/tmp/a.wav".to_owned()],
+            "local_record 键与值"
+        );
+    }
+
+    /// P57-② 评审钉死（1）：`file` 臂**没有** url 兜底，逐字对齐 Go
+    /// `resolveFileValue`（`handlers/cqparse/handlers_media.go:87` 只读 `file`）。
+    /// 谁把 `media_from_segment` 的兜底用回 file 臂，本用例即报警。
+    /// 裸码（既无 `file` 也无 `url`）的透传语义见 P59，本用例不覆盖。
+    #[test]
+    fn file_arm_does_not_fall_back_to_url() {
+        let plan = OutboundPlan::from_segments(&cqcode::parse("[CQ:file,url=https://x/a.bin]"));
+        assert_eq!(
+            plan.files,
+            vec![FileRef {
+                media: MediaRef::Unknown(String::new()),
+                file_name: None,
+            }],
+            "file 臂只读 file=，url= 不参与取值"
+        );
+        assert!(plan.extra.is_empty(), "file 码不应落 extra");
+        assert_eq!(
+            plan.to_found_items()["unknown_file"],
+            [String::new()],
+            "unknown_file 键与空值：url= 未被取用"
+        );
+    }
+
+    /// P57-② 评审钉死（2）：`video` 臂**有** url 兜底（Go
+    /// `handlers/message_parser.go:1218-1222` 的 `resolveMediaValue`），
+    /// 与 image / record 同口径。
+    #[test]
+    fn video_arm_falls_back_to_url_when_file_is_empty() {
+        let missing_plan =
+            OutboundPlan::from_segments(&cqcode::parse("[CQ:video,url=https://x/a.mp4]"));
+        assert_eq!(
+            missing_plan.videos,
+            vec![MediaRef::Url("https://x/a.mp4".to_owned())],
+            "file= 缺失时 video 取 url"
+        );
+        assert_eq!(
+            missing_plan.to_found_items()["url_video"],
+            ["https://x/a.mp4".to_owned()],
+            "url_video 键与值"
+        );
+
+        let empty_plan =
+            OutboundPlan::from_segments(&cqcode::parse("[CQ:video,file=,url=https://x/b.mp4]"));
+        assert_eq!(
+            empty_plan.videos,
+            vec![MediaRef::Url("https://x/b.mp4".to_owned())],
+            "file= 显式为空同样兜底"
+        );
+        assert_eq!(
+            empty_plan.to_found_items()["url_video"],
+            ["https://x/b.mp4".to_owned()],
+            "url_video 键与值"
+        );
+    }
+
+    /// P57-② 评审钉死（3）：兜底只在 `file` 为空时生效，`file` 非空则 file 优先
+    /// （Go `handlers_media.go:51-55` 的 `if v == ""` 判定）。
+    #[test]
+    fn media_arm_prefers_file_over_url() {
+        let plan = OutboundPlan::from_segments(&cqcode::parse(
+            "[CQ:image,file=a.png,url=https://x/b.png]",
+        ));
+        assert_eq!(
+            plan.images,
+            vec![MediaRef::Unknown("a.png".to_owned())],
+            "file 非空时读 file（无协议前缀按 from_wire 口径落 Unknown）"
+        );
+        let items = plan.to_found_items();
+        assert_eq!(
+            items["unknown_image"],
+            ["a.png".to_owned()],
+            "unknown_image 键与值"
+        );
+        assert!(
+            !items
+                .values()
+                .flatten()
+                .any(|value| value == "https://x/b.png"),
+            "file 非空时 url= 不该进 foundItems"
+        );
+    }
+
+    /// P57-② 评审钉死（4）：url 兜底与 voice 归一两条不变式合在一处——同参
+    /// `record` 与 `voice` 都经 `media_from_segment` 落语音通道与 `url_record` 键
+    /// （Go `cqparse/handlers_media.go:48-55`）。
+    #[test]
+    fn record_and_voice_share_the_url_fallback() {
+        let record_plan =
+            OutboundPlan::from_segments(&cqcode::parse("[CQ:record,file=,url=https://x/a.amr]"));
+        let voice_plan =
+            OutboundPlan::from_segments(&cqcode::parse("[CQ:voice,file=,url=https://x/a.amr]"));
+        assert_eq!(
+            record_plan.records,
+            vec![MediaRef::Url("https://x/a.amr".to_owned())],
+            "record 的 file 为空时兼容 url"
+        );
+        assert_eq!(voice_plan, record_plan, "voice 应与同参 record 逐字段等价");
+        for plan in [&record_plan, &voice_plan] {
+            assert_eq!(
+                plan.to_found_items()["url_record"],
+                ["https://x/a.amr".to_owned()],
+                "两条码都落 url_record 键与值"
+            );
+            assert!(
+                plan.unknown_records.is_empty(),
+                "兜底成功就不该落语音兜底桶"
+            );
+        }
     }
 
     #[test]

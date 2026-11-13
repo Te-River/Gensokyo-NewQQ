@@ -267,6 +267,52 @@ impl Runtime {
         }
     }
 
+    /// 启动装配：按 `lotus` 选出站短链 mint 并注入状态（P56-T4，Go `GenerateShortURL`
+    /// 两分支的装配侧对应物；消费点在 [`crate::deferred`] 的 URL 变换阶段）。
+    /// 本地分支复用 [`Self::attach_short_url`] 已打开的库句柄；库未装配（打开失败）或
+    /// lotus 客户端构造失败时保持 `None`，对应 [`crate::url_pipeline::transform`] 的
+    /// Rust-only 防御路径（URL 原文保留不改写）。
+    ///
+    /// 本处只固化**变体**：`lotus` 在重启表内（`gensokyo-config/src/diff.rs`），热改它
+    /// 本就整体冻结快照，固化无可观测差异。mint 的拼接参数（`server_dir` / `port` /
+    /// `force_ssl` / `lotus_password`）由 [`crate::url_pipeline::UrlMint::mint`] 逐调用
+    /// 现读 live 快照，与 Go `GenerateShortURL` 每次 `config.GetXxx()` 同口径——其中
+    /// `port`、`force_ssl` 不在重启表内，固化会让热改后每次 mint 都打旧端口而必然失败。
+    /// 残留差异只剩 config 层既有口径：Go 重启项变更会**自动重启**
+    /// （`config/config.go:166-173`），Rust 需手动重启。已注入时原样返回（测试先注入
+    /// 临时库）。
+    fn attach_url_mint(state: AppState) -> AppState {
+        if state.url_mint().is_some() {
+            return state;
+        }
+        let settings = state.config().snapshot();
+        let mint = if settings.get_lotus() {
+            match crate::url_pipeline::LotusMint::try_new() {
+                Ok(mint) => crate::url_pipeline::UrlMint::Lotus(mint),
+                Err(err) => {
+                    // 绝不用 reqwest::Client::new() 兜底：它会 panic，而 workspace
+                    // panic = "abort"，boot 期等于直接终止进程。
+                    tracing::error!(
+                        error = %err,
+                        "lotus 短链 HTTP 客户端构造失败，出站短链 mint 不装配（URL 原文保留）"
+                    );
+                    return state;
+                }
+            }
+        } else {
+            match state.short_url_arc() {
+                Some(store) => {
+                    crate::url_pipeline::UrlMint::Local(crate::url_pipeline::LocalMint { store })
+                }
+                None => {
+                    tracing::warn!("短链库未装配，出站 URL 短链分支保留原文不改写（防御路径）");
+                    return state;
+                }
+            }
+        };
+        state.with_url_mint(Some(Arc::new(mint)))
+    }
+
     /// 启动装配：向 `GET /users/@me` 取机器人真实 ID 并注入状态与
     /// [`gensokyo_actions::ActionContext`]（Go `main.go:254` 的 `api.Me` → `main.go:304`）。
     ///
@@ -325,6 +371,7 @@ impl Runtime {
         let (state, idmap_remote) = Self::attach_idmap(state);
         let state = Self::attach_botstats(state);
         let state = Self::attach_short_url(state);
+        let state = Self::attach_url_mint(state);
         let state = Self::attach_bot_id(state).await;
         let settings = state.config().snapshot();
 
@@ -357,9 +404,9 @@ impl Runtime {
         // 会让 `Router::route` panic，在这里提前变成可诊断的启动错误。
         let ws_target = if settings.get_enable_ws_server() {
             let path = crate::ws_server::route_path(settings.get_ws_server_path())?;
-            let bind = options.ws_bind.unwrap_or_else(|| {
-                format!("0.0.0.0:{}", main_listener_port(&settings).trim())
-            });
+            let bind = options
+                .ws_bind
+                .unwrap_or_else(|| format!("0.0.0.0:{}", main_listener_port(&settings).trim()));
             Some((bind, path))
         } else {
             tracing::info!("enable_ws_server=false，正向 WS 未启动");
@@ -553,9 +600,7 @@ fn start_gateway(state: &AppState) -> Option<GatewayHandle> {
     let token_config = TokenConfig::new(app_id.to_string(), client_secret)
         .with_sandbox(settings.get_sandbox_mode());
     let tokens = Arc::new(TokenManager::new(Arc::clone(&transport), token_config));
-    Some(
-        GatewayClient::new(transport, tokens, state, GatewayOptions::default()).start(),
-    )
+    Some(GatewayClient::new(transport, tokens, state, GatewayOptions::default()).start())
 }
 
 /// idmap 的打开参数：AppID 参与 OpenID 的 key、`hash_id` 决定 vUIN 的派生方式、
@@ -1163,7 +1208,10 @@ fn attach_idmap_remote(store: IdMapStore, settings: &Settings) -> (IdMapStore, b
                 // 避免不可达主机拖住启动（有意差异）。
                 Ok(endpoint) => endpoint.connect_timeout(Duration::from_secs(5)),
                 Err(reason) => {
-                    tracing::warn!(reason, "idmap gRPC 客户端不挂载，降级本地（/getid 保持挂载）");
+                    tracing::warn!(
+                        reason,
+                        "idmap gRPC 客户端不挂载，降级本地（/getid 保持挂载）"
+                    );
                     return (store, false);
                 }
             };
@@ -1279,9 +1327,11 @@ mod tests {
             super::shared_transport().is_err(),
             "失败不应被缓存，第二次仍走构建并报错"
         );
-        let attempts =
-            super::BUILD_ATTEMPTS.load(std::sync::atomic::Ordering::Relaxed) - before;
-        assert!(attempts >= 2, "两次失败应各尝试构建一次，实际 {attempts} 次");
+        let attempts = super::BUILD_ATTEMPTS.load(std::sync::atomic::Ordering::Relaxed) - before;
+        assert!(
+            attempts >= 2,
+            "两次失败应各尝试构建一次，实际 {attempts} 次"
+        );
     }
 
     /// 方向矩阵（Go `main_grpc.go:24-50`）：只有 `!lotus && lotus_grpc` 起服务端；
@@ -1783,6 +1833,137 @@ mod tests {
                 .bot_id(),
             Some("2633000001"),
             "出站替换读的是 ActionContext 里的 BotID"
+        );
+    }
+
+    /// `attach_url_mint` 本地分支（P56-F2）：`lotus=false` 且短链库已装配时，mint 必须
+    /// **复用同一份** `Arc<ShortUrlStore>`——生产不变式「管线 mint 出的短码能被 `/url/{code}`
+    /// 跳转」的装配侧根据（端到端验证在 `tests/url_pipeline.rs`）。
+    #[test]
+    fn attach_url_mint_local_reuses_the_mounted_store() {
+        use std::sync::Arc;
+
+        use gensokyo_config::ConfigManager;
+        use gensokyo_storage::ShortUrlStore;
+
+        use super::Runtime;
+        use crate::state::AppState;
+        use crate::url_pipeline::UrlMint;
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nsettings:\n  server_dir: example.com\n")
+            .expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let store =
+            Arc::new(ShortUrlStore::open(dir.path().join("short-urls.redb")).expect("打开短链库"));
+
+        let state = Runtime::attach_url_mint(
+            AppState::with_builtin_handlers(manager).with_short_url(Arc::clone(&store)),
+        );
+        match state.url_mint().expect("本地分支应注入 mint") {
+            UrlMint::Local(local) => {
+                assert!(
+                    Arc::ptr_eq(&local.store, &store),
+                    "mint 必须复用 attach_short_url 那份 Arc，而不是另开库"
+                );
+            }
+            UrlMint::Lotus(_) => panic!("lotus=false 不得选远程变体"),
+        }
+    }
+
+    /// 短链库未装配（`attach_short_url` 打开失败同款态）：保持 `None`，出站短链分支
+    /// 走 `transform` 的 Rust-only 防御路径（URL 原文保留不改写）。
+    #[test]
+    fn attach_url_mint_without_store_stays_none() {
+        use std::sync::Arc;
+
+        use gensokyo_config::ConfigManager;
+
+        use super::Runtime;
+        use crate::state::AppState;
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nsettings:\n  server_dir: example.com\n")
+            .expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+
+        let state = Runtime::attach_url_mint(AppState::with_builtin_handlers(manager));
+        assert!(
+            state.url_mint().is_none(),
+            "短链库未装配时不得注入 mint（防御路径=保留原文）"
+        );
+    }
+
+    /// 已注入时原样返回：配置 `lotus=true` 也不重选变体——用 Local 哨兵证明，若误走
+    /// 装配路径结果必变 Lotus 或 `None`（本用例靠早退根本不碰 `try_new`）。
+    #[test]
+    fn attach_url_mint_keeps_injected_mint() {
+        use std::sync::Arc;
+
+        use gensokyo_config::ConfigManager;
+        use gensokyo_storage::ShortUrlStore;
+
+        use super::Runtime;
+        use crate::state::AppState;
+        use crate::url_pipeline::{LocalMint, UrlMint};
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(
+            &path,
+            "version: 1\nsettings:\n  lotus: true\n  server_dir: x\n",
+        )
+        .expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let store =
+            Arc::new(ShortUrlStore::open(dir.path().join("short-urls.redb")).expect("打开短链库"));
+        let sentinel = Arc::new(UrlMint::Local(LocalMint { store }));
+
+        let state = Runtime::attach_url_mint(
+            AppState::with_builtin_handlers(manager).with_url_mint(Some(sentinel)),
+        );
+        assert!(
+            matches!(state.url_mint(), Some(UrlMint::Local(_))),
+            "已注入的 mint 必须原样保留"
+        );
+    }
+
+    /// `lotus=true` 分支不变式：绝不落 Local（成功=`Some(Lotus)`、构造失败=`None`），
+    /// 且不得 panic——本仓 boot 不 panic 约定。测试进程是否已装 rustls CryptoProvider
+    /// 取决于同二进制内 url_pipeline 用例的并发时序（provider 是进程级全局）：已装走
+    /// `Some(Lotus)`；未装则 `LotusMint::try_new` 的 `CryptoProvider::get_default()`
+    /// 预检返回 `Err`（reqwest 0.13.5 无 provider 时 `build()` 直接 panic，预检挡住
+    /// panic 路径），`attach_url_mint` 记 `error!` 不注入 mint——两条路径都满足断言。
+    #[test]
+    fn attach_url_mint_lotus_true_never_panics_never_local() {
+        use std::sync::Arc;
+
+        use gensokyo_config::ConfigManager;
+        use gensokyo_storage::ShortUrlStore;
+
+        use super::Runtime;
+        use crate::state::AppState;
+        use crate::url_pipeline::UrlMint;
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(
+            &path,
+            "version: 1\nsettings:\n  lotus: true\n  server_dir: x\n",
+        )
+        .expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let store =
+            Arc::new(ShortUrlStore::open(dir.path().join("short-urls.redb")).expect("打开短链库"));
+
+        let state = Runtime::attach_url_mint(
+            AppState::with_builtin_handlers(manager).with_short_url(store),
+        );
+        assert!(
+            !matches!(state.url_mint(), Some(UrlMint::Local(_))),
+            "lotus=true 绝不回退本地变体（成功=Lotus、构造失败=None）"
         );
     }
 }
