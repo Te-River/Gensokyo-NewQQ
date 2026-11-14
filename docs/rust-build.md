@@ -242,3 +242,5 @@ cargo +1.99.1-x86_64-pc-windows-gnu run -p xtask -- build --no-upx   # 宿主 re
   `panic = "abort"` 下**直接退出进程**（见上文「release 的 panic 语义」），生产部署必须有 supervisor。
   `lotus=true` 时主 listener（正向 WS，缺席则 HTTP API 端口）改用 `backup_port`——Go 的 `backup_port`
   作用于主 HTTP 服务器 port，端口语义映射与完整差异清单见 `docs/rust-m0.md` R4l 条目。
+
+接手本仓的全局视图（已落地能力 / 运维必读 / 已知差异 / 未完成项）：见 [`rust-handover.md`](./rust-handover.md)。

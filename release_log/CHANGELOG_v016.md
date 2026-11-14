@@ -109,6 +109,14 @@ Rust 版接齐出站 URL 管线（对齐 Go `transformMessageTextUrl` + `generat
 - **与 Go 差异（登记）**：mint 拼接参数（`server_dir`/`port`/`force_ssl`/`lotus_password`）逐调用现读 live 快照（Go `GenerateShortURL` 每次 `config.GetXxx()` 同口径），boot 只固化变体选择——`server_dir`/`lotus`/`lotus_password` 属重启项、改后快照整体冻结（`manager.rs:114-122`），残留差异只剩「Go 重启项变更→自动重启（`config.go:166-173` `sys.RestartApplication()`）vs Rust 手动重启」这一条 config 层既有口径；QR PNG 字节级跨库差异（矩阵级 parity）；PNG 生成失败/成功日志口径同 Go（`tracing` 替代 `mylog`）；`serde_json::from_str` 不容忍 JSON 尾随垃圾 vs Go `json.Decoder.Decode` 容忍（仅畸形响应有别）；长混合字母数字内容两库可能选不同 QR 版本（module 数不同、解码载荷相同、rqrr 已验）；lotus mint 最坏延迟 = 30s × URL 条数且未复用 `boot::shared_transport()`（本轮不做，后续项）；`transfer_url`+`url_to_qrimage` 同开时 QR 条与正文条各推一条 wakeup notice（对齐 Go 每出口 `sendWakeupNotice`，被动额度占 2）且存在「图已发、正文失败」残缺窗口（运维知悉）；**M-B 已闭环（P56-F3）**：`LotusMint::try_new` 在构造 client 前预检 `CryptoProvider::get_default()`，未安装 provider 返回 `Err`（`idmap/http_remote.rs` 同款口径，reqwest 0.13.5 无 provider 时 `build()` 直接 panic，`Result` 单独兜不住）并由 `attach_url_mint` 记 `error!` 不注入 mint；**不注入的后果**是短链分支保留 URL 原文（M-C 语义），不崩进程；runtime 的 `rustls` 依赖从 dev 升入 `[dependencies]`（workspace 定义无 provider，惯例不破）
 - **测试**：`url_pipeline` 单测 17（T3 的 15 + T4 悬空 base/None-mint 修正新增 2）+ runtime 集成 9（既有 7：`transfer_url=false` 回归锁、QR 发送序/`msg_type=7` 无 reply/单份响应/精确文本、IP 隐藏优先、本地短链落库、mint 未装配保留原文、lotus stub 原位替换、forward 逐 node 覆盖；P56-F2 增 2：管线 mint 短码→运行时 `GET /url/{code}` 301 闭环（与生产同款共用 `Arc<ShortUrlStore>`）、QR 生成失败仍删 URL）+ boot `attach_url_mint` 装配用例 4（P56-F3 落地 `try_new` provider 预检后全绿）；合并树 `cargo test --workspace` 43 suites / 1356 passed / 0 failed
 
+### `get_friend_list` 读侧对齐（Rust 侧 P64a，2026-11-14）
+
+Go 的 `get_friend_list` 不是上游接口，是本地 idmap 活实现（枚举 `UserInfo` 桶，`handlers/get_friend_list.go:29-47`），Rust 侧此前与「官方无端点」action 并列回 `1500`；本版补齐读侧与其对齐（写侧 `StoreUserInfo` 另立 P64b）：
+
+- **修改**：`crates/gensokyo-storage/src/idmap/mod.rs` 新增只读 `IdMapStore::list_all_users()` 与 `UserInfoRow`（Go `ListAllUsers` 口径：按 key 字节序升序、无去重、value 三字段 JSON 解码、损坏行整次 Err、表不存在回空）；`crates/gensokyo-actions/src/users.rs` 的 `GetFriendListHandler` 从 `context.idmap()` 直读，仅滤空 `user_id`（Go `get_friend_list.go:36-40`），条目按 Go 声明序 `nickname`、`remark`、`user_id` 装配；死代码清账——`QqApi::get_friend_list` 占位 trait 方法、`FriendEntry` 及再导出、`testing.rs` 的 `Call::FriendList` / `friends` 槽零消费，全部移除
+- **影响**：空表 / 未装配 idmap / 枚举出错均照 Go 恒 `retcode=0 status="ok"` + `"data":null`（不是 `[]`），错误只记 warn 日志；`user_id` 输出表内原串（JSON 字符串），不做虚拟号转换；**注意**：写侧尚未移植（P64b）——Go 在入站 C2C 时写 `UserInfo` 桶（`ProcessC2CMessage.go:231-241`），Rust 的 `user_info` 表目前只有 M1e 导入器数据，全新部署在导入前该接口恒回 `data:null`
+- **测试**：storage 新增 3 例（key 字节序与内容 / 含空 user_id 与缺字段未知字段原样返回 / 损坏行整次枚举 Err）+ actions 新增 4 例（非空列表外部 JSON 字节断言、空表 `"data":null`、未装配 retcode=0、非对象 params 1400）；`cargo test -p gensokyo-storage -p gensokyo-actions` 141 + 169 passed / 0 failed，两包 clippy `--all-targets -- -D warnings` 零告警，`cargo fmt --all -- --check` 绿
+
 ---
 
 ## 🐛 修复
@@ -207,9 +215,19 @@ Rust 版补齐 lotus 客户端模式 parity：`lotus=true` 时 idmap 17 个操�
 - **与 Go 差异（登记）**：建连失败 warn 降级 vs Go panic；gRPC 30s 超时 vs Go 无超时；服务端模式不阻塞主线程（与 HTTP 共存）；`lotus+lotus_grpc` 不查 `lotus_without_idmaps`（Go 怪癖照抄 + warn）；`delete_config` 远程恒 true / `store_cache_with_ttl` 远程忽略 TTL / `update_virtual_value_pro` 远程单次 RPC 等语义微差——完整清单与配置矩阵见 `docs/rust-m0.md` R4l 条目
 - **测试**：41 suites / 1286 passed（P55-P4 时点口径）；双实例集成（服务端实例 + 客户端实例，虚拟 ID 跨实例一致，`crates/gensokyo-runtime/tests/lotus.rs`）
 
+### Rust 裸媒体码不再发出空 file_info（P59，2026-11-14）
+
+`[CQ:image]` / `[CQ:video]` / `[CQ:file]` / `[CQ:record]` / `[CQ:voice]` 不带 `file`/`url` 参数时，Rust 出站链曾产出 `MediaRef::Unknown("")` 并按「已拿到 `file_info`」透传臂**向 QQ 上游发出 `"media":{"file_info":""}`**（空引用必被上游拒绝；Go 真行为是原位保留字面文本，`handlers_media.go:56-59`、`:88-91`，属触及外部 JSON 的硬约束不一致）。修复后裸码与 Go 同口径：字面进正文、不占媒体槽：
+
+- **修改**：`crates/gensokyo-protocol/src/outbound.rs` 的 `from_segments` 媒体归一点新增 `is_bare_media_segment`（五段族且 `file`、`url` 两值皆空）→ 段原文经 `Segment::raw_or_cq()` 放回 `plan.text`，不再进任何媒体桶；单点实现，五臂无特判分叉
+- **影响**：裸码原位保留逐字节字面（含方括号与两侧空白，同 Go `Replacement: tok.Raw`），不触发上传、不拆 `msg_type=7` 条；`file=` 有值 / `url=` 有值 / `file=,url=` 有值三类既有行为零变化，`[CQ:file,url=x]` 的 file 臂不读 url 仍按 P57-② 钉死口径
+- **测试**：新增 protocol 2 例（五族裸码字面保留与桶为空、混排空白）+ runtime 1 例（经 `MessageOut::from_content` 生产入口断言上游 `MessageToCreate` 不带 media 槽、正文含五族字面）；`from_segments_voice_alias_matches_record_every_shape` 的裸码形态由「与裸 record 逐字段等价」改为「各自保留自身字面 + 都不进桶」——字面保留后两码文本天然不同，属被本修复纠正
+
 ---
 
 ## 📝 工程与文档变更
+
+
 
 ### 文档同步（群管理三接口 + 入站新字段）
 

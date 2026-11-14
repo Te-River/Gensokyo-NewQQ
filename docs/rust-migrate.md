@@ -10,26 +10,64 @@
 
 ## 1. 要带什么、不用带什么
 
+**主路径是「整包拷贝仓库根目录」**：新机不做 `git clone`，直接把整个文件夹搬过去。
+`.git/`（实测 **111.9 MB**）一并带走，所以新机**不需要远端仓库权限**，历史、分支、`git blame` 全在，
+未提交的工作也会原样跟过去——这正是拷贝优于 clone 的地方（两条路径的取舍见 §7）。
+
 | 对象 | 实测大小 | 是否搬运 | 依据 |
 |------|----------|----------|------|
 | 工作树（不含 `target/`、`.git/`） | **23.7 MB** | 必带 | 全部源码 + fixture + 文档 |
-| `.git/` | **111.9 MB** | 必带 | 历史与分支，`git clone` 即带走 |
-| `target/` | **3.67 GB** | 不带 | 纯编译缓存，`.gitignore` 已覆盖 |
-| `target-*/`（交叉目标缓存） | 未单独统计 | 不带 | `.gitignore` 含 `target/` 与 `target-*/` 两条 |
-| `.tools/`（zig / cargo-zigbuild 缓存） | — | 不带 | 已 gitignore，首次构建自动重新引导（见 §2） |
-| `release/` | **4.1 MB** | 不带 | 已 gitignore，`cargo xtask build` 可重出 |
+| `.git/` | **111.9 MB** | 必带（整包拷贝天然带走） | 历史、分支、blame；`git clone` 也能重建，但**不含未提交工作** |
+| `target/` | **282.82 MB**（2026-11-14 缓存清扫后实测；清扫前曾达 **3.67 GB**，体积随构建增长） | 排除 | 纯编译缓存，可再生；`.gitignore` 已覆盖 |
+| `target-*/`（交叉目标缓存） | 写本手册时点**不存在** | 存在时排除 | `.gitignore` 含 `target/` 与 `target-*/` 两条；名单先枚举再传参，见下 |
+| `.tools/`（zig / cargo-zigbuild 缓存） | 写本手册时点**不存在**（首次交叉构建才生成） | 存在时排除 | 已 gitignore，首次构建自动重新引导（见 §2） |
+| `release/` | **4.12 MB**（随构建次数增长，以 §1 命令输出为准） | 排除 | 已 gitignore，`cargo xtask build` 可重出 |
 
-**结论：一次 `git clone` 约 136 MB 就能搬走全部有效内容。**
+排除名单与体积都用这两条命令现取，**别凭记忆写死路径**（没实证的路径写进 `/XD` 只是噪声）：
 
-搬运前在旧机复核「有没有游离文件会漏掉」（两条命令输出均为空 ⇒ clone 不会漏东西）：
+```powershell
+# 1) 枚举仓内「当前真实存在」的待排目录——不存在的（如未交叉构建时的 .tools/）自然不进名单
+Get-ChildItem -Directory | Where-Object { $_.Name -like 'target*' -or $_.Name -in '.tools','release' } | Select-Object -Expand FullName
+
+# 2) 复核各目录体积（MB）：本表的大小列以这条的输出为准
+Get-ChildItem -Directory | Where-Object { $_.Name -like 'target*' -or $_.Name -in '.tools','release' } | ForEach-Object {
+    $s = (Get-ChildItem $_.FullName -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+    '{0}  {1} MB' -f $_.Name, [math]::Round($s / 1MB, 1)
+}
+```
+
+> **`.gitignore` 不影响 robocopy——这是两个不同的机制，最容易踩。**
+> gitignore 只决定 `git add` 收不收；拷贝工具根本不看它。
+> `target/`、`target-*/`、`release/`、`.tools/` 四条虽然都在 `.gitignore` 里，
+> 整包拷贝时**仍然必须自己排除**，否则编译缓存照样跟过去（本手册写作时点
+> `target/` 实测 282.82 MB；清缓存前是 3.67 GB——量级完全取决于构建历史，
+> 所以务必用上面的命令现取，别照抄表里的数字）。
+
+拷贝命令（源路径与目标盘按新机实际改）：
+
+```powershell
+$skip = Get-ChildItem -Directory | Where-Object { $_.Name -like 'target*' -or $_.Name -in '.tools','release' }
+robocopy D:\Github\Gensokyo-NewQQ-Refactor E:\Gensokyo-NewQQ-Refactor /E /XD @($skip.FullName)
+```
+
+> `/XD` 接的就是上面**枚举出来的**目录；**不需要 `/XF`**——要排的全是整目录，
+> 仓内没有值得按文件名排除的东西。**`.git/` 必须留在拷贝里**，漏掉它新机就没有历史。
+> 拷前请先走完 §7.1 的「有没有并发写入」检查。
+
+构建缓存目录 `D:\rust-target\gensokyo`（旧机实测 **40 GB+**）在**仓外**，整包拷贝不会、也不需要把它带过去。
+新机首次构建前重新选一个仓外、非系统盘的目录并设 `CARGO_TARGET_DIR`（位置约定见 §3）。
+
+**结论：整包拷贝「工作树 23.7 MB + `.git/` 111.9 MB」≈ 136 MB 即可带走全部有效内容，且不依赖远端权限、包含未提交工作。**
+
+只有当你决定走 `git clone` 备选路径（只想干净重来，见 §7）时，才需要先复核「有没有游离文件会漏掉」——两条命令输出均为空 ⇒ clone 不会漏东西：
 
 ```powershell
 git status --porcelain --untracked-files=all
 git ls-files --others --exclude-standard
 ```
 
-> 迁移前实测结果：未跟踪且未被 ignore 的文件 **0 个**。换机当天请重跑这两条确认，
-> 若有输出说明存在未入库内容，走 §7。
+> 迁移前实测结果：未跟踪且未被 ignore 的文件 **0 个**。换机当天请重跑这两条确认；
+> 若有输出说明存在未入库内容——走整包拷贝（§7）即可原样带走，走 clone 则必须先入库。
 
 ---
 
@@ -120,7 +158,7 @@ gcc --version                                                     # 确认链接
 
 | 门禁 | 基线（旧机 HEAD `69afb8d` 时点实测） |
 |------|----------------------------------------|
-| `cargo test --workspace --no-fail-fast` | **43 suites / 1356 passed / 0 failed** |
+| `cargo test --workspace --no-fail-fast` | **43 suites / 1364 passed / 0 failed**（2026-11-14 实测；数字随新增用例增长，以命令输出为准） |
 | `cargo clippy --workspace --all-targets -- -D warnings` | **零告警** |
 | `cargo fmt --all -- --check` | **退出码 0** |
 
@@ -148,27 +186,71 @@ CI 侧 `rust.yml` 在 push 到 `Refactor` / `main` 时跑：**fmt + clippy + msr
 
 ---
 
-## 7. 存在未提交改动时怎么办
+## 7. 整包拷贝的流程：拷前必查、两条路径取舍、拷后必验
 
-写本手册时，旧机工作树**存在未提交的 P59 改动**（协议层 `outbound.rs`、`deferred.rs` 的文档与用例，以及 parity / rust-m0 / CHANGELOG 三处文档）。
-**是否仍未提交、具体是哪些文件，一律以 `git status` 的实际输出为准**，本手册不描述其完成状态。
+### 7.1 拷前必查：仓库有没有在被并发修改（最关键的一条）
 
-| 路径 | 做法 | 适用 |
-|------|------|------|
-| ① 先入库再搬（推荐） | `git add <确切文件>` → `git commit -F <UTF-8 临时文件>` → `git push`，新机 `git clone -b Refactor` | 改动已具备一次 commit 的完整性；最省，136 MB 一把带走 |
-| ② 连工作树一起拷 | 整仓 robocopy / 压缩，但**必须排除** `target*/`、`.tools/`、`release/` | 改动还没到能 commit 的程度，必须原样搬工作状态 |
-
-路径 ② 的排除示例（Windows，`/XD` 排除目录；目标盘按新机自选）：
+未提交改动清单每次现取，本手册不列文件名、也不描述其完成状态：
 
 ```powershell
-$skip = Get-ChildItem -Directory | Where-Object { $_.Name -like 'target*' -or $_.Name -in '.tools','release' }
-robocopy D:\Github\Gensokyo-NewQQ-Refactor E:\Gensokyo-NewQQ-Refactor /E /XD @($skip.FullName) /XF *.log
+# 留档：拷贝前的工作树快照（写本手册时点实测输出为 6 项，属另一包的进行中工作）
+git status --porcelain | Out-File -Encoding utf8 $env:TEMP\pre-copy-status.txt
+Get-Content $env:TEMP\pre-copy-status.txt
 ```
 
-> `/XD` 的名单**先列再拷**（旧机根目录当时只有 `target/` 与 `release/`，`.tools/` 要等首次交叉构建才会出现），
-> 别凭记忆写死；漏排一条就是多拷几 GB～几十 GB 缓存。
-> **`.git/` 必须包含在拷贝里**，否则新机没有历史，无法 diff、无法继续提交。
-> 落地后先 `git status` 与旧机输出比对，确认游离文件数量一致。
+**风险**：如果拷贝期间仓库还在被改（多代理/多人同时在建、在跑测试、在写文件），拷到的是**半写入状态**——
+某个文件写了一半，或 `Cargo.lock` 与源码不是同一个时间点的快照。
+这比丢改动更难排查：任何命令都不会报错，症状要等新机编译或跑测试时才浮出来。
+
+建议动作顺序（整包拷贝前跑完这四步）：
+
+1. **停止一切构建与测试**：`cargo build` / `cargo test` / `xtask` 还在跑的时候不要拷。
+2. `git status --porcelain` **留档**未提交改动清单（上面那条命令，存到 OS temp，不放仓库）。
+3. **关闭会占用或写文件的进程**：IDE（`rust-analyzer` 会写索引）、`cargo`/`rustc`、本地 dev server。
+   robocopy 遇到被占用的文件会重试后跳过，跳过的文件不报错，只在汇总里体现为少了文件。
+4. 再执行 §1 的 robocopy。
+
+> 未提交改动**会随文件夹一起过去**（这正是拷贝优于 clone 之处）；代价就是拷贝期间**不要有人改文件**。
+
+### 7.2 两条路径的取舍
+
+| 路径 | 做法 | 带走什么 | 适用 |
+|------|------|----------|------|
+| ① 整包拷贝（**主路径**） | §1 的 robocopy：仓库根目录整体，排除枚举出来的 `target*`、`release`、`.tools` | 工作树 **23.7 MB** + `.git/` **111.9 MB**；未提交改动、`git blame`、全部分支与历史都跟着走；**不需要远端仓库权限** | 现状迁移：工作树有未提交内容，或新机拿不到远端权限 |
+| ② `git clone`（备选，保留） | 旧机先 `git add <确切文件>` → `git commit -F <UTF-8 临时文件>` → `git push`，新机 `git clone -b Refactor` | 约 **136 MB**，只含**已入库**内容，**不含未提交工作** | 只想干净重来：确认工作树没有需要保留的游离改动，或已全部入库 |
+
+> 路径 ② 的前置条件就是 §1 末尾那两条游离文件检查命令输出为空；一旦有输出，走 ①，别指望 clone 带上未提交内容。
+
+### 7.3 拷后必验（新机侧，逐条给命令）
+
+在新机工作树根目录依次执行（第 5 条之前先按 §4 设好 `PATH` 前置与 `CARGO_TARGET_DIR`）：
+
+```powershell
+# 1) 提交点位：应与旧机拷贝前 `git rev-parse --short HEAD` 的输出一致
+git rev-parse --short HEAD
+
+# 2) 换行策略：记下值，第 3 条判读要用
+git config core.autocrlf
+
+# 3) 未提交改动：应与 §7.1 留档的 pre-copy-status.txt 一致
+git status --porcelain
+
+# 4) 工具链与链接器
+rustc --version      # 应为 rust-toolchain.toml 钉的 1.99.1
+gcc --version        # Windows 需 mingw；旧机实测 gcc.exe 只在 C:\msys64\mingw64\bin，usr\bin 下没有（PATH 前置见 §2.1）
+
+# 5) 最快证明「webui/dist 占位 + 两份金样 fixture 都在位」的一条
+cargo test -p gensokyo-protocol
+```
+
+判读口径：
+
+1. 第 3 条与留档清单**逐行一致**（顺序可能不同），拷贝即视为完整。
+2. 第 3 条若冒出**大面积 modified**，先怀疑 `core.autocrlf` 与换行风格差异（`rustfmt.toml` 用的是 `newline_style="Unix"`，见 §6 那条坑），
+   处置按 §6：`git add --renormalize .` 或 `git status` 重扫后再判断真差异，**不要**先动代码。
+3. 第 5 条通过即说明 `webui/dist` 占位文件、`crates/gensokyo-protocol/tests/xurls_golden.json`、
+   `crates/gensokyo-media/tests/qr_golden.json` 三者都在位——金样 fixture 缺失时相关测试会直接失败。
+4. 之后再走 §8 的完整自检，数字对照 §5 的验收基线。
 
 ---
 

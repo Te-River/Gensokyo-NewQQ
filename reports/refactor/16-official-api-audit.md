@@ -1,5 +1,9 @@
 # QQ 官方能力全量复核（2026-10 快照）
 
+> **⚠️ 时效声明（P65 · 2026-11-14 追加）**：下文「裁决汇总」「未到里程碑 / 永久占位」两表的计数是 `d00a5ff` 时点（2026-11-08 订正节回写之前）的快照，原文保留仅为留痕，**现状以「R3 接线回写」一节 + 当前代码为准**。
+> 本会话逐项实测：原「未到里程碑 **28**」中 27 项已接线（M3 22 项 + R3b 5 项），唯一未移植的 `get_qq_profile` 已由本文真缺口表的 `get_qq_profile` 行裁决「明确不做」⇒ **真缺（注册集口径）= 0**；原「发送链未接线 **5**」5 项全部已接。依据见各表行内标注。
+> 唯一行为不对等项为 `get_friend_list`（Go `handlers/get_friend_list.go:29-47` 本地 idmap 活实现回 `retcode=0`；Rust 此前回 `1500`），被本快照误归入「官方无端点 16 项」。**定稿（P64a，2026-11-14）**：读侧已对齐——Rust 现照 Go 枚举 idmap `user_info` 表（key 字节序升序、滤空 `user_id`、恒 `retcode=0 status="ok"`、空表/出错/未装配为 `"data":null` 而非 `[]`），归类改判「本地 idmap 活实现」；**写侧 `StoreUserInfo`（Go 在入站 C2C 处理时写该桶，`ProcessC2CMessage.go:231-241`）属 P64b 待做**——Rust 的 `user_info` 表当前只有 M1e 导入器数据，全新 Rust 部署在导入前该接口恒回 `data:null`（是实现缺口，不是功能缺陷）。详见 `docs/rust-m0.md` R4o。
+
 ## 元信息
 
 | 项 | 值 |
@@ -57,8 +61,8 @@
 |---|---|---|---|
 | 真缺口 | **4** | 3 修 + 1 明确不做 | 素材管理 / @全员 / 单聊图文卡片**已修**；`GET /users/@me` 明确不做 |
 | 口径不一致 | **7** | 全修 | 7 条**全部已修**，逐条见「口径不一致 7 条」 |
-| 未到里程碑（Rust 端点未移植/未接线） | **28** | 不动 | **未修**：`gensokyo-qq` 尚无对应端点是本轮范围外 |
-| 官方无端点永久占位 | **16** | 文档登记 | **未修**：官方无对应能力，两侧行为一致 |
+| 未到里程碑（Rust 端点未移植/未接线） | **28** | 不动 | **未修**：`gensokyo-qq` 尚无对应端点是本轮范围外 **【快照失效，见下文『未到里程碑 / 永久占位』节首订正与『R3 接线回写』节】28 项中 27 项已接线**：M3 22 项 + R3b 5 项（落点 `panels.rs:5-21`、`interaction.rs:6-25`、`group_admin.rs:10`、`messages.rs:7`）；余 1 项 `get_qq_profile` 属上文真缺口表「明确不做」⇒ 真缺 0 |
+| 官方无端点永久占位 | **16** | 文档登记 | **未修**：官方无对应能力，两侧行为一致 **【快照部分失效，见下文『R3 接线回写』节 R3a 行】** 群列表已由 R3a 改判「已实现聚合」；`get_friend_list` 的「两侧一致」原不成立（Go 活实现 vs Rust 曾 `1500` 占位），**P64a 读侧已对齐并移出本集合**（现照 Go 枚举 idmap `user_info`，空态 `"data":null`/恒 `retcode=0`，见 `docs/rust-m0.md` R4o；写侧 `StoreUserInfo` 属 P64b）⇒ 现值 16→**15**（纯官方无端点） |
 | OneBot 兼容空实现 | **5** | 不动 | **未修**：纯兼容回执，与 Go 语义一致 |
 | 附：固定 `retcode=100` | 2 实现 / 3 名 | 不动 | **未修**：`set_group_whole_ban`/`get_group_whole_ban`、`set_group_card` 官方无写接口 |
 
@@ -128,9 +132,9 @@ Rust 侧 44 项硬占位（`retcode=1500`）的拆分，**28 项属未到里程�
 
 | 分组 | 数量 | 代表项 | 为什么不算缺口 |
 |---|---|---|---|
-| 端点未移植 | **23** | `set_group_kick`、`delete_msg`/`delete_group_msg`、`put_interaction`、`get_robot_share_link`、`set_group_add_request`、黑名单两枚、`get_qq_profile`、面板 6、菜单 2、审批策略 6 | `gensokyo-qq` 未暴露对应端点（`crates/gensokyo-actions/src/qqapi.rs`、`panels.rs`、`interaction.rs` 自述），属新链移植进度 |
-| 发送链未接线 | **5** | `send_group_forward_msg`、`send_private_forward_msg`、`send_group_msg_raw`、`send_private_msg_sse`、`send_private_msg_wakeup` | 端点已在 Go 侧验证可用，Rust 仅缺 deferred 链分支 |
-| 官方无端点（**不在这 28 项内**） | **16** | 退群、群列表、`get_msg`、合并转发查询、好友列表、陌生人资料、点赞、群荣誉、匿名禁言、@all 剩余次数、群名/管理员/头衔/备注、机器人资料写、群系统消息 | 官方无对应能力，永久占位；Go 侧同样降级或固定回执 |
+| 端点未移植 | **23** | `set_group_kick`、`delete_msg`/`delete_group_msg`、`put_interaction`、`get_robot_share_link`、`set_group_add_request`、黑名单两枚、`get_qq_profile`、面板 6、菜单 2、审批策略 6 | `gensokyo-qq` 未暴露对应端点（`crates/gensokyo-actions/src/qqapi.rs`、`panels.rs`、`interaction.rs` 自述），属新链移植进度。**【快照失效，见下文『R3 接线回写』节 M3 行】** 本行 23 项中 22 项已由 M3（`a60c4ed`）接线（`panels.rs:5-21` 面板 6 + 菜单 2 + 审批策略 6、`interaction.rs:6-25`、`group_admin.rs:10` 踢人/黑名单/入群申请、`messages.rs:7` 撤回）；余 `get_qq_profile` 属上文真缺口表「明确不做」 |
+| 发送链未接线 | **5** | `send_group_forward_msg`、`send_private_forward_msg`、`send_group_msg_raw`、`send_private_msg_sse`、`send_private_msg_wakeup` | 端点已在 Go 侧验证可用，Rust 仅缺 deferred 链分支。**【快照失效，见下文『R3 接线回写』节 R3b 行】5 项全部已接线（R3b `c6b44a2`）**：`send_group/private_forward_msg` → `dispatcher.rs:231` → `deferred.rs:773 execute_forward`；`send_private_msg_sse` → `dispatcher.rs:245` → `deferred.rs:728`；`send_group_msg_raw` → `interaction.rs:19`；`send_private_msg_wakeup` → `deferred.rs:263-304` + R4a `publish_wakeup_notice`（`deferred.rs:674`，见下文『已知缺口与刻意差异』第 1 条） |
+| 官方无端点（**不在这 28 项内**） | **16** | 退群、群列表、`get_msg`、合并转发查询、好友列表、陌生人资料、点赞、群荣誉、匿名禁言、@all 剩余次数、群名/管理员/头衔/备注、机器人资料写、群系统消息 | 官方无对应能力，永久占位；Go 侧同样降级或固定回执。**【快照部分失效，见下文『R3 接线回写』节 R3a 行】** 代表项「群列表」已由 R3a 移出本集合；「好友列表」亦已由 P64a 读侧对齐移出（Rust 现照 Go 枚举 idmap `user_info`，空表/出错/未装配恒 `retcode=0` + `"data":null`；写侧 `StoreUserInfo` 属 P64b，见 `docs/rust-m0.md` R4o）——现维持 1500 / 固定回执的清单见下文『官方无端点 · 维持 1500 / 固定回执（现值）』表，**P64a 后现值 15** |
 | 固定 `retcode=100` | 2 实现 / 3 名 | `set_group_whole_ban`/`get_group_whole_ban`、`set_group_card` | 官方 `restrict_chat_setting` 只能按成员写，无全员禁言与群名片写接口 |
 | OneBot 兼容空实现 | **5** | `set_restart`、`clean_cache`、`get_cookies`、`get_csrf_token`、`get_credentials` | 纯兼容回执，与 Go 一致，不产生上游调用 |
 
@@ -154,7 +158,7 @@ Rust 侧 44 项硬占位（`retcode=1500`）的拆分，**28 项属未到里程�
 
 | 处置 | 数量 | action | 落点 |
 |---|---|---|---|
-| 参数校验后回 `1500` | **16** | `get_group_at_all_remain`、`set_group_name`、`set_group_admin`、`set_group_special_title`、`set_group_remark`、`set_qq_profile`、`get_group_system_msg`、`get_qq_profile`（`gensokyo-qq` 未暴露机器人资料端点）、`get_friend_list`、`get_stranger_info`、`send_like`、`set_group_leave`、`get_msg`、`get_forward_msg`、`get_group_honor_info`、`set_group_anonymous_ban` | `unsupported.rs:5-16`、`users.rs:7-9`、`messages.rs:8-9`、`group_admin.rs:11`、`interaction.rs:23-24` |
+| 参数校验后回 `1500` | **15** | `get_group_at_all_remain`、`set_group_name`、`set_group_admin`、`set_group_special_title`、`set_group_remark`、`set_qq_profile`、`get_group_system_msg`、`get_qq_profile`（`gensokyo-qq` 未暴露机器人资料端点）、`get_stranger_info`、`send_like`、`set_group_leave`、`get_msg`、`get_forward_msg`、`get_group_honor_info`、`set_group_anonymous_ban` | `unsupported.rs:5-16`、`users.rs:8-9`、`messages.rs:8-9`、`group_admin.rs:11`、`interaction.rs:23-24`；`get_friend_list` 已由 P64a 移出本表（读侧直读 idmap，`users.rs` 模块文档） |
 | 固定 `retcode=100`（Go 同口径） | 2 实现 / 3 名 | `set_group_whole_ban`（含别名 `get_group_whole_ban`）、`set_group_card` | `group_admin.rs:8-9,18-23` |
 | Go 的本地固定回执 | **1** | `get_online_clients` → `{"clients": [], "tiny_id": 0}`（逐字段照抄 Go） | `unsupported.rs:15,30-34` |
 | OneBot 兼容固定回执 | **5** | `set_restart`、`clean_cache`（日志 + `{"code": 0}`，不真执行）、`get_cookies`、`get_csrf_token`、`get_credentials`（固定空值） | `system.rs:8-12` |

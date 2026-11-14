@@ -61,7 +61,7 @@
 
 **消息链特性矩阵**（对齐=已对齐）：reply/echo ✓；msg_type 0/2/6/7/8 ✓；markdown/keyboard ✓；card 部分（私聊也支持=扩展；本地 pic ✓ P29a）；input_notify ✓；stream/SSE ✓；qqmusic ✓（P29b：查询→markdown+键盘，失败回退分享文案）；forward ✓（保留 node 媒体）；raw ✓；wakeup/active ✓；SSM ✓（仅群入队同 Go）；懒消息/2000/seq ✓；at：AppID→BotID ✓（P15）、add_at_group ✓；auto_escape 刻意差异（Rust 尊重该字段）；array/string_ob11 ✓。
 
-**媒体链**：local/url/base64 四类 ✓；多媒体段拆分 ✓（P1）；**>5MB 分片上传 ✓（P29a）**；**silk 转码/图片压缩 ✓（P29a）**；素材链 oss_type=7 ✓；图床 provider 4~10 ✓（P7）；图床上传重试 ✓（P7）；**card 本地 pic_url ✓（P29a）**；markdown 内嵌图替换 ✓；unknown_* 透传 ✓；qqmusic ✓（P29b：真实 markdown+键盘）。
+**媒体链**：local/url/base64 四类 ✓；多媒体段拆分 ✓（P1）；**>5MB 分片上传 ✓（P29a）**；**silk 转码/图片压缩 ✓（P29a）**；素材链 oss_type=7 ✓；图床 provider 4~10 ✓（P7）；图床上传重试 ✓（P7）；**card 本地 pic_url ✓（P29a）**；markdown 内嵌图替换 ✓；unknown_* 透传 ✓（仅非空值；裸码 `file`/`url` 皆空时按 Go 原位保留字面、不产 `Unknown("")` 空 `file_info`，P59）；qqmusic ✓（P29b：真实 markdown+键盘）。
 
 ### B4. CQ 码进出站
 
@@ -70,7 +70,7 @@
 | 转义口径 | 出站只转 `,` `]` `&`，不转 `[`（handlers/cqcode.go） | cqcode.rs:7-12,58-73 显式跟随 Go | 已对齐（刻意偏离规范） | High |
 | 参数容错 | `:` 仅 stream 认、裸片段并入前一键值 | cqcode.rs:26-47 同口径；大小写不敏感 | 已对齐 | High |
 | 未知码 | 原样保留文本 | Segment::raw_or_cq 逐字节透传 | 已对齐 | High |
-| `voice` 别名 | voice≡record | `outbound.rs:571-575` `"record" \| "voice"` 同臂归一 + `:759-767` `media_from_segment` 的 file→url 兜底 + `:577-584` file 臂保持 file-only（对 Go `cqparse/handlers_media.go:48-55`、`message_parser.go:909/1318`、`:87/1187` 无 url 兜底）；原实现 `voice` 落 `_ => extra`，即 `[CQ:voice]` **从未走语音通道**、`url=` 形态值丢失（P57-②）。钉死用例 `from_segments_voice_alias_matches_record_every_shape`/`..._lands_on_record_channel_per_shape` + 家族不对称四例（`file_arm_does_not_fall_back_to_url` 等）；CODES 元数据补 `url`（`parse_body` 不查码表，纯元数据）；protocol 115 passed。**遗留（record 同型，另立 P59）**：裸媒体码 Go 保字面文本 vs Rust `Unknown("")`→空 `file_info` 外漏；Url 值键口径 Rust 统一 `url_record` vs Go 剥前缀分写 `url_record`/`url_records` | **已对齐（P57-②，原「部分/Medium」）** | High |
+| `voice` 别名 | voice≡record | `outbound.rs:571-575` `"record" \| "voice"` 同臂归一 + `:759-767` `media_from_segment` 的 file→url 兜底 + `:577-584` file 臂保持 file-only（对 Go `cqparse/handlers_media.go:48-55`、`message_parser.go:909/1318`、`:87/1187` 无 url 兜底）；原实现 `voice` 落 `_ => extra`，即 `[CQ:voice]` **从未走语音通道**、`url=` 形态值丢失（P57-②）。钉死用例 `from_segments_voice_alias_matches_record_every_shape`/`..._lands_on_record_channel_per_shape` + 家族不对称四例（`file_arm_does_not_fall_back_to_url` 等）；CODES 元数据补 `url`（`parse_body` 不查码表，纯元数据）；protocol 115 passed。**P59 已修**：裸媒体码（`file`/`url` 皆空）经 `from_segments` 归一点 `is_bare_media_segment` 把段原文放回 `plan.text`（`raw_or_cq`，对齐 Go `Replacement: tok.Raw` `handlers_media.go:56-59/:88-91`），不再产出 `Unknown("")`→空 `file_info` 外漏。**遗留（另立条目）**：Url 值键口径 Rust 统一 `url_record` vs Go 剥前缀分写 `url_record`/`url_records`（需先让 `Url` 携带 scheme 种类） | **已对齐（P57-② + P59）** | High |
 | at 顺序 | 纯 at 回退原文 | 缺 qq/反查失败原样透传 | 已对齐 | High |
 | AppID→BotID | message_parser.go:1679-1682（do_not_replace_appid） | `/users/@me` + 出站替换 + `do_not_replace_appid`（P15） | **已对齐** | High |
 | node 出站 | CQ 管道无 outbound node | cqcode.rs:775-780 outbound:false | 已对齐 | High |
@@ -101,6 +101,7 @@
 | ~~Medium~~ | ~~add_at_group 无消费者、AppID→BotID 缺失~~ | ~~入站/文本渲染各补一处~~ | **已修（P15 + 入站 add_at_group）** |
 | Low | lib.rs:50 陈旧文档（SSM/#62 已落地仍写未接线） | 改注释 | 5 行 |
 | Low | KNOWN_ACTIONS 3 个幽灵项 | 对齐 Go 实际注册表 | 10 行 |
+| ~~Medium~~ | `get_friend_list` 行为不等：Go 本地 idmap `UserInfo` 桶活实现（`get_friend_list.go:29-47`）vs Rust 曾与「官方无端点」并列回 `1500` | storage `IdMapStore::list_all_users` 读 API + `users.rs` 直读 idmap 装配 | **读侧已对齐（P64a）**：key 字节序枚举、滤空 `user_id`、恒 `retcode=0`、空态 `"data":null`；**写侧 `StoreUserInfo`（Go 入站 C2C 写 `ProcessC2CMessage.go:231-241`）属 P64b**——Rust 的 `user_info` 表目前只有 M1e 导入器数据，全新部署导入前恒回 `data:null` |
 
 **推荐顺序**：媒体四件套（分片、silk/压缩、多媒体拆条、card pic）→ qqmusic → 图床 provider → 队列/限速 → 其余。
 
