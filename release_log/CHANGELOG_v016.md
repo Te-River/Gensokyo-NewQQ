@@ -339,6 +339,12 @@ P74 双仓核实发现：Go 默认 `cq_parse_mode=legacy` 下，`[CQ:music]` 只
 ## ✅ 提交记录
 
 ```
+2d9fa6e  docs: P79/P82 文档收口与已知差异登记
+56cf231  test: 加固环回依赖用例的间歇假红（P82）
+ca59e2b  fix: 出站不可消费的 avatar/music 保留字面，不再整条 1400（P79）
+58de264  docs: P75 闭环回写、P78 注释修复登记与 readme 戳一戳对齐主仓
+a78574f  docs: 修正 card 别名的三处陈旧注释（P78）
+27a661d  docs: P73 收口与 P77 分侧登记，CHANGELOG 提交记录回填全量
 791734b  docs: P69/P70/P71/P72 文档收口与取证轨迹留档
 15b1a4e  fix: array_value 手打 CQ 按原文折回 text（P72，收 18 码位）
 ebe26c3  feat: user_info 写侧闭环 + 码表元数据口径修正（P64b / P69① / P70）
