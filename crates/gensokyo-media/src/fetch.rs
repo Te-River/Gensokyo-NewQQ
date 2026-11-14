@@ -1037,21 +1037,36 @@ mod ssrf_tests {
     }
 
     /// 连接层重试（环境缓解，非产品行为）：本机火绒网络过滤驱动会间歇性中止已建立的
-    /// 环回 TCP 连接（os error 10053）。仅对连接层错误重试至多 3 次，其余错误
-    /// （SSRF 拒绝 / 非 200 / 跳数上限 / 解析失败）原样上抛；每次尝试前清空 stub 已记录
-    /// 的目标，重试不会在精确序列断言里留下重复/残缺条目（同 storage retry_seq 口径）。
+    /// 环回 TCP 连接（os error 10053）。判据双轨——`expected` 条请求里 stub 没收全
+    /// （`seen.len() < expected`），或 reqwest 报发送失败——而不是单看错误文本：中止
+    /// 可以落在任意一跳，产品随后会把 `TooManyRedirects` 这类**业务结论**掩盖成
+    /// `Transport`。业务错误（SSRF 拒绝 / 非 200 / 缺 Location / 超限）时 stub 恰好
+    /// 收满，不会触发重试。每次尝试前清空 stub 记录（同 storage `retry_seq` 口径），
+    /// 两次尝试之间退避，避免 4 次尝试全部落进同一个中断窗口（历史假红的真实形态）。
     async fn get_with_retry(
         transport: &HttpTransport,
         stub: &Stub,
         url: &str,
+        expected: usize,
     ) -> Result<TransportResponse, Error> {
-        let mut attempt = 0;
+        let mut attempt = 0u64;
         loop {
             stub.clear_targets();
             match transport.get(request(url)).await {
                 Ok(response) => return Ok(response),
-                Err(err) if attempt < 3 && is_conn_abort(&err) => attempt += 1,
-                Err(err) => return Err(err),
+                Err(err) => {
+                    let seen = stub.targets();
+                    let seen_len = seen.len();
+                    if attempt < 3 && (seen_len < expected || is_conn_abort(&err)) {
+                        attempt += 1;
+                        eprintln!(
+                            "环回 stub 请求未收全（{seen_len}/{expected}，记录: {seen:?}，错误: {err}），第 {attempt} 次重试"
+                        );
+                        tokio::time::sleep(Duration::from_millis(100 * attempt)).await;
+                        continue;
+                    }
+                    return Err(err);
+                }
             }
         }
     }
@@ -1250,7 +1265,7 @@ mod ssrf_tests {
         let transport = transport(client, FakeProbe::new());
         let url = format!("http://start.test:{}/start", stub.addr.port());
 
-        let err = get_with_retry(&transport, &stub, &url)
+        let err = get_with_retry(&transport, &stub, &url, 1)
             .await
             .expect_err("重定向到私网必须拒绝");
         assert!(matches!(err, Error::SsrfBlocked(_)), "{err:?}");
@@ -1279,7 +1294,7 @@ mod ssrf_tests {
         let transport = transport(client, probe);
         let url = format!("http://start.test:{}/start", stub.addr.port());
 
-        let err = get_with_retry(&transport, &stub, &url)
+        let err = get_with_retry(&transport, &stub, &url, 1)
             .await
             .expect_err("重定向到私网解析域名必须拒绝");
         assert!(matches!(err, Error::SsrfBlocked(_)), "{err:?}");
@@ -1297,7 +1312,7 @@ mod ssrf_tests {
         let transport = transport(client, FakeProbe::new());
         let url = format!("http://chain.test:{}/start", stub.addr.port());
 
-        let response = get_with_retry(&transport, &stub, &url)
+        let response = get_with_retry(&transport, &stub, &url, 2)
             .await
             .expect("下载成功");
         assert_eq!(response.status, 200);
@@ -1315,7 +1330,7 @@ mod ssrf_tests {
         let transport = transport(client, FakeProbe::new());
         let url = format!("http://hop.test:{}/h0", stub.addr.port());
 
-        let err = get_with_retry(&transport, &stub, &url)
+        let err = get_with_retry(&transport, &stub, &url, MAX_REDIRECTS + 1)
             .await
             .expect_err("跳数上限必须拒绝");
         assert!(
@@ -1323,9 +1338,11 @@ mod ssrf_tests {
             "{err:?}"
         );
         assert_eq!(
-            stub.targets().len(),
-            MAX_REDIRECTS + 1,
-            "最多 6 次请求 = 首跳 + 5 次重定向"
+            stub.targets(),
+            (0..=MAX_REDIRECTS)
+                .map(|hop| format!("/h{hop}"))
+                .collect::<Vec<_>>(),
+            "最多 6 次请求 = 首跳 + 5 次重定向，顺序不得错位"
         );
     }
 
@@ -1336,7 +1353,7 @@ mod ssrf_tests {
         let transport = transport(client, FakeProbe::new());
         let url = format!("http://noloc.test:{}/start", stub.addr.port());
 
-        let err = get_with_retry(&transport, &stub, &url)
+        let err = get_with_retry(&transport, &stub, &url, 1)
             .await
             .expect_err("缺少 Location 必须报错");
         assert!(matches!(err, Error::Transport(_)), "{err:?}");
@@ -1352,12 +1369,12 @@ mod ssrf_tests {
         let transport = transport(client, FakeProbe::new());
         let base = format!("http://gate.test:{}", stub.addr.port());
 
-        let err = get_with_retry(&transport, &stub, &format!("{base}/missing"))
+        let err = get_with_retry(&transport, &stub, &format!("{base}/missing"), 1)
             .await
             .expect_err("非 200 必须拒绝");
         assert!(matches!(err, Error::HttpStatus(404)), "{err:?}");
 
-        let err = get_with_retry(&transport, &stub, &format!("{base}/big"))
+        let err = get_with_retry(&transport, &stub, &format!("{base}/big"), 1)
             .await
             .expect_err("超限必须拒绝");
         assert!(

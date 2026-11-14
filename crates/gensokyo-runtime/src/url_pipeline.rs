@@ -498,8 +498,34 @@ mod tests {
         let stub = Stub::spawn(|| (200, r#"{"shortURL":"https://s.cn/x9"}"#.to_owned()));
         let settings = lotus_settings(&stub.port(), "");
         let mint = UrlMint::Lotus(LotusMint::try_new().expect("构造 lotus client"));
-        let result = transform("看 http://a.com 好", &settings, Some(&mint)).await;
-        assert_eq!(result.text, "看 https://s.cn/x9 好");
+        const EXPECTED: &str = "看 https://s.cn/x9 好";
+        // 连接层重试（环境缓解，非产品行为；同 tests/url_pipeline.rs 的 P70 口径）：
+        // 每轮前清空 stub 记录，最后一轮仍被掐断就按原诊断失败。
+        let mut attempt = 0u64;
+        let result = loop {
+            stub.clear();
+            let result = transform("看 http://a.com 好", &settings, Some(&mint)).await;
+            if conn_lost(&stub, result.text != EXPECTED) && attempt < 3 {
+                attempt += 1;
+                eprintln!(
+                    "环回 stub 未收到完整请求（记录: {:?}），第 {attempt} 次重试",
+                    stub.requests()
+                );
+                tokio::time::sleep(Duration::from_millis(100 * attempt)).await;
+                continue;
+            }
+            break result;
+        };
+        assert_eq!(result.text, EXPECTED);
+        let requests = stub.requests();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|raw| raw.starts_with("POST /url"))
+                .count(),
+            1,
+            "mint 恰好一次 POST /url；stub 记录: {requests:?}"
+        );
     }
 
     // ---------- LocalMint 映射 ----------
@@ -544,6 +570,16 @@ mod tests {
     }
 
     // ---------- LotusMint ----------
+
+    /// 连接层失败指纹（环境缓解，非产品行为）：本机安全软件会间歇性中止环回 TCP
+    /// 连接，stub 连请求行都收不到（或不完整，已在 `handle_conn` 里丢弃）。产品侧
+    /// `LotusMint::mint` 按 Go 口径把发送失败吞成空串（`tracing::warn` 不回调用方），
+    /// 用例能观测到的连接层信号只剩「操作失败 + stub 没收到完整 `POST /url`」。
+    /// stub 正常收下完整请求后的失败（非 200 / JSON 坏 / 缺 shortURL）是业务错误，
+    /// 本判据不成立，不重试。
+    fn conn_lost(stub: &Stub, failed: bool) -> bool {
+        failed && stub.requests().is_empty()
+    }
 
     /// `rustls-no-provider` 口径（media/runtime dev-dep 注释同款）：构建 reqwest Client
     /// 纯 HTTP 也需要进程级 provider，测试里自行安装（生产由二进制 startup 装）。
@@ -644,14 +680,30 @@ mod tests {
         let stub = Stub::spawn(|| (200, r#"{"shortURL":"https://s.cn/1"}"#.to_owned()));
         let settings = lotus_settings(&stub.port(), "");
         let mint = LotusMint::try_new().expect("构造 lotus client");
-        assert_eq!(mint.mint(URL1, &settings).await, "https://s.cn/1");
-        let body = stub
-            .requests()
-            .remove(0)
-            .split_once("\r\n\r\n")
-            .expect("头尾分隔")
-            .1
-            .to_owned();
+        // 同 `lotus_variant_replaces_via_transform`：只对「stub 没收到完整请求」重试。
+        let mut attempt = 0u64;
+        let link = loop {
+            stub.clear();
+            let link = mint.mint(URL1, &settings).await;
+            if conn_lost(&stub, link.is_empty()) && attempt < 3 {
+                attempt += 1;
+                eprintln!(
+                    "环回 stub 未收到完整请求（记录: {:?}），第 {attempt} 次重试",
+                    stub.requests()
+                );
+                tokio::time::sleep(Duration::from_millis(100 * attempt)).await;
+                continue;
+            }
+            break link;
+        };
+        assert_eq!(link, "https://s.cn/1");
+        let requests = stub.requests();
+        assert_eq!(
+            requests.len(),
+            1,
+            "mint 恰好一次 POST /url；stub 记录: {requests:?}"
+        );
+        let body = requests[0].split_once("\r\n\r\n").expect("头尾分隔").1;
         assert_eq!(
             body, "url=http%3A%2F%2Fa.com",
             "空密码不发 token（Go :151 条件）"
@@ -752,6 +804,12 @@ mod tests {
         fn requests(&self) -> Vec<String> {
             self.requests.lock().unwrap().clone()
         }
+
+        /// 清空已记录请求：连接层重试前调用，避免上一轮的残缺条目污染「恰好一次
+        /// POST /url」与请求体断言（同 storage `retry_seq` 的 P70 口径）。
+        fn clear(&self) {
+            self.requests.lock().unwrap().clear();
+        }
     }
 
     impl Drop for Stub {
@@ -800,6 +858,11 @@ mod tests {
                 Ok(read) => buf.extend_from_slice(&chunk[..read]),
                 Err(_) => return,
             }
+        }
+        if buf.len() < need {
+            // 请求体没读满 = 客户端发完前被掐断（10053）：不算「收到完整请求」，
+            // 让 `conn_lost` 认出来重试，也不让它污染逐字断言。
+            return;
         }
         requests
             .lock()

@@ -837,44 +837,63 @@ mod tests {
         spawn_test_bridge(stub.port(), false, Duration::from_secs(5))
     }
 
-    /// 连接层重试（环境缓解，非产品行为）：本机火绒网络过滤驱动（HipsDaemon/
-    /// wsctrlsvc）会间歇性中止已建立的环回 TCP 连接，reqwest 报
-    /// WSAECONNABORTED（os error 10053），产品桥如实上报 `failed to send request`。
-    /// 仅对该连接层错误重试至多 3 次，其余错误（超时/非 200/解析失败）原样上抛。
+    /// 连接层失败指纹（环境缓解，非产品行为）：本机火绒网络过滤驱动（HipsDaemon/
+    /// wsctrlsvc）会间歇性中止已建立的环回 TCP 连接，reqwest 在发送、回程读、解码
+    /// 三个阶段的失败文案各不相同，产品桥如实上报。非 200、JSON 解析、超限、桥线程
+    /// 异常都不在此列，不被重试。
+    fn is_conn_flake(err: &StorageError) -> bool {
+        let text = err.to_string();
+        [
+            "failed to send request",
+            "failed to read response body",
+            "failed to decode response",
+        ]
+        .iter()
+        .any(|fingerprint| text.contains(fingerprint))
+    }
+
+    /// 单次调用重试：仅对连接层错误至多重试 3 次，其余错误（超时/非 200/解析失败）
+    /// 原样上抛；两次尝试之间退避，避免 4 次尝试全部落进同一个中断窗口。
     fn retry_conn<F, T>(mut f: F) -> Result<T, StorageError>
     where
         F: FnMut() -> Result<T, StorageError>,
     {
-        let mut attempt = 0;
+        let mut attempt = 0u64;
         loop {
             match f() {
                 Ok(value) => return Ok(value),
-                Err(err) => {
-                    if attempt < 3 && err.to_string().contains("failed to send request") {
-                        attempt += 1;
-                        continue;
-                    }
-                    return Err(err);
+                Err(err) if attempt < 3 && is_conn_flake(&err) => {
+                    attempt += 1;
+                    eprintln!("环回 idmap 连接被中止（{err}），第 {attempt} 次重试");
+                    std::thread::sleep(Duration::from_millis(100 * attempt));
                 }
+                Err(err) => return Err(err),
             }
         }
     }
 
-    /// 整段重试：供逐字断言目标序列的测试使用。连接层错误时清空 stub 已记录的
-    /// 目标并从头重跑整段，保证重试不会在精确序列断言里留下重复/残缺条目；
-    /// 断言失败（panic）不受影响，直接上抛。
-    fn retry_seq<F>(stub: &Stub, mut f: F)
+    /// 整段重试：供逐字断言目标序列的测试使用。判据双轨——stub 侧没收到完整的
+    /// `expected_requests` 条目标，或连接层错误文案——而不是单看错误文本：中止可以落在
+    /// 任意一条操作上，此前已发起的请求会让记录残缺。每轮先清空 stub 记录再从头重跑，
+    /// 保证重试不会在精确序列断言里留下重复/残缺条目；断言失败（panic）不受影响，
+    /// 最后一轮仍失败就按原诊断 panic。
+    fn retry_seq<F>(stub: &Stub, expected_requests: usize, mut f: F)
     where
         F: FnMut() -> Result<(), StorageError>,
     {
-        let mut attempt = 0;
+        let mut attempt = 0u64;
         loop {
             stub.clear_targets();
             match f() {
                 Ok(()) => return,
                 Err(err) => {
-                    if attempt < 3 && err.to_string().contains("failed to send request") {
+                    let seen = stub.targets().len();
+                    if attempt < 3 && (seen < expected_requests || is_conn_flake(&err)) {
                         attempt += 1;
+                        eprintln!(
+                            "环回 idmap stub 请求未收全（{seen}/{expected_requests}，错误: {err}），第 {attempt} 次重试"
+                        );
+                        std::thread::sleep(Duration::from_millis(100 * attempt));
                         continue;
                     }
                     panic!("{err}");
@@ -890,7 +909,8 @@ mod tests {
         let stub = Stub::spawn(table_response);
         let bridge = bridge_to(&stub);
 
-        retry_seq(&stub, || {
+        // 17 个操作 = 17 条目标：stub 没收全即连接层被掐断（见 `retry_seq`）。
+        retry_seq(&stub, 17, || {
             assert_eq!(bridge.store_idv2("openid-user-1")?, 101); // type=1
             assert_eq!(bridge.retrieve_row_by_idv2("101")?, "openid-user-1"); // type=2
             bridge.write_config_v2("lotus", "token", "abc")?; // type=3
