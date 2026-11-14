@@ -236,9 +236,17 @@ Rust 版补齐 lotus 客户端模式 parity：`lotus=true` 时 idmap 17 个操�
 
 P69 登记的那项入站口径差异（`inbound` 位比 Go 实际产出集超集）经 P71 逐码取证后由 **P72 裁决并实施**：Go `ConvertToSegmentedMessage`（`handlers/message_parser.go:2253-2334` + `:2340` 的段类型集合）对正文**只做整段切片 + `<@OpenID>` 正则、完全不解析用户手打的 CQ** ⇒ `array_value` 上报里用户手打的 `[CQ:…]` 除 `at` 外一律按原文留在 text 段，与 Go 逐字节一致。
 
-- **修改**：`crates/gensokyo-protocol/src/cqcode.rs` 改写 `CodeSpec::inbound` 的文档位语义——这一位从此只回答「`array_value` 上报时用户手打的 `[CQ:x,…]` 要不要落成类型化段」（真→落段、假→按原文逐字节折回 text；折回臂取码段原文，段名/键名归一只发生在落段臂），它**既不是**「Go 是否支持该码」、也**不是**「入站是否会产出该段」；据此把 **18 条码位 true→false**（reply / image / record / video / file / face / markdown / card / keyboard / stream / input_notify / music / active / wakeup / node / poke / ark / json），每条行内注明依据；`at` **保持 `inbound: true`** 并注明为结构性唯一例外（真实 @ 由 `revert_mentions` 合成 `[CQ:at,qq=…]` 后再靠这一位回解，收假会让全部真实 mention 退化成文本，彻底对齐另立 P73）；`crates/gensokyo-runtime/src/lib.rs` 的模块文档按代码事实改写（image / record / ark / reply 段已按 `attachments` 与 `msg_elements` 经 `image_segments` / `message_event_segments` 产出，只有**视频附件**仍不产段——Go M2-B 的 `image/` 前缀过滤、语音走 record 段），旧表述「图片 / 语音 / 视频 / ark 卡片段仍不生成」作废
-- **影响**：`code_spec(…).inbound` 的**生产读取点只有** `crates/gensokyo-runtime/src/inbound.rs` 的 `reported_message` 一处，故外部可见变化仅限「`array_value=true` 时手打码的段数组由类型化段改为 text 段原文」；`image_segments` / `message_event_segments` 在其之后 `extend`，**结构化附件与卡片上报不受收位影响**（混排用例实证：真图片附件照旧落 image 段，同一条正文里手打的 `[CQ:image,…]` 留 text，字符串路径追加的媒体码与之互不影响）。零回归面：`cqcode.rs` 码表往返与 verbatim 用例、actions `messages.rs` 的 face 断言均未改动且通过；`golden_inbound_matches_go` 不受影响（其 config 无 `array:`，走 Text 分支）。**遗留两项（未开工，勿当已完成）**：`poke` 的收位依据沿用 P71 取证（全 Go 树大小写不敏感零命中 + 无 `REACTION_*` 处理器）、**P72 本轮未复扫**；`at` 的结构改造 = **P73**（先设计再动手）
-- **测试**：`crates/gensokyo-runtime/tests/inbound.rs`（净增 137 行）纠正旧用例——原 `array_value_parses_at_and_multiple_segments`（现名 `array_value_keeps_at_segment_and_folds_typed_face_code`）由 5 段（含 face 段）改为 3 段，手打 `[CQ:face,id=1]` 留在相邻 text，`at` 断言未动、只是相邻合并；新增 `array_report` 三视图助手（段数组 JSON / `raw_message` / `message` 纯文本）、`array_value_folds_every_inbound_false_code_verbatim`（20 例，混入码名大写、段名内空格、大写键名、`&#44;` 转义、JSON 值与 stream 冒号语法；先断言确被 parse 成码段再断言整段折回，避免顺从「解析失败本来就留 text」这条与本位无关的路径，并断言 `message` 文本与 `raw_message` 逐字节一致）、`array_value_keeps_structured_image_segment_while_folding_typed_image_code`（真附件与手打码混排）。**门禁**：`cargo test --workspace` 43 suites / 1373 passed / 0 failed（实现者实测、lead 独立复核中，以最终门禁输出为准），`cargo clippy` 零告警、`cargo build --release` Finished、`cargo fmt --all -- --check` 退出码 0
+- **修改**：`crates/gensokyo-protocol/src/cqcode.rs` 改写 `CodeSpec::inbound` 的文档位语义——这一位从此只回答「`array_value` 上报时用户手打的 `[CQ:x,…]` 要不要落成类型化段」（真→落段、假→按原文逐字节折回 text；折回臂取码段原文，段名/键名归一只发生在落段臂），它**既不是**「Go 是否支持该码」、也**不是**「入站是否会产出该段」；据此把 **18 条码位 true→false**（reply / image / record / video / file / face / markdown / card / keyboard / stream / input_notify / music / active / wakeup / node / poke / ark / json），每条行内注明依据；`at` **保持 `inbound: true`** 并注明为结构性唯一例外（真实 @ 由 `revert_mentions` 合成 `[CQ:at,qq=…]` 后再靠这一位回解，收假会让全部真实 mention 退化成文本，彻底对齐另立 P73）；`crates/gensokyo-runtime/src/lib.rs` 的模块文档按代码事实改写（image / record / ark / reply 段已按 `attachments` 与 `msg_elements` 经 `image_segments` / `message_event_segments` 产出，只有**视频附件**仍不产段——Go M2-B 的 `image/` 前缀过滤、语音走 record 段），旧表述（称 image / record / video / ark 四类段尚未产出）作废
+- **影响**：`code_spec(…).inbound` 的**生产读取点只有** `crates/gensokyo-runtime/src/inbound.rs` 的 `reported_message` 一处，故外部可见变化仅限「`array_value=true` 时手打码的段数组由类型化段改为 text 段原文」；`image_segments` / `message_event_segments` 在其之后 `extend`，**结构化附件与卡片上报不受收位影响**（混排用例实证：真图片附件照旧落 image 段，同一条正文里手打的 `[CQ:image,…]` 留 text，字符串路径追加的媒体码与之互不影响）。零回归面：`cqcode.rs` 码表往返与 verbatim 用例、actions `messages.rs` 的 face 断言均未改动且通过；`golden_inbound_matches_go` 不受影响（其 config 无 `array:`，走 Text 分支）。**遗留（勿当已全部收口）**：`poke` 的收位依据在 **P72 本轮未复扫**（沿用 P71 取证：全 Go 树大小写不敏感零命中 + 无 `REACTION_*` 处理器），随后于 2026-11-14 的复扫波次中**源码级确证**（`.go` 零命中、`Processor/` 对 `REACTION` / `GROUP_POKED` 等零命中），但复扫同时暴露一项覆盖不对称——**Go 侧没有「手打 CQ 在数组上报留 text」的入站用例**能钉住该结论，已另立 **P75①** 欠账；`at` 的结构改造 = **P73**（**已于同日完成**，见下方 P73 子节；本条「`at` 保持 `inbound: true`」为 P72 时点记录）
+- **测试**：`crates/gensokyo-runtime/tests/inbound.rs`（改动 137 行：+133 / −4）纠正旧用例——原 `array_value_parses_at_and_multiple_segments`（现名 `array_value_keeps_at_segment_and_folds_typed_face_code`）由 5 段（含 face 段）改为 3 段，手打 `[CQ:face,id=1]` 留在相邻 text，`at` 断言未动、只是相邻合并；新增 `array_report` 三视图助手（段数组 JSON / `raw_message` / `message` 纯文本）、`array_value_folds_every_inbound_false_code_verbatim`（20 例，混入码名大写、段名内空格、大写键名、`&#44;` 转义、JSON 值与 stream 冒号语法；先断言确被 parse 成码段再断言整段折回，避免顺从「解析失败本来就留 text」这条与本位无关的路径，并断言 `message` 文本与 `raw_message` 逐字节一致）、`array_value_keeps_structured_image_segment_while_folding_typed_image_code`（真附件与手打码混排）。**门禁**：`cargo test --workspace` 43 suites / 1373 passed / 0 failed（P72 时点实测，lead 独立复核通过；当前基线见下方 P73 子节），`cargo clippy` 零告警、`cargo build --release` Finished、`cargo fmt --all -- --check` 退出码 0
+
+### at 段占位符直出（Rust 侧 P73，2026-11-14）
+
+P72 之后最后一个手打码位偏差收口。Go 的 `ConvertToSegmentedMessage`（`handlers/message_parser.go:2182-2336`）从不解析正文里的 CQ：`at` 段只由 `<@!?([0-9A-Fa-f]+)>` 正则（`:49` 的 `incomingAtRe`）对占位符展开产出，`<@all>` 等非 hex 形态原样留 text。Rust 原先靠 `revert_mentions` 合成 `[CQ:at,qq=…]`、再由 `CodeSpec::inbound` 回解成段——既让手打 `[CQ:at,…]` 被类型化（与 Go 不一致），又使该位无法收假。
+
+- **修改**：`crates/gensokyo-runtime/src/inbound.rs` 的数组形态改为「Go 同款 NUL 哨兵 `"\x00ATPH%d\x00"` 正文 + at 槽位表」，`reported_message` 数组臂删除 `cqcode::parse`，由 `expand_at_placeholders` 在「条件 trim → 去首个 `/`」之后按哨兵切片直出 text/at 段（顺序与「找不到哨兵就跳过、不中断」照 Go `:2269-2323`）；at 段用 `Segment::new("at").param("qq", …)` 构造，不用 `Segment::at`（规避 id 规范化风险）；`push_text_segment` 随最后一个 `cqcode::parse` 调用点删除（全仓 grep 零调用）；码表 `at.inbound` 由 true 改 false，`CodeSpec::inbound` 自此**无生产读取点**，与 `params`/`outbound` 同属描述性元数据；`crates/gensokyo-runtime/src/lib.rs` 模块文档按新口径改写。
+- **影响**：手打的 `[CQ:at,qq=…]` 与 Go 一致按原文留 text；真实 `@` 仍由 `<@!hex>` 占位符产 at 段；非 hex（如 `<@all>`）原样留 text（`MentionEveryone` 全 Go 仓零消费）；出站 `at_everyone.rs` 未动，`raw_message` 字节不变。
+- **测试**：Go `handlers/zzzz_inbound_at_order_test.go`（`TestInboundAtOrderPreserved`）的 8 组 `wantStr`/`wantArr` 逐字移植 + 交叉不变式（段数组拼回 == `raw_message`）+ 非 hex / 前导零 / 超 i64 / 哨兵丢失 / 连续多 `@` 五类边界；门禁 `cargo test --workspace` **43 suites / 1379 passed / 0 failed**、`cargo clippy` 零告警、`cargo build --release` Finished、`cargo fmt --all -- --check` 退出码 0。**说明**：按磁盘与并发纪律未运行 Go 侧 `go test`，Go 依据为源码与测试期望值的静态核对。
 
 ---
 
@@ -301,7 +309,7 @@ P69 登记的那项入站口径差异（`inbound` 位比 Go 实际产出集超�
 
 ### CQ 码表元数据与口径校准（Rust 侧 P69，2026-11-14）
 
-只动 `crates/gensokyo-protocol/src/cqcode.rs`，**零行为变化**；完整口径见 `docs/rust-m0.md` R4q 与 parity 报告 B4。
+只动 `crates/gensokyo-protocol/src/cqcode.rs`，**P69 本波零行为变化**（真正改动上报行为的是后续 P72，见「🐛 修复」段同名子节）；完整口径见 `docs/rust-m0.md` R4q 与 parity 报告 B4。
 
 - **修改**：`ark.params` 由 `["data"]` 改为**入站三键** `["ark_type", "ark_name", "prompt"]`——Go 入站的 CQ 文本形态只有这三键（`handlers/message_parser.go:2496-2498`），`fields` 只进段 JSON 的 `data`（`arkSegmentData`，`:2432-2444`），而出站对 ark **整段剥离、一个参数都不读**（`handlers/cqcode.go:198`、`:203-206` + `handlers/cqparse/handlers_control.go:26` 的 `inboundOnlyHandler`）⇒ 旧值在两个方向都不成立，不是「出站口径」；`CodeSpec` 三字段的消费者写实——`params` 是**纯描述性元数据**（全仓唯一读取点是同文件测试模块遍历 `CODES` 的往返用例，读 `spec.params`）、`inbound` **是行为开关**（唯一生产消费者 `crates/gensokyo-runtime/src/inbound.rs:1622` 的 `reported_message`，决定 `array_value` 上报时用户手打的 `[CQ:x,…]` 落成类型化段还是折回 text 段）、`outbound` **无生产消费者**（只有测试模块 `code_spec(…).outbound` 那组断言）；`face` **当时**维持 `inbound: true` 并在码表 `face` 条目的注释里写明「这一位管的是用户手打要不要类型化，与 Go 是否产出 `CQ:face` 无关」——**该结论已被 P72 推翻并收假**（见「🐛 修复」段的 P72 子节）。`cqcode.rs` 的行号随码表与用例增删浮动，上述位置一律**按符号定位**
 - **影响**：**P69 本波零行为变化**（改的是「按元数据推断行为」的误导面）；由它牵出的入站口径差异当时登记为待裁决项，**现已由 P71 取证、P72 裁决并实施**——终态与影响面见「🐛 修复」段的「`array_value` 手打 CQ 折回 text（P72）」子节，本条只保留取证轨迹，不再作结论
@@ -317,6 +325,127 @@ P69 登记的那项入站口径差异（`inbound` 位比 Go 实际产出集超�
 ## ✅ 提交记录
 
 ```
+791734b  docs: P69/P70/P71/P72 文档收口与取证轨迹留档
+15b1a4e  fix: array_value 手打 CQ 按原文折回 text（P72，收 18 码位）
+ebe26c3  feat: user_info 写侧闭环 + 码表元数据口径修正（P64b / P69① / P70）
+3095302  docs: 交接文档 + P59/P64a/P65 文档收口
+970f60d  fix: 裸媒体码按臂判定 + get_friend_list 读侧（P59/P59b/P64a）
+cc7e479  docs: 新增换机迁移手册 docs/rust-migrate.md
+ff72776  docs: 补「迁移到新机器」与构建缓存位置约定
+a4a1312  feat: 出站 URL 转换管线 + QR 侧发送 + 重试/voice 别名收口（P56-T3/T4 · P57）
+53b81d9  feat: P56 前段——SSRF 守卫 + xurls 移植 + QR 生成（①/T1/T0+T2）
+aeabe8c  feat: lotus 客户端模式 boot 装配 + 文档 + 评审修复（P55-P4/P5）
+5ca58f3  feat: lotus HTTP 回退桥 + type 全表（P55-P3）
+032a40d  feat: 构建链自动引导 zig/cargo-zigbuild（Linux 交叉免安装）
+30c0c69  feat: IdMapStore 远程分支 + lotus 模式判定（P55-P2）
+4fbfd5d  feat: lotus gRPC 客户端 RemoteBridge 专职桥线程（P55-P1）
+857817e  docs: 纠正 parity 过期状态（union_webhook P17 / AppID-BotID P15 已实现）
+65a77fb  feat: 段 JSON 键序对齐 Go + 判等顺序无关（P53/P54）
+594c9d4  feat: ark fields 真对象化（P52）
+662cbd5  feat: 入站媒体段 + 评审收口（P50/P51）
+b10aaca  feat: /getid type 14 对齐 + gRPC RPC 14（P49）
+c54d968  feat: /getid type 5/12 重绑定 + gRPC RPC 5/6（P47/P48）
+65b625e  feat: union_id 入站切换 + 配置清洗 + /uploadrecord（P42/P43/P44/P45/P46）
+caec0be  docs: 补端到端复测 §4.4（Rust 最终 release vs 最新 Go，2026-11-10）
+2805da2  perf: 统一共享 HTTP 传输（P41）
+7b3309a  docs: 里程碑补 R4h 波次（P33/P36/P38/P39/P40）
+36fb95b  perf: mimalloc 分配器 + 短链/配置自愈接线 + unioncache（P33/P36/P38/P39/P40）
+6122182  feat: parity 余项与运行效率波次（P29b/P30/P31/P34/P35/P37）
+328189f  docs: parity 表与里程碑回写 R4f 波次（P20/P21/P26/P27/P28/P29a）
+1a5dd7f  feat: 入站 mention/审核/端点/分片媒体补齐波次（P20/P21/P26/P27/P28/P29a）
+b3ce791  feat: 连接/入站/端点/传输补齐波次（P15/P17/P18/P19/P22/P24/P25）
+890ee0e  feat: /uploadpic 系列 + /getid 端点与 WebUI 日志流（P14 + P16）
+0fb10d4  feat: oss 三后端（0~3）与 botstats 生产接线（P13 + P12b）
+f85a9e4  feat: 图床接线（P11）与 /metrics + botstats（P12）
+6b8a7cb  feat: parity 审计后修复波次——连接/入站/出站/WebUI/迁移全面对齐
+2c7f058  feat: idmap legacy-export 导出器（G1）
+5cca076  docs: #70 网关收尾文档 + parity 审计状态更新
+2fcb05e  chore: Cargo.lock 补 gensokyo-actions 的 tokio 依赖边
+9e71c31  feat: 下游分发接线——反向 WS action 派发 + 正向 WS 事件下发（P4）
+e1f822c  feat: get_group_list 逐群节流（P2）
+3fcb426  feat: 多媒体段与卡片+媒体拆分发送（P1）
+dfee81b  feat: QQ 上游事件 WebSocket 网关客户端（#70）
+feec3c8  docs: Go-Rust 全链路 parity 审计总表（A/B/C 三分域，含缺口与优先级）
+8c69129  feat: SSM 22009 补发（#65）
+34cc131  test: 运行时测试注入临时 idmap，消除 cwd redb 污染（#69 修复）
+83fd328  feat: 出站懒消息 / "2000" 主动推送 / msg_seq 解析（#66b）
+d94704e  docs: rust-m0 里程碑回写 R4b 波次（MSRV/金样/热重载/markdown素材链/WS缓冲/拆分/echo+idmap接线）
+b3612c9  chore: gitignore 兜底忽略 idmap redb 测试库
+ead507c  feat: idmap 生产接线（#69）
+90abe64  feat: EchoStore 生产接线与入站喂池（#66a）
+ad7cd10  feat: markdown 与 CQ 媒体同条时按 Go 口径拆分发送（#64）
+5fe3e86  feat: 反向 WS 写失败缓冲（对齐 Go sendFailures/processFailedMessages）
+5d1d19f  test: 入站金样回放（15 类事件 Go↔Rust 对齐）与 hash_id vUIN 支持
+0f42d6e  feat: markdown 正文本地图经官方素材链替换（#62，对齐 Go ResolveMarkdownImages）
+1d87aba  feat: 接线配置热重载（ConfigWatcher）到运行时启动链
+89befb6  test: 黄金入站样本生成器（goldengen build tag）与 15 类 fixture（time 归一化、复跑 SHA256 一致）
+74bd69c  ci: 新增 MSRV job 钉 1.90；reqwest default-features 上提根 manifest（成员覆写在 Cargo <=1.98 拒绝解析）
+18f6894  docs: actions/lib.rs 媒体上传与 echo 回写表述按 deferred 现状更正
+19669c9  docs: rust-m0 未建清单按代码现状对账（热重载/idmap/echo/四连接/媒体/WebUI 已建，余 MSRV job 与黄金样本回放/M4）
+4f3836f  docs: R4a 与素材 DTO 修复回写里程碑与审计缺口表述
+da3fe3c  feat: wakeup 发送终局回推 c2c_wakeup_resp notice（R4a）
+ab79a50  fix: 素材管理 DTO 数值字段兼容官方字符串下发
+fbe28a7  docs: R3 里程碑收尾——rust-m0 回写 + 官方 API 审计接线对账
+c6b44a2  feat: 出站发送链接线——raw/wakeup/sse/合并转发（R3b）
+bbee6d6  feat: get_group_list 真实化——idmap 枚举 + 逐群信息聚合（R3a）
+a60c4ed  feat: Rust 端点补齐与出站段类型放开（M3）
+8e7daa1  fix: 短签名图床外链不得进入出站与对外接口，回退本地公网 URL
+4cd83d9  fix: xtask 跨目标 skip 提示带 --toolchain，0 产物给出可操作指引
+9d9e254  fix: build.ps1 自动选择 Rust 工具链，无 MSVC 时回退 GNU
+5692f51  fix: ChatGLM 短签名图床自取转传，修复 QQ 图片不显示
+6decc56  fix: 仓库自带 webui/dist 占位文件，clean clone 可直接构建 Go 与 Rust
+26dd81b  docs: 图床实测状态标注（2026-11-07）
+0c48237  docs: 站点审计回改——wakeup/cq-active/card 口径与代码对齐
+dc838ae  feat: CQ 码解析全路径最大兼容统一
+f9eb538  feat: CQ 码参数空白容错全量适配
+6bb967e  docs: 审计报告补记 CQ at 参数顺序的已知差异
+67f6522  fix: 统一 CQ at 段的空白容错与非法段口径
+0a95b52  docs: 入库 QQ 官方能力全量复核报告
+d00a5ff  feat: 对齐 QQ 官方 2026-10 三条新能力并完成双侧全量复核
+5391096  docs: 性能对比改为 10 轮均值与标准差
+f2c882c  test: action 数量断言改为动态
+789575a  feat: deferred 媒体上传/reply/echo 与 POST / 修复（M1r）
+c0fdf21  feat: 剩余 action 与面板/互动占位（M1q）
+9992a9b  feat: markdown/card/stream 出站模型（M1p）
+2c3e0a6  docs: 补充 Rust/Go 同负载性能对比
+f0c6537  ci: 占位 index 含 WebUI 字样，匹配运行期断言
+982768f  feat: bin 装配 QQ 客户端与 47 actions
+eb6bf3f  ci: 构建前创建 webui/dist 占位；补性能优化记录
+8199231  feat: gRPC IDMapService（tonic/prost）
+d6e225a  feat: action 全量注册与 deferred 发送执行（M1o）
+6200e66  feat: 入站 12 类事件与 text_intent（M1n）
+38ca39d  feat: action 批次二与 async 变体（M1m）
+b0714e9  feat: silk 编解码外部进程封装（M2d）
+3366503  feat: 再实现 12 个常用 action（M1l）
+e5247cf  perf: 事件反序列化手写实现（-40%）
+56d6de4  build: 构建链 Rust 化（xtask build + build.ps1 薄包装）
+074708c  fix: 健康检查改用 /health
+75640c6  feat: WebUI 挂载与 /health（M3 集成）
+b5cf811  feat: 6 个查询/管理 action 与 QqApi 抽象（M1k）
+700d689  feat: 图片压缩与 image 特性收窄（M2c）
+f4fafa4  perf: CQ 解析热路径优化（约 2x）
+63bfc7e  feat: WebUI 静态资源与 cookie 登录（M3）
+69421a6  refactor: Handler 异步化并移除 spawn_blocking
+a696bb6  perf: 发布配置与热路径基线
+a753da2  feat: 二进制装配与 CLI（M1j）
+83143bd  feat: 反向 WS/webhook/入站事件转换（M1h-b）
+8e8f0c7  feat: 图片尺寸与图床抽象（M2b）
+28e19cb  feat: 文本类出站 action 规划层（M1i）
+28d9e79  feat: 运行时正向 WS/HTTP 与 dispatcher（M1h-a）
+3e71afd  feat: 媒体基础能力 M2a（下载/解析/格式识别）
+09946d2  feat: QQ OpenAPI 客户端（M1g）
+39749cc  feat: OneBot V11 协议层（M1f）
+68c6054  fix: echo 清理保留懒消息表并解除引用环
+fb92211  fix: 修复 macOS 下配置监听路径不匹配
+ec73c74  feat: echo 内存层与消息行号算法（M1e）
+8cb5d2c  feat: redb 存储层与 idmap 本地核心（M1d）
+7b44650  feat: 配置热重载与模板生成（M1c）
+6c5f247  feat: 配置访问器与宽容解析补齐（M1b）
+bd14e36  feat: 配置层全量对齐 Go Settings（M1a）
+4b64df6  feat: 引入 Rust 重写 M0 脚手架
+68efccd  chore: 升级漏洞依赖与工具链
+4977720  fix: 修复 wsclient Close/Reconnect 竞态（send on closed channel）
+86d9415  docs: CHANGELOG_v016 补本轮提交记录
 eca1843  fix: 官方口径再对齐（token 域名 / 5M 直传阈值 / dto.User 字段）
 8f3cfdb  docs: 修复 3 处失效相对链接（语法参考 cq-set_group / API介绍 本版新增功能 / 入群申请列表 readme）
 c1c6470  feat: 对齐官方 v2 现文档（群管理契约 / 入站事件字段 / 5MB 直传 / 错误码）
