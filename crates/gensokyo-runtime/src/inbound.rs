@@ -74,7 +74,11 @@
 //!   `cqparse.EncodeValue`）；`attachments` / `msg_elements` 整数组 `null` 按空数组收
 //!   （[`null_as_default`]，对齐 Go `[]*T`）。
 //! - **正文明文处理**（`<@OpenID>` mention 反解 → 自身 @ 剥离 → trim → 去首个 `/`）见
-//!   [`Inbound::revert_mentions`]，字符串形态与段数组形态各按 Go 自己的路径算一遍。
+//!   [`Inbound::revert_mentions`]，字符串形态与段数组形态各按 Go 自己的路径算一遍：字符串
+//!   形态把真实 @ 写成 `[CQ:at,qq=…]` 文本，段数组形态写成 NUL 哨兵并在槽位表里存 `qq` 值，
+//!   由 [`expand_at_placeholders`] 在 trim / 去前缀之后切片成 text/at 段——数组路径不解析
+//!   正文里的 CQ，用户手打的 `[CQ:…]` 留在 text 原文（P73，对齐 Go
+//!   `ConvertToSegmentedMessage` `handlers/message_parser.go:2253-2334`）。
 //!   @bot 判定用「事件 `mentions[]` 的 `is_you`/`bot` 标记 + BotID / AppID」，消息作者
 //!   本人永不当作 @bot（`is_you` 在多实例场景会误标发送者）。与 Go 的差异：Go 另有进程级
 //!   `selfAtIDs` 跨事件记忆（`RememberSelfAtID`），本仓不引入跨请求的全局可变表。
@@ -103,7 +107,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use gensokyo_config::{ConfigManager, Settings};
 use gensokyo_core::telemetry::metrics;
 use gensokyo_core::{Ob11Id, acnode};
-use gensokyo_protocol::cqcode::{self, code_spec};
+use gensokyo_protocol::cqcode;
 use gensokyo_protocol::event::{
     HeartbeatStatus, MessageEvent, MessageType, MetaEvent, NoticeEvent, RequestEvent, Sender,
 };
@@ -588,22 +592,29 @@ impl Inbound {
     /// 「全量群消息或 `remove_at`」trim 一次，最后按 `remove_prefix` 去掉第一个 `/`。
     /// mention 一律**原位**替换或剥离，不前移、不重排；反查失败的 `<@OpenID>` 原样留在原位。
     ///
-    /// `string_form` 选形态，两形态的差异只在开头与 trim 条件：
+    /// `string_form` 选形态，两形态的差异在开头、trim 条件与真实 @ 的落点：
     ///
-    /// - `true`（字符串路径）：`" "` / `"/ "` / `" / "` 归一成 `" "`，并先 trim 前后空白。
+    /// - `true`（字符串路径）：`" "` / `"/ "` / `" / "` 归一成 `" "`，并先 trim 前后空白；
+    ///   真实 @ 原位写成 `[CQ:at,qq=…]` 文本，[`RevertedText::at_ids`] 恒空。
     /// - `false`（段数组路径）：只有 `" "` 被保护，没有初始 trim（Go 只在 at 处理之后
-    ///   按 `is_full_group_message || remove_at` trim）。
+    ///   按 `is_full_group_message || remove_at` trim）；真实 @ 原位只写 NUL 哨兵
+    ///   `\0ATPH{n}\0`，`qq` 值按出现顺序进 [`RevertedText::at_ids`]，由
+    ///   [`expand_at_placeholders`] 在 trim / 去前缀**之后**切片成段（P73）。哨兵是内部
+    ///   暂存，展开后必然清零，绝不进上报文本；段数组路径因此完全不经过 CQ 解析。
     ///
     /// 自身 @ 的剥离范围：全量群消息（`GROUP_MESSAGE_CREATE`）**恒剥离**，与 `remove_at`
     /// 无关；`GROUP_AT_MESSAGE_CREATE` 只在 `remove_at = true` 时剥离，否则还原成
     /// `[CQ:at,qq=<self_id>]`（Go `message_parser.go:1876-1883` / `:2262-2276`）。
+    ///
+    /// 非 hex 占位符（`<@all>` 等）不被 [`scan_mentions`] 匹配，两形态都原样留文本——
+    /// Go `incomingAtRe` 只认 `[0-9A-Fa-f]+`，`MentionEveryone` 入站侧零消费。
     fn revert_mentions(
         &self,
         settings: &Settings,
         content: &str,
         ctx: &MentionContext<'_>,
         string_form: bool,
-    ) -> String {
+    ) -> RevertedText {
         // 「保护态」正文：用户就想发一个空格/斜杠，前后两次 trim 都不碰。
         let (text, protected) = match (string_form, content) {
             (_, " ") | (true, "/ " | " / ") => (" ".to_owned(), true),
@@ -612,6 +623,7 @@ impl Inbound {
         };
         let strip_self = ctx.full_group || settings.get_remove_at();
         let mut out = String::with_capacity(text.len());
+        let mut at_ids: Vec<String> = Vec::new();
         let mut last = 0;
         for (range, user) in scan_mentions(&text) {
             out.push_str(&text[last..range.start]);
@@ -620,10 +632,10 @@ impl Inbound {
                 if !strip_self {
                     // mentions 判定的 @bot 可能不在 idmap 里（反查失败），退回 self_id 形态
                     let qq = resolved.unwrap_or_else(|| self.self_id_of(settings).to_string());
-                    out.push_str(&format!("[CQ:at,qq={qq}]"));
+                    emit_at(string_form, &mut out, &mut at_ids, qq);
                 }
             } else if let Some(qq) = resolved {
-                out.push_str(&format!("[CQ:at,qq={qq}]"));
+                emit_at(string_form, &mut out, &mut at_ids, qq);
             } else {
                 // 未开启转换 / idmap 查不到：原样保留在原位
                 out.push_str(&text[range.clone()]);
@@ -641,9 +653,10 @@ impl Inbound {
             && let Some(idx) = text.find('/')
         {
             // Go 去掉的是正文里**第一个** `/`，不限位置（`message_parser.go:1906-1911`）。
+            // 段数组路径同样在这一步之后才展开哨兵（Go `:2298-2306`）。
             text.remove(idx);
         }
-        text
+        RevertedText { text, at_ids }
     }
 
     /// `<@user>` 是否为 @bot 自身（Go `isIncomingSelfAt`）。
@@ -1038,7 +1051,7 @@ impl Inbound {
         // 前缀在其后才前置：字符串形态的 `message` 与 `raw_message` 都是这一串
         let media = media_cq_text(&payload);
         let content = bot_id_to_app_id(settings, &payload.content, self.bot_id.as_deref());
-        let text = self.revert_mentions(settings, &content, &ctx, true);
+        let text = self.revert_mentions(settings, &content, &ctx, true).text;
         let string_form = format!("{text}{media}");
         let raw_message = reported_group_content(settings, &string_form, flavor);
         // 段数组形态与字符串形态不同源：Go `ConvertToSegmentedMessage` 从 `data.Content`
@@ -1047,7 +1060,7 @@ impl Inbound {
         let segment_source = if settings.get_array_value() {
             self.revert_mentions(settings, &content, &ctx, false)
         } else {
-            String::new()
+            RevertedText::EMPTY
         };
         let message = reported_message(settings, &segment_source, &raw_message, &payload);
         Ok(Event::Message(MessageEvent {
@@ -1123,12 +1136,12 @@ impl Inbound {
         let content = bot_id_to_app_id(settings, &payload.content, self.bot_id.as_deref());
         // 单聊在 Go 里同样走 `RevertTransformedText`（`ProcessC2CMessage.go:104`），
         // 只是没有 `mentions`、也不算全量群消息；媒体码同样接在正文之后。
-        let text = self.revert_mentions(settings, &content, &ctx, true);
+        let text = self.revert_mentions(settings, &content, &ctx, true).text;
         let string_form = format!("{text}{media}");
         let segment_source = if settings.get_array_value() {
             self.revert_mentions(settings, &content, &ctx, false)
         } else {
-            String::new()
+            RevertedText::EMPTY
         };
         let message = reported_message(settings, &segment_source, &string_form, &payload);
         Ok(Event::Message(MessageEvent {
@@ -1606,53 +1619,106 @@ fn reported_group_content(settings: &Settings, content: &str, flavor: GroupFlavo
     format!("[CQ:at,qq={}] {content}", settings.get_app_id())
 }
 
-/// 上报 `message` 字段：`array_value` 打开时按 CQ 解析成消息段数组，否则用字符串形态。
+/// [`Inbound::revert_mentions`] 的产物：处理后的正文 + 段数组形态的 at 槽位表。
+///
+/// 字符串形态（`string_form = true`）的正文里已含 `[CQ:at,qq=…]`，[`Self::at_ids`] 恒空。
+/// 段数组形态（`false`）的真实 @ 只是 NUL 哨兵 `\0ATPH{n}\0`，`at_ids[n]` 按出现顺序存它的
+/// `qq` 值，上报前由 [`expand_at_placeholders`] 切片成段——与 Go
+/// `ConvertToSegmentedMessage` 的「先占位、文本级处理完再按序展开」两步
+/// （`handlers/message_parser.go:2253-2280` 与 `:2304-2330`）一一对应，段数组不经过
+/// 任何 CQ 解析（P73）。
+struct RevertedText {
+    /// 处理后的正文；段数组形态下仍带哨兵，**不得**直接上报。
+    text: String,
+    /// 哨兵序号 → OneBot `qq` 值（下标即 Go `placeholders` 里 `len(placeholders)` 的序号）。
+    at_ids: Vec<String>,
+}
+
+impl RevertedText {
+    /// `array_value` 关闭时的占位：[`reported_message`] 走字符串臂，两个字段都不读。
+    const EMPTY: Self = Self {
+        text: String::new(),
+        at_ids: Vec::new(),
+    };
+}
+
+/// 段数组形态暂存真实 @ 的哨兵（Go `fmt.Sprintf("\x00ATPH%d\x00", len(placeholders))`，
+/// `handlers/message_parser.go:2274` / `:2278`）。NUL 不是 QQ 正文里的字符，
+/// 序号在单次处理内唯一，展开时按槽位表逐个删除，展开后正文不含 NUL。
+fn at_placeholder(ordinal: usize) -> String {
+    format!("\0ATPH{ordinal}\0")
+}
+
+/// 一处真实 @ 在两种形态下的落点：字符串形态直接写 `[CQ:at,qq=…]`，段数组形态写哨兵
+/// 并把 `qq` 值追加进槽位表（Go `:1876-1883` 与 `:2269-2280`）。
+fn emit_at(string_form: bool, out: &mut String, at_ids: &mut Vec<String>, qq: String) {
+    if string_form {
+        out.push_str(&format!("[CQ:at,qq={qq}]"));
+        return;
+    }
+    out.push_str(&at_placeholder(at_ids.len()));
+    at_ids.push(qq);
+}
+
+/// 按哨兵切片直出 text/at 段（Go `ConvertToSegmentedMessage` 的展开循环，
+/// `handlers/message_parser.go:2304-2330`）。
+///
+/// 段数组路径的正文段只有这一个来源，所以不解析正文里的 CQ：用户手打的 `[CQ:…]`
+/// （含 `[CQ:at,…]`）留在 text 原文，与 Go 同构（P73）。空文本切片不落段（Go 的
+/// `before != ""`），找不到哨兵的槽位跳过而不中断（Go `:2308-2311`，理论不可达的兜底）。
+fn expand_at_placeholders(text: &str, at_ids: &[String]) -> Vec<Segment> {
+    let mut segments: Vec<Segment> = Vec::new();
+    let mut rest = text;
+    for (ordinal, qq) in at_ids.iter().enumerate() {
+        let placeholder = at_placeholder(ordinal);
+        let Some(index) = rest.find(&placeholder) else {
+            continue;
+        };
+        let before = &rest[..index];
+        if !before.is_empty() {
+            segments.push(Segment::text(before));
+        }
+        // 刻意不走 `Segment::at`：那条把值交给 `Ob11Id` 转一手再 Display 回来
+        // （`gensokyo-protocol/src/segment.rs:190-194`），而这里的 `qq` 必须逐字节等于
+        // Go 的 `p.atID` 字符串；`Ob11Id` 一侧另有 `id_param` / `parse_id` 这种
+        // 「纯数字就还原成 Num」的口径，把保真责任寄托在别人的 Display 上不该做。
+        segments.push(Segment::new("at").param("qq", qq.clone()));
+        rest = &rest[index + placeholder.len()..];
+    }
+    if !rest.is_empty() {
+        segments.push(Segment::text(rest));
+    }
+    segments
+}
+
+/// 上报 `message` 字段：`array_value` 打开时按哨兵切成 text/at 段数组，否则用字符串形态。
 ///
 /// 两种形态读的正文不同：Go 字符串路径上报 `messageText`（含 `add_at_group` 前缀，
 /// `ProcessGroupNormalMessage.go:148-150` / `:176`），数组路径的
 /// `ConvertToSegmentedMessage` 则从 `data.Content` 重算（`handlers/message_parser.go:2182`），
-/// 前缀不进段数组。`content` 传段数组形态的正文（[`Inbound::revert_mentions`] 的
+/// 前缀不进段数组。`source` 传段数组形态的产物（[`Inbound::revert_mentions`] 的
 /// `string_form = false` 结果，`array_value` 关闭时不读），`string_form` 传字符串形态。
-/// 段名不在入站码表（[`code_spec`] 查无此项或 `inbound` 为假，例如用户手打的 `[CQ:remove,…]`）
-/// 时折回 text 原文，不向客户端交出它不认识的段；相邻 text 段合并成一段，
-/// 与 Go 文本段「连续切片」的粒度一致。
 ///
-/// 段数组末尾还要接图片段与事件段（[`image_segments`] / [`message_event_segments`]）；
+/// 数组臂的段来源与 Go 一样只有三条（P73）：[`expand_at_placeholders`] 展开的哨兵、
+/// [`image_segments`] 的附件图片段、[`message_event_segments`] 的结构化事件段——整条路径
+/// **不解析正文里的 CQ**，用户手打的任何 `[CQ:…]` 一律留在 text 原文，
+/// `CodeSpec::inbound` 在本仓已无消费点。
+///
 /// 字符串形态的媒体码由调用方并进 `string_form`（[`media_cq_text`]），这里只管形态选择。
 fn reported_message(
     settings: &Settings,
-    content: &str,
+    source: &RevertedText,
     string_form: &str,
     msg: &QqMessage,
 ) -> MessageContent {
     if !settings.get_array_value() {
         return MessageContent::Text(string_form.to_owned());
     }
-    let mut segments: Vec<Segment> = Vec::new();
-    for segment in cqcode::parse(content) {
-        match code_spec(&segment.kind) {
-            Some(spec) if spec.inbound && !segment.is_text() => segments.push(segment),
-            // `raw_or_cq` 保留码段原始字节：解析失败的码本就在 text 段里，未知段名也按原文折回
-            _ => push_text_segment(&mut segments, segment.raw_or_cq().as_ref()),
-        }
-    }
     // 图片段排在正文段之后，事件段再排图片段之后（Go `handlers/message_parser.go:2331-2334`）
+    let mut segments = expand_at_placeholders(&source.text, &source.at_ids);
     segments.extend(image_segments(msg));
     segments.extend(message_event_segments(msg));
     MessageContent::Array(segments)
-}
-
-/// 追加文本段并合并相邻文本（空串不落段）。
-fn push_text_segment(segments: &mut Vec<Segment>, text: &str) {
-    if text.is_empty() {
-        return;
-    }
-    if let Some(last) = segments.last_mut().filter(|segment| segment.is_text()) {
-        let merged = format!("{}{text}", last.get("text").unwrap_or_default());
-        *last = Segment::text(merged);
-        return;
-    }
-    segments.push(Segment::text(text));
 }
 
 /// 消息事件新增字段（语音附件 / 结构化卡片 / 引用 / 嵌套正文）的降级单元。
@@ -2117,9 +2183,10 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        auto_approved_pair, parse_rfc3339, scan_mentions, strip_extension, timestamp_of,
-        verify_comment,
+        at_placeholder, auto_approved_pair, expand_at_placeholders, parse_rfc3339, scan_mentions,
+        strip_extension, timestamp_of, verify_comment,
     };
+    use gensokyo_protocol::Segment;
     use serde_json::json;
 
     /// `strip_extension` 对齐 Go `filepath.Ext` + `TrimSuffix`（go1.26.10 实测）：
@@ -2156,6 +2223,97 @@ mod tests {
         let (range, id) = &found[0];
         assert_eq!(*id, "AB");
         assert_eq!(&text[range.clone()], "<@AB>");
+    }
+
+    /// 哨兵切片直出段：text 与 at 按原序交错，空文本切片不落段（Go `:2304-2330`），
+    /// 且展开后不留任何 NUL——哨兵是内部暂存，绝不能泄漏进上报文本。
+    #[test]
+    fn expand_at_placeholders_slices_in_go_order() {
+        let text = format!("头{} 中 {}尾", at_placeholder(0), at_placeholder(1));
+        let ids: Vec<String> = vec!["11".to_owned(), "22".to_owned()];
+        let segments = expand_at_placeholders(&text, &ids);
+        assert_eq!(
+            segments,
+            vec![
+                Segment::text("头"),
+                Segment::new("at").param("qq", "11"),
+                Segment::text(" 中 "),
+                Segment::new("at").param("qq", "22"),
+                Segment::text("尾"),
+            ]
+        );
+        for segment in &segments {
+            assert!(
+                !segment.get("text").unwrap_or_default().contains('\0'),
+                "NUL 哨兵不得泄漏进上报文本: {segment:?}"
+            );
+        }
+    }
+
+    /// 连续多个 @：槽位序号按出现顺序递增，相邻 at 之间不产生空 text 段。
+    #[test]
+    fn expand_at_placeholders_numbers_consecutive_mentions() {
+        let text = format!(
+            "{}{}{}",
+            at_placeholder(0),
+            at_placeholder(1),
+            at_placeholder(2)
+        );
+        let ids: Vec<String> = vec!["7".to_owned(), "8".to_owned(), "7".to_owned()];
+        let segments = expand_at_placeholders(&text, &ids);
+        let kinds: Vec<&str> = segments
+            .iter()
+            .map(|segment| segment.kind.as_str())
+            .collect();
+        assert_eq!(kinds, vec!["at", "at", "at"], "空文本切片不得落成 text 段");
+        let qqs: Vec<&str> = segments
+            .iter()
+            .map(|segment| segment.get("qq").expect("at 段必须带 qq"))
+            .collect();
+        assert_eq!(qqs, vec!["7", "8", "7"], "序号错位就会取到别人的槽位");
+    }
+
+    /// 前导零与超出 `i64` 的超长数字串：`qq` 必须逐字节等于槽位里的原始字符串。
+    /// 这一条钉住「不走 `Segment::at`（那是把值交给 `Ob11Id` 转一手）而用 `param` 直填」。
+    #[test]
+    fn expand_at_placeholders_keeps_qq_bytes_verbatim() {
+        for id in [
+            "007",
+            "000000000000000000007",
+            "9223372036854775808",
+            "123456789012345678901234",
+        ] {
+            let segments = expand_at_placeholders(&at_placeholder(0), &[id.to_owned()]);
+            assert_eq!(segments[0].get("qq"), Some(id), "qq 必须原样透传");
+            assert_eq!(
+                serde_json::to_value(&segments[0]).expect("段可序列化")["data"]["qq"],
+                json!(id),
+                "上报 JSON 里 qq 仍是同一串原始字节"
+            );
+        }
+    }
+
+    /// 找不到哨兵的畸形输入：跳过该 at、不中断，正文照常成段（Go `:2308-2311` 的兜底）。
+    #[test]
+    fn expand_at_placeholders_skips_missing_sentinel_without_interrupting() {
+        let ids: Vec<String> = vec!["1".to_owned(), "2".to_owned()];
+        let segments = expand_at_placeholders("正文里没有哨兵", &ids);
+        assert_eq!(
+            segments,
+            vec![Segment::text("正文里没有哨兵")],
+            "两个槽位都落空时正文整段留 text"
+        );
+        let partial = format!("头{}尾", at_placeholder(1));
+        let segments = expand_at_placeholders(&partial, &ids);
+        assert_eq!(
+            segments,
+            vec![
+                Segment::text("头"),
+                Segment::new("at").param("qq", "2"),
+                Segment::text("尾"),
+            ],
+            "只有 0 号哨兵丢失时，仅那一个 at 不产出，后面的段序不变"
+        );
     }
 
     #[test]

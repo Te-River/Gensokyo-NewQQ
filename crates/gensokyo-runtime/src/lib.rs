@@ -91,11 +91,12 @@
 //!   差异见该模块文档。
 //!
 //! # 未做项（后续里程碑）
-//! - 消息段：`array_value` 已生效（`message` 按 CQ 解析成段数组），image / record /
+//! - 消息段：`array_value` 已生效（`message` 按 Go `ConvertToSegmentedMessage` 口径成段：
+//!   正文只做整段切片 + `<@OpenID>` 哨兵展开，**不解析手打 CQ**），image / record /
 //!   ark / reply 段已按 `attachments` 与 `msg_elements` 产出（`inbound` 的
 //!   `image_segments` / `message_event_segments`）；**视频附件**仍不产段（Go M2-B 的
-//!   `image/` 前缀过滤，语音走 record 段）。手打的 `[CQ:…]` 一律按原文留 text，
-//!   仅 `at` 落类型化段（口径见 `gensokyo-protocol::cqcode::CodeSpec::inbound`）。
+//!   `image/` 前缀过滤，语音走 record 段）。手打的 `[CQ:…]`（含 `[CQ:at]`）一律按原文
+//!   留 text，`CodeSpec::inbound` 自 P73 起已无消费点。
 //! - `INTERACTION_CREATE`、`MESSAGE_AUDIT_*`、`FORUM_*`、`AUDIO_*`、频道 `GUILD_*` 未转换。
 //! - webhook 的 ed25519 签名校验与 `op=13` 回调校验已实现（ring 直连边），
 //!   `union_webhook` 罚壳扇出亦已实现（P17：异步转发、敏感头过滤、5s 超时）

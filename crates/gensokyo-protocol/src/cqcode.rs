@@ -658,26 +658,30 @@ impl fmt::Display for CqCode {
 
 /// 一个 CQ 码的静态说明（码表条目）。
 ///
-/// `inbound` 是行为开关（见 [`CodeSpec::inbound`]）；`params` 与 `outbound` 是**描述性
-/// 元数据**，全仓没有生产读取点（`params` 只被本文件的码表往返测试用），写错它们不动
-/// 行为，但会误导接手人——填之前先对齐 Go 的真实形态。
+/// 三个字段现在**都是描述性元数据**：`params` 只被本文件的码表往返测试用（写错不动行为），
+/// `outbound` 没有读取点（出站链路按码名显式分发），`inbound` 自 P73 起也没有读取点了
+/// （见 [`CodeSpec::inbound`]）。写错的代价不是行为回归，而是误导接手人——填之前先对齐
+/// Go 的真实形态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CodeSpec {
     /// 码类型。
     pub name: &'static str,
     /// 参数名（顺序即 Go 生成顺序）。
     pub params: &'static [&'static str],
-    /// `array_value` 段数组上报时，正文里**用户手打**的 `[CQ:x,…]` 是否落成类型化段。
+    /// 「Go 的 `array_value` 段数组上报会不会把正文里**用户手打**的 `[CQ:x,…]` 落成类型化段」。
     ///
-    /// 唯一消费点是 `gensokyo-runtime` 的 `inbound::reported_message`：真 → 落成类型化段；
-    /// 假 → 按原文逐字节折回 text 段（折回臂取码段原文，段名/键名归一只发生在落段臂）。
+    /// **P73 起本位已无生产读取点**，只剩描述性：曾经唯一的消费点
+    /// `gensokyo-runtime` 的 `inbound::reported_message` 改为按 NUL 哨兵切片直出 text/at 段，
+    /// 与 Go `ConvertToSegmentedMessage`（`handlers/message_parser.go:2253-2334`）同构——
+    /// 数组路径不再解析正文里的 CQ，所以手打形态一律留 text。
+    ///
+    /// 除 `text` 外全部取假（`text` 是历史遗留的真值：Go 的正文本来就整段落成 text 段，
+    /// 与「手打 `[CQ:text,…]` 落段」无关，且它在旧的落段臂里也被 `!segment.is_text()` 挡住）。
     ///
     /// 这一位**不是**「Go 是否支持该码」，也不是「入站是否会产出该段」：真实的 image /
-    /// record / ark / reply 段由 `inbound` 的 `image_segments` / `message_event_segments`
-    /// 按附件与 `msg_elements` 独立产出，与本位无关。Go `ConvertToSegmentedMessage`
-    /// （`handlers/message_parser.go:2253-2334`）对正文只做整段切片 + `<@OpenID>` 正则、
-    /// 不解析 CQ，所以手打形态一律留 text——除 `text` 与 `at` 外本位全部取假（P72，
-    /// `at` 为真的原因见码表该条注释）。
+    /// record / ark / reply 段由 `image_segments` / `message_event_segments` 按附件与
+    /// `msg_elements` 独立产出，真实的 at 段由 `revert_mentions` 写哨兵、
+    /// `expand_at_placeholders` 展开产出，都与本位无关。
     pub inbound: bool,
     /// 出站解析会消费该码。
     ///
@@ -694,11 +698,13 @@ pub const CODES: &[CodeSpec] = &[
         outbound: true,
     },
     CodeSpec {
-        // `inbound: true` 的唯一例外（结构性，另立 P73 处理）：真实 @ 由 `revert_mentions`
-        // 把 `<@OpenID>` 合成成 `[CQ:at,qq=…]`，再靠本位解回类型化段，置假会让真实 mention 全部退化成文本。
+        // 手打形态 Go 留 text：`ConvertToSegmentedMessage` 只做整段切片 + `<@OpenID>` 正则，
+        // 不解析 CQ（message_parser.go:2253-2334），所以本位与 reply / image 同口径取假（P73
+        // 收掉这最后一个例外）。真实的 at 段走另一条路：`revert_mentions` 写 NUL 哨兵、
+        // `expand_at_placeholders` 按序切片直出，全程不经本位、也不经 CQ 解析。
         name: "at",
         params: &["qq"],
-        inbound: true,
+        inbound: false,
         outbound: true,
     },
     CodeSpec {
@@ -1511,9 +1517,9 @@ mod tests {
         );
     }
 
-    /// 行为断言：face 段的透传字节保真。入站上报把 `[CQ:face,…]` 折回 text 段还是落成类型化段
-    /// 由 `CodeSpec::inbound` 决定（消费点在 `gensokyo-runtime::inbound::reported_message`），
-    /// 无论哪一路交给客户端的 CQ 文本都不该被规范化改写——这一条守住「改标记只换形态、不丢字节」。
+    /// 行为断言：face 段的透传字节保真。入站上报（`gensokyo-runtime::inbound`）已按 Go 口径
+    /// 不再解析正文 CQ，手打形态一律留 text（P73）；无论哪一路交给客户端的 CQ 文本都不该被
+    /// 规范化改写——这一条守住「改标记只换形态、不丢字节」，也让 `raw_or_cq` 的保真契约继续有钉。
     #[test]
     fn face_cq_text_is_preserved_verbatim() {
         let raw = "[CQ:face , id = 14, name=a&#44;b]";

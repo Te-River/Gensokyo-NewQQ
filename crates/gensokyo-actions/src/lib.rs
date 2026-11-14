@@ -47,7 +47,9 @@
 //! 4. 按 target 调 [`qqapi::QqApi::send_group_message`] / [`qqapi::QqApi::send_c2c_message`]，
 //!    最终回客户端 `data = {"message_id": …}`——计划本身（含 `deferred` 标记）不会泄漏。
 //!
-//! 尚未接线的部分：SSM / 懒消息（`[CQ:active]` 主动推送标记）与 markdown 正文内嵌本地图的素材链替换（#62 待办）。媒体上传与 echo 回写已在 `gensokyo-runtime` 的 deferred 执行链落地。
+//! 已在 `gensokyo-runtime` 的 deferred 执行链落地的部分：媒体上传与 echo 回写、SSM 补发（`code:22009`，
+//! 见该模块「SSM 补发」节）、懒消息与 `[CQ:active]` / `messageID == "2000"` 主动推送（同模块「被动回复身份与
+//! msg_seq」节）、以及 markdown 正文内嵌本地图的素材链替换（#62，`resolve_markdown_images`）。
 //!
 //! # 尚未实现
 //!
@@ -57,7 +59,8 @@
 //!   `[CQ:video]` / `[CQ:file]` 的 `local_*` / `url_*` / `base64_*` 三种来源经 Fetcher 取字节 →
 //!   `upload_group_file` / `upload_c2c_file` → `file_info` → `msg_type=7`；`MediaRef::Unknown` 直通不再上传。
 //!   限制（单条一个 media 槽、5MB、不压缩）见 `gensokyo-runtime::deferred`「媒体」节；
-//!   markdown 正文内嵌本地图的素材链替换尚未接线（#62）。
+//!   markdown 正文内嵌本地图的素材链替换已接线（#62，`gensokyo-runtime::deferred` 的
+//!   `resolve_markdown_images`：按 `oss_type` 分 OSS 直传 / 素材库 / 图床三条分支换成外链）。
 //! - **尚未接线**：`get_msg` / `get_forward_msg`（官方无查询端点）、`get_stranger_info` /
 //!   `send_like`（官方无端点）、`set_group_leave`（官方无退群端点）、
 //!   群荣誉 / 匿名禁言

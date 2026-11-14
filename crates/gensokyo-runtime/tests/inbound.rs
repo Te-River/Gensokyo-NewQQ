@@ -649,30 +649,31 @@ fn array_value_parses_plain_text_into_text_segment() {
     assert_eq!(raw, "hi", "raw_message 恒为字符串");
 }
 
-/// `array_value` 下 at 与 face 的分工（P72 收位后的口径）：
-/// - `at` 仍是类型化段——真实 @ 由 `revert_mentions` 把 `<@OpenID>` 合成成 `[CQ:at,qq=…]`
-///   再解回段，这一位结构性依赖，置假会让真实 mention 全部退化成文本（另立 P73）；
-/// - 手打的 `[CQ:face,…]` 折回 text 原文，并与相邻文本合并成一段——Go `ConvertToSegmentedMessage`
-///   的段类型只有 text/at/image 再加 record/ark/reply（`handlers/message_parser.go:2340`），
-///   对正文只做整段切片 + `<@OpenID>` 正则、不解析 CQ（同文件 `:2253-2334`）。
+/// P73 收位后的口径：段数组路径的正文段**只**来自 `revert_mentions` 的 NUL 哨兵与
+/// 附件 / 事件结构化段，整条路径不解析正文里的 CQ——所以手打的 `[CQ:at,…]` 与
+/// `[CQ:face,…]` 一样，按原文留在同一条 text 段里（对齐 Go `ConvertToSegmentedMessage`
+/// `handlers/message_parser.go:2253-2334`：只做整段切片 + `<@OpenID>` 正则）。
+/// 真实 @ 的 at 段仍照常产出，见下面 `array_form_emits_at_segment_in_place` 与
+/// `array_and_string_forms_match_go_inbound_at_order_cases`。
 #[test]
-fn array_value_keeps_at_segment_and_folds_typed_face_code() {
+fn array_value_folds_hand_typed_at_code_into_text() {
     let (segments, raw) = segments_of(&array_settings(true), "a[CQ:at,qq=10086]b[CQ:face,id=1]c");
     assert_eq!(
         segments,
-        vec![
-            json!({"type": "text", "data": {"text": "a"}}),
-            json!({"type": "at", "data": {"qq": "10086"}}),
-            json!({"type": "text", "data": {"text": "b[CQ:face,id=1]c"}}),
-        ]
+        vec![json!({
+            "type": "text",
+            "data": {"text": "a[CQ:at,qq=10086]b[CQ:face,id=1]c"}
+        })],
+        "手打的 at 不再落成类型化段（P73 收掉最后一个手打码偏差）"
     );
     assert_eq!(raw, "a[CQ:at,qq=10086]b[CQ:face,id=1]c");
 }
 
 #[test]
 fn array_value_degrades_unknown_codes_to_text() {
-    // `bogus` 不在码表；`remove` 是出站专用（inbound=false）。两者都折回 text 原文，
-    // 且相邻 text 合并成一段（与 Go 文本段「连续切片」的粒度一致）。
+    // `bogus` 不在码表；`remove` 是出站专用。两者都留在 text 原文，而且整段只有一条 text——
+    // 数组路径压根不解析正文（P73），没有「相邻 text 再合并」这一步：Go 的文本段本就是
+    // 两条哨兵之间的连续切片。
     let content = "a[CQ:bogus,foo=1]b[CQ:remove,user_id=9]c";
     let (segments, raw) = segments_of(&array_settings(true), content);
     assert_eq!(
@@ -708,16 +709,17 @@ fn array_report(content: &str) -> (Vec<Value>, String, String) {
     )
 }
 
-/// P72 收位：18 个 `inbound = false` 的码，手打形态一律按原文折回 text 段。
+/// 手打形态的码（P72 收位的那批 + P73 补上的 `at`），数组上报一律按原文留 text 段。
 ///
 /// Go `ConvertToSegmentedMessage`（`handlers/message_parser.go:2253-2334`）对正文只做整段
-/// 切片 + `<@OpenID>` 正则、**不解析 CQ**，所以用户手打的任何 `[CQ:…]` 都留在 text。
+/// 切片 + `<@OpenID>` 正则、**不解析 CQ**，所以用户手打的任何 `[CQ:…]` 都留在 text；
+/// 数组路径已不再调用 `cqcode::parse`，`CodeSpec::inbound` 也失去消费点。
 /// 用例刻意混入码名大写、段名内空格、大写键名、`&#44;` 转义、JSON 值与 stream 冒号语法：
-/// 归一只发生在落段臂（段名/键名小写），折回臂取码段原文，一个字节都不该被改写。
+/// 一个字节都不该被改写。
 #[test]
-fn array_value_folds_every_inbound_false_code_verbatim() {
-    // (手打原文, parse 应识别出的段名)。第二列钉住「确实先解析成码段、再按 inbound 位折回」，
-    // 否则断言会顺从「解析失败本来就留 text」这条与本位无关的路径通过。
+fn array_value_folds_every_hand_typed_code_verbatim() {
+    // (手打原文, parse 应识别出的段名)。第二列钉住「这些原文确实是可解析的码段」，
+    // 否则断言会顺从「本来就解析不成码」这条与数组路径无关的路径通过。
     let cases: &[(&str, &str)] = &[
         (
             "[CQ:image,file=a.png,subType=0,url=https://x/a.png]",
@@ -728,6 +730,7 @@ fn array_value_folds_every_inbound_false_code_verbatim() {
         ("[CQ:video , file = clip.mp4]", "video"),
         ("[CQ:file,file=my file.txt,file_name=my file.txt]", "file"),
         ("[CQ:face , id = 14, name=a&#44;b]", "face"),
+        ("[CQ:at,qq=10086]", "at"),
         (
             "[CQ:markdown,data={\"text\":{\"alt\":\"a,b\"}}]",
             "markdown",
@@ -759,13 +762,13 @@ fn array_value_folds_every_inbound_false_code_verbatim() {
         );
         assert_eq!(
             parsed[1].kind, *kind,
-            "{code} 必须先进落段判定才谈得上被 inbound 位折回"
+            "{code} 必须先是可解析的码段，才谈得上被数组路径按原文留成 text"
         );
         let (segments, raw, text) = array_report(&content);
         assert_eq!(
             segments,
             vec![json!({"type": "text", "data": {"text": content}})],
-            "手打 {code} 应整段折回同一条 text，不拆分、不改写"
+            "手打 {code} 应整段留进同一条 text，不拆分、不改写"
         );
         assert_eq!(raw, content, "{code} 的 raw_message 必须逐字节等于原文");
         assert_eq!(
@@ -860,11 +863,11 @@ fn array_value_is_independent_of_string_ob11() {
         let (segments, _raw) = segments_of(&array_settings(string_ob11), "hi[CQ:at,qq=7]");
         assert_eq!(
             segments,
-            vec![
-                json!({"type": "text", "data": {"text": "hi"}}),
-                json!({"type": "at", "data": {"qq": "7"}}),
-            ],
-            "string_ob11={string_ob11} 时消息段形态不变"
+            vec![json!({
+                "type": "text",
+                "data": {"text": "hi[CQ:at,qq=7]"}
+            })],
+            "string_ob11={string_ob11} 时消息段形态不变：手打的 at 留 text（P73）"
         );
     }
 }
@@ -1528,6 +1531,297 @@ fn array_form_emits_at_segment_in_place() {
         "at 段按原位顺序落段，不前移"
     );
     assert_eq!(raw, format!("[CQ:at,qq={}] 你好", vids[0]));
+}
+
+/// Go `zzzz_inbound_at_order_test.go` 的 `atStdMentions()`：bot 标 `is_you`，发送者与
+/// 可反查的他人只带 id，`UNMAPPED_OPENID`（Go 的 `atOther2OpenID`）故意不入 idmap。
+fn at_std_mentions() -> Value {
+    json!([
+        {"id": BOT_MENTION, "is_you": true},
+        {"id": SENDER_OPENID},
+        {"id": OTHER_OPENID},
+        {"id": UNMAPPED_OPENID},
+    ])
+}
+
+fn at_seg(qq: &str) -> Value {
+    json!({"type": "at", "data": {"qq": qq}})
+}
+
+fn text_seg(text: &str) -> Value {
+    json!({"type": "text", "data": {"text": text}})
+}
+
+/// 段数组按序拼回文本：Go `atAssertConsistency`（`:218-238`）的交叉不变式——array 与
+/// string 两条路径必须表达同一序列。只拼 at / text 两类段，与 Go 的 switch 分支一致。
+fn rejoin_at_text(segments: &[Value]) -> String {
+    let mut out = String::new();
+    for segment in segments {
+        match segment["type"].as_str().expect("段必须有 type") {
+            "at" => {
+                let qq = segment["data"]["qq"].as_str().expect("at 段的 qq 是字符串");
+                out.push_str(&format!("[CQ:at,qq={qq}]"));
+            }
+            "text" => out.push_str(
+                segment["data"]["text"]
+                    .as_str()
+                    .expect("text 段的 text 是字符串"),
+            ),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Go 一条子用例的共同断言。`expect` 用回读到的虚拟 ID 构造期望值——Go 侧同样是
+/// `atSeedIDmap` 回读 `atSenderVID` / `atOther1VID`，不硬编码数字。
+///
+/// 夹具对应：`BOT_MENTION`=`atBotOpenID`、`SENDER_OPENID`=`atSenderOpenID`、
+/// `OTHER_OPENID`=`atOther1OpenID`、`UNMAPPED_OPENID`=`atOther2OpenID`；自身 ID 在 Go
+/// 夹具里是 `AppID = "8888"`（故 ③⑥ 的期望是 `at(8888)`），本仓配置是 `app_id: 12345`，
+/// 形态相同、数值随配置。除三条硬门外，这里还钉住「上报里不残留 NUL 哨兵」。
+fn go_at_case(
+    name: &str,
+    kind: &str,
+    extra_settings: &str,
+    content: &str,
+    mentions: Value,
+    expect: impl Fn(&[String]) -> (String, Vec<Value>),
+) {
+    let settings = format!(
+        "  app_id: 12345\n  string_ob11: true\n  native_ob11: true\n  array: true\n{extra_settings}"
+    );
+    let (inbound, vids, _dir) = at_inbound(&settings, &[SENDER_OPENID, OTHER_OPENID]);
+    let (want_str, want_arr) = expect(&vids);
+    let (segments, raw) = array_segments(&inbound, kind, &at_payload(content, mentions));
+    assert_eq!(raw, want_str, "{name}：字符串形态与 Go wantStr 不一致");
+    assert_eq!(segments, want_arr, "{name}：段数组与 Go wantArr 不一致");
+    assert_eq!(
+        rejoin_at_text(&segments),
+        raw,
+        "{name}：段数组按序拼回必须逐字节等于 raw_message（Go atAssertConsistency）"
+    );
+    let dump = serde_json::to_string(&segments).expect("段数组可序列化");
+    assert!(
+        !raw.contains('\0') && !dump.contains("\\u0000"),
+        "{name}：NUL 哨兵泄漏进上报: {dump}"
+    );
+}
+
+/// Go `handlers/zzzz_inbound_at_order_test.go` 的 8 组入站 @ 保位用例，逐字移植。
+/// wantStr / wantArr 的期望序列抄 Go `:259`、`:275`、`:291`、`:307`、`:323`、`:338`、
+/// `:359`、`:374`（含文本片断里的每个空格），外加 Go `atAssertConsistency` 的交叉不变式。
+#[test]
+fn array_and_string_forms_match_go_inbound_at_order_cases() {
+    let content_std = format!(
+        "<@{BOT_MENTION}> at检测 <@{SENDER_OPENID}> <@{OTHER_OPENID}> <@{UNMAPPED_OPENID}>"
+    );
+    let raw_other2 = format!("<@{UNMAPPED_OPENID}>");
+    let convert_and_remove = "  remove_at: true\n  convert_other_at: true\n";
+    let remove_off = "  remove_at: false\n  convert_other_at: true\n";
+
+    // ① Go `:256-269`
+    go_at_case(
+        "①_atbot加多他人_保位",
+        "GROUP_AT_MESSAGE_CREATE",
+        convert_and_remove,
+        &content_std,
+        at_std_mentions(),
+        |v| {
+            (
+                format!(
+                    "at检测 [CQ:at,qq={}] [CQ:at,qq={}] {raw_other2}",
+                    v[0], v[1]
+                ),
+                vec![
+                    text_seg("at检测 "),
+                    at_seg(&v[0]),
+                    text_seg(" "),
+                    at_seg(&v[1]),
+                    text_seg(&format!(" {raw_other2}")),
+                ],
+            )
+        },
+    );
+
+    // ② Go `:271-285`
+    let content = format!("前置 <@{BOT_MENTION}> 中间 <@{SENDER_OPENID}> 尾 <@{OTHER_OPENID}>");
+    go_at_case(
+        "②_atbot在中间_保位",
+        "GROUP_AT_MESSAGE_CREATE",
+        convert_and_remove,
+        &content,
+        at_std_mentions(),
+        |v| {
+            (
+                format!("前置  中间 [CQ:at,qq={}] 尾 [CQ:at,qq={}]", v[0], v[1]),
+                vec![
+                    text_seg("前置  中间 "),
+                    at_seg(&v[0]),
+                    text_seg(" 尾 "),
+                    at_seg(&v[1]),
+                ],
+            )
+        },
+    );
+
+    // ③ Go `:287-301`：`remove_at=false` 时只 @bot，整条正文就一个自身 at 段
+    let content = format!("<@{BOT_MENTION}>");
+    go_at_case(
+        "③_仅atbot_removeAt=false_转为自身段",
+        "GROUP_AT_MESSAGE_CREATE",
+        remove_off,
+        &content,
+        at_std_mentions(),
+        |_| (String::from("[CQ:at,qq=12345]"), vec![at_seg("12345")]),
+    );
+
+    // ④ Go `:303-317`：反查失败的他人原位保留，其后的文本片断跟着它走
+    let content = format!("<@{BOT_MENTION}> {raw_other2} 中 <@{SENDER_OPENID}>");
+    go_at_case(
+        "④_反查失败他人_原位保留",
+        "GROUP_AT_MESSAGE_CREATE",
+        convert_and_remove,
+        &content,
+        at_std_mentions(),
+        |v| {
+            (
+                format!("{raw_other2} 中 [CQ:at,qq={}]", v[0]),
+                vec![text_seg(&format!("{raw_other2} 中 ")), at_seg(&v[0])],
+            )
+        },
+    );
+
+    // ⑤ Go `:319-333`：`convert_other_at=false` 一律不产段，正文连 `<@OpenID>` 一起留 text
+    let content = format!("<@{BOT_MENTION}> at检测 <@{SENDER_OPENID}> <@{OTHER_OPENID}>");
+    let untouched = format!("at检测 <@{SENDER_OPENID}> <@{OTHER_OPENID}>");
+    go_at_case(
+        "⑤_convertOtherAt=false_原样保留在原位",
+        "GROUP_AT_MESSAGE_CREATE",
+        "  remove_at: true\n  convert_other_at: false\n",
+        &content,
+        at_std_mentions(),
+        |_| (untouched.clone(), vec![text_seg(&untouched)]),
+    );
+
+    // ⑥ Go `:335-348`：`remove_at=false` ⇒ 不 trim，首个文本片断保留 @bot 后那个空格
+    go_at_case(
+        "⑥_removeAt=false_全部原位转换",
+        "GROUP_AT_MESSAGE_CREATE",
+        remove_off,
+        &content_std,
+        at_std_mentions(),
+        |v| {
+            (
+                format!(
+                    "[CQ:at,qq=12345] at检测 [CQ:at,qq={}] [CQ:at,qq={}] {raw_other2}",
+                    v[0], v[1]
+                ),
+                vec![
+                    at_seg("12345"),
+                    text_seg(" at检测 "),
+                    at_seg(&v[0]),
+                    text_seg(" "),
+                    at_seg(&v[1]),
+                    text_seg(&format!(" {raw_other2}")),
+                ],
+            )
+        },
+    );
+
+    // ⑦ Go `:350-369`：`is_you` 误标发送者时，发送者的 @ 既不当 @bot 剥掉也不误转
+    let mentions = json!([
+        {"id": SENDER_OPENID, "is_you": true},
+        {"id": BOT_MENTION, "bot": true},
+    ]);
+    let content = format!("<@{BOT_MENTION}> at检测 <@{SENDER_OPENID}>");
+    go_at_case(
+        "⑦_is_you误标发送者_不丢失不误转",
+        "GROUP_AT_MESSAGE_CREATE",
+        convert_and_remove,
+        &content,
+        mentions,
+        |v| {
+            (
+                format!("at检测 [CQ:at,qq={}]", v[0]),
+                vec![text_seg("at检测 "), at_seg(&v[0])],
+            )
+        },
+    );
+
+    // ⑧ Go `:371-384`：全量群消息（`GROUP_MESSAGE_CREATE`）同语义保位
+    go_at_case(
+        "⑧_全量群消息_同语义保位",
+        "GROUP_MESSAGE_CREATE",
+        convert_and_remove,
+        &content_std,
+        at_std_mentions(),
+        |v| {
+            (
+                format!(
+                    "at检测 [CQ:at,qq={}] [CQ:at,qq={}] {raw_other2}",
+                    v[0], v[1]
+                ),
+                vec![
+                    text_seg("at检测 "),
+                    at_seg(&v[0]),
+                    text_seg(" "),
+                    at_seg(&v[1]),
+                    text_seg(&format!(" {raw_other2}")),
+                ],
+            )
+        },
+    );
+}
+
+/// Go 8 组之外的边界覆盖（P73 要求）：非 hex 占位符、连续 @ 的哨兵序号、
+/// 以及「trim 先于展开」这一步的可观测后果。
+#[test]
+fn array_form_covers_placeholder_edge_cases() {
+    // `<@all>` 之类非 hex 形态：Go `incomingAtRe = <@!?([0-9A-Fa-f]+)>` 匹配不到，
+    // `MentionEveryone` 入站零消费 ⇒ 原样留 text，不产段、不报错。
+    let content = format!("请 <@all> 看 <@{OTHER_OPENID}>");
+    go_at_case(
+        "非hex占位符_原样留text",
+        "GROUP_AT_MESSAGE_CREATE",
+        "  remove_at: false\n  convert_other_at: true\n",
+        &content,
+        json!([]),
+        |v| {
+            (
+                format!("请 <@all> 看 [CQ:at,qq={}]", v[1]),
+                vec![text_seg("请 <@all> 看 "), at_seg(&v[1])],
+            )
+        },
+    );
+
+    // 连续三个 @：哨兵序号按出现顺序递增，at 与 at 之间不得夹空 text 段。
+    let content = format!("<@{SENDER_OPENID}><@{OTHER_OPENID}><@{SENDER_OPENID}>");
+    go_at_case(
+        "连续多个@_序号按出现顺序",
+        "GROUP_AT_MESSAGE_CREATE",
+        "  remove_at: false\n  convert_other_at: true\n",
+        &content,
+        json!([]),
+        |v| {
+            (
+                format!("[CQ:at,qq={}][CQ:at,qq={}][CQ:at,qq={}]", v[0], v[1], v[0]),
+                vec![at_seg(&v[0]), at_seg(&v[1]), at_seg(&v[0])],
+            )
+        },
+    );
+
+    // 全量群消息 + 尾部空白：Go 先 TrimSpace 再展开哨兵（`message_parser.go:2291-2306`），
+    // 所以尾部空白属于「还没成段的 rest」，被 trim 吃掉 ⇒ 只剩一条 at 段。
+    let content = format!("<@{SENDER_OPENID}>  ");
+    go_at_case(
+        "trim先于展开_尾部空白不成段",
+        "GROUP_MESSAGE_CREATE",
+        "  remove_at: true\n  convert_other_at: true\n",
+        &content,
+        json!([]),
+        |v| (format!("[CQ:at,qq={}]", v[0]), vec![at_seg(&v[0])]),
+    );
 }
 
 #[test]
