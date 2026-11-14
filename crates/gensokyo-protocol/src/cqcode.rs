@@ -799,8 +799,10 @@ pub const CODES: &[CodeSpec] = &[
         outbound: true,
     },
     CodeSpec {
-        // foundItems 的 key 叫 qqmusic，CQ 类型沿用 OneBot 的 music,type=qq
-        // 手打形态 Go 留 text：music 是出站 msg_type=3 卡片，入站卡片走 ark 段（同上 :2253-2334）
+        // foundItems 的 key 叫 qqmusic，CQ 类型沿用 OneBot 的 music,type=qq；
+        // 出站是 msg_type=2 的 markdown + 键盘（Go handlers/send_group_msg.go:1553/1571）
+        // 手打形态 Go 留 text：出站只认 `type=qq,id=<数字>`（handlers/cqcode.go:38），入站无产出点
+        // （卡片形态走 ark 段，message_parser.go:2253-2334）
         name: "music",
         params: &["type", "id"],
         inbound: false,
@@ -873,6 +875,11 @@ pub const CODES: &[CodeSpec] = &[
         outbound: true,
     },
     CodeSpec {
+        // 出站 Go 有消费点：cqparse `handlers/cqparse/handlers_media.go:120-137`、段路径
+        // `handlers/message_parser.go:991-1016`（反查 openid 后进 `url_images` 发真图）；字符串
+        // 路径则由 `avatar.go:14/44` 替换成 `[CQ:image,file=…]` 字面文本。本仓协议层无
+        // idmap/app_id，暂按原文回写正文（不整条拒发）⇒ 字节形态与 Go 不同，属已知差异
+        // （parity B4、P80）。入站无产出点。
         name: "avatar",
         params: &["qq"],
         inbound: false,
@@ -1475,6 +1482,7 @@ mod tests {
             "stream",
             "input_notify",
             "music",
+            "avatar",
             "active",
             "wakeup",
             "node",

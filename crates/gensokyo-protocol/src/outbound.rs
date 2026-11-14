@@ -19,6 +19,12 @@
 //! # 无法归类的段
 //! `face` / `node` / `poke` / `set_group` 等没有对应 `foundItems` key 的段落进
 //! [`OutboundPlan::extra`]，按到达顺序原样保留，`to_segments` 时排在最后。
+//! 例外：**不可消费形态**的 `music`（非 `type=qq` / 非纯数字 id）与 `avatar` 按原文写回
+//! [`OutboundPlan::text`]，不进 `extra`（否则整条消息会被拒发）。`music` 与 Go legacy 字符串
+//! 路径一致（只认 `type=qq,id=<数字>`，`handlers/cqcode.go:38`）；`avatar` 在 Go 字符串路径会
+//! 被替换成 `[CQ:image,file=…]` 字面、段路径进 `url_images`（`handlers/avatar.go:44`、
+//! `handlers/message_parser.go:991-1016`），本仓协议层拿不到 idmap/app_id，暂按原文回写
+//! ⇒ **字节形态与 Go 不同，属已知差异**（parity B4「avatar / music 出站」行、P80）。
 //!
 //! # 与 Go 的字段差异
 //!
@@ -619,13 +625,22 @@ impl OutboundPlan {
                         plan.card.push(CardPayload { raw });
                     }
                 }
-                "music" => {
-                    if let Some(id) = segment.get("id") {
+                // avatar：本仓协议层无 idmap/app_id，无法复刻 Go 的可见形态——Go 字符串路径把
+                // `[CQ:avatar,qq=<数字>]` 替换成 `[CQ:image,file=…]` 字面（handlers/avatar.go:14/44），
+                // 段路径反查 openid 后进 url_images（handlers/message_parser.go:991-1016）。这里按
+                // 原文写回正文（不整条拒发），字节与 Go 不同，属已知差异（P80）。
+                "avatar" => plan.text.push_str(&segment.raw_or_cq()),
+                // Go legacy 字符串解析只匹配 `[CQ:music,type=qq,id=<数字>]`
+                // （handlers/cqcode.go:38，消费点 cqcode_pipeline.go:170-178）：裸码、非 qq
+                // type、非数字 id 都不命中 ⇒ 原样留在 messageText，不因此拒发整条消息。
+                "music" => match (segment.get("type"), segment.get("id")) {
+                    (Some("qq"), Some(id))
+                        if !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()) =>
+                    {
                         plan.qqmusic.push(id.to_owned());
-                    } else {
-                        plan.extra.push(segment.clone());
                     }
-                }
+                    _ => plan.text.push_str(&segment.raw_or_cq()),
+                },
                 "stream" => match stream_from_segment(segment) {
                     Some(stream) => plan.stream = Some(stream),
                     None => plan.extra.push(segment.clone()),
@@ -1544,6 +1559,40 @@ mod tests {
             wakeup,
             "只有 wakeup 时不应额外产出 [CQ:active]"
         );
+    }
+
+    /// 出站不可消费的 `[CQ:avatar]` / `[CQ:music]` 按原文留在正文（不再整条 1400）。
+    ///
+    /// music 与 Go legacy 字符串路径同口径：只认 `[CQ:music,type=qq,id=<数字>]`
+    /// （`handlers/cqcode.go:38`，消费点 `handlers/cqcode_pipeline.go:170-178`）。avatar 在 Go
+    /// 字符串路径会被替换成 `[CQ:image,file=…]` 字面（`handlers/avatar.go:44`）、段路径发真图，
+    /// 本仓暂按原文回写 ⇒ 字节形态与 Go 不同，属已知差异（parity B4、P80）。
+    /// 若落进 `extra`，`deferred::unsupported_segment` 会把整条消息变成 1400。
+    #[test]
+    fn unconsumable_avatar_and_music_stay_literal() {
+        for code in [
+            "[CQ:avatar]",
+            "[CQ:avatar,qq=123]",
+            "[CQ:music]",
+            "[CQ:music,id=123]",
+            "[CQ:music,type=163,id=1]",
+            "[CQ:music,type=QQ,id=1]",
+            "[CQ:music,type=qq,id=abc]",
+        ] {
+            let plan = OutboundPlan::from_segments(&cqcode::parse(code));
+            assert_eq!(plan.text, code, "应逐字节留在正文: {code}");
+            assert!(plan.extra.is_empty(), "不应进 extra（下游会 1400）: {code}");
+            assert!(plan.qqmusic.is_empty(), "不应产出 qqmusic: {code}");
+        }
+    }
+
+    /// 反面对照：`type=qq` + 纯数字 id 仍按 `foundItems["qqmusic"]` 消费，段从正文摘除。
+    #[test]
+    fn qq_music_with_numeric_id_is_still_consumed() {
+        let plan = OutboundPlan::from_segments(&cqcode::parse("听 [CQ:music,type=qq,id=123] 吧"));
+        assert_eq!(plan.qqmusic, vec!["123".to_owned()]);
+        assert_eq!(plan.text, "听  吧", "音乐段摘除后前后文本原样保留");
+        assert!(plan.extra.is_empty());
     }
 
     #[test]

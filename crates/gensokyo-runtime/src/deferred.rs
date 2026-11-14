@@ -2410,6 +2410,7 @@ mod tests {
     use gensokyo_media::silk::{ProcessOutput, ProcessRunner, SilkCodec};
     use gensokyo_media::{BoxFuture, FetchRequest, Fetcher, MediaTransport, TransportResponse};
     use gensokyo_media::{HostingTransport, UploadMethod, UploadRequest, UploadResponse};
+    use gensokyo_protocol::cqcode;
     use gensokyo_protocol::outbound::{
         ActiveKind, CardFields, CardPayload, InputNotifyPayload, KeyboardPayload, MarkdownPayload,
         StreamKind, StreamPayload,
@@ -4172,6 +4173,28 @@ mod tests {
 
         assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
         assert!(api.sent().is_empty(), "不支持的段不应发送");
+    }
+
+    /// P79：不可消费的 `[CQ:avatar]` / `[CQ:music]` 按原文字面发出，不再整条 1400
+    /// （Go 默认 legacy 字符串路径同口径：两者都只会留在 `messageText` 里）。
+    #[tokio::test]
+    async fn unconsumable_avatar_and_music_are_sent_as_literal_text() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let text = "看 [CQ:avatar,qq=123] 和 [CQ:music,type=163,id=1]";
+        // 生产侧 action 层同时填 `text` 与 `plan`（`from_segments` 只做计划归一），测试照此还原
+        let mut request_plan = group_request(OutboundPlan::from_segments(&cqcode::parse(text)));
+        request_plan.message.text = text.to_owned();
+
+        execute(&context, &request_plan, &deps(&media, None))
+            .await
+            .expect("不可消费的段应按字面发出，不返回 1400");
+
+        let sent = api.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].msg_type, None, "纯文本消息不带 msg_type");
+        assert_eq!(sent[0].content.as_deref(), Some(text), "字面逐字节保留");
     }
 
     #[tokio::test]
