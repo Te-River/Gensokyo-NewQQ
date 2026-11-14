@@ -202,8 +202,9 @@ impl CardPayload {
 
     /// 取出四个官方字段。
     ///
-    /// 别名与 Go `cardFieldsFromMap` 同口径：`desc` / `pic` 优先，为空时回退到
-    /// `description` / `pic_url`（Go 两者都认，避免同一份载荷两侧解析结果不同）。
+    /// `desc` / `pic` 优先，为空时回退到 `description` / `pic_url`——这是 **Rust 侧扩展**：
+    /// Go 的卡片只认 `title` / `desc` / `pic` / `url` 四键、不识别别名（`handlers/message_parser.go`
+    /// 的卡片字段收集与 `handlers/send_group_msg.go` 的组装点均只读这四键；差异登记见 parity P77-4）。
     ///
     /// # Errors
     /// 载荷不是 JSON 对象时返回 [`Error::Protocol`]。
@@ -222,7 +223,7 @@ impl CardPayload {
     }
 }
 
-/// 别名取值：按顺序取第一个 trim 后非空的值（Go `firstNonEmptyCardValue`）。
+/// 别名取值：按顺序取第一个 trim 后非空的值（Rust 侧别名扩展的取值规则；Go 无对应函数）。
 fn first_card_alias(value: &Value, keys: &[&str]) -> Option<String> {
     keys.iter()
         .filter_map(|key| value.get(*key).and_then(json_scalar))
@@ -1773,7 +1774,7 @@ mod tests {
         assert_eq!(fields.desc.as_deref(), Some("d"));
         assert_eq!(fields.pic.as_deref(), Some("https://x.com/p.png"));
 
-        // 两种写法同现时 desc / pic 优先（Go firstNonEmptyCardValue 的顺序）
+        // 两种写法同现时 desc / pic 优先（Rust 别名取值顺序；Go 不识别别名，只认 desc / pic）
         let both = CardPayload {
             raw: r#"{"desc":"简写","description":"全名","pic":"https://a/p.png","pic_url":"https://b/p.png"}"#
                 .to_owned(),
