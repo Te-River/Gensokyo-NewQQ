@@ -248,6 +248,20 @@ P72 之后最后一个手打码位偏差收口。Go 的 `ConvertToSegmentedMessa
 - **影响**：手打的 `[CQ:at,qq=…]` 与 Go 一致按原文留 text；真实 `@` 仍由 `<@!hex>` 占位符产 at 段；非 hex（如 `<@all>`）原样留 text（`MentionEveryone` 全 Go 仓零消费）；出站 `at_everyone.rs` 未动，`raw_message` 字节不变。
 - **测试**：Go `handlers/zzzz_inbound_at_order_test.go`（`TestInboundAtOrderPreserved`）的 8 组 `wantStr`/`wantArr` 逐字移植 + 交叉不变式（段数组拼回 == `raw_message`）+ 非 hex / 前导零 / 超 i64 / 哨兵丢失 / 连续多 `@` 五类边界；门禁 `cargo test --workspace` **43 suites / 1379 passed / 0 failed**、`cargo clippy` 零告警、`cargo build --release` Finished、`cargo fmt --all -- --check` 退出码 0。**说明**：按磁盘与并发纪律未运行 Go 侧 `go test`，Go 依据为源码与测试期望值的静态核对。
 
+### 出站 avatar / music 不可消费时保留字面（Rust 侧 P79，2026-11-14）
+
+P74 双仓核实发现：Go 默认 `cq_parse_mode=legacy` 下，`[CQ:music]` 只消费 `type=qq,id=<数字>`（`handlers/cqcode.go:38`），其余形态原样留正文；`[CQ:avatar]` 字符串路径替换为 `[CQ:image,file=…]` 字面、段路径反查 openid 后发真图。Rust 此前：`music` 只查 id 不看 type（`type=163` 被误当 QQ 音乐发送），`avatar` 无对应臂 ⇒ `extra → unsupported_segment → Error::Protocol →` 整条 **1400**。
+
+- **修复**：`from_segments` 新增 `avatar` 臂按原文写回 `plan.text`；`music` 臂收紧为「`type` 恰为 `qq`（小写敏感）且 `id` 非空纯 ASCII 数字」才进 `qqmusic`，其余按原文写回 ⇒ 两类不可消费形态不再拒发整条消息；同步改实注释（music 出站为 `msg_type=2` markdown+键盘；avatar 的 Go 消费点与 P80 待办）。
+- **影响**：含 `[CQ:avatar,…]` 或裸/非 qq `[CQ:music,…]` 的消息由「整条 1400 拒发」变为「按原文字面发出」；`[CQ:music,type=qq,id=123]` 行为不变。**已知差异**：avatar 可见形态与 Go 不同（Rust 保留原文，Go 为 image 字面/真图）⇒ P80；music 乱序/多余参数 Rust 消费而 Go 不识别；其余不可消费码仍会 1400 ⇒ P81。
+- **测试**：协议 2 例（六形态字面 + 反面 `type=qq,id=123` 仍消费）、runtime 1 例（含 avatar/music 的消息按字面发出、不 1400）；全量 **43 suites / 1382 passed / 0 failed**、clippy 零告警、release Finished、`fmt --all -- --check` 退出码 0。
+
+### 环回假红测试加固（P82，2026-11-14）
+
+- **修改**：`gensokyo-media` 的 `ssrf hop`、`gensokyo-runtime` 的 `lotus_variant_replaces_via_transform` / `lotus_mint_omits_token_when_password_empty`、`gensokyo-storage` 的 `http_remote` 17-op 用例，改用「stub 侧是否收到完整请求」为判据，重试上限 3、轮间退避、每轮清空 stub 记录；断言强度不降（hop 逐跳全序、lotus 恰好一次 `POST /url`、17 条逐字等价）。
+- **影响**：仅测试代码；本机安全软件间歇掐环回导致的假红不再污染门禁。
+- **测试**：三处各五连跑全绿；三 crate 822 passed；workspace **43 suites / 1382 passed / 0 failed**。
+
 ---
 
 ## 📝 工程与文档变更
