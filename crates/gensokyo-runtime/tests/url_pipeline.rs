@@ -57,6 +57,11 @@ impl FakeQqApi {
         self.sent.lock().expect("锁未中毒").clone()
     }
 
+    /// 清空发送记录：连接层重试前重跑整段时调用，否则 `sent.len()` 断言会把上一次计入。
+    fn clear_sent(&self) {
+        self.sent.lock().expect("锁未中毒").clear();
+    }
+
     fn uploads(&self) -> Vec<FileUpload> {
         self.uploads.lock().expect("锁未中毒").clone()
     }
@@ -289,12 +294,30 @@ impl LotusStub {
     fn requests(&self) -> Vec<String> {
         self.requests.lock().expect("锁未中毒").clone()
     }
+
+    /// 清空已记录请求：连接层重试前调用，避免残缺条目污染「恰好一次 POST /url」的序列断言
+    /// （同 storage `http_remote.rs` 的 `retry_seq` 口径）。
+    fn clear(&self) {
+        self.requests.lock().expect("锁未中毒").clear();
+    }
 }
 
 impl Drop for LotusStub {
     fn drop(&mut self) {
         *self.stop.lock().expect("锁未中毒") = true;
     }
+}
+
+/// 连接层失败指纹（环境缓解，非产品行为）：本机安全软件会间歇性中止已建立的环回 TCP
+/// 连接，stub 只 accept 到连接、连请求行都没读到，于是记下空/半截请求；产品侧
+/// `LotusMint::mint` 按 Go 口径把发送失败吞成空串（`tracing::warn` 不回调用方），用例
+/// 能观测到的连接层信号只剩这条残缺记录。反之，stub 正常收下完整 `POST /url` 后的失败
+/// （非 200 / JSON 坏 / 缺 shortURL）是业务错误，不重试。
+fn conn_aborted(stub: &LotusStub) -> bool {
+    let requests = stub.requests();
+    // 必须先有记录才算"被掐断"：`all()` 对空集合返回 true，否则 mint 根本没接线时
+    // 会被当成环境噪音白跑满 4 轮，最后才在最外层断言上暴露。
+    !requests.is_empty() && requests.iter().all(|raw| !raw.starts_with("POST /url"))
 }
 
 // ---------- 回归锁：默认配置零变化 ----------
@@ -465,15 +488,33 @@ async fn lotus_stub_replaces_with_remote_link_inplace() {
         LotusMint::try_new().expect("构造 lotus client"),
     ));
     let (_dir, api, state) = state(&settings, Some(mint));
-    api.push_ok("m-lotus");
 
-    let response = state
-        .dispatcher()
-        .dispatch(&request(
-            "send_group_msg",
-            group_message(&format!("看 {LONG_URL} 好")),
-        ))
-        .await;
+    // 连接层重试（环境缓解，同 `tests/lotus.rs` 与 storage `http_remote.rs` 的 10053 口径）：
+    // 只对「环回连接被中途掐断」重跑整段；断言与业务错误不参与判定，照常上抛。
+    let mut attempt = 0usize;
+    let response = loop {
+        stub.clear();
+        api.clear_sent();
+        api.push_ok("m-lotus");
+        let response = state
+            .dispatcher()
+            .dispatch(&request(
+                "send_group_msg",
+                group_message(&format!("看 {LONG_URL} 好")),
+            ))
+            .await;
+        if conn_aborted(&stub) && attempt < 3 {
+            attempt += 1;
+            eprintln!(
+                "环回 stub 连接被中止（记录: {:?}），第 {attempt} 次重试",
+                stub.requests()
+            );
+            // 先让 stub 线程把残缺记录落完，下一轮开头的 clear 才不会与它竞争。
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            continue;
+        }
+        break response;
+    };
 
     assert_eq!(response.retcode, 0);
     let sent = api.sent();
@@ -484,7 +525,14 @@ async fn lotus_stub_replaces_with_remote_link_inplace() {
         "远端完整 shortURL 原位替换；stub 收到请求: {:?}",
         stub.requests()
     );
-    assert_eq!(stub.requests().len(), 1, "mint 恰好一次 POST /url");
+    assert_eq!(
+        stub.requests()
+            .iter()
+            .filter(|raw| raw.starts_with("POST /url"))
+            .count(),
+        1,
+        "mint 恰好一次 POST /url"
+    );
 }
 
 // ---------- forward 路径覆盖 ----------

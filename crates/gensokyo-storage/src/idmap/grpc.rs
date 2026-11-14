@@ -699,6 +699,9 @@ fn status(err: StorageError) -> Status {
         StorageError::NotFound(_) | StorageError::Expired(_) => Status::not_found(message),
         // Go 只有一句 `%v :已存在` 文案（idmap/service.go:1496），这里保留同一消息
         StorageError::AlreadyExists(_) => Status::already_exists(message),
+        // 字符串键重复（idmap/service.go:2271-2272）：同属"已存在"，消息也是 Go 原文。
+        // 目前没有 RPC 走这条路（`StoreUserInfo` 未暴露），穷举仍需闭合。
+        StorageError::DuplicateKey(_) => Status::already_exists(message),
         StorageError::Corrupt(_) => Status::invalid_argument(message),
         StorageError::RetriesExhausted(_) => Status::resource_exhausted(message),
         StorageError::Redb(_) | StorageError::Remote(_) => Status::internal(message),

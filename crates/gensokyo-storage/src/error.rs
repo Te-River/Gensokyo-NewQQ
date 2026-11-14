@@ -25,6 +25,15 @@ pub enum StorageError {
     /// 用变体而不是消息后缀区分，gRPC 层据此映射 `AlreadyExists`。
     #[error("{0} :已存在")]
     AlreadyExists(i64),
+    /// 字符串键重复（Go `StoreUserInfo` 的 `fmt.Errorf("duplicate key: %s", key)`，
+    /// `idmap/service.go:2271-2272`）。载荷是**完整 key**，因此 `Display` 与 Go 文案逐字节一致。
+    ///
+    /// 与 [`StorageError::AlreadyExists`] 是两种独立语义：那条是 vUIN 重绑定的目标号已被占用，
+    /// 本条是"这一行的键已经写过"。重复键在稳态下必然命中（同一好友的第二条私信起），
+    /// 不代表库损坏，所以不复用 [`StorageError::Corrupt`]——否则调用方只能把它连同真损坏
+    /// 一起吞掉，或把真损坏一起报出来。
+    #[error("duplicate key: {0}")]
+    DuplicateKey(String),
     /// 数据损坏或非法入参（整数字段不是 8 字节、非法 UTF-8、空消息 ID、空 AppID 等）。
     #[error("数据损坏: {0}")]
     Corrupt(String),

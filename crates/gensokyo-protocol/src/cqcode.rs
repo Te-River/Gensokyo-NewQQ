@@ -658,8 +658,9 @@ impl fmt::Display for CqCode {
 
 /// 一个 CQ 码的静态说明（码表条目）。
 ///
-/// `params` 是 Gensokyo 实际使用的参数顺序；`inbound` / `outbound` 标记该码在
-/// `Processor/`（入站上报）与 `handlers/`（出站解析）里是否有消费点。
+/// `inbound` 是行为开关（见 [`CodeSpec::inbound`]）；`params` 与 `outbound` 是**描述性
+/// 元数据**，全仓没有生产读取点（`params` 只被本文件的码表往返测试用），写错它们不动
+/// 行为，但会误导接手人——填之前先对齐 Go 的真实形态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CodeSpec {
     /// 码类型。
@@ -667,8 +668,13 @@ pub struct CodeSpec {
     /// 参数名（顺序即 Go 生成顺序）。
     pub params: &'static [&'static str],
     /// 入站上报会产出该码。
+    ///
+    /// 唯一消费点是 `gensokyo-runtime` 的 `inbound::reported_message`：`array_value` 上报时，
+    /// 正文里出现的 `[CQ:x,…]` 按这一位决定**落成类型化段**（真）还是**按原文折回 text 段**（假）。
     pub inbound: bool,
     /// 出站解析会消费该码。
+    ///
+    /// 描述性：出站链路按码名显式分发，没有读这一位的地方。
     pub outbound: bool,
 }
 
@@ -719,6 +725,11 @@ pub const CODES: &[CodeSpec] = &[
         outbound: true,
     },
     CodeSpec {
+        // 出站有消费点：Go 新链 `internal/domain/message.ParseOneBotString` 把 `[CQ:face,id=…]`
+        // 解析成 face 段（未知媒体回落 `unknown_face`，`internal/domain/message/compat_test.go:38,73`）。
+        // Go 入站侧不产出它——`ConvertToSegmentedMessage` 的段类型只有 text/at/image 再加
+        // record/ark/reply（`handlers/message_parser.go:2340`），所以这里 `inbound: true` 的实际效果
+        // 是把用户手打的 `[CQ:face,…]` 类型化上报（口径见 [`CodeSpec::inbound`]）。
         name: "face",
         params: &["id"],
         inbound: true,
@@ -839,9 +850,13 @@ pub const CODES: &[CodeSpec] = &[
         outbound: true,
     },
     CodeSpec {
-        // 入站上报会产出 ark 卡片，出站无消费点（ProcessCQInboundOnlyCodes 会剥离）
+        // 入站上报会产出 ark 卡片，出站无消费点（ProcessCQInboundOnlyCodes 会剥离）。
+        // 出站那条路整段删掉、不读任何参数（Go `handlers/cqcode.go:198`+`:203-206`、
+        // `handlers/cqparse/handlers_control.go:26` 的 `inboundOnlyHandler`），所以 `params` 记的是
+        // **入站** CQ 文本形态的三键（Go `handlers/message_parser.go:2496-2498`）；`fields` 只存在于
+        // 段 JSON 的 `data` 里（`arkSegmentData`），不进 CQ 文本。
         name: "ark",
-        params: &["data"],
+        params: &["ark_type", "ark_name", "prompt"],
         inbound: true,
         outbound: false,
     },
@@ -1433,6 +1448,49 @@ mod tests {
         assert_eq!(code_spec("qqmusic").expect("qqmusic 别名").name, "music");
         assert!(!code_spec("ark").expect("ark").outbound);
         assert!(code_spec("set_group").expect("set_group").outbound);
+    }
+
+    /// 行为断言（防码表与真实形态再度漂移）：Go 入站构造的 ark CQ 文本
+    /// （`handlers/message_parser.go:2496-2498`，含 `&#44;` 转义逗号）在本仓解析后必须拿到
+    /// `ark_type` / `ark_name` / `prompt` 三个键，且能原样重新拼回线上形态。
+    /// 最后一条把断言钉回码表：`ark.params` 与这三键不同口径就红。
+    #[test]
+    fn ark_inbound_cq_form_carries_three_keys() {
+        let raw = "[CQ:ark,ark_type=picture,ark_name=甲&#44;乙,prompt=点击查看图片]";
+        let segments = parse(&format!("hello {raw}"));
+        assert_eq!(segments.len(), 2, "正文与卡片应切成两段: {segments:?}");
+        assert_eq!(segments[0].text_content(), Some("hello "));
+        let card = &segments[1];
+        assert_eq!(card.kind, "ark");
+        assert_eq!(card.get("ark_type"), Some("picture"));
+        assert_eq!(card.get("ark_name"), Some("甲,乙"), "转义逗号应解码");
+        assert_eq!(card.get("prompt"), Some("点击查看图片"));
+        assert_eq!(
+            to_cq_string(std::slice::from_ref(card)),
+            raw,
+            "ark 的出站重拼必须与 Go 入站形态同口径"
+        );
+        assert_eq!(
+            code_spec("ark").expect("ark").params,
+            &["ark_type", "ark_name", "prompt"][..]
+        );
+    }
+
+    /// 行为断言：face 段的透传字节保真。入站上报把 `[CQ:face,…]` 折回 text 段还是落成类型化段
+    /// 由 `CodeSpec::inbound` 决定（消费点在 `gensokyo-runtime::inbound::reported_message`），
+    /// 无论哪一路交给客户端的 CQ 文本都不该被规范化改写——这一条守住「改标记只换形态、不丢字节」。
+    #[test]
+    fn face_cq_text_is_preserved_verbatim() {
+        let raw = "[CQ:face , id = 14, name=a&#44;b]";
+        let segments = parse(raw);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].kind, "face");
+        assert_eq!(
+            segments[0].get("name"),
+            Some("a,b"),
+            "键内空格与转义只在解析结果里被规范化"
+        );
+        assert_eq!(segments[0].raw_or_cq(), raw, "透传原文必须逐字节一致");
     }
 
     #[test]

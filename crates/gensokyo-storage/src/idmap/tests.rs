@@ -574,6 +574,94 @@ fn list_all_users_corrupt_row_aborts_like_go() {
     );
 }
 
+/// 写侧字节形态对齐 Go `StoreUserInfo`（`idmap/service.go:2267-2287`）：键
+/// `"<rawID>:<user_id>"`，值是 `json.Marshal(FriendData)`（字段序 `nickname` / `remark` /
+/// `user_id`，都没有 omitempty）。
+#[test]
+fn store_user_info_writes_go_key_and_value_layout() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store = open(dir.path());
+    let row = UserInfoRow {
+        user_id: "200001".to_owned(),
+        ..UserInfoRow::default()
+    };
+    store
+        .store_user_info("alice-openid", &row)
+        .expect("写 user_info");
+
+    // 绕过读侧直接看原始行：键是复合键，value 是紧凑 JSON
+    let txn = store.identity_db.begin_read().expect("读事务");
+    let table = txn.open_table(USER_INFO).expect("user_info 表");
+    assert_eq!(
+        table
+            .get("alice-openid:200001")
+            .expect("读行")
+            .map(|value| value.value().to_vec()),
+        Some(br#"{"nickname":"","remark":"","user_id":"200001"}"#.to_vec()),
+        "键 = `rawID:user_id`，value = Go json.Marshal 的字节形态"
+    );
+}
+
+/// 重复键报错且不覆盖（Go `:2271-2272` 的 `duplicate key: <key>`）；空 `user_id` 照写
+/// （Go 写侧没有跳过分支，键退化成 `"<rawID>:"`）。
+#[test]
+fn store_user_info_rejects_duplicate_without_overwrite() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store = open(dir.path());
+    let first = UserInfoRow {
+        nickname: "Alice".to_owned(),
+        remark: "note".to_owned(),
+        user_id: "200001".to_owned(),
+    };
+    store
+        .store_user_info("alice-openid", &first)
+        .expect("写 user_info");
+
+    let duplicate = UserInfoRow {
+        nickname: "Mallory".to_owned(),
+        user_id: "200001".to_owned(),
+        ..UserInfoRow::default()
+    };
+    let err = store
+        .store_user_info("alice-openid", &duplicate)
+        .expect_err("重复键必须报错而不是覆盖");
+    assert!(
+        matches!(&err, StorageError::DuplicateKey(key) if key == "alice-openid:200001"),
+        "重复键必须是 DuplicateKey，载荷为完整 key: {err:?}"
+    );
+    // Display 与 Go `fmt.Errorf("duplicate key: %s", key)`（service.go:2272）逐字节一致
+    assert_eq!(err.to_string(), "duplicate key: alice-openid:200001");
+    assert_eq!(
+        store.list_all_users().expect("枚举"),
+        vec![first],
+        "重复键不得覆盖原值"
+    );
+
+    store
+        .store_user_info("ghost-openid", &UserInfoRow::default())
+        .expect("空 user_id 照写（Go 无跳过分支）");
+    assert_eq!(store.list_all_users().expect("枚举").len(), 2);
+}
+
+/// 持久化不变式：关库重开后行仍在（`user_info` 随身份库落盘）。
+#[test]
+fn store_user_info_survives_reopen() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let row = UserInfoRow {
+        user_id: "300003".to_owned(),
+        ..UserInfoRow::default()
+    };
+    {
+        let store = open(dir.path());
+        store
+            .store_user_info("carol-openid", &row)
+            .expect("写 user_info");
+    }
+
+    let reopened = open(dir.path());
+    assert_eq!(reopened.list_all_users().expect("枚举"), vec![row]);
+}
+
 #[test]
 fn force_unbind_deletes_forward_and_reverse_rows() {
     let dir = tempfile::tempdir().expect("临时目录");

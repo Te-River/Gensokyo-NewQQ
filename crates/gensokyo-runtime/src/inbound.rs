@@ -4,10 +4,12 @@
 //! [`gensokyo_protocol::Event`]，不碰框架指令、黑白名单、被动转主动等
 //! [`Processor`](https://github.com/hoshinonyaruko/gensokyo) 里的业务逻辑。
 //!
-//! 除把群注册进 idmap 外，副作用有两个：喂 echo（[`Inbound::with_echo`]）——消息事件写懒
+//! 除把群注册进 idmap 外，副作用有三个：喂 echo（[`Inbound::with_echo`]）——消息事件写懒
 //! message_id 池与 msg_id / msg_type 映射，入群类事件写 event_id，供出站解析被动回复凭据；
-//! 以及收发统计（`Inbound::record_message_received`）——三个消息事件各记一次当日接收数
-//! （Go `botstats.RecordMessageReceived`）。两者未装配时静默跳过，绝不阻断事件上报。
+//! 收发统计（`Inbound::record_message_received`）——三个消息事件各记一次当日接收数
+//! （Go `botstats.RecordMessageReceived`）；C2C 私信把好友写进 idmap 的 `user_info` 表
+//! （`Inbound::record_user_info`，`get_friend_list` 的数据源）。三者缺依赖时静默跳过，绝不
+//! 阻断事件上报。
 //!
 //! # 已覆盖事件
 //!
@@ -107,7 +109,9 @@ use gensokyo_protocol::event::{
 };
 use gensokyo_protocol::{Event, Extra, MessageContent, Segment};
 use gensokyo_qq::dto::interaction::Interaction;
-use gensokyo_storage::{BotStatsStore, EchoStore, IdMapStore, UnionCache};
+use gensokyo_storage::{
+    BotStatsStore, EchoStore, IdMapStore, StorageError, UnionCache, UserInfoRow,
+};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
@@ -733,6 +737,50 @@ impl Inbound {
         }
     }
 
+    /// C2C 私信写一行 `user_info`（Go `ProcessC2CMessage.go:231-241` → `idmap.StoreUserInfo`）。
+    ///
+    /// `raw_user` 是事件里的 OpenID（Go `data.Author.ID`，C2C 不做 union 切换）；`user_id` 取
+    /// **上报形态**——数字模式是虚拟号十进制串，`string_ob11` 下是原始 OpenID，与 Go `:231-234`
+    /// 的 `struserid` 一致。昵称 / 备注 Go 恒写空串（`:235-239`），这里照抄零值。
+    ///
+    /// Go 不检查返回值（`:241` 直接丢弃 err），因此写失败绝不阻断事件上报。重复键
+    /// [`StorageError::DuplicateKey`] 是稳态（同一好友的第二条私信起必然命中，见
+    /// `idmap/service.go:2271-2272`），压到 debug；其余失败——含真·行编码损坏的
+    /// [`StorageError::Corrupt`]——告警后继续。未装配 idmap 时静默跳过——没有本地库可写。
+    ///
+    /// 空 `raw_user` 直接返回，不写库也不记日志：Go `ProcessC2CMessage.go:30-33` 对
+    /// `data.Author == nil || data.Author.ID == ""` 是 `return nil`（整条事件根本不入库），
+    /// 这里取其"不写"的一半——空 OpenID 写进 `user_info` 只会产出键 `":"` 的垃圾行，Go 库里
+    /// 绝不会有这一行（`derive_message_ids` 已为同类空身份行设守卫）。Go 的判定是 `== ""`、
+    /// 不含 trim，本守卫同样只判空串。
+    fn record_user_info(&self, raw_user: &str, user_id: &Ob11Id) {
+        // Go `ProcessC2CMessage.go:30-33`：Author 为空 ⇒ 早退，不入库
+        if raw_user.is_empty() {
+            return;
+        }
+        let Some(store) = self.idmap.as_deref() else {
+            return;
+        };
+        let row = UserInfoRow {
+            user_id: user_id.to_string(),
+            ..UserInfoRow::default()
+        };
+        if let Err(err) = store.store_user_info(raw_user, &row) {
+            match err {
+                StorageError::DuplicateKey(_) => {
+                    tracing::debug!(user = raw_user, error = %err, "user_info 行已存在，跳过重复写入");
+                }
+                err => {
+                    tracing::warn!(
+                        user = raw_user,
+                        error = %err,
+                        "写 user_info 失败，get_friend_list 看不到该用户"
+                    );
+                }
+            }
+        }
+    }
+
     /// 一条消息事件要落的 idmap 写入（群/用户身份、message_id、群注册）合并成一次批量提交。
     ///
     /// 与逐条提交（每个字段一次写事务）相比只有提交次数不同：成功路径逐项结果一致（同一批内
@@ -1050,6 +1098,12 @@ impl Inbound {
             message_id,
             ..
         } = self.derive_message_ids(settings, user_raw, None, &payload.id, false);
+
+        // Go `ProcessC2CMessage.go:231-241`：私信顺手把好友写进 `user_info`（`get_friend_list`
+        // 的数据源，纯 Rust 部署此前没有任何写入口）。Go 在 `dispatchInbound` 之后写，这里放在
+        // 转换末尾：只动本地库，**事件上报 JSON 字节不变**；本包唯一的外部变化是
+        // `get_friend_list` 开始出数据。
+        self.record_user_info(user_raw, &user_id);
 
         let sender = Sender {
             user_id: Some(sender_user_id),
@@ -2219,7 +2273,7 @@ mod tests {
     use std::sync::Arc;
 
     use gensokyo_config::ConfigManager;
-    use gensokyo_storage::{EchoStore, IdMapOptions, IdMapStore};
+    use gensokyo_storage::{EchoStore, IdMapOptions, IdMapStore, UserInfoRow};
 
     use super::Inbound;
 
@@ -2723,6 +2777,95 @@ mod tests {
             DEFAULT_MESSAGE_ID,
             "私聊不写 v2 维度"
         );
+    }
+
+    /// C2C 私信把好友写进 `user_info`（Go `ProcessC2CMessage.go:231-241`）——`get_friend_list`
+    /// 的数据源；写侧键/value 与重复键语义由 storage 用例覆盖，这里只看接线与持久化。
+    #[test]
+    fn c2c_message_stores_user_info() {
+        use gensokyo_protocol::Event;
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nsettings: {}\n").expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+
+        let user_id;
+        {
+            let store = test_store(dir.path());
+            let inbound = Inbound::new(Arc::clone(&manager), Some(Arc::clone(&store)));
+
+            let events = inbound
+                .convert("C2C_MESSAGE_CREATE", Some(&c2c_payload()), None)
+                .expect("私聊消息应可转换");
+            let Event::Message(message) = &events[0] else {
+                panic!("C2C_MESSAGE_CREATE 应转成私聊消息");
+            };
+            assert!(
+                message.user_id.as_i64().is_some(),
+                "有 idmap 时应上报数字形态"
+            );
+            user_id = message.user_id.to_string();
+            assert_eq!(
+                store.list_all_users().expect("枚举"),
+                vec![UserInfoRow {
+                    user_id: user_id.clone(),
+                    ..UserInfoRow::default()
+                }],
+                "昵称 / 备注 Go 恒写空串（ProcessC2CMessage.go:235-239）"
+            );
+
+            // 同一好友的第二条私信命中重复键：Go 丢弃错误（`:241`），事件照常上报
+            inbound
+                .convert("C2C_MESSAGE_CREATE", Some(&c2c_payload()), None)
+                .expect("重复写 user_info 不得影响事件上报");
+            assert_eq!(store.list_all_users().expect("枚举").len(), 1);
+        }
+
+        // 关库重开仍在：持久化不变式（`get_friend_list` 跨重启可见）
+        let reopened = test_store(dir.path());
+        let rows = reopened.list_all_users().expect("枚举");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].user_id, user_id);
+        assert!(rows[0].nickname.is_empty() && rows[0].remark.is_empty());
+    }
+
+    /// 空 author 的 C2C 事件**不写** `user_info`（Go `ProcessC2CMessage.go:30-33` 对
+    /// `data.Author == nil || data.Author.ID == ""` 直接 `return nil`，库里绝不会有键 `":"`
+    /// 的垃圾行）。事件本身照常上报——上报形态不由本守卫负责。
+    #[test]
+    fn c2c_message_without_author_id_writes_no_user_info() {
+        use gensokyo_protocol::Event;
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nsettings: {}\n").expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let store = test_store(dir.path());
+        let inbound = Inbound::new(Arc::clone(&manager), Some(Arc::clone(&store)));
+
+        // Go 的两种空法（`Author.ID == ""` 与 `Author == nil`）在 Rust 侧都归一成空串
+        let mut blank_id = c2c_payload();
+        blank_id["author"]["id"] = json!("");
+        let mut no_author = c2c_payload();
+        no_author
+            .as_object_mut()
+            .expect("事件负载是对象")
+            .remove("author");
+
+        for payload in [&blank_id, &no_author] {
+            let events = inbound
+                .convert("C2C_MESSAGE_CREATE", Some(payload), None)
+                .expect("空 author 的事件仍照常上报");
+            assert!(
+                matches!(events[0], Event::Message(_)),
+                "C2C_MESSAGE_CREATE 应转成私聊消息"
+            );
+        }
+
+        // 一条都不写：`list_all_users` 为空即排除了键退化成 `":"` 的那一行
+        let rows = store.list_all_users().expect("枚举");
+        assert!(rows.is_empty(), "空 OpenID 不得写 user_info: {rows:?}");
     }
 
     /// 入群 / 邀请入群把 event_id 写进 echo（Go `ProcessGroupMember.go:67`、`ProcessGroupAddBot.go:157`）。

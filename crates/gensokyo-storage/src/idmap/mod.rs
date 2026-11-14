@@ -21,7 +21,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use redb::{
     Database, ReadTransaction, ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::StorageError;
@@ -233,7 +233,7 @@ pub struct IdentityMapping {
 ///
 /// 字段声明序与 Go 结构体一致；三个字段都对应 Go 的 JSON tag（`nickname` / `remark` /
 /// `user_id`），缺字段解码成空串（等价 Go `json.Unmarshal` 的零值语义），未知字段忽略。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UserInfoRow {
     /// 昵称。
@@ -788,6 +788,41 @@ impl IdMapStore {
         Ok(mappings)
     }
 
+    /// 写 `user_info` 表一行（Go `StoreUserInfo`，`idmap/service.go:2267-2287`）：键
+    /// `"<raw_id>:<user_id>"`（Go `fmt.Sprintf("%s:%s", rawID, userInfo.UserID)`），值是该行的
+    /// 紧凑 JSON——字段名与顺序（`nickname` / `remark` / `user_id`）同 Go `structs.FriendData`
+    /// 的 json tag，且都没有 omitempty，因此与 Go 的**实际产出形态一致**。严格逐字节还差一处
+    /// HTML 转义：Go `json.Marshal` 会把 `<` `>` `&` 写成 `\u003c` `\u003e` `\u0026`，serde_json
+    /// 不转。今日不可达——Go 侧 nickname / remark 恒为空串（`ProcessC2CMessage.go:235-239`），
+    /// user_id 只有十进制虚拟号或 OpenID 两种形态，都不含这三个字符，故不为此实现转义。
+    ///
+    /// **重复键报错而不覆盖**（Go `:2271-2272` 的 `duplicate key: <key>`）：用独立变体
+    /// [`StorageError::DuplicateKey`]，载荷是完整 key，`Display` 与 Go 逐字节一致。重复键是
+    /// 稳态而非异常，不代表库损坏，所以不复用 `Corrupt`；`AlreadyExists` 装的是 vUIN
+    /// （重绑定目标被占），也不是这里的字符串键。唯一调用方按同一事件派生键与行，键相同即
+    /// 整行相同；这里仍照 Go 报错，让"已存在"对调用方可区分。
+    ///
+    /// 与 Go 一致，本方法**只写本地库**：Go 的 `StoreUserInfo` 直用 `configAndUserInfoDB()`，
+    /// 没有 lotus 远程分支，因此 `remote` 已挂接时也不改走远端。
+    ///
+    /// # Errors
+    ///
+    /// 键已存在（[`StorageError::DuplicateKey`]）或 redb 事务失败时返回 [`StorageError`]。
+    pub fn store_user_info(&self, raw_id: &str, row: &UserInfoRow) -> Result<(), StorageError> {
+        let key = format!("{raw_id}:{}", row.user_id);
+        let value = serde_json::to_vec(row)
+            .map_err(|err| StorageError::Corrupt(format!("user_info 行编码失败: {err}")))?;
+        let txn = self.identity_db.begin_write().map_err(rb)?;
+        {
+            let mut table = txn.open_table(USER_INFO).map_err(rb)?;
+            if table.get(key.as_str()).map_err(rb)?.is_some() {
+                return Err(StorageError::DuplicateKey(key));
+            }
+            table.insert(key.as_str(), value.as_slice()).map_err(rb)?;
+        }
+        txn.commit().map_err(rb)
+    }
+
     /// 枚举 `user_info` 表（Go `ListAllUsers`，`idmap/service.go:2290-2314`）：只读，按表
     /// key 字节序升序遍历（Go bbolt `ForEach` 同序；key 的写侧形态是 `"<rawID>:<user_id>"`，
     /// 但 Go 读侧不解析 key、只借用其排序，三字段全部来自 value 的 JSON 解码，未知字段忽略、
@@ -801,7 +836,7 @@ impl IdMapStore {
     /// `configAndUserInfoDB()`，不经 lotus 远程分支。
     ///
     /// 目前唯一调用方是 `gensokyo-actions` 的 `get_friend_list`（P64a 读侧对齐）；写侧
-    /// `StoreUserInfo` 尚未移植（P64b），全新 Rust 部署里这张表只有 M1e 导入器的数据。
+    /// [`IdMapStore::store_user_info`]（P64b）由入站 C2C 消息喂数据，另有 M1e 导入器。
     ///
     /// # Errors
     ///
