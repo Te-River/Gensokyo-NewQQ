@@ -14,13 +14,14 @@
 [CQ:video,file=file:///path/to/video.mp4]      // 本地视频文件
 [CQ:video,file=http://example.com/video.mp4]    // HTTP 远程视频
 [CQ:video,file=https://example.com/video.mp4]   // HTTPS 远程视频
+[CQ:video,file=base64://<base64_data>]          // base64 编码视频
 ```
 
 ## 参数
 
 | 参数名 | 必填 | 说明 |
 |--------|------|------|
-| `file` | ✅ | 视频来源，支持 `file:///`（本地）、`http(s)://`（远程） |
+| `file` | ✅ | 视频来源，支持 `file:///`（本地）、`http(s)://`（远程）、`base64://`（编码数据）；`file` 为空时回落到 `url` 参数 |
 
 ## 解析行为
 
@@ -31,6 +32,9 @@
 | `file:///` | `local_video` | 本地路径，读取后走 QQ CDN 上传 |
 | `http://` | `url_video` | HTTP URL，直接作为 `RichMediaMessage.URL` 发送 |
 | `https://` | `url_videos` | HTTPS URL，同上 |
+| `base64://` | `base64_video` | 去除前缀后走 QQ CDN 上传（`handlers/cqcode_pipeline.go:80` 字符串管道、`handlers/message_parser.go:1229-1231` 消息段路径） |
+
+> 💡 `file` 为空时会回落到 `url` 参数取值（`handlers/cqparse/handlers_media.go:51-55`）；`file` 与 `url` 皆空时整码按原文保留为文本，不产出空视频。参见 [CQ 码汇总](../CQ码汇总.md) 的「无参裸码行为」。
 
 ### SSRF 防护
 

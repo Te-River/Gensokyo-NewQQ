@@ -46,4 +46,4 @@ for msg in messages:
 ## 注意
 
 - QQ Bot API 与 go-cqhttp 等第三方实现不同，不支持合并转发功能。
-- `forward_msg_limit` 配置项（默认 3）控制的是 SSM（Send Stack Messages）补发队列的折叠阈值，与合并转发消息无关。
+- `forward_msg_limit` 配置项**默认 3**，含义是**折叠转发时的条数上限**（与 SSM 补发队列无关）：`send_group_forward_msg` 逐条下发转发节点，累计条数超过该值即停止发送（`handlers/send_group_forward_msg.go:24` 取配置、`:28` 判上限），该键在全仓仅此一处消费；配置模板注释同口径——「发送折叠转发信息时的最大限制条数 若要发转发信息 请设置lazy_message_id为true」（`template/config_template.go:168`）。

@@ -6,6 +6,8 @@
 
 `[CQ:record]` 用于发送和接收语音消息。Gensokyo 会将语音文件自动转码为 silk 格式后上传至 QQ CDN。
 
+`[CQ:voice]` 是 `[CQ:record]` 的**同义别名**：与 `record` 走同一处理分支，内部键归一为 `*_record`（`handlers/cqparse/handlers_media.go:27` 注册 `voice`、`:46-50` 归一键）。
+
 范围：`q群 (Group Chat)` / `C2C (私聊)`
 
 ## 语法
@@ -33,6 +35,8 @@
 | `http://` | `url_record` | HTTP URL，下载后走 silk 转码，再上传 QQ CDN |
 | `https://` | `url_records` | HTTPS URL，同上 |
 | `base64://` | `base64_record` | 去除前缀后直接走 silk 转码，再上传 QQ CDN |
+
+> 💡 `file` 为空时会回落到 `url` 参数取值（`handlers/cqparse/handlers_media.go:51-55`）；`file` 与 `url` 皆空时整码按原文保留为文本，不产出空语音。`[CQ:voice]` 与本页完全等价。参见 [CQ 码汇总](../CQ码汇总.md) 的「无参裸码行为」。
 
 ### SSRF 防护
 
@@ -108,7 +112,7 @@ await bot.send_group_msg(
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `record_sampleRate` | `24000` | 语音采样率（Hz），最高 48000 |
-| `record_bitRate` | `24000` | 语音比特率（bps），默认 25000 |
+| `record_bitRate` | `24000` | 语音比特率（bps），取值以配置模板为准（`template/config_template.go:71`） |
 
 ## 注意
 

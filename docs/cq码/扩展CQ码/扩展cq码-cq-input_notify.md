@@ -22,7 +22,7 @@
 ## 解析行为
 
 - 从消息文本中提取 `[CQ:input_notify,...]` 并移除，最终用户不会看到该 CQ 码。
-- 数组消息段的 `"type":"input_notify"` 暂不支持，仅支持字符串格式。
+- **数组消息段三种输入形态均已支持**：字符串 `[CQ:input_notify,...]`、数组消息段 `{"type":"input_notify","data":{"type":"1","second":"5"}}`（`handlers/message_parser.go:1042-1058`，回归用例见 `handlers/message_parser_test.go:74`、`:79`）、以及 cqparse 新解析器路径。
 - 参数有效范围：`type` 固定为 `1`，`second` 为 `1~60`。
 
 ## 发送行为

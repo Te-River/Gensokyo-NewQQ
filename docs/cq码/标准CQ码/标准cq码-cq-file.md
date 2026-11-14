@@ -30,7 +30,7 @@
 | 本地文件 | ❌ | ✅ `file:///` 路径 |
 | URL 文件 | ❌ | ✅ `http(s)://` 链接 |
 | base64 | ❌ | ✅ `base64://` 数据 |
-| 自定义文件名 | ❌ | ✅ `file_name` 参数(预留) |
+| 自定义文件名 | ❌ | ✅ `file_name` 参数（已生效） |
 
 ## 解析行为
 
@@ -44,6 +44,10 @@
 | `base64://` | `base64_file` | 去除前缀后直接走 QQ CDN 上传 |
 
 文件上传走 `POST /v2/groups/{group_id}/files` 或 `POST /v2/users/{user_id}/files` 接口，`file_type=4`（上传方式与大小限制见下节）。
+
+> ⚠️ **`file` 为空时不回落 `url`**：`[CQ:file]` 只读 `file` 参数（`handlers/cqparse/handlers_media.go:87` 的 `resolveFileValue`），`file` 缺失或为空时整码按原文保留为文本、不产出文件媒体。这与 `image` / `record` / `voice` / `video` 相反——那四个码在 `file` 为空时会回落到 `url`（同文件 `:51-55`）。
+
+`file_name` 参数**已生效**（非预留）：新链在群聊与私聊的媒体循环里按下标把 `file_name` 透传给单条媒体消息（`handlers/outbound_bridge.go:573-575`、`:706-708`），legacy 私聊路径同样如此（`handlers/send_private_msg.go:606-608`）。
 
 ## 上传方式与大小限制
 
@@ -81,7 +85,7 @@ await bot.send_group_msg(
     ]),
 )
 
-# 发送本地文件并指定文件名（预留）
+# 发送本地文件并指定文件名
 await bot.send_group_msg(
     group_id=821404315,
     message=Message([

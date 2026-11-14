@@ -34,6 +34,8 @@
 | `https://` | `url_images` | HTTPS URL，同上 |
 | `base64://` | `base64_image` | 去除前缀后直接走 QQ CDN 上传 |
 
+> 💡 `file` 为空时会回落到 `url` 参数取值（`handlers/cqparse/handlers_media.go:51-55`），便于兼容部分客户端只填 `url` 的消息段；`file` 与 `url` 皆空时整码按原文保留为文本，不产出空图片（见 [CQ 码汇总](../CQ码汇总.md) 的「无参裸码行为」）。**注意此回落仅适用于 `image` / `record` / `voice` / `video`，`[CQ:file]` 不回落 `url`。**
+
 ### URL 图片的处理分支
 
 当 `url_pic_transfer=true` 时：
