@@ -22,20 +22,22 @@
 
 ## 2. 当前状态：一句话 + 数据
 
-主干链路（连接/入站/出站/媒体/idmap/短链/重试/URL 转换）已对齐；官方 API 审计的**真缺口（注册集口径）= 0**（`reports/refactor/16-official-api-audit.md:3-4`：原「28 项未接线」是 `d00a5ff` 时点的快照，27 项已接线、余 1 项 `get_qq_profile` 裁决「明确不做」）。剩余工作集中在**写侧数据**（P64b）、**元数据校准**（P69）、测试加固与文档欠账，见 §7。
+主干链路（连接/入站/出站/媒体/idmap/短链/重试/URL 转换）已对齐；官方 API 审计的**真缺口（注册集口径）= 0**（`reports/refactor/16-official-api-audit.md:3-4`：原「28 项未接线」是 `d00a5ff` 时点的快照，27 项已接线、余 1 项 `get_qq_profile` 裁决「明确不做」）。`get_friend_list` 的**读写两侧均已落地**（P64a/P64b，写侧含评审收口：`StorageError::DuplicateKey` 独立变体 + 空 `Author.ID` 守卫，见 §6 ⑬⑭），CQ 码表元数据已校准（P69）、lotus stub 用例已加固（P70）；上一版挂着的「入站 `inbound` 位与 Go 实际产出集超集」已由 P71 逐码取证、**P72 裁决并实施**（18 条码位 true→false，`array_value` 上报里用户手打的 `[CQ:…]` 除 `at` 外按原文折回 text，与 Go `ConvertToSegmentedMessage` 逐字节一致）；剩余工作只有三项：**P73 的 `at` 结构改造**（`revert_mentions` 合成 → `inbound` 位回解这条链，须先设计再动手）、**`poke` 收位依据的复扫**（P72 未重跑取证）、以及文档欠账，见 §7。
 
 | 指标 | 现值 | 来源 / 取数命令 |
 |------|------|-----------------|
 | parity 覆盖面 | A/B/C 三表逐项标注状态，主干/功能/边角项均为「已对齐 / 关闭」；B6 是**历史 severity 汇总**，个别行只写估量、未逐条回写状态 | `reports/refactor/17-go-rust-parity.md` A(`:10-27`) / C(`:33-51`) / B(`:60-86`) / B6(`:88-106`) |
-| 测试基线 | **43 suites / 1364 passed / 1 ignored**（2026-11-14 实测） | `cargo test --workspace --no-fail-fast`（计数随新增用例变化，取数见 §9） |
+| 测试基线 | **43 suites / 1373 passed / 0 failed**（2026-11-14 P72 后实测；`ignored` 计数以门禁输出为准） | `cargo test --workspace --no-fail-fast`（计数随新增用例变化，取数见 §9） |
 | clippy | `-D warnings` **零告警** | `cargo clippy --workspace --all-targets -- -D warnings` |
 | 格式 | `cargo fmt --all -- --check` **退出码 0** | 同左 |
 | release 产物 | **≈10.3 MiB**（同表记录 Go `44.82 MiB`，≈4.3× 更小） | `docs/rust-perf.md:167`（2026-11-10 口径）；当前体积以 `cargo xtask build` 打印为准 |
 
 > 关于测试数字：suite/passed 随新增用例变化，且各里程碑文档记的是各自时点值
 > （如 `docs/rust-m0.md` 的 R4m 记 1356、R4n 记 1359，均对当时成立）。
-> 当前实测以 2026-11-14 为准：**43 suites / 1364 passed / 1 ignored**；
-> `1 ignored` 是 `#[ignore]` 用例（要 `--ignored` 才跑）。引用时以**你刚跑出的
+> 当前实测以 2026-11-14（P72 收位后）为准：**43 suites / 1373 passed / 0 failed**
+> （lead 独立复核中，引用时以最终门禁的 `test result:` 行为准）；
+> `ignored` 是 `#[ignore]` 用例（要 `--ignored` 才跑），计数随用例增删浮动、以实测输出为准。
+> 引用时以**你刚跑出的
 > `test result:` 行**为准。
 
 报表本身带**时效声明**：`reports/refactor/16-official-api-audit.md:3` 明说旧计数是 `d00a5ff` 时点的快照，「现状以『R3 接线回写』节 + 当前代码为准」——引用任何历史数字前先看这一行。
@@ -102,7 +104,7 @@
 
 ## 6. 已知缺口与有意差异（「不要当成 bug」清单）
 
-下面 12 条都是**已裁决 / 已登记**的差异：看到时先查证据列，不要直接按「和 Go 不一样」开修。真正待办的只在 §7。
+下面 16 条都是**已裁决 / 已登记**的差异：看到时先查证据列，不要直接按「和 Go 不一样」开修。真正待办的只在 §7。
 
 | # | 项 | 说明 | 证据 |
 |---|----|------|------|
@@ -118,14 +120,21 @@
 | ⑩ | `/getrealvalues` 两侧都无服务端注册 | Go 只拼客户端 URL（`idmap/service.go:1956`），Rust 照抄；不要「补一个服务端」当修 bug | Go `idmap/service.go:1956`；`http_remote.rs:887` |
 | ⑪ | 短链 token 自指校验 | Go `isValidToken` 比的是 `hex(HMAC(pwd, token)) == token`，客户端送 `HMAC(pwd, 长链)`，两端口径从来不一致 ⇒ `lotus_password` 非空时**创建一律 400**；修要两端同时改 | parity `:131` |
 | ⑫ | `/url` 的挂载位置与 301 差异 | Rust 绑 WS listener（`enable_ws_server=true` 才有），否则落 HTTP API 端口；301 **无响应体**，多段路径 `/url/a/b` 落 WebUI SPA（Go 是 404） | parity `:126` |
+| ⑬ | `user_info` 重复键用独立错误变体承载 | Go 的 `StoreUserInfo` 遇重复键回 `fmt.Errorf("duplicate key: %s", key)` 字符串错误；Rust 是 `StorageError::DuplicateKey(String)`（载荷为**完整 key**，`Display` 与 Go 文案**逐字节一致**）——**不复用 `Corrupt`**（重复键是稳态、不代表库损坏，借 `Corrupt` 会逼调用方把真损坏一起吞掉），也不借只装 vUIN 的 `AlreadyExists`；入站因此能只把重复键压 debug、真损坏保持 warn；gRPC `status()` 归 `already_exists`。**看到 `duplicate key` 日志是稳态，不是 bug，不要当损坏告警去修** | `crates/gensokyo-storage/src/error.rs`（`DuplicateKey`）、`idmap/mod.rs:799-824`、`idmap/grpc.rs`；Go `idmap/service.go:2272`；登记 `docs/rust-m0.md` R4p |
+| ⑭ | C2C 空 `Author.ID`：Rust 只「不写库」，不整条早退 | Go `Processor/ProcessC2CMessage.go:30-33` 对 `data.Author == nil \|\| data.Author.ID == ""` 是 `return nil`——整条事件**既不上报也不入库**；Rust 只取「不写库」这一半（`record_user_info` 进门判空串直接返回，**只判空、不 trim** ⇒ 与 Go 两个子条件等价），事件上报字节不变。取舍：改上报形态会动外部 JSON，收益不抵风险；不补守卫则会写出键 `":"` 的垃圾身份行（Go 库绝无此行） | `crates/gensokyo-runtime/src/inbound.rs:756-760`；Go `Processor/ProcessC2CMessage.go:30-33`；登记 `docs/rust-m0.md` R4p |
+| ⑮ | 入站不做 alias 替换与 visual 前缀剥离 | Rust 入站两条路径都不做 Go `message_parser.go:2003-2024` 的 alias 替换与 visual 前缀剥离，框架指令/黑白名单前缀场景仍与 Go 不同——**既有范围限定，未随 P72 改变**，不要当成 P72 的回归 | Go `handlers/message_parser.go:2003-2024`；Rust 入站无对应实现（`gensokyo-runtime` 的 `revert_mentions` 只做 @，`reported_message` 只做落段/折回判定） |
+| ⑯ | `at` 位是 `inbound: true` 的唯一例外 | `at` 位保持 `inbound: true`：Rust 真实 @ 靠 `revert_mentions` 合成 `[CQ:at,qq=…]` 再回解成段，与 Go「数组路径完全不解析 CQ」结构性不同，收位另立 P73——看到「手打的 `[CQ:at,…]` 在 Rust 会落成 at 段、在 Go 留 text」是**已知差异**，不是 P72 漏收 | `crates/gensokyo-protocol/src/cqcode.rs` 码表 `name: "at"` 条目注释（按符号定位）；`CodeSpec::inbound` 文档；登记 `docs/rust-m0.md` R4r、parity B4 |
 
 ## 7. 未完成项与下一步
 
 | 优先级 | 项 | 现状 | 下一步 | 证据 |
 |--------|----|------|--------|------|
-| **P0** | P64b（`get_friend_list` **写侧**） | 读侧已实现（`list_all_users` + `users.rs`），但 Rust 入站**没有** Go `StoreUserInfo` 的对应写入 ⇒ 纯 Rust 新部署恒 `data:null` | storage 加 `store_user_info`（键 `"<rawID>:<user_id>"`、value 为同结构紧凑 JSON、单写事务 + 缓存失效），在 `inbound.rs` 的 C2C 臂接线；**先读 Go 实现**：重复键在 Go 是报错而非覆盖 | 读侧 `crates/gensokyo-storage/src/idmap/mod.rs:809`、`crates/gensokyo-actions/src/users.rs:1-19`；Go 写侧 `Processor/ProcessC2CMessage.go:231-241` + `idmap/service.go:2267-2287`；C2C 臂 `crates/gensokyo-runtime/src/inbound.rs:504`；登记 `docs/rust-m0.md:75`（R4o） |
-| P1 | P69（CQ 元数据校准） | `ark.params = ["data"]` 与 Go 入站真实形态 `ark_type`/`ark_name`/`prompt` 不一致；`face` 被标记 `inbound+outbound`，而 Go 入站不产 `CQ:face` | 核实后修正或显式登记（改动前先对 Go `message_parser.go` 的 ark/face 分支取金样） | `crates/gensokyo-protocol/src/cqcode.rs:843-844`（ark）、`:722`（face 表项） |
-| P1 | 测试加固（`url_pipeline` lotus stub） | 连接层重试覆盖不全；本机安全软件掐环回时偶发 `stub 收到请求: [""]` 失败（单跑 3/3 通过） | 按仓库既有「仅连接层重试 ≤3」口径补齐 | `crates/gensokyo-runtime/tests/url_pipeline.rs:484` |
+| ✅ | P64b（`get_friend_list` **写侧**，含评审收口） | **已完成**：storage `store_user_info`（键 `"<rawID>:<user_id>"` 与 value 三字段紧凑 JSON 逐字对齐 Go `service.go:2270-2276`、复用读侧同一个 `UserInfoRow`、单写事务且不得在 `with_write_batch` 闭包内调用）+ 入站 C2C 臂接线（`record_user_info`，写失败不阻断上报）；评审收口另改两处——① 重复键改由**独立变体** `StorageError::DuplicateKey(String)` 承载（`Display` 与 Go 文案逐字节一致，不再借 `Corrupt`；日志分级随之修正：重复键 debug、真损坏 warn；gRPC `status()` 补 `already_exists` 臂），② 空 `Author.ID` 补守卫（原先会写出键 `":"` 的垃圾身份行）。⇒ 纯 Rust 部署该表**在运行期自然积累**，`data:null` 只剩「没导入也没收过私信」的初始态 | —（写侧无遗留；差异见 §6 ⑬⑭） | `crates/gensokyo-storage/src/idmap/mod.rs:811`、`src/error.rs`、`src/idmap/grpc.rs`、`crates/gensokyo-runtime/src/inbound.rs:756`（调用点 `:1106`）；Go `Processor/ProcessC2CMessage.go:231-241` + `idmap/service.go:2267-2287`；登记 `docs/rust-m0.md` R4p、parity B6 好友行 |
+| ✅ | P69（CQ 码表元数据校准） | **已完成**（只动 `cqcode.rs`）：`ark.params` 由 `["data"]` 改为**入站三键** `["ark_type","ark_name","prompt"]`（Go 入站 CQ 文本只有三键 `message_parser.go:2496-2498`；`fields` 只进段 JSON 的 `data`；出站对 ark 整段剥离不读参数 ⇒ 旧值两个方向都不成立）；`CodeSpec` 三字段消费者写实（`params`/`outbound` **描述性、无生产消费者**，`inbound` **是行为开关**）；新增两条行为断言 `ark_inbound_cq_form_carries_three_keys`、`face_cq_text_is_preserved_verbatim`。**注意**：本行当时保留的「`face` 维持 `inbound: true`」结论**已被 P72 推翻并收假**（见下一行），而 `face_cq_text_is_preserved_verbatim` 钉的是 parse/`to_cq` 的字节保真、与落段落段无关，故不受收位影响 | —（元数据无遗留；由它牵出的产出集口径已由 P71/P72 收口） | `crates/gensokyo-protocol/src/cqcode.rs` 码表 `name: "ark"` 条目（`params` 三键）、`CodeSpec` 结构体文档块、同文件测试模块的 `CODES` 往返用例与 `code_spec(…).outbound` 断言（该文件行号随码表增删浮动，按符号定位）；登记 `docs/rust-m0.md` R4q、parity B4 |
+| ✅ | P71 → P72（入站 `inbound` 位口径：手打 CQ 折回 text） | **已完成，口径已裁决并实施**（不再是「未裁决」）：判定依据是 Go `ConvertToSegmentedMessage`（`handlers/message_parser.go:2253-2334` + `:2340` 的段类型集合）对正文**只做整段切片 + `<@OpenID>` 正则、完全不解析用户手打的 CQ** ⇒ `cqcode.rs` 收 **18 条码位 true→false**（reply/image/record/video/file/face/markdown/card/keyboard/stream/input_notify/music/active/wakeup/node/poke/ark/json，每条行内注明依据），`CodeSpec::inbound` 文档改写为「只回答手打的码要不要落段」；`crates/gensokyo-runtime/src/lib.rs` 的模块文档按代码事实改写（image/record/ark/reply 已按 `attachments`/`msg_elements` 产段，只有**视频附件**仍不产段），旧表述「图片 / 语音 / 视频 / ark 卡片段仍不生成」作废。影响面唯一：`code_spec(…).inbound` 生产读取点只有 `inbound.rs` 的 `reported_message` 一处，`image_segments`/`message_event_segments` 在其之后 `extend` ⇒ 结构化附件与卡片上报不受收位影响（混排用例实证）。测试：`array_report` 三视图助手 + `array_value_folds_every_inbound_false_code_verbatim`（20 例，断言 `message` 文本 == `raw_message` 逐字节）+ `array_value_keeps_structured_image_segment_while_folding_typed_image_code`，并纠正旧用例（原 `array_value_parses_at_and_multiple_segments` → 现名 `array_value_keeps_at_segment_and_folds_typed_face_code`，5 段→3 段）；`cargo test --workspace` **43 suites / 1373 passed / 0 failed**（lead 独立复核中，以最终门禁输出为准）、clippy 零告警、`build --release` Finished、`fmt --all --check` 退出码 0 | —（唯 `at` 与 `poke` 两项另见下两行） | parity B4 末三行（`已对齐` 一行 + `at` 的 `部分` 一行 + `CodeSpec` 一行）；登记 `docs/rust-m0.md` R4r、`release_log/CHANGELOG_v016.md` P72 子节；`cqcode.rs` 与 `tests/inbound.rs` 一律按符号定位 |
+| **P1（须先设计）** | P73：`at` 位的结构改造 | **未开工**：Rust 真实 @ 靠 `revert_mentions` 合成 `[CQ:at,qq=…]`、再靠 `inbound` 位回解成段，把该位收假会让全部真实 mention 退化成文本 ⇒ 本轮**刻意保留 `inbound: true`**（已登记 §6 ⑯），这是 P72 之后唯一未对齐的手打码位 | **先设计再动手**：改造合成 / 回解链，让真实 @ 落段不再依赖 `inbound` 位，之后才能收位并与 Go 的数组路径完全一致 | 码表 `name: "at"` 条目注释与 `CodeSpec::inbound` 文档（按符号定位）；parity B4「`at` 位保留」行 |
+| 待复核 | `poke` 的收位依据未在本波复扫 | **已收位但依据未复扫**：判定依据沿用 P71 取证（全 Go 树大小写不敏感零命中 + 无 `REACTION_*` 处理器），P72 本轮没有重跑取证 ⇒ 结论目前成立、证据是上一波的 | 下一次取证波次复扫 `poke` / `REACTION` 相关产出点，确认无回归后回写「已复扫」 | `docs/rust-m0.md` R4r 遗留①；parity B4「`inbound` 位」行状态列 |
+| ✅ | P70（测试加固：`url_pipeline` lotus stub） | **已完成**（同批提交）：`lotus_stub_replaces_with_remote_link_inplace` 按仓库既有「仅连接层中止才重试、上限 3 次」口径加固——每轮清空 stub 请求记录与 api 发送记录；判定指纹从「错误文本」下移到「stub 侧未收到完整 `POST /url`」（`LotusMint::mint` 按 Go 口径吞掉发送错误），并要求先有记录才算被掐断（封掉 `all()` 对空集合恒真的白跑路径）；业务失败不参与重试 | —（其余用例加固另需再立项，本行只覆盖 lotus stub） | `crates/gensokyo-runtime/tests/url_pipeline.rs:478`（用例）、`:506`（重试判定）；同口径先例 `tests/lotus.rs`、storage `http_remote.rs` 的 10053 处理 |
 | P2 | 文档欠账 | `release_log/CHANGELOG_v016.md` 的「✅ 提交记录」段自 `eca1843` 起未维护 | 回填提交记录（`git log --oneline eca1843..HEAD`，排除 merge/仓库卫生类） | `release_log/CHANGELOG_v016.md` |
 | — | 迁移/交接 | 换机清单只在 `docs/rust-migrate.md` | 本文**不重复**，按那份执行 | `docs/rust-migrate.md` |
 | 不排期 | 视频抽帧 / 转码 / 压缩 | Go 侧是死代码且函数自身破损（全仓零调用者），**不可移植**；视频发送链本身已覆盖 | 保持关闭，不要当缺口重开 | parity `:49` |

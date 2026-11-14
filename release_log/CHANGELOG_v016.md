@@ -114,8 +114,17 @@ Rust 版接齐出站 URL 管线（对齐 Go `transformMessageTextUrl` + `generat
 Go 的 `get_friend_list` 不是上游接口，是本地 idmap 活实现（枚举 `UserInfo` 桶，`handlers/get_friend_list.go:29-47`），Rust 侧此前与「官方无端点」action 并列回 `1500`；本版补齐读侧与其对齐（写侧 `StoreUserInfo` 另立 P64b）：
 
 - **修改**：`crates/gensokyo-storage/src/idmap/mod.rs` 新增只读 `IdMapStore::list_all_users()` 与 `UserInfoRow`（Go `ListAllUsers` 口径：按 key 字节序升序、无去重、value 三字段 JSON 解码、损坏行整次 Err、表不存在回空）；`crates/gensokyo-actions/src/users.rs` 的 `GetFriendListHandler` 从 `context.idmap()` 直读，仅滤空 `user_id`（Go `get_friend_list.go:36-40`），条目按 Go 声明序 `nickname`、`remark`、`user_id` 装配；死代码清账——`QqApi::get_friend_list` 占位 trait 方法、`FriendEntry` 及再导出、`testing.rs` 的 `Call::FriendList` / `friends` 槽零消费，全部移除
-- **影响**：空表 / 未装配 idmap / 枚举出错均照 Go 恒 `retcode=0 status="ok"` + `"data":null`（不是 `[]`），错误只记 warn 日志；`user_id` 输出表内原串（JSON 字符串），不做虚拟号转换；**注意**：写侧尚未移植（P64b）——Go 在入站 C2C 时写 `UserInfo` 桶（`ProcessC2CMessage.go:231-241`），Rust 的 `user_info` 表目前只有 M1e 导入器数据，全新部署在导入前该接口恒回 `data:null`
+- **影响**：空表 / 未装配 idmap / 枚举出错均照 Go 恒 `retcode=0 status="ok"` + `"data":null`（不是 `[]`），错误只记 warn 日志；`user_id` 输出表内原串（JSON 字符串），不做虚拟号转换；**写侧已由 P64b 补齐**（见下条）——Go 在入站 C2C 时写 `UserInfo` 桶（`ProcessC2CMessage.go:231-241`），Rust 接上同一条写入后，纯 Rust 部署**收过私信就会在运行期自然积累** `user_info` 表；`"data":null` 只剩「既没跑过 M1e 导入、也还没收到过私信」的初始状态，不再是长期结论
 - **测试**：storage 新增 3 例（key 字节序与内容 / 含空 user_id 与缺字段未知字段原样返回 / 损坏行整次枚举 Err）+ actions 新增 4 例（非空列表外部 JSON 字节断言、空表 `"data":null`、未装配 retcode=0、非对象 params 1400）；`cargo test -p gensokyo-storage -p gensokyo-actions` 141 + 169 passed / 0 failed，两包 clippy `--all-targets -- -D warnings` 零告警，`cargo fmt --all -- --check` 绿
+
+### `get_friend_list` 写侧接线（Rust 侧 P64b，2026-11-14）
+
+Go 在每条 C2C 私信末尾把好友写进 idmap 的 `UserInfo` 桶（`Processor/ProcessC2CMessage.go:231-241` → `idmap.StoreUserInfo`，实现 `idmap/service.go:2267-2287`）；Rust 侧此前只有读侧（P64a），纯 Rust 部署的 `user_info` 表只有 M1e 导入器数据，**写侧缺失期间收过私信的好友也不可见**（该接口只回 `"data":null`）。本版补上写侧：
+
+- **修改**：`crates/gensokyo-storage/src/idmap/mod.rs` 新增 `IdMapStore::store_user_info(raw_id, row)`——键 `"<rawID>:<user_id>"` 与 value 三字段紧凑 JSON 逐字对齐 Go `idmap/service.go:2270-2276`（字段序 `nickname`/`remark`/`user_id`，均无 omitempty ⇒ 与 Go `json.Marshal` 字节一致），复用读侧同一个 `UserInfoRow`、**不设第二套编码器**；自开单写事务（与邻近 `write_config` 同风格），**不得在 `with_write_batch` 闭包内调用**（redb 每库单写者，`idmap/batch.rs:3-5` 已注明）；**重复键报错而不覆盖**，承载方式是 `error.rs` 新增独立变体 `StorageError::DuplicateKey(String)`（载荷为**完整 key**，`Display` 与 Go `service.go:2272` 的 `duplicate key: <key>` 逐字节一致）——评审收口把原先借用的 `StorageError::Corrupt` 改开：重复键是稳态不代表库损坏，借 `Corrupt` 会让调用方把真损坏一起吞掉；`AlreadyExists` 装的是 vUIN（重绑定目标被占），也不改借它。`idmap/grpc.rs` 的 `status()` 同步补 `DuplicateKey => already_exists` 臂（全仓唯一不带通配的 `StorageError` 穷举点；该 enum 为 `#[non_exhaustive]`，跨 crate 匹配本就须带通配，无第二补臂点）；与 Go 一致只写本地库，`remote`（lotus）挂接时不改走远端
+- **接线**：`crates/gensokyo-runtime/src/inbound.rs` 的 C2C 臂（`record_user_info`，`:756`；调用点 `:1106`）——raw 段取事件 OpenID（C2C 不做 union 切换），`user_id` 取上报形态（数字模式十进制虚拟号 / `string_ob11` 下原始 OpenID），昵称·备注照 Go 恒空串；写失败不阻断事件（Go 忽略返回值）；日志按错误类型分级（评审收口修正）——`DuplicateKey` 压 debug、其余失败含真·行编码损坏的 `Corrupt` 走 warn，此前一个分支同时吞两类，等于把真损坏藏进 debug；**空 OpenID 守卫**：`raw_user` 是空串就直接返回不写库（Go `ProcessC2CMessage.go:30-33` 对 `Author` 为空是整条事件早退，Rust 原先照写不误、会产出键为 `":"` 的垃圾身份行），只判空串、不 trim ⇒ 与 Go 的两个子条件等价
+- **影响**：纯 Rust 部署收过私信的好友**立即可被 `get_friend_list` 读到**，重启后仍在（落身份库）；该表自此**在运行期自然积累**，出站 JSON 零变化。差异登记两处：① idmap 身份批写失败时本仓回退原始串（key 形如 `"<raw>:<raw>"`），Go 照旧用 `userid64=0`——P35 既有 ID 回退口径，正常路径无差异；② C2C `Author` 为空时 Go 是**整条事件不上报**（`ProcessC2CMessage.go:30-33` 直接 `return nil`），Rust 只取「不写库」这一半、上报字节不变——改上报形态会动外部 JSON，刻意保留，已登记 `docs/rust-handover.md` §6
+- **测试**：storage 3 例（`store_user_info_writes_go_key_and_value_layout` 键与 value 字节形态 / `store_user_info_rejects_duplicate_without_overwrite` 断言变体是 `DuplicateKey` 且载荷为完整 key、`Display` 与 Go 文案**全串比对**、原值不被覆盖、空 `user_id` 照写 / `store_user_info_survives_reopen` 关库重开仍在）+ runtime 2 例（`c2c_message_stores_user_info` 事件后 `list_all_users` 可读、重复私信不影响上报 / `c2c_message_without_author_id_writes_no_user_info` 覆盖 `author.id=""` 与 `author` 字段缺失**两种空法**）；包级 clippy `--all-targets -- -D warnings` 与 `cargo fmt --all -- --check` 在门禁内，用例数与产物体积**不预填**，以最终门禁（`cargo test --workspace`）输出为准
 
 ---
 
@@ -223,6 +232,14 @@ Rust 版补齐 lotus 客户端模式 parity：`lotus=true` 时 idmap 17 个操�
 - **影响**：裸码原位保留逐字节字面（含方括号与两侧空白，同 Go `Replacement: tok.Raw`），不触发上传、不拆 `msg_type=7` 条；`file=` 有值 / `url=` 有值 / `file=,url=` 有值三类既有行为零变化，`[CQ:file,url=x]` 的 file 臂不读 url 仍按 P57-② 钉死口径
 - **测试**：新增 protocol 2 例（五族裸码字面保留与桶为空、混排空白）+ runtime 1 例（经 `MessageOut::from_content` 生产入口断言上游 `MessageToCreate` 不带 media 槽、正文含五族字面）；`from_segments_voice_alias_matches_record_every_shape` 的裸码形态由「与裸 record 逐字段等价」改为「各自保留自身字面 + 都不进桶」——字面保留后两码文本天然不同，属被本修复纠正
 
+### `array_value` 手打 CQ 折回 text（Rust 侧 P72，2026-11-14）
+
+P69 登记的那项入站口径差异（`inbound` 位比 Go 实际产出集超集）经 P71 逐码取证后由 **P72 裁决并实施**：Go `ConvertToSegmentedMessage`（`handlers/message_parser.go:2253-2334` + `:2340` 的段类型集合）对正文**只做整段切片 + `<@OpenID>` 正则、完全不解析用户手打的 CQ** ⇒ `array_value` 上报里用户手打的 `[CQ:…]` 除 `at` 外一律按原文留在 text 段，与 Go 逐字节一致。
+
+- **修改**：`crates/gensokyo-protocol/src/cqcode.rs` 改写 `CodeSpec::inbound` 的文档位语义——这一位从此只回答「`array_value` 上报时用户手打的 `[CQ:x,…]` 要不要落成类型化段」（真→落段、假→按原文逐字节折回 text；折回臂取码段原文，段名/键名归一只发生在落段臂），它**既不是**「Go 是否支持该码」、也**不是**「入站是否会产出该段」；据此把 **18 条码位 true→false**（reply / image / record / video / file / face / markdown / card / keyboard / stream / input_notify / music / active / wakeup / node / poke / ark / json），每条行内注明依据；`at` **保持 `inbound: true`** 并注明为结构性唯一例外（真实 @ 由 `revert_mentions` 合成 `[CQ:at,qq=…]` 后再靠这一位回解，收假会让全部真实 mention 退化成文本，彻底对齐另立 P73）；`crates/gensokyo-runtime/src/lib.rs` 的模块文档按代码事实改写（image / record / ark / reply 段已按 `attachments` 与 `msg_elements` 经 `image_segments` / `message_event_segments` 产出，只有**视频附件**仍不产段——Go M2-B 的 `image/` 前缀过滤、语音走 record 段），旧表述「图片 / 语音 / 视频 / ark 卡片段仍不生成」作废
+- **影响**：`code_spec(…).inbound` 的**生产读取点只有** `crates/gensokyo-runtime/src/inbound.rs` 的 `reported_message` 一处，故外部可见变化仅限「`array_value=true` 时手打码的段数组由类型化段改为 text 段原文」；`image_segments` / `message_event_segments` 在其之后 `extend`，**结构化附件与卡片上报不受收位影响**（混排用例实证：真图片附件照旧落 image 段，同一条正文里手打的 `[CQ:image,…]` 留 text，字符串路径追加的媒体码与之互不影响）。零回归面：`cqcode.rs` 码表往返与 verbatim 用例、actions `messages.rs` 的 face 断言均未改动且通过；`golden_inbound_matches_go` 不受影响（其 config 无 `array:`，走 Text 分支）。**遗留两项（未开工，勿当已完成）**：`poke` 的收位依据沿用 P71 取证（全 Go 树大小写不敏感零命中 + 无 `REACTION_*` 处理器）、**P72 本轮未复扫**；`at` 的结构改造 = **P73**（先设计再动手）
+- **测试**：`crates/gensokyo-runtime/tests/inbound.rs`（净增 137 行）纠正旧用例——原 `array_value_parses_at_and_multiple_segments`（现名 `array_value_keeps_at_segment_and_folds_typed_face_code`）由 5 段（含 face 段）改为 3 段，手打 `[CQ:face,id=1]` 留在相邻 text，`at` 断言未动、只是相邻合并；新增 `array_report` 三视图助手（段数组 JSON / `raw_message` / `message` 纯文本）、`array_value_folds_every_inbound_false_code_verbatim`（20 例，混入码名大写、段名内空格、大写键名、`&#44;` 转义、JSON 值与 stream 冒号语法；先断言确被 parse 成码段再断言整段折回，避免顺从「解析失败本来就留 text」这条与本位无关的路径，并断言 `message` 文本与 `raw_message` 逐字节一致）、`array_value_keeps_structured_image_segment_while_folding_typed_image_code`（真附件与手打码混排）。**门禁**：`cargo test --workspace` 43 suites / 1373 passed / 0 failed（实现者实测、lead 独立复核中，以最终门禁输出为准），`cargo clippy` 零告警、`cargo build --release` Finished、`cargo fmt --all -- --check` 退出码 0
+
 ---
 
 ## 📝 工程与文档变更
@@ -281,6 +298,19 @@ Rust 版补齐 lotus 客户端模式 parity：`lotus=true` 时 idmap 17 个操�
 - **修改**：`.github/workflows/cross_compile.yml` 的 `node-version` 24 → 24.22.1（CVE-2026-111497）
 - **影响**：`go build ./...`、`go build -tags=small ./...`、`go vet ./...`、`go test ./handlers/` 全部通过
 - **说明**：最小版本选择连带抬高的间接依赖为 `golang.org/x/sys` v0.48.0、`golang.org/x/crypto` v0.57.0、`google.golang.org/protobuf` v1.36.11、`google.golang.org/genproto/googleapis/rpc`（2026-07-06 版本），均为上层模块的强制下界
+
+### CQ 码表元数据与口径校准（Rust 侧 P69，2026-11-14）
+
+只动 `crates/gensokyo-protocol/src/cqcode.rs`，**零行为变化**；完整口径见 `docs/rust-m0.md` R4q 与 parity 报告 B4。
+
+- **修改**：`ark.params` 由 `["data"]` 改为**入站三键** `["ark_type", "ark_name", "prompt"]`——Go 入站的 CQ 文本形态只有这三键（`handlers/message_parser.go:2496-2498`），`fields` 只进段 JSON 的 `data`（`arkSegmentData`，`:2432-2444`），而出站对 ark **整段剥离、一个参数都不读**（`handlers/cqcode.go:198`、`:203-206` + `handlers/cqparse/handlers_control.go:26` 的 `inboundOnlyHandler`）⇒ 旧值在两个方向都不成立，不是「出站口径」；`CodeSpec` 三字段的消费者写实——`params` 是**纯描述性元数据**（全仓唯一读取点是同文件测试模块遍历 `CODES` 的往返用例，读 `spec.params`）、`inbound` **是行为开关**（唯一生产消费者 `crates/gensokyo-runtime/src/inbound.rs:1622` 的 `reported_message`，决定 `array_value` 上报时用户手打的 `[CQ:x,…]` 落成类型化段还是折回 text 段）、`outbound` **无生产消费者**（只有测试模块 `code_spec(…).outbound` 那组断言）；`face` **当时**维持 `inbound: true` 并在码表 `face` 条目的注释里写明「这一位管的是用户手打要不要类型化，与 Go 是否产出 `CQ:face` 无关」——**该结论已被 P72 推翻并收假**（见「🐛 修复」段的 P72 子节）。`cqcode.rs` 的行号随码表与用例增删浮动，上述位置一律**按符号定位**
+- **影响**：**P69 本波零行为变化**（改的是「按元数据推断行为」的误导面）；由它牵出的入站口径差异当时登记为待裁决项，**现已由 P71 取证、P72 裁决并实施**——终态与影响面见「🐛 修复」段的「`array_value` 手打 CQ 折回 text（P72）」子节，本条只保留取证轨迹，不再作结论
+- **测试**：新增两条行为断言 `ark_inbound_cq_form_carries_three_keys`（钉住 ark 入站三键形态）、`face_cq_text_is_preserved_verbatim`（face 段原文逐字节保真）；protocol 用例只增不改，数字以 `cargo test --workspace` 输出为准
+
+### lotus stub 用例加固（Rust 侧 P70，2026-11-14）
+
+- **修改**：`crates/gensokyo-runtime/tests/url_pipeline.rs` 的 `lotus_stub_replaces_with_remote_link_inplace`（`:478`）按仓库既有「仅连接层中止才重试、上限 3 次」口径加固（同 `tests/lotus.rs` 与 storage `http_remote.rs` 的 10053 处理）——每轮开头清空 stub 请求记录与 api 发送记录（`stub.clear()` / `api.clear_sent()`），否则上一轮会污染计数断言；判定指纹从「错误文本」下移到「stub 侧未收到完整 `POST /url`」（`conn_aborted`），因 `LotusMint::mint` 按 Go 口径把发送失败吞成空串、用例观测不到错误；并先要求「已有记录」才算被掐断（`all()` 对空集合恒真，否则 mint 根本没接线时会白跑满 4 轮才在最外层断言暴露）；业务失败（非 200 / JSON 坏 / 缺 `shortURL`）不参与重试判定、照常上抛
+- **影响**：仅测试代码，产品链路零变化；本机安全软件间歇掐环回造成的偶发失败不再靠重跑整个套件规避
 
 ---
 
