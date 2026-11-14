@@ -489,6 +489,91 @@ fn list_identities_enumerates_forward_table_in_key_order() {
     );
 }
 
+/// 直接写 `user_info` 表：写侧 `StoreUserInfo` 属 P64b（无公共写入口），读侧用例走裸表写入，
+/// 与上面几个 helper 同口径（绕过 store 写路径也要失效读缓存）。
+fn write_user_info(store: &IdMapStore, key: &str, json: &str) {
+    let txn = store.identity_db.begin_write().expect("写事务");
+    {
+        let mut table = txn.open_table(USER_INFO).expect("user_info 表");
+        table.insert(key, json.as_bytes()).expect("写 user_info");
+    }
+    txn.commit().expect("提交");
+    store.invalidate_lookup_cache();
+}
+
+#[test]
+fn list_all_users_enumerates_user_info_in_key_order() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store = open(dir.path());
+    assert!(
+        store.list_all_users().expect("空表枚举").is_empty(),
+        "空表回空列表（Go 是 bucket 缺失回 Err、调用方降级成空；观测一致）"
+    );
+
+    // 乱序写入：枚举按 key 字节序升序（Go bbolt ForEach 同序：`B`(0x42) < `a`(0x61)，
+    // 前缀行 `alice:` 排在 `alice:200001` 之前），与写入顺序、与 value 里的字段无关
+    write_user_info(
+        &store,
+        "alice:200001",
+        r#"{"nickname":"Alice","remark":"a-note","user_id":"200001"}"#,
+    );
+    write_user_info(
+        &store,
+        "Bob:100002",
+        r#"{"nickname":"Bob","remark":"b-note","user_id":"100002","Private":true}"#,
+    );
+    // 空 user_id 行原样返回——滤空发生在 `get_friend_list` handler（Go
+    // get_friend_list.go:36-40），不在 ListAllUsers
+    write_user_info(
+        &store,
+        "alice:",
+        r#"{"nickname":"Ghost","remark":"","user_id":""}"#,
+    );
+    // 缺字段解码成空串（Go json.Unmarshal 零值语义；key 不被读侧解析）
+    write_user_info(&store, "carol:300003", r#"{"nickname":"Carol"}"#);
+
+    assert_eq!(
+        store.list_all_users().expect("枚举"),
+        vec![
+            UserInfoRow {
+                nickname: "Bob".to_owned(),
+                remark: "b-note".to_owned(),
+                user_id: "100002".to_owned(),
+            },
+            UserInfoRow {
+                nickname: "Ghost".to_owned(),
+                remark: String::new(),
+                user_id: String::new(),
+            },
+            UserInfoRow {
+                nickname: "Alice".to_owned(),
+                remark: "a-note".to_owned(),
+                user_id: "200001".to_owned(),
+            },
+            UserInfoRow {
+                nickname: "Carol".to_owned(),
+                remark: String::new(),
+                user_id: String::new(),
+            },
+        ],
+        "顺序=key 字节序；未知字段（Private）忽略、缺字段为空串"
+    );
+}
+
+#[test]
+fn list_all_users_corrupt_row_aborts_like_go() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store = open(dir.path());
+    write_user_info(&store, "alice:1", r#"{"nickname":"Alice","user_id":"1"}"#);
+    write_user_info(&store, "bob:2", "not-json");
+    // Go：任一行 json.Unmarshal 失败即中止 ForEach 并返回 err（service.go:2301-2303），
+    // 调用方把 err 记日志后回 `data:null`——不能回半个列表
+    assert!(
+        store.list_all_users().is_err(),
+        "损坏行必须整次枚举返回 Err"
+    );
+}
+
 #[test]
 fn force_unbind_deletes_forward_and_reverse_rows() {
     let dir = tempfile::tempdir().expect("临时目录");

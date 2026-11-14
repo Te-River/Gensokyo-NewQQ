@@ -30,8 +30,7 @@ use gensokyo_qq::dto::{
 use gensokyo_storage::IdMapStore;
 
 use crate::qqapi::{
-    ActionContext, FriendEntry, KickResult, MsgDetail, QqApi, QqFuture, RetractRequest,
-    StrangerProfile,
+    ActionContext, KickResult, MsgDetail, QqApi, QqFuture, RetractRequest, StrangerProfile,
 };
 
 /// 一次上游调用的入参记录。
@@ -49,8 +48,6 @@ pub(crate) enum Call {
     GetMsg(String),
     /// `get_forward_msg(forward_id)`
     GetForwardMsg(String),
-    /// `get_friend_list()`
-    FriendList,
     /// `get_stranger_info(user_openid)`
     StrangerInfo(String),
     /// `send_like(user_openid, times)`
@@ -113,7 +110,6 @@ pub(crate) struct FakeQqApi {
     pub(crate) delete: Mutex<Option<Result<()>>>,
     pub(crate) msg: Mutex<Option<Result<MsgDetail>>>,
     pub(crate) forward: Mutex<Option<Result<Vec<Segment>>>>,
-    pub(crate) friends: Mutex<Option<Result<Vec<FriendEntry>>>>,
     pub(crate) stranger: Mutex<Option<Result<StrangerProfile>>>,
     pub(crate) like: Mutex<Option<Result<()>>>,
     pub(crate) group_send: Mutex<Option<Result<MessageResponse>>>,
@@ -260,13 +256,6 @@ impl QqApi for FakeQqApi {
         Box::pin(async move {
             self.record(Call::GetForwardMsg(forward_id));
             take(&self.forward)
-        })
-    }
-
-    fn get_friend_list(&self) -> QqFuture<'_, Vec<FriendEntry>> {
-        Box::pin(async move {
-            self.record(Call::FriendList);
-            take(&self.friends)
         })
     }
 

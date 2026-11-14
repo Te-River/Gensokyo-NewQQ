@@ -554,6 +554,14 @@ impl OutboundPlan {
         let mut active = ActiveKind::default();
 
         for segment in segments {
+            // P59 裸媒体码：按 media_wire_value 的臂口径取值为空时 Go 保留 `tok.Raw`
+            // 字面、不进 foundItems（resolveMediaValue handlers_media.go:51-59、
+            // resolveFileValue :87-91——file 臂只读 file，故 `[CQ:file,url=…]` 同样算裸码）；
+            // 在归一点统一把原文放回 text，不产出 `Unknown("")` 空 file_info。
+            if is_bare_media_segment(segment) {
+                plan.text.push_str(&segment.raw_or_cq());
+                continue;
+            }
             match segment.kind.as_str() {
                 "text" => plan
                     .text
@@ -575,8 +583,10 @@ impl OutboundPlan {
                 "record" | "voice" => plan.records.push(media_from_segment(segment)),
                 "video" => plan.videos.push(media_from_segment(segment)),
                 "file" => plan.files.push(FileRef {
-                    // file 码只读 file，无 url 兜底（Go resolveFileValue handlers_media.go:87）
-                    media: MediaRef::from_wire(segment.get("file").unwrap_or_default()),
+                    // 取值走 media_wire_value 单一口径：file 臂只读 file（Go
+                    // resolveFileValue handlers_media.go:87-91），url 从不参与取值；
+                    // 取值为空的形态（含 [CQ:file,url=…]）已被裸码判定拦在上面
+                    media: media_from_segment(segment),
                     file_name: segment
                         .get("file_name")
                         .or_else(|| segment.get("name"))
@@ -756,14 +766,53 @@ fn push_media<'a>(bucket: &mut Vec<MediaRef>, key: &str, values: impl Iterator<I
     }
 }
 
-fn media_from_segment(segment: &Segment) -> MediaRef {
-    // Go resolveMediaValue 的 file（空时兼容 url）口径：
-    // handlers/cqparse/handlers_media.go:51-55、message_parser.go:870-874/914-918/1218-1222
-    let file = segment.get("file").unwrap_or_default();
-    if file.is_empty() {
-        return MediaRef::from_wire(segment.get("url").unwrap_or_default());
+/// 媒体段族的**单一取值点**：按 Go 的臂口径从段参数解析出最终参与发送的 wire 值。
+///
+/// - Go `resolveMediaValue`（`handlers/cqparse/handlers_media.go:51-55`）：`image` /
+///   `record` / `voice` / `video` 的 `file` 为空则兜 `url`（另见 legacy 同口径
+///   `message_parser.go:870-874/914-918/1218-1222`）；
+/// - Go `resolveFileValue`（`:87-91`）：`file` 只读 `file`，`url` **从不参与取值**。
+///
+/// 取值结果**为空**即 Go 返回 `Replacement: tok.Raw` 的形态（`:56-59`、`:88-91`）：
+/// 保留字面、不产 foundItems。规则只在本函数里出现一次，[`media_from_segment`] 与
+/// [`is_bare_media_segment`] 共用，各臂不再重复特判。
+///
+/// 返回 `None` 表示该段不属于媒体族（调用方不应据此判定裸码）。
+fn media_wire_value(segment: &Segment) -> Option<&str> {
+    match segment.kind.as_str() {
+        // Go resolveMediaValue：file 空则兜 url（:51-55），皆空才保字面（:56-59）
+        "image" | "record" | "voice" | "video" => {
+            let file = segment.get("file").unwrap_or_default();
+            if file.is_empty() {
+                Some(segment.get("url").unwrap_or_default())
+            } else {
+                Some(file)
+            }
+        }
+        // Go resolveFileValue：只读 file（:87-91），url 从不参与取值
+        "file" => Some(segment.get("file").unwrap_or_default()),
+        _ => None,
     }
-    MediaRef::from_wire(file)
+}
+
+fn media_from_segment(segment: &Segment) -> MediaRef {
+    // 取值口径（含按臂差异）见 media_wire_value，本函数只做 wire → MediaRef 的形态映射
+    MediaRef::from_wire(media_wire_value(segment).unwrap_or_default())
+}
+
+/// 裸媒体码：媒体段族（`image` / `record` / `voice` / `video` / `file`）按
+/// [`media_wire_value`] 的**臂口径**解析出的取值为空——对 `image` / `record` /
+/// `voice` / `video` 是 `file` 与 `url` 皆空，对 `file` 是 `file` 空（`url` 有无都算）。
+///
+/// Go 的 `resolveMediaValue` / `resolveFileValue` 对该形态返回 `Replacement: tok.Raw`
+/// （`handlers/cqparse/handlers_media.go:56-59`、`:88-91`）——保留字面、不产任何
+/// foundItems 键；若在 Rust 侧放行会产出 `MediaRef::Unknown("")`，向上游发出空
+/// `file_info`。`from_segments` 的媒体归一点按本判定把原始字面放回 `plan.text`。
+///
+/// 取值非空的形态各臂行为不变（`file` 臂不兜 `url` 的钉死口径见
+/// `file_arm_does_not_fall_back_to_url`）。
+fn is_bare_media_segment(segment: &Segment) -> bool {
+    media_wire_value(segment).is_some_and(|wire| wire.is_empty())
 }
 
 /// `[CQ:markdown,data=…]` → `foundItems["markdown"]` 契约（base64(JSON)）。
@@ -1145,33 +1194,43 @@ mod tests {
     /// 运行级钉死：各参数形态下 voice 码与同参 record 码逐字段等价，不落 extra、
     /// 不产出 `*_voice` 键（对拍 Go `cq_parse_regression_test.go:688-717`、
     /// `cq_threepath_matrix_test.go:181-203`）。
+    ///
+    /// 第二列是**形态标记**：`true` = P59 裸码（取值空、按 Go `tok.Raw` 保留字面），
+    /// 口径见 `media_wire_value`。裸与否随数据一起维护，新增 `[CQ:voice,file=,url=]`
+    /// 这类裸形态只需加一行，不会误落非裸分支。
     #[test]
     fn from_segments_voice_alias_matches_record_every_shape() {
-        let shapes = [
-            "[CQ:voice,file=https://x.com/a.mp3]",
-            "[CQ:voice,file=http://x.com/b.mp3]",
-            "[CQ:voice,file=base64://dm9pY2U=]",
-            "[CQ:voice,file=file:///C:/tmp/a.wav]",
-            "[CQ:voice,file=weird://y]",
+        let shapes: [(&str, bool); 11] = [
+            ("[CQ:voice,file=https://x.com/a.mp3]", false),
+            ("[CQ:voice,file=http://x.com/b.mp3]", false),
+            ("[CQ:voice,file=base64://dm9pY2U=]", false),
+            ("[CQ:voice,file=file:///C:/tmp/a.wav]", false),
+            ("[CQ:voice,file=weird://y]", false),
             // Go resolveMediaValue：file 空时兼容 url（handlers_media.go:52-55）
-            "[CQ:voice,url=https://x.com/c.mp3]",
-            "[CQ:voice,file=,url=https://x.com/d.mp3]",
+            ("[CQ:voice,url=https://x.com/c.mp3]", false),
+            ("[CQ:voice,file=,url=https://x.com/d.mp3]", false),
             // 附加参数（asr）与 record 同口径：出站不读取，不影响归一
-            "[CQ:voice,file=abc.silk,asr=1]",
-            "[CQ:VOICE,file=https://x.com/e.mp3]",
+            ("[CQ:voice,file=abc.silk,asr=1]", false),
+            ("[CQ:VOICE,file=https://x.com/e.mp3]", false),
             // 裸码与裸 record 行为一致（两路都不应有 voice 特判）
-            "[CQ:voice]",
+            ("[CQ:voice]", true),
+            // 两个参数都在但都为空：取值仍是空 → 同属裸码
+            ("[CQ:voice,file=,url=]", true),
         ];
-        for voice_code in shapes {
+        for (voice_code, bare) in shapes {
             let record_code = voice_code
                 .replace("voice", "record")
                 .replace("VOICE", "RECORD");
             let voice_plan = OutboundPlan::from_segments(&cqcode::parse(voice_code));
             let record_plan = OutboundPlan::from_segments(&cqcode::parse(&record_code));
-            assert_eq!(
-                voice_plan, record_plan,
-                "voice 应与同参 record 等价: {voice_code}"
-            );
+            // 裸码无取值：P59 后按 Go `Replacement: tok.Raw` 保留**各自**字面，
+            // `[CQ:voice]` 与 `[CQ:record]` 文本天然不同，等价断言只适用有值形态
+            if !bare {
+                assert_eq!(
+                    voice_plan, record_plan,
+                    "voice 应与同参 record 等价: {voice_code}"
+                );
+            }
             assert!(
                 voice_plan.extra.is_empty(),
                 "voice 不应落 extra: {voice_code}"
@@ -1185,10 +1244,19 @@ mod tests {
                 record_plan.to_found_items(),
                 "foundItems 应与同参 record 一致: {voice_code}"
             );
-            // 裸码无 file/url：Go 与 Rust 都与裸 record 同行为（本用例断言等价已覆盖），
-            // 仅带值形态才断言"落语音通道"
-            let bare = matches!(voice_code, "[CQ:voice]");
-            if !bare {
+            // 裸码两路都不产 foundItems 键，且只保留字面、不进任何媒体桶
+            if bare {
+                assert!(
+                    items.is_empty() && record_plan.to_found_items().is_empty(),
+                    "裸码不该产出 foundItems 键: {voice_code}"
+                );
+                assert_eq!(voice_plan.text, voice_code, "裸 voice 保留自身字面");
+                assert_eq!(
+                    record_plan.text, record_code,
+                    "裸 record 保留自身字面（与 Go tok.Raw 同）"
+                );
+                assert!(voice_plan.records.is_empty(), "裸码不进语音桶");
+            } else {
                 assert_eq!(voice_plan.records.len(), 1, "应落语音通道: {voice_code}");
             }
         }
@@ -1231,27 +1299,43 @@ mod tests {
         );
     }
 
-    /// P57-② 评审钉死（1）：`file` 臂**没有** url 兜底，逐字对齐 Go
-    /// `resolveFileValue`（`handlers/cqparse/handlers_media.go:87` 只读 `file`）。
+    /// P57-② 评审钉死（1），P59b 修正口径：`file` 臂**没有** url 兜底，逐字对齐 Go
+    /// `resolveFileValue`（`handlers/cqparse/handlers_media.go:87-91` 只读 `file`，
+    /// `file` 空即 `Replacement: tok.Raw`）。所以带 `url` 而 `file` 空的形态既不兜 url
+    /// （不产 `url_file`），也不产 `Unknown("")` 的空 `file_info`——原位保留字面，
+    /// `to_found_items()` 为空（Go 对该形态不产任何键，含 Go 不产的 `file_name`）。
+    /// 旧版本用例钉的是 `files == [Unknown("")]` + `unknown_file == [""]`，那只对
+    /// legacy `message_parser.go:1185-1207` 成立，与本基准（cqparse）相反，故改钉字面。
     /// 谁把 `media_from_segment` 的兜底用回 file 臂，本用例即报警。
-    /// 裸码（既无 `file` 也无 `url`）的透传语义见 P59，本用例不覆盖。
     #[test]
     fn file_arm_does_not_fall_back_to_url() {
-        let plan = OutboundPlan::from_segments(&cqcode::parse("[CQ:file,url=https://x/a.bin]"));
-        assert_eq!(
-            plan.files,
-            vec![FileRef {
-                media: MediaRef::Unknown(String::new()),
-                file_name: None,
-            }],
-            "file 臂只读 file=，url= 不参与取值"
-        );
-        assert!(plan.extra.is_empty(), "file 码不应落 extra");
-        assert_eq!(
-            plan.to_found_items()["unknown_file"],
-            [String::new()],
-            "unknown_file 键与空值：url= 未被取用"
-        );
+        for code in [
+            "[CQ:file,url=https://x/a.bin]",
+            "[CQ:file,file=,url=https://x/a.bin]",
+            "[CQ:file,url=https://x/a.bin,file_name=a.bin]",
+        ] {
+            let plan = OutboundPlan::from_segments(&cqcode::parse(code));
+            assert!(
+                plan.files.is_empty(),
+                "file 臂不兜 url，不该进文件桶: {code}"
+            );
+            assert!(plan.extra.is_empty(), "file 码不应落 extra: {code}");
+            let items = plan.to_found_items();
+            for key in [
+                "url_file",
+                "url_files",
+                "local_file",
+                "unknown_file",
+                "file_name",
+            ] {
+                assert!(!items.contains_key(key), "不该产出 {key} 键: {items:?}");
+            }
+            assert!(
+                items.is_empty(),
+                "空 file 的 file 码不产任何 foundItems 键: {items:?}"
+            );
+            assert_eq!(plan.text, code, "空 file 的 file 码原位保留字面: {code}");
+        }
     }
 
     /// P57-② 评审钉死（2）：`video` 臂**有** url 兜底（Go
@@ -1339,6 +1423,41 @@ mod tests {
                 "兜底成功就不该落语音兜底桶"
             );
         }
+    }
+
+    /// P59：裸媒体码（`file` 与 `url` 皆无）按 Go 保留字面原文——
+    /// `resolveMediaValue`/`resolveFileValue` 对该形态返回 `Replacement: tok.Raw`、
+    /// 不产 foundItems（`handlers/cqparse/handlers_media.go:56-59`、`:88-91`）。
+    /// 修复前会产出 `MediaRef::Unknown("")`，向上游发出空 `file_info`。
+    #[test]
+    fn from_segments_bare_media_code_keeps_literal_text() {
+        for code in [
+            "[CQ:image]",
+            "[CQ:video]",
+            "[CQ:file]",
+            "[CQ:record]",
+            "[CQ:voice]",
+        ] {
+            let plan = OutboundPlan::from_segments(&cqcode::parse(code));
+            assert!(plan.images.is_empty(), "{code} 不该进图片桶");
+            assert!(plan.videos.is_empty(), "{code} 不该进视频桶");
+            assert!(plan.records.is_empty(), "{code} 不该进语音桶");
+            assert!(plan.files.is_empty(), "{code} 不该进文件桶");
+            assert!(plan.extra.is_empty(), "{code} 不该落 extra");
+            assert_eq!(plan.text, code, "{code} 应原位保留字面原文（含方括号）");
+        }
+    }
+
+    /// P59：裸码与文本混排时按 Go `Replacement: tok.Raw` 的原位语义保留前后空白，
+    /// 逐字节还原到 `plan.text`。
+    #[test]
+    fn from_segments_bare_media_code_keeps_surrounding_whitespace() {
+        let plan = OutboundPlan::from_segments(&cqcode::parse("看 [CQ:image] 好"));
+        assert_eq!(
+            plan.text, "看 [CQ:image] 好",
+            "空白原位保留，码体逐字面回写"
+        );
+        assert!(plan.images.is_empty(), "裸码不该进图片桶");
     }
 
     #[test]

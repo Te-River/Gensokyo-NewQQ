@@ -9,7 +9,7 @@
 //! | [`group`] | `get_group_info`、`get_group_member_info`、`get_group_member_list`、`set_group_ban`（别名 `get_group_ban`）、`get_group_bot_state`、`get_group_join_request_list` | 真正调用 QQ 上游的查询 / 管理 action，经 [`qqapi::QqApi`] 抽象，成功回 `data`，参数错误 `1400` / 上游错误 `1500`。 |
 //! | [`group_admin`] | `set_group_whole_ban`（别名 `get_group_whole_ban`）、`set_group_card`、`set_group_kick`、`set_group_leave`、`get_group_list` | 群管理：前两个照 Go 口径固定回 `retcode = 100`（官方无写入路径），`set_group_kick` 走 `POST /v2/groups/{gid}/batch_remove_members`，`set_group_leave` 无官方端点回 `1500`，`get_group_list` 用 idmap 枚举已注册群 + 逐群群信息聚合。 |
 //! | [`messages`] | `delete_msg`、`get_msg`、`get_forward_msg` | `delete_msg` 走官方撤回端点（群 `DELETE /v2/groups/{gid}/messages/{mid}`、C2C `/v2/users/{uid}/messages/{mid}`）；`get_msg` / `get_forward_msg` 官方无端点回 `1500`。 |
-//! | [`users`] | `get_friend_list`、`get_stranger_info`、`send_like` | 用户列表 / 资料 / 点赞；同上游限制回 `1500`。 |
+//! | [`users`] | `get_friend_list`、`get_stranger_info`、`send_like` | 好友列表直读 idmap `user_info` 表（P64a 读侧对齐，空态 `data: null` 同 Go）；资料 / 点赞官方无端点回 `1500`。 |
 //! | [`media`] | `get_image`、`get_record` | 纯本地：`file://` 归一成本地路径、其余原样回填进 `{"file": …}`；缺 `file` 回 `1400`。 |
 //! | [`system`] | `set_restart`、`clean_cache`、`get_cookies`、`get_csrf_token`、`get_credentials` | 运行控制 / 凭证：前两个只记审计日志并回 `{"code": 0}`（不重启、不清缓存），后三个回空凭证。 |
 //! | [`unsupported`] | `get_group_at_all_remain`、`set_group_name`、`set_group_admin`、`set_group_special_title`、`set_group_remark`、`set_qq_profile`、`get_qq_profile`、`get_group_system_msg`、`get_online_clients` | 无上游端点的 action：参数照 OneBot 契约校验后回 `1500`；`get_online_clients` 例外，逐字段照抄 Go 的本地回执 `{"clients": [], "tiny_id": 0}`。 |
@@ -58,8 +58,8 @@
 //!   `upload_group_file` / `upload_c2c_file` → `file_info` → `msg_type=7`；`MediaRef::Unknown` 直通不再上传。
 //!   限制（单条一个 media 槽、5MB、不压缩）见 `gensokyo-runtime::deferred`「媒体」节；
 //!   markdown 正文内嵌本地图的素材链替换尚未接线（#62）。
-//! - **尚未接线**：`get_msg` / `get_forward_msg`（官方无查询端点）、`get_friend_list` /
-//!   `get_stranger_info` / `send_like`（官方无端点）、`set_group_leave`（官方无退群端点）、
+//! - **尚未接线**：`get_msg` / `get_forward_msg`（官方无查询端点）、`get_stranger_info` /
+//!   `send_like`（官方无端点）、`set_group_leave`（官方无退群端点）、
 //!   群荣誉 / 匿名禁言
 //!   （[`interaction`]）——这些只做参数校验后回 `1500`，不做静默降级。`get_login_info` /
 //!   `get_status` / `get_version_info` 由 runtime 内置（[`BUILTIN_ACTIONS`]），不在本 crate。
@@ -148,8 +148,7 @@ pub use panels::{
     SetPanelHandler, SetPanelTargetHandler,
 };
 pub use qqapi::{
-    ActionContext, FriendEntry, KickResult, MsgDetail, QqApi, QqFuture, RetractRequest,
-    StrangerProfile,
+    ActionContext, KickResult, MsgDetail, QqApi, QqFuture, RetractRequest, StrangerProfile,
 };
 pub use register::register_all;
 pub use send::{

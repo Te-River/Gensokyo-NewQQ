@@ -21,6 +21,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use redb::{
     Database, ReadTransaction, ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction,
 };
+use serde::Deserialize;
 use tracing::{debug, warn};
 
 use crate::StorageError;
@@ -226,6 +227,21 @@ pub struct IdentityMapping {
     pub virtual_id: i64,
     /// 名称缓存，未缓存时为空串（Go `GetUserName` 未命中返回 `""`）。
     pub username: String,
+}
+
+/// `user_info` 表的一行（Go `structs.FriendData`，`structs/structs.go:3-7`）。
+///
+/// 字段声明序与 Go 结构体一致；三个字段都对应 Go 的 JSON tag（`nickname` / `remark` /
+/// `user_id`），缺字段解码成空串（等价 Go `json.Unmarshal` 的零值语义），未知字段忽略。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct UserInfoRow {
+    /// 昵称。
+    pub nickname: String,
+    /// 备注。
+    pub remark: String,
+    /// 用户 ID（Go 写侧存什么就是什么，读侧不改写）。
+    pub user_id: String,
 }
 
 /// [`IdMapStore::resolve_rebind_identity`] 的结果：正表 key + 反表要写的原始身份串。
@@ -770,6 +786,43 @@ impl IdMapStore {
             });
         }
         Ok(mappings)
+    }
+
+    /// 枚举 `user_info` 表（Go `ListAllUsers`，`idmap/service.go:2290-2314`）：只读，按表
+    /// key 字节序升序遍历（Go bbolt `ForEach` 同序；key 的写侧形态是 `"<rawID>:<user_id>"`，
+    /// 但 Go 读侧不解析 key、只借用其排序，三字段全部来自 value 的 JSON 解码，未知字段忽略、
+    /// 缺字段为空串）。某行解码失败时 Go 中止整次枚举并返回 err（调用方
+    /// `get_friend_list.go:30-32` 只记日志、随后 `data` 为 `null`）——本函数同样返回 Err，
+    /// 不回半个列表。
+    ///
+    /// 与 Go 的差异：bucket 缺失时 Go 返回 Err（`bucket not found`）并由调用方降级成空，
+    /// redb 的表在 [`IdMapStore::open`] 时已创建、理论不会缺失——表不存在这里直接回空
+    /// 列表，调用方可观测行为一致。本函数恒读本地库：Go `ListAllUsers` 同样直用
+    /// `configAndUserInfoDB()`，不经 lotus 远程分支。
+    ///
+    /// 目前唯一调用方是 `gensokyo-actions` 的 `get_friend_list`（P64a 读侧对齐）；写侧
+    /// `StoreUserInfo` 尚未移植（P64b），全新 Rust 部署里这张表只有 M1e 导入器的数据。
+    ///
+    /// # Errors
+    ///
+    /// redb 事务失败、表数据损坏或某行 JSON 解码失败时返回 [`StorageError`]。
+    pub fn list_all_users(&self) -> Result<Vec<UserInfoRow>, StorageError> {
+        let txn = self.identity_db.begin_read().map_err(rb)?;
+        let table = match txn.open_table(USER_INFO) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => {
+                return Ok(Vec::new());
+            }
+            Err(err) => return Err(rb(err)),
+        };
+        let mut rows = Vec::new();
+        for entry in table.iter().map_err(rb)? {
+            let (_, value) = entry.map_err(rb)?;
+            let row: UserInfoRow = serde_json::from_slice(value.value())
+                .map_err(|err| StorageError::Corrupt(format!("user_info 行解码失败: {err}")))?;
+            rows.push(row);
+        }
+        Ok(rows)
     }
 
     /// 取同一前缀下的所有子键（Go `FindSubKeysById`，`idmap/service.go:2113`）：按

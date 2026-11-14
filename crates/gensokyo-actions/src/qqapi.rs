@@ -44,7 +44,6 @@
 //! | [`QqApi::set_group_leave`] | 官方无机器人退群端点 | 未落地，`Unsupported` |
 //! | [`QqApi::get_msg`] | 官方无按 message_id 查询消息端点 | 未落地，`Unsupported` |
 //! | [`QqApi::get_forward_msg`] | 官方无合并转发查询端点 | 未落地，`Unsupported` |
-//! | [`QqApi::get_friend_list`] | 官方无好友列表端点 | 未落地，`Unsupported` |
 //! | [`QqApi::get_stranger_info`] | 官方无陌生人资料端点 | 未落地，`Unsupported` |
 //! | [`QqApi::send_like`] | 官方无点赞端点 | 未落地，`Unsupported` |
 //!
@@ -520,18 +519,6 @@ pub trait QqApi: Send + Sync + fmt::Debug {
         Box::pin(async {
             Err(Error::Unsupported(
                 "get_forward_msg: 官方 v2 无合并转发查询端点".to_owned(),
-            ))
-        })
-    }
-
-    /// 好友列表。
-    ///
-    /// 官方没有好友列表端点；Go 侧读 idmap 全量用户，而 [`IdMapStore`] 没有枚举接口，
-    /// 因此返回 [`Error::Unsupported`]。
-    fn get_friend_list(&self) -> QqFuture<'_, Vec<FriendEntry>> {
-        Box::pin(async {
-            Err(Error::Unsupported(
-                "get_friend_list: 官方无好友列表端点，且 idmap 暂无枚举接口".to_owned(),
             ))
         })
     }
@@ -1092,17 +1079,6 @@ pub struct MsgDetail {
     pub text: String,
     /// 消息段（按收到的顺序；为空表示只有纯文本）。
     pub segments: Vec<Segment>,
-}
-
-/// 好友条目。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct FriendEntry {
-    /// 好友的 user_openid。
-    pub user_openid: String,
-    /// 昵称。
-    pub nickname: String,
-    /// 备注（官方无此字段时为空串）。
-    pub remark: String,
 }
 
 /// 陌生人资料。

@@ -70,8 +70,9 @@
 //! - **`UserInfo` 桶**：Go `initNewDBs` 在身份库额外建 `config` / `UserInfo` 两个 bucket。
 //!   `config` 由 M1f 补上（[`IdMapStore::write_config`] / [`IdMapStore::read_config`] /
 //!   [`IdMapStore::delete_config`]，供 gRPC `WriteConfigV2` 等使用）；`UserInfo`（表名
-//!   `user_info`）由 M1e 的导入器补上，目前只有导入入口，`StoreUserInfo` / `ListAllUsers`
-//!   尚未暴露（没有调用方）。
+//!   `user_info`）由 M1e 的导入器补上；读侧 `ListAllUsers` 已暴露为
+//!   [`IdMapStore::list_all_users`]（P64a，`get_friend_list` 是首个调用方），写侧
+//!   `StoreUserInfo` 仍未暴露（P64b，全新部署该表只有导入器数据）。
 //! - **批量写**：Go 每个 `StoreIDv2` / `StoreMsgID` / `WriteConfigv2` 各自一次写事务（一次
 //!   fsync）；[`IdMapStore::with_write_batch`] 把一次事件内的多次写入收进同一个事务。成功
 //!   路径逐键结果与 Go 一致，只有提交次数变少；失败路径是整批回滚（Go 保留失败点之前的写入）。
@@ -99,7 +100,7 @@ pub use botstats::{BotStats, BotStatsStore, DEFAULT_BOTSTATS_PATH};
 pub use echo::{Clock, EchoStore, MessageGroupPair, MessageScene};
 pub use error::StorageError;
 pub use idmap::grpc::{IdMapClient, IdMapService};
-pub use idmap::{IdMapOptions, IdMapStore, USER_NAME_SWEEP_THRESHOLD};
+pub use idmap::{IdMapOptions, IdMapStore, USER_NAME_SWEEP_THRESHOLD, UserInfoRow};
 pub use importer::{ImportError, ImportOptions, ImportReport, OnVuinConflict};
 pub use short_url::{
     DEFAULT_SHORT_URL_PATH, ShortUrlStore, UrlRejection, is_malicious, redirect_target,

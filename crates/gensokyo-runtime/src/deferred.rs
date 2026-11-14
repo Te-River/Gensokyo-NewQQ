@@ -87,7 +87,12 @@
 //!   按上游错误返回，**不**降级回 `file_data` 直传（Go 同）；下载硬上限 200MB
 //!   （[`crate::media::MAX_UPLOAD_BYTES`]）；
 //! - [`MediaRef::Unknown`] 视为「已经拿到上游 `file_info`」，直接透传、不再上传（Go 的
-//!   `unknown_*` 回退口径）；
+//!   `unknown_*` 回退口径）；**空值不会出现**：`OutboundPlan::from_segments` 归一点按 Go 的
+//!   **臂口径**（`media_wire_value`：`image` / `video` / `record` / `voice` 取 `file` 空则兜
+//!   `url`、皆空才算裸码；`file` 只读 `file`，`url` 从不参与取值，故 `[CQ:file,url=…]` 这类
+//!   含 `url` 形态同样不出现空 `file_info`）判为空的段已原位放回正文字面（对齐 Go
+//!   `Replacement: tok.Raw`，`handlers_media.go:56-59`、`:87-91`），不再产出 `Unknown("")`
+//!   向下游发出空 `file_info`；
 //! - **本地 / base64 来源**先做发送前处理（Go 条件，URL 来源原样）：图片按
 //!   `image_sizelimit`（KB，`0` = 不压缩）压缩；语音不是 AMR / SILK 时经 `ffmpeg` + `pts`
 //!   转码（工具缺失报 1500）；视频 / 文件不处理。
@@ -2409,7 +2414,7 @@ mod tests {
         ActiveKind, CardFields, CardPayload, InputNotifyPayload, KeyboardPayload, MarkdownPayload,
         StreamKind, StreamPayload,
     };
-    use gensokyo_protocol::{MediaRef, OutboundPlan};
+    use gensokyo_protocol::{MediaRef, MessageContent, OutboundPlan};
     use gensokyo_qq::dto::media_image::{
         MediaImageCompleteRequest, MediaImageCompleteResponse, MediaImagePrepareRequest,
         MediaImagePrepareResponse,
@@ -3463,6 +3468,79 @@ mod tests {
                 .map(|media| media.file_info.as_str()),
             Some("FILE-INFO")
         );
+    }
+
+    /// P59：裸媒体码（`file` 与 `url` 皆无）在外部形态上**不得**向 QQ 发出
+    /// `"media":{"file_info":""}`——Go 对该形态原位保留字面文本
+    /// （`handlers/cqparse/handlers_media.go:56-59`、`:88-91`）。修复前 Rust 经
+    /// `MediaRef::Unknown("")` 透传臂产出空 `file_info`，本用例钉死纠正后的形态。
+    /// 走 `MessageOut::from_content` 生产入口（CQ 文本 → MessageOut），断言的是发往
+    /// 上游的 [`MessageToCreate`] 请求体外形态。
+    #[tokio::test]
+    async fn bare_media_code_never_sends_empty_file_info() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let raw = "看 [CQ:image] [CQ:video] [CQ:file] [CQ:record] [CQ:voice] 好";
+        let mut send = group_request(OutboundPlan::default());
+        send.message = MessageOut::from_content(&MessageContent::from(raw), false);
+
+        execute(&context, &send, &deps(&no_media(), None))
+            .await
+            .expect("裸媒体码按文本发送");
+
+        assert!(api.uploads().is_empty(), "裸码不应触发媒体上传");
+        let sent = api.sent();
+        assert_eq!(sent.len(), 1, "裸码不应拆出富媒体条");
+        for message in &sent {
+            assert!(
+                message.media.is_none(),
+                "裸码不占 media 槽，更不得出现空 file_info"
+            );
+        }
+        assert_eq!(
+            sent[0].content.as_deref(),
+            Some(raw),
+            "五族裸码原位保留字面（含方括号与两侧空白）"
+        );
+    }
+
+    /// P59b：`file` 臂的**含 `url` 形态**同样不得向 QQ 发出 `"media":{"file_info":""}`。
+    /// Go `resolveFileValue`（`handlers/cqparse/handlers_media.go:87-91`）只读 `file`，
+    /// `file` 空即 `Replacement: tok.Raw`——`url` 从不参与取值，所以
+    /// `[CQ:file,url=…]` 走的是与裸码相同的字面保留路径：不占 media 槽、不下载、
+    /// 不上传，也不带 Go 不产的 `file_name`。断言的是发往上游的 [`MessageToCreate`]
+    /// 请求体外形态（生产入口 `MessageOut::from_content`，fake api 同上例）。
+    #[tokio::test]
+    async fn file_arm_with_url_never_sends_empty_file_info() {
+        for raw in [
+            "附件 [CQ:file,url=https://x/a.bin] 结束",
+            "附件 [CQ:file,file=,url=https://x/a.bin] 结束",
+            "附件 [CQ:file,url=https://x/a.bin,file_name=a.bin] 结束",
+        ] {
+            let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+            let (_dir, context) = context(Arc::clone(&api));
+            let mut send = group_request(OutboundPlan::default());
+            send.message = MessageOut::from_content(&MessageContent::from(raw), false);
+
+            execute(&context, &send, &deps(&no_media(), None))
+                .await
+                .unwrap_or_else(|err| panic!("file 臂含 url 应按文本发送: {err}"));
+
+            assert!(api.uploads().is_empty(), "{raw} 不该触发媒体上传");
+            let sent = api.sent();
+            assert_eq!(sent.len(), 1, "{raw} 不该拆出富媒体条");
+            for message in &sent {
+                assert!(
+                    message.media.is_none(),
+                    "{raw} 不占 media 槽，更不得出现空 file_info"
+                );
+            }
+            assert_eq!(
+                sent[0].content.as_deref(),
+                Some(raw),
+                "{raw} 应原位保留字面（含 url 与 file_name 参数）"
+            );
+        }
     }
 
     // ---- reply / echo ----
