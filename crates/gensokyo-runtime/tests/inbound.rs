@@ -9,6 +9,7 @@ use std::sync::Arc;
 use gensokyo_core::Ob11Id;
 use gensokyo_protocol::Event;
 use gensokyo_protocol::MessageContent;
+use gensokyo_protocol::cqcode;
 use gensokyo_protocol::event::MessageType;
 use gensokyo_runtime::Inbound;
 use gensokyo_storage::{EchoStore, IdMapOptions, IdMapStore, UnionCache};
@@ -648,17 +649,21 @@ fn array_value_parses_plain_text_into_text_segment() {
     assert_eq!(raw, "hi", "raw_message 恒为字符串");
 }
 
+/// `array_value` 下 at 与 face 的分工（P72 收位后的口径）：
+/// - `at` 仍是类型化段——真实 @ 由 `revert_mentions` 把 `<@OpenID>` 合成成 `[CQ:at,qq=…]`
+///   再解回段，这一位结构性依赖，置假会让真实 mention 全部退化成文本（另立 P73）；
+/// - 手打的 `[CQ:face,…]` 折回 text 原文，并与相邻文本合并成一段——Go `ConvertToSegmentedMessage`
+///   的段类型只有 text/at/image 再加 record/ark/reply（`handlers/message_parser.go:2340`），
+///   对正文只做整段切片 + `<@OpenID>` 正则、不解析 CQ（同文件 `:2253-2334`）。
 #[test]
-fn array_value_parses_at_and_multiple_segments() {
+fn array_value_keeps_at_segment_and_folds_typed_face_code() {
     let (segments, raw) = segments_of(&array_settings(true), "a[CQ:at,qq=10086]b[CQ:face,id=1]c");
     assert_eq!(
         segments,
         vec![
             json!({"type": "text", "data": {"text": "a"}}),
             json!({"type": "at", "data": {"qq": "10086"}}),
-            json!({"type": "text", "data": {"text": "b"}}),
-            json!({"type": "face", "data": {"id": "1"}}),
-            json!({"type": "text", "data": {"text": "c"}}),
+            json!({"type": "text", "data": {"text": "b[CQ:face,id=1]c"}}),
         ]
     );
     assert_eq!(raw, "a[CQ:at,qq=10086]b[CQ:face,id=1]c");
@@ -675,6 +680,130 @@ fn array_value_degrades_unknown_codes_to_text() {
         vec![json!({"type": "text", "data": {"text": content}})]
     );
     assert_eq!(raw, content);
+}
+
+/// 数组形态上报的三视图：段数组的 JSON、`raw_message`、以及 `message` 拼出的纯文本。
+fn array_report(content: &str) -> (Vec<Value>, String, String) {
+    let (inbound, _dir) = inbound(&array_settings(true));
+    let events = inbound
+        .convert(
+            "GROUP_AT_MESSAGE_CREATE",
+            Some(&message_payload(content)),
+            None,
+        )
+        .expect("转换失败");
+    let Event::Message(message) = &events[0] else {
+        panic!("应为 message 事件，实得 {events:?}");
+    };
+    let MessageContent::Array(segments) = &message.message else {
+        panic!("array_value=true 应上报段数组，实得 {:?}", message.message);
+    };
+    (
+        segments
+            .iter()
+            .map(|segment| serde_json::to_value(segment).expect("段序列化失败"))
+            .collect(),
+        message.raw_message.clone(),
+        message.text(),
+    )
+}
+
+/// P72 收位：18 个 `inbound = false` 的码，手打形态一律按原文折回 text 段。
+///
+/// Go `ConvertToSegmentedMessage`（`handlers/message_parser.go:2253-2334`）对正文只做整段
+/// 切片 + `<@OpenID>` 正则、**不解析 CQ**，所以用户手打的任何 `[CQ:…]` 都留在 text。
+/// 用例刻意混入码名大写、段名内空格、大写键名、`&#44;` 转义、JSON 值与 stream 冒号语法：
+/// 归一只发生在落段臂（段名/键名小写），折回臂取码段原文，一个字节都不该被改写。
+#[test]
+fn array_value_folds_every_inbound_false_code_verbatim() {
+    // (手打原文, parse 应识别出的段名)。第二列钉住「确实先解析成码段、再按 inbound 位折回」，
+    // 否则断言会顺从「解析失败本来就留 text」这条与本位无关的路径通过。
+    let cases: &[(&str, &str)] = &[
+        (
+            "[CQ:image,file=a.png,subType=0,url=https://x/a.png]",
+            "image",
+        ),
+        ("[CQ:Image,FILE=a.png]", "image"),
+        ("[CQ:record,file=https://x/a.wav,asr=你好]", "record"),
+        ("[CQ:video , file = clip.mp4]", "video"),
+        ("[CQ:file,file=my file.txt,file_name=my file.txt]", "file"),
+        ("[CQ:face , id = 14, name=a&#44;b]", "face"),
+        (
+            "[CQ:markdown,data={\"text\":{\"alt\":\"a,b\"}}]",
+            "markdown",
+        ),
+        ("[CQ:card,title=t,desc=d,pic=p,url=u]", "card"),
+        ("[CQ:keyboard,data={\"rows\":[]}]", "keyboard"),
+        ("[CQ:stream,type:start,qq:123]", "stream"),
+        ("[CQ:input_notify,type=1,second=3]", "input_notify"),
+        ("[CQ:music,type=qq,id=123]", "music"),
+        ("[CQ:qqmusic,style=1,id=2]", "qqmusic"),
+        ("[CQ:active,type=0,sub_type=1]", "active"),
+        ("[CQ:wakeup,userid=10086]", "wakeup"),
+        ("[CQ:node,id=1,user_id=2,nickname=n,content=c]", "node"),
+        ("[CQ:poke,qq=10086]", "poke"),
+        ("[CQ:json,data={\"type\":\"text\"}]", "json"),
+        (
+            "[CQ:ark,ark_type=tuwen,ark_name=甲&#44;乙,prompt=点我]",
+            "ark",
+        ),
+        ("[CQ:reply,id=123,msg_idx=1]", "reply"),
+    ];
+    for (code, kind) in cases {
+        let content = format!("x{code}y");
+        let parsed = cqcode::parse(&content);
+        assert_eq!(
+            parsed.len(),
+            3,
+            "{code} 应切成 文本 + 码段 + 文本 三段: {parsed:?}"
+        );
+        assert_eq!(
+            parsed[1].kind, *kind,
+            "{code} 必须先进落段判定才谈得上被 inbound 位折回"
+        );
+        let (segments, raw, text) = array_report(&content);
+        assert_eq!(
+            segments,
+            vec![json!({"type": "text", "data": {"text": content}})],
+            "手打 {code} 应整段折回同一条 text，不拆分、不改写"
+        );
+        assert_eq!(raw, content, "{code} 的 raw_message 必须逐字节等于原文");
+        assert_eq!(
+            text, raw,
+            "{code} 的 message 文本与 raw_message 必须逐字节一致"
+        );
+    }
+}
+
+/// 收位不伤结构化路径：真图片附件照常落类型化 image 段（`image_segments` 按 `attachments`
+/// 产出，与 `CodeSpec::inbound` 无关），同一条正文里用户手打的 `[CQ:image,…]` 留 text 原文。
+#[test]
+fn array_value_keeps_structured_image_segment_while_folding_typed_image_code() {
+    let typed = "[CQ:image,file=manual.png,subType=0,url=https://manual.example/x.png]";
+    let mut payload = message_payload(&format!("前{typed}后"));
+    payload["attachments"] = json!([{
+        "content_type": "image/png",
+        "filename": "abc.png",
+        "url": "https://gchat.qpic.cn/abc.png"
+    }]);
+    let (segments, raw) = segments_of_payload(&array_settings(true), &payload);
+    assert_eq!(
+        segments,
+        vec![
+            json!({"type": "text", "data": {"text": format!("前{typed}后")}}),
+            json!({"type": "image", "data": {
+                "file": "abc.image",
+                "subType": "0",
+                "url": "https://gchat.qpic.cn/abc.png"
+            }}),
+        ],
+        "手打的 image 码折回 text，真附件的 image 段照旧产出并排在正文段之后"
+    );
+    assert_eq!(
+        raw,
+        format!("前{typed}后[CQ:image,file=abc.image,subType=0,url=https://gchat.qpic.cn/abc.png]"),
+        "字符串路径的媒体码仍由附件追加，与手打的那段互不影响"
+    );
 }
 
 #[test]

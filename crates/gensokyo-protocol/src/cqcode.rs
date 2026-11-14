@@ -667,10 +667,17 @@ pub struct CodeSpec {
     pub name: &'static str,
     /// 参数名（顺序即 Go 生成顺序）。
     pub params: &'static [&'static str],
-    /// 入站上报会产出该码。
+    /// `array_value` 段数组上报时，正文里**用户手打**的 `[CQ:x,…]` 是否落成类型化段。
     ///
-    /// 唯一消费点是 `gensokyo-runtime` 的 `inbound::reported_message`：`array_value` 上报时，
-    /// 正文里出现的 `[CQ:x,…]` 按这一位决定**落成类型化段**（真）还是**按原文折回 text 段**（假）。
+    /// 唯一消费点是 `gensokyo-runtime` 的 `inbound::reported_message`：真 → 落成类型化段；
+    /// 假 → 按原文逐字节折回 text 段（折回臂取码段原文，段名/键名归一只发生在落段臂）。
+    ///
+    /// 这一位**不是**「Go 是否支持该码」，也不是「入站是否会产出该段」：真实的 image /
+    /// record / ark / reply 段由 `inbound` 的 `image_segments` / `message_event_segments`
+    /// 按附件与 `msg_elements` 独立产出，与本位无关。Go `ConvertToSegmentedMessage`
+    /// （`handlers/message_parser.go:2253-2334`）对正文只做整段切片 + `<@OpenID>` 正则、
+    /// 不解析 CQ，所以手打形态一律留 text——除 `text` 与 `at` 外本位全部取假（P72，
+    /// `at` 为真的原因见码表该条注释）。
     pub inbound: bool,
     /// 出站解析会消费该码。
     ///
@@ -687,109 +694,131 @@ pub const CODES: &[CodeSpec] = &[
         outbound: true,
     },
     CodeSpec {
+        // `inbound: true` 的唯一例外（结构性，另立 P73 处理）：真实 @ 由 `revert_mentions`
+        // 把 `<@OpenID>` 合成成 `[CQ:at,qq=…]`，再靠本位解回类型化段，置假会让真实 mention 全部退化成文本。
         name: "at",
         params: &["qq"],
         inbound: true,
         outbound: true,
     },
     CodeSpec {
+        // 手打形态 Go 留 text：`ConvertToSegmentedMessage` 只做整段切片 + `<@OpenID>` 正则，
+        // 不解析 CQ（message_parser.go:2253-2334）。reply 段由 message_event_segments
+        //（msg_elements 引用）独立产出，不受本位影响。
         name: "reply",
         params: &["id", "msg_idx"],
-        inbound: true,
+        inbound: false,
         outbound: true,
     },
     CodeSpec {
+        // 手打形态同上留 text（message_parser.go:2253-2334）。image 段由 image_segments
+        //（图片附件）独立产出，不受本位影响。
         name: "image",
         params: &["file", "subType", "url"],
-        inbound: true,
+        inbound: false,
         outbound: true,
     },
     CodeSpec {
         // file 为空时兼容 url（Go resolveMediaValue handlers_media.go:51-55）
+        // 手打形态同上留 text（message_parser.go:2253-2334）。record 段由
+        // message_event_segments（语音附件）独立产出，不受本位影响。
         name: "record",
         params: &["file", "url", "asr"],
-        inbound: true,
+        inbound: false,
         outbound: true,
     },
     CodeSpec {
         // 同 record/voice 口径的 url 兜底（Go message_parser.go:1218-1222）
+        // 手打形态 Go 留 text（message_parser.go:2253-2334）；Go 入站也不产视频段
+        //（附件过滤只认 `image/` 前缀，同文件 :2214-2235）。
         name: "video",
         params: &["file", "url"],
-        inbound: true,
+        inbound: false,
         outbound: true,
     },
     CodeSpec {
+        // 手打形态 Go 留 text：无任何入站产出点（message_parser.go:2253-2334 仅切片 + `<@>` 正则）
         name: "file",
         params: &["file", "file_name", "name"],
-        inbound: true,
+        inbound: false,
         outbound: true,
     },
     CodeSpec {
         // 出站有消费点：Go 新链 `internal/domain/message.ParseOneBotString` 把 `[CQ:face,id=…]`
         // 解析成 face 段（未知媒体回落 `unknown_face`，`internal/domain/message/compat_test.go:38,73`）。
         // Go 入站侧不产出它——`ConvertToSegmentedMessage` 的段类型只有 text/at/image 再加
-        // record/ark/reply（`handlers/message_parser.go:2340`），所以这里 `inbound: true` 的实际效果
-        // 是把用户手打的 `[CQ:face,…]` 类型化上报（口径见 [`CodeSpec::inbound`]）。
+        // record/ark/reply（`handlers/message_parser.go:2340`），所以手打的 `[CQ:face,…]`
+        // 按原文留 text（P72 收位，口径见 [`CodeSpec::inbound`]）。
         name: "face",
         params: &["id"],
-        inbound: true,
+        inbound: false,
         outbound: true,
     },
     CodeSpec {
+        // 手打形态 Go 留 text：markdown 只作出站 msg_type=2，入站无产出点
+        //（message_parser.go:2253-2334 仅切片 + `<@>` 正则）
         name: "markdown",
         params: &["data"],
-        inbound: true,
+        inbound: false,
         outbound: true,
     },
     CodeSpec {
         // 出站 `[CQ:card,title=…,desc=…,pic=…,url=…]`（handlers/cqcode_pipeline.go:114）；
         // `data=` 是段形态的 JSON 串写法（handlers/message_parser.go:988）
+        // 手打形态 Go 留 text：card 是出站群消息 msg_type=8，入站无产出点（同上 :2253-2334）
         name: "card",
         params: &["title", "desc", "pic", "url", "data"],
-        inbound: true,
+        inbound: false,
         outbound: true,
     },
     CodeSpec {
+        // 手打形态 Go 留 text：keyboard 是出站按钮消息，入站无产出点（同上 :2253-2334）
         name: "keyboard",
         params: &["data"],
-        inbound: true,
+        inbound: false,
         outbound: true,
     },
     CodeSpec {
+        // 手打形态 Go 留 text：stream 是出站单聊流式消息 msg_type 控制位，入站无产出点（同上 :2253-2334）
         name: "stream",
         params: &["type", "qq"],
-        inbound: true,
+        inbound: false,
         outbound: true,
     },
     CodeSpec {
+        // 手打形态 Go 留 text：input_notify 是出站单聊 msg_type=6 控制位，入站无产出点（同上 :2253-2334）
         name: "input_notify",
         params: &["type", "second"],
-        inbound: true,
+        inbound: false,
         outbound: true,
     },
     CodeSpec {
         // foundItems 的 key 叫 qqmusic，CQ 类型沿用 OneBot 的 music,type=qq
+        // 手打形态 Go 留 text：music 是出站 msg_type=3 卡片，入站卡片走 ark 段（同上 :2253-2334）
         name: "music",
         params: &["type", "id"],
-        inbound: true,
+        inbound: false,
         outbound: true,
     },
     CodeSpec {
+        // 手打形态 Go 留 text：active / active_type / active_sub_type 是出站 foundItems 控制 key，入站不产出
         name: "active",
         params: &["type", "sub_type"],
-        inbound: true,
+        inbound: false,
         outbound: true,
     },
     CodeSpec {
+        // 手打形态 Go 留 text：wakeup 是 `send_private_msg_wakeup` 的出站标记位，入站无产出点
         name: "wakeup",
         params: &["userid"],
-        inbound: true,
+        inbound: false,
         outbound: true,
     },
     CodeSpec {
+        // 手打形态 Go 留 text：node 是转发消息段的形态，入站不产出（message_parser.go:2253-2334）
         name: "node",
         params: &["id", "user_id", "nickname", "content"],
-        inbound: true,
+        inbound: false,
         outbound: false,
     },
     CodeSpec {
@@ -819,9 +848,10 @@ pub const CODES: &[CodeSpec] = &[
         outbound: true,
     },
     CodeSpec {
+        // 手打形态 Go 留 text：Go 入站不产出 poke（全仓大小写不敏感零命中，`REACTION_*` 无处理器）
         name: "poke",
         params: &["qq"],
-        inbound: true,
+        inbound: false,
         outbound: true,
     },
     CodeSpec {
@@ -850,20 +880,25 @@ pub const CODES: &[CodeSpec] = &[
         outbound: true,
     },
     CodeSpec {
-        // 入站上报会产出 ark 卡片，出站无消费点（ProcessCQInboundOnlyCodes 会剥离）。
+        // 入站上报会产出 ark 卡片段——那是 `message_event_segments` 按 `msg_elements` /
+        // `message_type=3` 独立产出的，与下面 `inbound` 位无关（P72）；出站无消费点
+        //（ProcessCQInboundOnlyCodes 会剥离）。
         // 出站那条路整段删掉、不读任何参数（Go `handlers/cqcode.go:198`+`:203-206`、
         // `handlers/cqparse/handlers_control.go:26` 的 `inboundOnlyHandler`），所以 `params` 记的是
         // **入站** CQ 文本形态的三键（Go `handlers/message_parser.go:2496-2498`）；`fields` 只存在于
         // 段 JSON 的 `data` 里（`arkSegmentData`），不进 CQ 文本。
+        // 手打的 `[CQ:ark,…]` 按原文留 text（message_parser.go:2253-2334 仅切片 + `<@>` 正则）。
         name: "ark",
         params: &["ark_type", "ark_name", "prompt"],
-        inbound: true,
+        inbound: false,
         outbound: false,
     },
     CodeSpec {
+        // 手打形态 Go 留 text：json 段是 OneBot 数组形态的容器，Go 入站无产出点
+        //（message_parser.go:2253-2334 仅切片 + `<@>` 正则）
         name: "json",
         params: &["data"],
-        inbound: true,
+        inbound: false,
         outbound: false,
     },
 ];
