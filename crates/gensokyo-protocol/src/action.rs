@@ -6,11 +6,13 @@
 //!
 //! 这里只放**模型**，不含任何 QQ API 调用或业务判断（那是 M4 `gensokyo-actions` 的职责）。
 
+use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use gensokyo_core::Ob11Id;
 
+use crate::envelope::{CompactData, EnvelopeKind};
 use crate::event::Extra;
 use crate::segment::{MessageContent, Segment};
 
@@ -66,10 +68,13 @@ pub enum Status {
 
 /// 一条 action 响应。
 ///
-/// **字段声明序 = 线上键序**：Go 用 `structToMap` 转 map 再 `json.Marshal`，顶层键按字母序
-/// （`handlers/message_parser.go:398-404`），所以这里按字母序声明字段；新增字段必须插到正确
-/// 位置，否则 golden 整串断言会失配。
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// **键序 = 字母序**：Go 用 `structToMap` 转 map 再 `json.Marshal`，顶层键按字母序
+/// （`handlers/message_parser.go:398-404`），所以序列化（见 [`Serialize`] 的手写实现）按字母序
+/// 写键；新增键必须插到正确位置，否则 golden 整串断言会失配。
+///
+/// 线上键集由 [`ActionResponse::envelope`] 决定：A 发送类 / C 查询类是 [`EnvelopeKind::Full`]
+/// （现状），B 管理类是 [`EnvelopeKind::Compact`]（Go `sendActionResult` 形状）。
+#[derive(Debug, Clone, Deserialize)]
 pub struct ActionResponse<T = ()> {
     /// 业务数据：恒序列化（None 输出 `null`，对齐 OneBot 响应结构，不省略字段）。
     #[serde(default)]
@@ -84,7 +89,7 @@ pub struct ActionResponse<T = ()> {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<Ob11Id>,
     /// 错误信息：恒序列化（Go 的 `Message` 没有 omitempty，成功回执是空串）。
-    #[serde(default, serialize_with = "message_or_empty")]
+    #[serde(default)]
     pub message: Option<String>,
     /// 分页游标（Gensokyo 扩展，放响应顶层；Go 的响应没有该字段）：仅分页类 action 填，
     /// `None` 不序列化，既有响应形态不受影响。
@@ -102,6 +107,9 @@ pub struct ActionResponse<T = ()> {
     /// 因此不上线——保留字段但不参与序列化 / 反序列化。
     #[serde(skip)]
     pub wording: Option<String>,
+    /// 响应信封模式（见 [`crate::envelope`]）：不上线，由分发器按 action 名设置。
+    #[serde(skip)]
+    pub envelope: EnvelopeKind,
 }
 
 impl<T> ActionResponse<T> {
@@ -118,6 +126,7 @@ impl<T> ActionResponse<T> {
             next_cursor: None,
             group_id: None,
             user_id: None,
+            envelope: EnvelopeKind::Full,
         }
     }
 
@@ -134,6 +143,7 @@ impl<T> ActionResponse<T> {
             next_cursor: None,
             group_id: None,
             user_id: None,
+            envelope: EnvelopeKind::Full,
         }
     }
 
@@ -151,6 +161,61 @@ impl<T> ActionResponse<T> {
         self
     }
 }
+
+/// 手写 `Serialize`：同一个结构体按 [`EnvelopeKind`] 输出两套键集（Go 的两套信封），键序恒为
+/// 字母序。`derive` 无法表达「同一个字段有时在、有时不在、有时换形状」，所以这里显式写。
+impl<T: Serialize> Serialize for ActionResponse<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(None)?;
+        match self.envelope {
+            EnvelopeKind::Full => {
+                map.serialize_entry("data", &self.data)?;
+                map.serialize_entry("echo", &self.echo)?;
+                if let Some(group_id) = &self.group_id {
+                    map.serialize_entry("group_id", group_id)?;
+                }
+                map.serialize_entry("message", self.message.as_deref().unwrap_or_default())?;
+                if let Some(next_cursor) = &self.next_cursor {
+                    map.serialize_entry("next_cursor", next_cursor)?;
+                }
+                map.serialize_entry("retcode", &self.retcode)?;
+                map.serialize_entry("status", &self.status)?;
+                if let Some(user_id) = &self.user_id {
+                    map.serialize_entry("user_id", user_id)?;
+                }
+            }
+            EnvelopeKind::Compact(data) => {
+                // Go 的失败路径只有 `sendActionResult`（那里根本没有 data 字段），所以 failed
+                // 时无论子形态如何都不写 data。
+                if self.status != Status::Failed {
+                    match data {
+                        CompactData::Omit => {}
+                        CompactData::AsIs => map.serialize_entry("data", &self.data)?,
+                        CompactData::EmptyObject => map.serialize_entry("data", &EmptyObject {})?,
+                        CompactData::Null => map.serialize_entry("data", &Value::Null)?,
+                    }
+                }
+                if let Some(echo) = &self.echo {
+                    map.serialize_entry("echo", echo)?;
+                }
+                map.serialize_entry("message", self.message.as_deref().unwrap_or_default())?;
+                if let Some(next_cursor) = &self.next_cursor {
+                    map.serialize_entry("next_cursor", next_cursor)?;
+                }
+                map.serialize_entry("retcode", &self.retcode)?;
+                map.serialize_entry("status", &self.status)?;
+            }
+        }
+        map.end()
+    }
+}
+
+/// `{}` 的序列化载体（Go `sendActionResultWithData(..., map[string]interface{}{})`）。
+#[derive(Serialize)]
+struct EmptyObject {}
 
 /// 无参数 action 的参数占位（`get_login_info` / `get_status` / `get_version_info` 等）。
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
@@ -538,17 +603,10 @@ fn is_empty(map: &Extra) -> bool {
     map.is_empty()
 }
 
-/// `message` 恒序列化：`None` 输出空串（Go 的 `ServerResponse.Message` 没有 omitempty）。
-fn message_or_empty<S>(value: &Option<String>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    serializer.serialize_str(value.as_deref().unwrap_or_default())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{ActionRequest, ActionResponse, GetGroupInfoParams, SendGroupMsgParams, Status};
+    use crate::envelope::{CompactData, EnvelopeKind};
     use crate::event::MessageType;
 
     #[test]
@@ -635,6 +693,128 @@ mod tests {
         response.wording = Some("提示".to_owned());
         let json = serde_json::to_string(&response).expect("序列化失败");
         assert!(!json.contains("wording"), "wording 不应上线: {json}");
+    }
+
+    // ---- P86c：B 管理类的 Compact 信封（Go `sendActionResult` / `sendActionResultWithData`） ----
+
+    fn compact<T>(mut response: ActionResponse<T>, data: CompactData) -> ActionResponse<T> {
+        response.envelope = EnvelopeKind::Compact(data);
+        response
+    }
+
+    fn to_json<T: serde::Serialize>(response: &ActionResponse<T>) -> String {
+        serde_json::to_string(response).expect("序列化失败")
+    }
+
+    /// 无 `data` 的成功回执：`echo` 带 omitempty（无请求回执时整个键消失）。
+    #[test]
+    fn compact_omits_data_and_empty_echo() {
+        let echo: ActionResponse<serde_json::Value> = compact(
+            ActionResponse::ok(serde_json::Value::Null),
+            CompactData::Omit,
+        )
+        .with_echo(Some(serde_json::json!("e1")));
+        assert_eq!(
+            to_json(&echo),
+            r#"{"echo":"e1","message":"","retcode":0,"status":"ok"}"#
+        );
+
+        let bare: ActionResponse<serde_json::Value> = compact(
+            ActionResponse::ok(serde_json::Value::Null),
+            CompactData::Omit,
+        );
+        assert_eq!(
+            to_json(&bare),
+            r#"{"message":"","retcode":0,"status":"ok"}"#
+        );
+    }
+
+    /// 失败：Go 的 B 类只有 `retcode 100` 这一档，且失败路径没有 `data`（即使子形态是 AsIs）。
+    #[test]
+    fn compact_failure_has_no_data() {
+        let failed: ActionResponse<serde_json::Value> = compact(
+            ActionResponse::failed(100, "无法反查群 OpenID"),
+            CompactData::AsIs,
+        )
+        .with_echo(Some(serde_json::json!("e1")));
+        assert_eq!(
+            to_json(&failed),
+            r#"{"echo":"e1","message":"无法反查群 OpenID","retcode":100,"status":"failed"}"#
+        );
+    }
+
+    /// `data` 的三种形态：取 handler 值 / 恒 `{}` / 恒 `null`。
+    #[test]
+    fn compact_data_shapes() {
+        let with_data: ActionResponse<serde_json::Value> = compact(
+            ActionResponse::ok(serde_json::json!({
+                "add_to_member_blacklist_fail_openids": [],
+                "kicked": [],
+                "remove_members_result": "",
+            })),
+            CompactData::AsIs,
+        )
+        .with_echo(Some(serde_json::json!("e1")));
+        assert_eq!(
+            to_json(&with_data),
+            r#"{"data":{"add_to_member_blacklist_fail_openids":[],"kicked":[],"remove_members_result":""},"echo":"e1","message":"","retcode":0,"status":"ok"}"#
+        );
+
+        let empty: ActionResponse<serde_json::Value> = compact(
+            ActionResponse::ok(serde_json::Value::Null),
+            CompactData::EmptyObject,
+        )
+        .with_echo(Some(serde_json::json!("e1")));
+        assert_eq!(
+            to_json(&empty),
+            r#"{"data":{},"echo":"e1","message":"","retcode":0,"status":"ok"}"#
+        );
+
+        let null: ActionResponse<serde_json::Value> = compact(
+            ActionResponse::ok(serde_json::Value::Null),
+            CompactData::Null,
+        )
+        .with_echo(Some(serde_json::json!("e1")));
+        assert_eq!(
+            to_json(&null),
+            r#"{"data":null,"echo":"e1","message":"","retcode":0,"status":"ok"}"#
+        );
+    }
+
+    /// 同一个响应体在两种信封下产出不同线上形状（默认仍是 Full）。
+    #[test]
+    fn full_and_compact_envelopes_differ() {
+        let mut response: ActionResponse<serde_json::Value> =
+            ActionResponse::ok(serde_json::Value::Null).with_echo(Some(serde_json::json!("e1")));
+        assert_eq!(response.envelope, EnvelopeKind::Full);
+        assert_eq!(
+            to_json(&response),
+            r#"{"data":null,"echo":"e1","message":"","retcode":0,"status":"ok"}"#
+        );
+
+        response.envelope = EnvelopeKind::Compact(CompactData::Omit);
+        assert_eq!(
+            to_json(&response),
+            r#"{"echo":"e1","message":"","retcode":0,"status":"ok"}"#
+        );
+    }
+
+    /// C 查询类仍是 Full：`data` / `message` / `echo` 恒在（`get_group_info` 的 `message` 是
+    /// `"success"`，不是空串——`handlers/get_group_info.go:65`）。
+    #[test]
+    fn query_actions_keep_the_full_envelope() {
+        let mut response: ActionResponse<serde_json::Value> =
+            ActionResponse::ok(serde_json::json!({ "group_id": 456, "group_name": "测试群" }))
+                .with_echo(Some(serde_json::json!("e1")));
+        response.message = Some("success".to_owned());
+        assert_eq!(
+            crate::envelope::envelope_for("get_group_info"),
+            EnvelopeKind::Full
+        );
+        assert_eq!(
+            to_json(&response),
+            r#"{"data":{"group_id":456,"group_name":"测试群"},"echo":"e1","message":"success","retcode":0,"status":"ok"}"#
+        );
     }
 
     #[test]

@@ -40,7 +40,8 @@ use gensokyo_core::Error as CoreError;
 use gensokyo_core::Ob11Id;
 use gensokyo_core::telemetry::metrics;
 use gensokyo_protocol::Registry;
-use gensokyo_protocol::action::{ActionRequest, ActionResponse, Echo};
+use gensokyo_protocol::action::{ActionRequest, ActionResponse, Echo, Status};
+use gensokyo_protocol::envelope::{EnvelopeKind, envelope_for};
 use gensokyo_storage::{BotStatsStore, EchoStore};
 use serde_json::{Value, json};
 
@@ -54,6 +55,8 @@ pub const RETCODE_BAD_REQUEST: i32 = 1400;
 pub const RETCODE_UNKNOWN_ACTION: i32 = 1404;
 /// 内部错误（含 handler panic 与 deferred 执行失败）。
 pub const RETCODE_INTERNAL: i32 = 1500;
+/// B 管理类失败：Go `sendActionResult(msg, 100)` 只有这一档，不分参数错误 / 上游失败。
+pub const RETCODE_MANAGEMENT_FAILED: i32 = 100;
 
 /// 把 action 请求喂给注册表。
 #[derive(Debug, Clone)]
@@ -143,6 +146,20 @@ impl Dispatcher {
     /// panic 隔离：handler 的 panic 不会带走 WS 连接处理任务或 HTTP 请求任务，更不会拖垮
     /// 进程（worktree 的 panic=abort 配置若启用则退化为进程退出，属预期）。
     pub async fn dispatch(&self, request: &ActionRequest<Value>) -> ActionResponse<Value> {
+        let mut response = self.route(request).await;
+        // 信封在这里单点设置：23 个 B 类 handler 不用各自声明，A 发送类 / C 查询类仍是 Full
+        // （`envelope_for` 只认 B 类那 23 条）。
+        let envelope = envelope_for(&request.action);
+        response.envelope = envelope;
+        if matches!(envelope, EnvelopeKind::Compact(_)) && response.status == Status::Failed {
+            // Go 的 B 类失败一律 `sendActionResult(msg, 100)`，没有 1400/1500 分档。
+            response.retcode = RETCODE_MANAGEMENT_FAILED;
+        }
+        response
+    }
+
+    /// 分派本体：只产出响应内容；信封与 B 类失败码由 [`Self::dispatch`] 统一收口。
+    async fn route(&self, request: &ActionRequest<Value>) -> ActionResponse<Value> {
         let Some(handler) = self.registry.get(&request.action) else {
             tracing::debug!(action = %request.action, "未知 action");
             return failure(
@@ -435,7 +452,13 @@ fn retcode_for(err: &CoreError) -> i32 {
 fn encode(response: &ActionResponse<Value>) -> String {
     serde_json::to_string(response).unwrap_or_else(|err| {
         tracing::error!(error = %err, "action 响应序列化失败");
-        r#"{"status":"failed","retcode":1500,"data":null}"#.to_owned()
+        // 信封按当前模式兜底：B 类不补上 Go 那里没有的 `data` / `echo`。
+        match response.envelope {
+            EnvelopeKind::Full => r#"{"data":null,"retcode":1500,"status":"failed"}"#.to_owned(),
+            EnvelopeKind::Compact(_) => {
+                r#"{"message":"","retcode":100,"status":"failed"}"#.to_owned()
+            }
+        }
     })
 }
 
@@ -454,12 +477,14 @@ mod tests {
     use gensokyo_core::Error;
     use gensokyo_protocol::Registry;
     use gensokyo_protocol::action::{ActionRequest, ActionResponse};
+    use gensokyo_protocol::envelope::EnvelopeKind;
     use gensokyo_protocol::registry::{Handler, HandlerFuture};
     use gensokyo_storage::EchoStore;
     use serde_json::{Value, json};
 
     use super::{
-        Dispatcher, RETCODE_BAD_REQUEST, RETCODE_INTERNAL, RETCODE_UNKNOWN_ACTION, dispatch_json,
+        Dispatcher, RETCODE_BAD_REQUEST, RETCODE_INTERNAL, RETCODE_MANAGEMENT_FAILED,
+        RETCODE_UNKNOWN_ACTION, dispatch_json,
     };
     use crate::deferred::EMPTY_MESSAGE_ID;
 
@@ -529,6 +554,20 @@ mod tests {
         }
     }
 
+    /// B 管理类里「无 data」的那种成功回执（Go `sendActionResult`）。
+    #[derive(Debug)]
+    struct NullOk;
+
+    impl Handler for NullOk {
+        fn name(&self) -> &'static str {
+            "null_ok"
+        }
+
+        fn handle<'a>(&'a self, _request: &'a ActionRequest<Value>) -> HandlerFuture<'a> {
+            Box::pin(async { Ok(ActionResponse::ok(Value::Null)) })
+        }
+    }
+
     fn dispatcher() -> Dispatcher {
         let mut registry = Registry::new();
         let _ = registry.register("fixed", Arc::new(Fixed));
@@ -536,6 +575,9 @@ mod tests {
         let _ = registry.register("unimplemented", Arc::new(Unimplemented));
         let _ = registry.register("bad_params", Arc::new(BadParams));
         let _ = registry.register("bad_config", Arc::new(BadConfig));
+        // P86c：名字取自真实 B 管理类 action，验证信封按 action 名分派（不是按 handler 类型）。
+        let _ = registry.register("set_group_ban", Arc::new(NullOk));
+        let _ = registry.register("set_group_card", Arc::new(BadParams));
         Dispatcher::new(Arc::new(registry))
     }
 
@@ -604,6 +646,55 @@ mod tests {
         assert_eq!(response.retcode, 0);
         assert_eq!(response.data, Some(json!({ "pong": true })));
         assert_eq!(response.echo, Some(json!({"id": 7})));
+    }
+
+    // ---- P86c：B 管理类走 Go 的 Compact 信封 ----
+
+    /// 无 `data` 的成功回执：`echo` 有请求回执则带，没有则整个键消失（Go `echo,omitempty`）。
+    #[tokio::test]
+    async fn management_success_uses_the_compact_envelope() {
+        let body = dispatch_json(
+            dispatcher(),
+            br#"{"action":"set_group_ban","echo":"e1"}"#.to_vec(),
+        )
+        .await;
+        assert_eq!(
+            body,
+            r#"{"echo":"e1","message":"","retcode":0,"status":"ok"}"#
+        );
+
+        let body = dispatch_json(dispatcher(), br#"{"action":"set_group_ban"}"#.to_vec()).await;
+        assert_eq!(body, r#"{"message":"","retcode":0,"status":"ok"}"#);
+    }
+
+    /// 失败：`retcode 100`（不是 1400/1500），且失败路径没有 `data`。
+    #[tokio::test]
+    async fn management_failure_is_retcode_100() {
+        let body = dispatch_json(
+            dispatcher(),
+            br#"{"action":"set_group_card","params":{},"echo":"e1"}"#.to_vec(),
+        )
+        .await;
+        let value: Value = serde_json::from_str(&body).expect("响应应为 JSON");
+        assert_eq!(
+            value["retcode"], RETCODE_MANAGEMENT_FAILED,
+            "B 类失败只有 100 这一档: {body}"
+        );
+        assert_eq!(value["status"], "failed");
+        assert_eq!(value["echo"], "e1");
+        assert!(value.get("data").is_none(), "B 类失败不带 data: {body}");
+        assert!(value.get("message").is_some(), "message 恒在: {body}");
+    }
+
+    /// A 发送类失败仍是 1400/1500 + Full 信封（D7 裁决），不被 B 类的 100 波及。
+    #[tokio::test]
+    async fn send_failures_keep_1400_1500_and_full_envelope() {
+        let response = dispatcher().dispatch(&request("bad_params", None)).await;
+        assert_eq!(response.retcode, RETCODE_BAD_REQUEST);
+        assert_eq!(response.envelope, EnvelopeKind::Full);
+        let body = super::encode(&response);
+        assert!(body.contains(r#""data":null"#), "Full 仍带 data: {body}");
+        assert!(body.contains(r#""echo":null"#), "Full 仍带 echo: {body}");
     }
 
     #[tokio::test]

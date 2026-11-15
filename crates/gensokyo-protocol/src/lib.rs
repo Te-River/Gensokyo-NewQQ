@@ -47,6 +47,7 @@ mod base64;
 
 pub mod action;
 pub mod cqcode;
+pub mod envelope;
 pub mod event;
 pub mod outbound;
 pub mod registry;
@@ -54,6 +55,7 @@ pub mod segment;
 pub mod xurls;
 
 pub use action::{ActionRequest, ActionResponse, Echo, Status};
+pub use envelope::{CompactData, EnvelopeKind, envelope_for};
 pub use event::Event;
 pub use outbound::OutboundPlan;
 pub use registry::{Handler, HandlerFuture, Registry};
