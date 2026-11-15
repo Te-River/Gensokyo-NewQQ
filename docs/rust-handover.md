@@ -28,14 +28,14 @@
 |------|------|-----------------|
 | 发布名 | **Release 016 Rust**（Rust 重构分支首个 Release；GitHub Release 标题用此名，tag 建议 `Release016Rust`） | 本文件随 `Refactor` 分支维护；Go 主线仍为 `Release016`；见 `release_log/CHANGELOG_v016.md` 首部 |
 | parity 覆盖面 | A/B/C 三表逐项标注状态，主干/功能/边角项均为「已对齐 / 关闭」；B6 是**历史 severity 汇总**，个别行只写估量、未逐条回写状态 | `reports/refactor/17-go-rust-parity.md`：**按节定位**（A 表 / C 表 / B1-3 / B4 CQ 码进出站 / B5 / B6 缺口汇总 / D / E），该文件行号随每次 parity 回写浮动，不再钉死数字区间 |
-| 测试基线 | **43 suites / 1399 passed / 0 failed**（2026-11-15 P80 后实测；`ignored` 计数以门禁输出为准） | `cargo test --workspace --no-fail-fast`（计数随新增用例变化，取数见 §9） |
+| 测试基线 | **43 suites / 1406 passed / 0 failed**（2026-11-15 P86a 后实测；`ignored` 计数以门禁输出为准） | `cargo test --workspace --no-fail-fast`（计数随新增用例变化，取数见 §9） |
 | clippy | `-D warnings` **零告警** | `cargo clippy --workspace --all-targets -- -D warnings` |
 | 格式 | `cargo fmt --all -- --check` **退出码 0** | 同左 |
 | release 产物 | **≈10.3 MiB**（同表记录 Go `44.82 MiB`，≈4.3× 更小） | `docs/rust-perf.md:167`（2026-11-10 口径）；当前体积以 `cargo xtask build` 打印为准 |
 
 > 关于测试数字：suite/passed 随新增用例变化，且各里程碑文档记的是各自时点值
 > （如 `docs/rust-m0.md` 的 R4m 记 1356、R4n 记 1359，均对当时成立）。
-> 当前实测以 2026-11-15（P80 后）为准：**43 suites / 1399 passed / 0 failed**；
+> 当前实测以 2026-11-15（P86a 后）为准：**43 suites / 1406 passed / 0 failed**；
 > `ignored` 是 `#[ignore]` 用例（要 `--ignored` 才跑），计数随用例增删浮动。
 > 引用时以**你刚跑出的
 > `test result:` 行**为准，以最终门禁输出为最终口径。
@@ -145,7 +145,7 @@
 | ✅ | P82（环回假红测试加固） | **已完成（2026-11-14，仅测试）**：media ssrf hop / runtime lotus×2 / storage idmap 17-op 改用「stub 是否收到完整请求」判据 + ≤3 次重试 + 轮间退避 + 每轮清 stub，断言不降；三处五连跑全绿、workspace 43/1382/0 | —（残留：url_pipeline 无法识别「stub 已收完整请求、回程被掐断」） | `crates/gensokyo-media/src/fetch.rs`、`crates/gensokyo-runtime/src/url_pipeline.rs`、`crates/gensokyo-storage/src/idmap/http_remote.rs`；登记 R4u |
 | ✅ | P81（出站三分界 + 纯码空消息回执） | **已完成（2026-11-15）**：`face`/`node`/`poke`/`group_info`/`json`/未知码与形态不命中的 `markdown`/`keyboard`/`stream`/`input_notify` 按字面保留；`ark`/空 `card` 静默丢弃；`member`/`set_group`/`remove` 仍 1400（P83）；纯码空消息成功回执、不发送 | —（botstats 多记 1 条仍为 P84 观察项） | `crates/gensokyo-protocol/src/outbound.rs`、`crates/gensokyo-runtime/src/deferred.rs`；提交 `b1c25f5` |
 | ✅ | P85（构建版本串注入） | **已完成（2026-11-15）**：`cargo xtask build` 注入 `GENSOKYO_BUILD_VERSION`（`git-<7位>` / `dev-…`，env 优先），发布产物 `--version` 与 Go 同形态 | —（PGO/CI 不注入，按设计） | `xtask/src/build.rs`、`crates/gensokyo-bin/src/version.rs`；提交 `38c0b97` |
-| P1 | P86（Action 响应信封） | 审计完成（D1–D9，parity §F）：numeric `message_id` 类型、`group_id`/`user_id` 缺失、空回执、顶层字段、键序需修；D5/D7/D8 已裁决为刻意分侧 | 先 **P86a**（message_id 类型 + 空回执数字）→ **P86b**（group_id/user_id + 顶层 message/echo + 键序）；等 P80 落地后开始 | 黑板 `p86-action-response/01-researcher-findings.md`；parity §F |
+| P1 | P86（Action 响应信封） | **P86a 已完成（2026-11-15）**：numeric 回执为 echo 派生行号数字、string 模式原串、空回执两模式均数字 `0`，派生失败保串 + warn；**P86b 待做**：`group_id`/`user_id`、`message`/`echo` 恒在、键序、`wording`/`next_cursor` | P86b 实施（同 `dispatcher.rs`/`action.rs`；设计黑板 `p86b-response-envelope`） | parity §F；`crates/gensokyo-runtime/src/dispatcher.rs` `message_id_value` |
 | — | 迁移/交接 | 换机清单只在 `docs/rust-migrate.md` | 本文**不重复**，按那份执行 | `docs/rust-migrate.md` |
 | 不排期 | 视频抽帧 / 转码 / 压缩 | Go 侧是死代码且函数自身破损（全仓零调用者），**不可移植**；视频发送链本身已覆盖 | 保持关闭，不要当缺口重开 | parity `:49` |
 

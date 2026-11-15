@@ -151,10 +151,10 @@ P81 收口空消息回执时发现响应形态疑点，专项审计（黑板 `p8
 
 | # | 场景 | Go | Rust 现状 | 裁决 |
 |---|---|---|---|---|
-| D1 | 群发送成功 / numeric（默认 `string_ob11=false`） | `data.message_id` 为 int（`handlers/message_parser.go:324`，echo 虚拟行号）+ `group_id` int64（`:380`） | `data.message_id` 为 String（`dispatcher.rs:260`）、无 `group_id` | **对齐（P86a/b）**：numeric 用 `echo.store_cache_in_memory` 的 i64 行号（禁止伪造 0）；补 `group_id` |
+| D1 | 群发送成功 / numeric（默认 `string_ob11=false`） | `data.message_id` 为 int（`handlers/message_parser.go:324`，echo 虚拟行号）+ `group_id` int64（`:380`） | `data.message_id` 为 String（`dispatcher.rs:260`）、无 `group_id` | | **P86a 已修 message_id 部分**：numeric 用 echo 行号数字（禁伪造 0）、string 原串、空回执数字 0；`group_id` 待 P86b |
 | D2 | 群发送成功 / string | `data.message_id` 为上游原串 + `group_id` 为 OpenID 串（`:419/:426`） | 串形态对、缺 `group_id` | **对齐（P86b）** |
-| D3 | 私聊成功（两模式） | `SendC2CResponse` 恒数字（`:593`）+ `user_id`（`:606`） | 字符串、无 `user_id` | **对齐（P86a/b）** |
-| D4 | 空消息回执（群） | `data.message_id = 0`（int，`:375`，两模式皆数字） | `"0"`（字符串） | **对齐（P86a）** |
+| D3 | 私聊成功（两模式） | `SendC2CResponse` 恒数字（`:593`）+ `user_id`（`:606`） | 字符串、无 `user_id` | **P86a 已修 `message_id`；`user_id` 待 P86b** |
+| D4 | 空消息回执（群） | `data.message_id = 0`（int，`:375`，两模式皆数字） | `"0"`（字符串） | **已修（P86a）** |
 | D5 | 空消息（私聊） | **无回执**（`handlers/send_private_msg.go:490`/`:780`） | 有成功回执 | **刻意分侧**：Rust 保持回执（不响应会让客户端超时），登记 |
 | D6 | 顶层字段 | `message` 恒在、`echo` 恒在（null） | None 时省略 | **对齐（P86b）** |
 | D7 | 发送失败 | 恒 `retcode 0 / status ok`（`message_parser.go:386-387`） | 1400/1500 failed | **刻意分侧**：生产级要求失败可见，登记 |

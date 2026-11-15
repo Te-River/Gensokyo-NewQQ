@@ -285,6 +285,14 @@ P81 逐码核实 Go 三条出站路径后定界：字面保留 / 静默丢弃 / 
 - **影响**：avatar 出站可见形态与 Go 段路径一致；无 `qq` 的形态仍按字面保留。已知差异（登记）：`app_id` 未配置时 Go 发坏 URL 换 1500、Rust 吞段；idmap 仅一维反查（Go Pro 二维）；头像图追加在 `plan.images` 末尾、多图混排次序不严格同序。
 - **测试**：protocol 3 例 + runtime 6 例（含真 serde 握手往返 `avatar_becomes_qlogo_image_after_handshake`、反查失败吞段、`app_id` 未配置吞段、与真实图片混排）；全量 **43 suites / 1399 passed / 0 failed**、clippy 零告警、release Finished、fmt 退出码 0。
 
+### action 回执 message_id 类型对齐（Rust 侧 P86a，2026-11-15）
+
+P86 审计（parity §F）确认的 D1/D3/D4：Go numeric 模式（默认 `string_ob11=false`）的 `data.message_id` 是 int（echo 派生虚拟行号），string 模式是上游原串，空回执两种模式都是数字 `0`；Rust 此前恒回字符串。
+
+- **修复**：`dispatcher::message_id_value` 按三分支渲染——空回执 → 数字 `0`；`string_ob11=true` → 原 ID 字符串；numeric → `EchoStore::store_cache_in_memory` 派生数字（失败退回 `parse::<i64>`，再失败保留字符串 + `warn`，**不伪造 0**）。`EMPTY_MESSAGE_ID` 提为 `pub(crate)`。SSE/forward 分支未动（P86b/P86c）。
+- **影响**：默认 numeric 配置下，发送类 action 回执的 `data.message_id` 由字符串改为数字；string 模式保持原串（且不登记 echo）。回执与 Go 的 numeric/string 双模式一致。
+- **测试**：5 个 dispatcher 单测（numeric/string/空回执/派生失败两条）+ 2 个集成用例；并做反向验证（还原旧实现 → 5 例红）。全量 **43 suites / 1406 passed / 0 failed**、clippy 零告警、release Finished、fmt 退出码 0。
+
 ### Action 响应信封审计（P86，2026-11-15，审计项）
 
 - **发现**：Go 的 numeric 模式（默认 `string_ob11=false`）响应里 `data.message_id` 是 **int**、`group_id` 为 int64；string 模式为原串 + OpenID；Rust dispatcher 恒回字符串且缺 `group_id`/`user_id`；空回执 `0` vs `"0"`；顶层 `message`/`echo` 缺省省略；键序不同。D1–D9 详见 `reports/refactor/17-go-rust-parity.md` §F。
