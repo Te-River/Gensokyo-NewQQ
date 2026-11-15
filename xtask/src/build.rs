@@ -8,6 +8,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -397,10 +398,55 @@ fn cargo_invocation(target: &Target, no_webui: bool) -> (&'static str, Vec<Strin
     (subcommand, args)
 }
 
+/// 版本串推导（纯函数，便于单测）：显式覆盖 > `git-<短 hash>` > `dev-<epoch>.<毫秒>`。
+///
+/// 形态与 Go `build.ps1` 的 `Get-BuildLdflags` 一致：有 git 时 `<type>=git`、
+/// `<spec>=<短 hash>`，否则 `dev` + UTC 秒/毫秒；空串等同于未设置。
+fn build_version(override_value: Option<&str>, commit: Option<&str>, now: SystemTime) -> String {
+    if let Some(value) = override_value.filter(|value| !value.is_empty()) {
+        return value.to_owned();
+    }
+    match commit.filter(|commit| !commit.is_empty()) {
+        Some(commit) => format!("git-{commit}"),
+        None => {
+            let elapsed = now.duration_since(UNIX_EPOCH).unwrap_or_default();
+            format!("dev-{}.{:03}", elapsed.as_secs(), elapsed.subsec_millis())
+        }
+    }
+}
+
+/// `git rev-parse --short=7 HEAD`；git 不在 PATH、不在仓库内或仓库无提交时返回 `None`。
+fn git_short_commit(root: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(["rev-parse", "--short=7", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let commit = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!commit.is_empty()).then_some(commit)
+}
+
+/// 本次构建注入的版本串：已有的 `GENSOKYO_BUILD_VERSION` 优先（发布流水线可覆盖），
+/// 否则按 [`build_version`] 推导。
+fn resolve_build_version(root: &Path) -> String {
+    let override_value = std::env::var("GENSOKYO_BUILD_VERSION").ok();
+    let commit = git_short_commit(root);
+    build_version(
+        override_value.as_deref(),
+        commit.as_deref(),
+        SystemTime::now(),
+    )
+}
+
 /// `cargo build|zigbuild --release --locked`：交叉时加 `--target`，精简版加 `--no-default-features`。
 ///
 /// 只构建 bin 包——工作区还有 10 个库 crate 与 xtask 自身，全量构建没有意义。
 /// `tool_path` 非空时注入引导好的 PATH（zig / cargo-zigbuild 所在目录前置）。
+/// 每次调用都把版本串经 `GENSOKYO_BUILD_VERSION` 传给 cargo 子进程，供
+/// `gensokyo-bin` 的 `option_env!` 收进 `--version`（Go 侧 ldflags 的等价物）。
 fn cargo_build(
     root: &Path,
     target: &Target,
@@ -408,9 +454,17 @@ fn cargo_build(
     tool_path: Option<&std::ffi::OsStr>,
 ) -> Result<()> {
     let (subcommand, args) = cargo_invocation(target, no_webui);
-    println!("  $ cargo {subcommand} {}", args.join(" "));
+    let version = resolve_build_version(root);
+    println!(
+        "  $ cargo {subcommand} {} (GENSOKYO_BUILD_VERSION={version})",
+        args.join(" ")
+    );
     let mut command = Command::new(cargo());
-    command.current_dir(root).arg(subcommand).args(&args);
+    command
+        .current_dir(root)
+        .arg(subcommand)
+        .args(&args)
+        .env("GENSOKYO_BUILD_VERSION", &version);
     if let Some(path) = tool_path {
         command.env("PATH", path);
     }
@@ -624,9 +678,10 @@ pub fn run(args: BuildArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BuildArgs, Target, artifact_name, built_binary, cargo_invocation, ensure_webui_dist,
-        flavors, plan, split_triple, uses_zigbuild,
+        BuildArgs, Target, artifact_name, build_version, built_binary, cargo_invocation,
+        ensure_webui_dist, flavors, git_short_commit, plan, split_triple, uses_zigbuild,
     };
+    use std::time::{Duration, SystemTime};
 
     /// 测试用参数；未设置的字段一律取“不生效”的值。
     fn args(target: &[&str], all: bool, linux_only: bool, no_webui: bool) -> BuildArgs {
@@ -851,5 +906,36 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn build_version_prefers_override_then_git_then_dev() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_millis(1_700_000_000_007);
+        // 流水线显式覆盖优先于自动推导
+        assert_eq!(
+            build_version(Some("git-release016"), Some("deadbee"), now),
+            "git-release016"
+        );
+        // 有 git：git-<短 hash>，对应 Go 的 BuildType=git / BuildSpec=<short>
+        assert_eq!(build_version(None, Some("deadbee"), now), "git-deadbee");
+        // 无 git：dev-<epoch 秒>.<毫秒 3 位>，与 Go 的 BuildType=dev 同口径
+        assert_eq!(build_version(None, None, now), "dev-1700000000.007");
+        // 空串等同未设置，不能产出空版本串
+        assert_eq!(build_version(Some(""), Some("deadbee"), now), "git-deadbee");
+        assert_eq!(build_version(Some(""), Some(""), now), "dev-1700000000.007");
+    }
+
+    #[test]
+    fn git_short_commit_is_seven_hex_chars_or_absent() {
+        // cargo test 的工作目录是本 crate 目录（仓库内），git 可用时必能取到短 hash
+        let root = std::env::current_dir().expect("取当前目录失败");
+        let Some(commit) = git_short_commit(&root) else {
+            return; // 无 git / 非仓库（打包源码树）：走 dev 回退，不做断言
+        };
+        assert_eq!(commit.len(), 7, "短 hash 长度: {commit}");
+        assert!(
+            commit.chars().all(|c| c.is_ascii_hexdigit()),
+            "短 hash 应全为十六进制: {commit}"
+        );
     }
 }

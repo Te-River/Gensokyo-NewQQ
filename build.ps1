@@ -1,6 +1,8 @@
 ﻿# Gensokyo build script —— Rust 薄包装
 # 实际构建逻辑在 `cargo xtask build`（见 docs/rust-build.md），本脚本只做“Go 命名 → Rust 三元组”
 # 的参数翻译：不再调用 Go 工具链，也不再自己创建 webui/dist 占位目录（xtask 负责）。
+# 版本串（`--version`）由 xtask 注入 `GENSOKYO_BUILD_VERSION`：有 git 时 `git-<7 位短 hash>`，
+# 否则 `dev-<epoch>.<毫秒>`，与 Go 版 `Get-BuildLdflags` 同形态；发布流水线设同名环境变量即可覆盖。
 #
 # 单目标（缺省宿主）：
 #   .\build.ps1
