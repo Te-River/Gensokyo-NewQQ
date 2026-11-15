@@ -293,6 +293,12 @@ P86 审计（parity §F）确认的 D1/D3/D4：Go numeric 模式（默认 `strin
 - **影响**：默认 numeric 配置下，发送类 action 回执的 `data.message_id` 由字符串改为数字；string 模式保持原串（且不登记 echo）。回执与 Go 的 numeric/string 双模式一致。
 - **测试**：5 个 dispatcher 单测（numeric/string/空回执/派生失败两条）+ 2 个集成用例；并做反向验证（还原旧实现 → 5 例红）。全量 **43 suites / 1406 passed / 0 failed**、clippy 零告警、release Finished、fmt 退出码 0。
 
+### action 响应外层信封按 Go 对齐（Rust 侧 P86b，2026-11-15）
+
+- **修复**：`ActionResponse` 按 Go 的 map 字母序声明字段（`data, echo, group_id, message, next_cursor, retcode, status, user_id`）；`group_id`/`user_id` 为 omitempty（反查失败不写、不伪造 0）；`message` None→`""`、`echo` None→`null` 恒序列化；`wording` 不上线（grep 零消费者）；`next_cursor` 保留为 Gensokyo 扩展。dispatcher 在 `finalize` 按 deferred target 填顶层 ID——群 string 用请求原串、群 numeric 用 idmap 虚拟号、私聊两模式恒数字（照抄 Go `SendC2CResponse`），空消息回执同样带 ID。
+- **影响**：发送类 action 顶层 JSON 与 Go 对齐；已知差异登记：失败回执不填 ID、numeric 下原数字串不重复分配、`channel_id`/`guild_id` 未覆盖。群管理/查询类的 per-action 信封另立 **P86c**。
+- **测试**：协议 4 例 + runtime 6 例整串断言（群/私聊 × numeric/string + 空回执 × 群/私聊）；全量 **43 suites / 1416 passed / 0 failed**、clippy 零告警、release Finished、fmt 退出码 0。
+
 ### Action 响应信封审计（P86，2026-11-15，审计项）
 
 - **发现**：Go 的 numeric 模式（默认 `string_ob11=false`）响应里 `data.message_id` 是 **int**、`group_id` 为 int64；string 模式为原串 + OpenID；Rust dispatcher 恒回字符串且缺 `group_id`/`user_id`；空回执 `0` vs `"0"`；顶层 `message`/`echo` 缺省省略；键序不同。D1–D9 详见 `reports/refactor/17-go-rust-parity.md` §F。

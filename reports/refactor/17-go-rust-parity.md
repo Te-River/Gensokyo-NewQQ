@@ -59,7 +59,7 @@
 
 **Action 全集**：Go 53 个唯一注册名（50 canonical + 3 别名）→ Rust **53/53 覆盖，缺失 0**；清单漂移：Rust `KNOWN_ACTIONS` 多 3 个 Go 从未注册的素材管理扩展（upload/get_list/delete_media_image），属 Rust 扩展（Medium，登记）。
 
-**消息链特性矩阵**（对齐=已对齐）：reply/echo ✓；msg_type 0/2/6/7/8 ✓；markdown/keyboard ✓；card 分侧差异登记见 B4 表 P77-1~4（必填校验 / 最终 https / 参数别名 / 单聊路径，两侧行为不同：单聊 card=Rust 扩展、必填与 https=Rust 本地从严、别名=Rust 兼容并集）；本地 pic 上传 ✓ P29a；input_notify ✓；stream/SSE ✓；qqmusic ✓（P29b：查询→markdown+键盘，失败回退分享文案）；forward ✓（保留 node 媒体）；raw ✓；wakeup/active 部分（空内容口径两侧不同：Go 补发 `" "` 唤醒 vs Rust 1400，见 B4 表 P77-5；active 段名严格度见 P77-6）；SSM ✓（仅群入队同 Go）；懒消息/2000/seq ✓；at：AppID→BotID ✓（P15）、add_at_group ✓；auto_escape 刻意差异（Rust 尊重该字段）；array ✓；**string_ob11 仅参数/入站侧对齐，响应侧未对齐**（P86 审计：`message_id` 数值/字符串形态、`group_id`/`user_id` 缺失、空回执、顶层字段与键序，见 §F）。
+**消息链特性矩阵**（对齐=已对齐）：reply/echo ✓；msg_type 0/2/6/7/8 ✓；markdown/keyboard ✓；card 分侧差异登记见 B4 表 P77-1~4（必填校验 / 最终 https / 参数别名 / 单聊路径，两侧行为不同：单聊 card=Rust 扩展、必填与 https=Rust 本地从严、别名=Rust 兼容并集）；本地 pic 上传 ✓ P29a；input_notify ✓；stream/SSE ✓；qqmusic ✓（P29b：查询→markdown+键盘，失败回退分享文案）；forward ✓（保留 node 媒体）；raw ✓；wakeup/active 部分（空内容口径两侧不同：Go 补发 `" "` 唤醒 vs Rust 1400，见 B4 表 P77-5；active 段名严格度见 P77-6）；SSM ✓（仅群入队同 Go）；懒消息/2000/seq ✓；at：AppID→BotID ✓（P15）、add_at_group ✓；auto_escape 刻意差异（Rust 尊重该字段）；array ✓；**发送类响应已对齐（P86a/P86b）；per-action 信封（管理/查询类）P86c 审计中**。
 
 **媒体链**：local/url/base64 四类 ✓；多媒体段拆分 ✓（P1）；**>5MB 分片上传 ✓（P29a）**；**silk 转码/图片压缩 ✓（P29a）**；素材链 oss_type=7 ✓；图床 provider 4~10 ✓（P7）；图床上传重试 ✓（P7）；**card 本地 pic_url ✓（P29a）**；markdown 内嵌图替换 ✓；unknown_* 透传 ✓（仅非空值；裸码 `file`/`url` 皆空时按 Go 原位保留字面、不产 `Unknown("")` 空 `file_info`，P59）；qqmusic ✓（P29b：真实 markdown+键盘）。
 
@@ -151,16 +151,18 @@ P81 收口空消息回执时发现响应形态疑点，专项审计（黑板 `p8
 
 | # | 场景 | Go | Rust 现状 | 裁决 |
 |---|---|---|---|---|
-| D1 | 群发送成功 / numeric（默认 `string_ob11=false`） | `data.message_id` 为 int（`handlers/message_parser.go:324`，echo 虚拟行号）+ `group_id` int64（`:380`） | `data.message_id` 为 String（`dispatcher.rs:260`）、无 `group_id` | | **P86a 已修 message_id 部分**：numeric 用 echo 行号数字（禁伪造 0）、string 原串、空回执数字 0；`group_id` 待 P86b |
-| D2 | 群发送成功 / string | `data.message_id` 为上游原串 + `group_id` 为 OpenID 串（`:419/:426`） | 串形态对、缺 `group_id` | **对齐（P86b）** |
-| D3 | 私聊成功（两模式） | `SendC2CResponse` 恒数字（`:593`）+ `user_id`（`:606`） | 字符串、无 `user_id` | **P86a 已修 `message_id`；`user_id` 待 P86b** |
+| D1 | 群发送成功 / numeric（默认 `string_ob11=false`） | `data.message_id` 为 int（`handlers/message_parser.go:324`，echo 虚拟行号）+ `group_id` int64（`:380`） | `data.message_id` 为 String（`dispatcher.rs:260`）、无 `group_id` | **P86a 已修 message_id 部分**：numeric 用 echo 行号数字（禁伪造 0）、string 原串、空回执数字 0；`group_id` 已修（P86b） |
+| D2 | 群发送成功 / string | `data.message_id` 为上游原串 + `group_id` 为 OpenID 串（`:419/:426`） | 串形态对、缺 `group_id` | **已修（P86b）** |
+| D3 | 私聊成功（两模式） | `SendC2CResponse` 恒数字（`:593`）+ `user_id`（`:606`） | 字符串、无 `user_id` | **P86a 已修 `message_id`；`user_id` 已修（P86b）** |
 | D4 | 空消息回执（群） | `data.message_id = 0`（int，`:375`，两模式皆数字） | `"0"`（字符串） | **已修（P86a）** |
 | D5 | 空消息（私聊） | **无回执**（`handlers/send_private_msg.go:490`/`:780`） | 有成功回执 | **刻意分侧**：Rust 保持回执（不响应会让客户端超时），登记 |
-| D6 | 顶层字段 | `message` 恒在、`echo` 恒在（null） | None 时省略 | **对齐（P86b）** |
+| D6 | 顶层字段 | `message` 恒在、`echo` 恒在（null） | None 时省略 | **已修（P86b）** |
 | D7 | 发送失败 | 恒 `retcode 0 / status ok`（`message_parser.go:386-387`） | 1400/1500 failed | **刻意分侧**：生产级要求失败可见，登记 |
 | D8 | 参数非法 | 无回执（`send_group_msg.go:129-133`） | 1400 | **刻意分侧**：保持 1400，登记 |
-| D9 | 键序 | `map` 字母序（`wsclient/ws.go:47-71`） | 结构体声明序（`action.rs:69-90`） | **对齐（P86b）**：响应按字母序序列化 |
+| D9 | 键序 | `map` 字母序（`wsclient/ws.go:47-71`） | 结构体声明序（`action.rs:69-90`） | **已修（P86b）**：响应按字母序序列化 |
 
-> 结论：D1–D4、D6、D9 是正常路径的**硬性外部 JSON 差异**，必须修（P86a→P86b）；D5/D7/D8 为 Go 的错误路径怪癖，Rust 保留更安全行为并登记为刻意分侧。
+| D10 | 群管理/查询类信封（per-action，P86c） | Go 多用 map 直出：可能**无 `data`、无 `message`**、`echo` 带 omitempty（如 `handlers/set_group_add_request.go:59-69`） | 全局 `ActionResponse` 恒有 `data`/`message`/`echo` ⇒ 会多出字段 | **P86c 审计中**：逐类核对 75 action 后引入 per-action 信封模式再修 | High |
+
+> 结论：D1–D4、D6、D9 是正常路径的**硬性外部 JSON 差异**，必须修（P86a→P86b）；D5/D7/D8 为 Go 的错误路径怪癖，Rust 保留更安全行为并登记为刻意分侧；D10 由 P86c 收口。
 
 （本文由三分域审计汇总；A/B/C/D 表与 §E 状态已按 R4k 波次回写，时点见 `docs/rust-m0.md`。）
