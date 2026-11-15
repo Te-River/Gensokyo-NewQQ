@@ -884,6 +884,28 @@ mod tests {
         assert_bad_request(&handler, json!({"panel_id": PANEL}));
     }
 
+    /// 面板列表的整串形状：游标在 `data` 内（Go `get_panel_list.go:39-47`），响应走 B 类
+    /// Compact（`sendActionResultWithData`），没有 `group_id` / `user_id`。
+    #[test]
+    fn panel_list_wire_shape_keeps_cursor_in_data() {
+        let (ctx, api) = context();
+        *api.panel_list.lock().unwrap() = Some(Ok(PanelList {
+            records: Vec::new(),
+            next_cursor: "n1".to_owned(),
+            is_end: false,
+        }));
+        let handler = GetPanelListHandler::new(ctx);
+        let response =
+            block_on(handler.handle(&request("get_panel_list", json!({"scope": "group"}))))
+                .expect("面板列表不应失败");
+        let mut response = response;
+        response.envelope = gensokyo_protocol::envelope::envelope_for("get_panel_list");
+        assert_eq!(
+            serde_json::to_string(&response).expect("响应应可序列化"),
+            r#"{"data":{"is_end":false,"next_cursor":"n1","records":[]},"echo":"e-1","message":"","retcode":0,"status":"ok"}"#
+        );
+    }
+
     #[test]
     fn delete_and_get_panel_use_their_endpoints() {
         let (ctx, api) = context();

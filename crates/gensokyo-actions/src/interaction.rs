@@ -6,7 +6,7 @@
 //! | action | Go 对应 | 上游端点 | 结果 |
 //! |--------|---------|----------|------|
 //! | `get_avatar` | `handlers/get_avatar.go` | 无（`q.qlogo.cn` URL 模板） | 本地拼 URL：`{"message": url, "url": url, "user_id": …}` |
-//! | `mark_msg_as_read` | `handlers/mark_msg_as_read.go` | 无（官方无已读上报接口） | 本地空实现：`retcode = 0` + `data = null` |
+//! | `mark_msg_as_read` | `handlers/mark_msg_as_read.go` | 无（官方无已读上报接口） | 本地空实现：`retcode = 0` + 顶层 `msg` / `wording` 空串 |
 //! | `.handle_quick_operation` | `handlers/handle_quick_operation.go` | 无（复用发送链） | deferred 计划（`send_group_msg` / `send_private_msg`） |
 //! | `.handle_quick_operation_async` | `handlers/handle_quick_operation_async.go` | 同上 | 同上 |
 //! | `get_robot_share_link` | `handlers/get_robot_share_link.go` | `POST /v2/generate_url_link` | `{"url": …, "callback_data": …}` |
@@ -30,8 +30,11 @@
 //!   `message` / `user_id` 字段，并额外给 go-cqhttp 标准客户端一个同值的 `url`。
 //!   Go 在 `idmap_pro` 下用「群 + 成员」二维反查，本 crate 只有一维虚拟号反查——32 位 OpenID
 //!   直通，两者结果一致；虚拟号场景下以 `user_openid` 映射为准。
-//! - **`mark_msg_as_read`**：官方没有已读上报端点，Go 回 `retcode = 0` + `status = ok` + 空 `data`
-//!   （`gjson.Result` 零值序列化成 `null`）。这里逐字段照抄，不触达上游。
+//! - **`mark_msg_as_read`**：官方没有已读上报端点，Go 回 `retcode = 0` + `status = ok` + 顶层
+//!   `msg` / `wording` 空串（`MarkThisMessageAsReadAPIResponse`，没有 omitempty）。这里照抄
+//!   字段与键名，不触达上游。**唯一的差异**：Go 的 `data` 是 `gjson.Result` 零值，`json.Marshal`
+//!   会把它展开成第三方结构体转储（`{"Type":0,"Raw":"",…}`）；那是实现泄漏而不是契约，这里
+//!   按语义回 `data = null`。
 //! - **`.handle_quick_operation` / `.handle_quick_operation_async`**：Go 的
 //!   `CreateSendGroupMsgAction` 只做一件事——按 `context.message_type` 把 `operation.reply`
 //!   转成一次 `send_group_msg` / `send_private_msg`。本 crate 复用 [`crate::handler`] 的 deferred
@@ -329,7 +332,12 @@ impl MarkMsgAsReadHandler {
     }
 
     async fn run(&self, request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
-        ok_data(request, &Value::Null)
+        let mut response = ok_data(request, &Value::Null)?;
+        // Go `MarkThisMessageAsReadAPIResponse` 的顶层键是 `msg` / `wording`（不是 `message`），
+        // 两者都没有 omitempty：成功回执里恒为空串。
+        response.msg = Some(String::new());
+        response.wording = Some(String::new());
+        Ok(response)
     }
 }
 
@@ -1065,7 +1073,12 @@ mod tests {
             request_without_params("mark_msg_as_read"),
         ] {
             let response = block_on(handler.handle(&req)).expect("本地空实现不应失败");
-            assert_eq!(ok_data(response), Value::Null);
+            // Go `json.Marshal(MarkThisMessageAsReadAPIResponse{})`：`msg` / `wording` 在顶层且
+            // 恒为空串；`data` 是 `gjson.Result` 零值（这里按语义回 `null`，见模块文档）。
+            assert_eq!(
+                serde_json::to_string(&response).expect("响应应可序列化"),
+                r#"{"data":null,"echo":"e-1","msg":"","retcode":0,"status":"ok","wording":""}"#
+            );
         }
         assert_eq!(handler.name(), "mark_msg_as_read");
     }

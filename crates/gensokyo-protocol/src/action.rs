@@ -74,6 +74,9 @@ pub enum Status {
 ///
 /// 线上键集由 [`ActionResponse::envelope`] 决定：A 发送类 / C 查询类是 [`EnvelopeKind::Full`]
 /// （现状），B 管理类是 [`EnvelopeKind::Compact`]（Go `sendActionResult` 形状）。
+///
+/// 唯一换键名的一处是 `mark_msg_as_read`：Go 的响应结构用 `msg` 而不是 `message`，另带
+/// `wording`（见 [`ActionResponse::msg`] / [`ActionResponse::wording`]）。
 #[derive(Debug, Clone, Deserialize)]
 pub struct ActionResponse<T = ()> {
     /// 业务数据：恒序列化（None 输出 `null`，对齐 OneBot 响应结构，不省略字段）。
@@ -89,12 +92,15 @@ pub struct ActionResponse<T = ()> {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<Ob11Id>,
     /// 错误信息：恒序列化（Go 的 `Message` 没有 omitempty，成功回执是空串）。
+    ///
+    /// `mark_msg_as_read` 的响应换用同义的 [`Self::msg`] 键，此时本字段不上线（Go 里两者
+    /// 不会同时出现）。
     #[serde(default)]
     pub message: Option<String>,
-    /// 分页游标（Gensokyo 扩展，放响应顶层；Go 的响应没有该字段）：仅分页类 action 填，
-    /// `None` 不序列化，既有响应形态不受影响。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_cursor: Option<String>,
+    /// 顶层 `msg`（Go `MarkThisMessageAsReadAPIResponse.Msg`）：与 [`Self::message`] 同义、
+    /// 只是键名不同，只有 `mark_msg_as_read` 用。`None` 不序列化，其他 action 仍写 `message`。
+    #[serde(default)]
+    pub msg: Option<String>,
     /// 返回码，0 为成功。
     pub retcode: i32,
     /// 状态。
@@ -103,9 +109,9 @@ pub struct ActionResponse<T = ()> {
     /// （照抄 Go `SendC2CResponse` 的数字结构，见 `handlers/message_parser.go:605-609`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_id: Option<Ob11Id>,
-    /// 补充说明（Gensokyo 扩展）：Go 的响应结构没有该字段（`wording` 只出现在请求参数里），
-    /// 因此不上线——保留字段但不参与序列化 / 反序列化。
-    #[serde(skip)]
+    /// 补充说明（Go `MarkThisMessageAsReadAPIResponse.Wording`，没有 omitempty）：只有
+    /// `mark_msg_as_read` 的成功回执带该键（空串）；其余 action 不设、`None` 不序列化。
+    #[serde(default)]
     pub wording: Option<String>,
     /// 响应信封模式（见 [`crate::envelope`]）：不上线，由分发器按 action 名设置。
     #[serde(skip)]
@@ -121,9 +127,9 @@ impl<T> ActionResponse<T> {
             retcode: 0,
             data: Some(data),
             message: None,
+            msg: None,
             wording: None,
             echo: None,
-            next_cursor: None,
             group_id: None,
             user_id: None,
             envelope: EnvelopeKind::Full,
@@ -138,9 +144,9 @@ impl<T> ActionResponse<T> {
             retcode,
             data: None,
             message: Some(message.into()),
+            msg: None,
             wording: None,
             echo: None,
-            next_cursor: None,
             group_id: None,
             user_id: None,
             envelope: EnvelopeKind::Full,
@@ -151,13 +157,6 @@ impl<T> ActionResponse<T> {
     #[must_use]
     pub fn with_echo(mut self, echo: Option<Echo>) -> Self {
         self.echo = echo;
-        self
-    }
-
-    /// 挂上分页游标（`None` 不序列化）。
-    #[must_use]
-    pub fn with_next_cursor(mut self, next_cursor: Option<String>) -> Self {
-        self.next_cursor = next_cursor;
         self
     }
 }
@@ -177,14 +176,24 @@ impl<T: Serialize> Serialize for ActionResponse<T> {
                 if let Some(group_id) = &self.group_id {
                     map.serialize_entry("group_id", group_id)?;
                 }
-                map.serialize_entry("message", self.message.as_deref().unwrap_or_default())?;
-                if let Some(next_cursor) = &self.next_cursor {
-                    map.serialize_entry("next_cursor", next_cursor)?;
+                match &self.msg {
+                    // Go 的 `msg` 与 `message` 互斥（`MarkThisMessageAsReadAPIResponse` 只有
+                    // `msg`）：设了 `msg` 就不再写 `message`。
+                    Some(msg) => map.serialize_entry("msg", msg)?,
+                    None => {
+                        map.serialize_entry(
+                            "message",
+                            self.message.as_deref().unwrap_or_default(),
+                        )?;
+                    }
                 }
                 map.serialize_entry("retcode", &self.retcode)?;
                 map.serialize_entry("status", &self.status)?;
                 if let Some(user_id) = &self.user_id {
                     map.serialize_entry("user_id", user_id)?;
+                }
+                if let Some(wording) = &self.wording {
+                    map.serialize_entry("wording", wording)?;
                 }
             }
             EnvelopeKind::Compact(data) => {
@@ -202,9 +211,6 @@ impl<T: Serialize> Serialize for ActionResponse<T> {
                     map.serialize_entry("echo", echo)?;
                 }
                 map.serialize_entry("message", self.message.as_deref().unwrap_or_default())?;
-                if let Some(next_cursor) = &self.next_cursor {
-                    map.serialize_entry("next_cursor", next_cursor)?;
-                }
                 map.serialize_entry("retcode", &self.retcode)?;
                 map.serialize_entry("status", &self.status)?;
             }
@@ -623,18 +629,16 @@ mod tests {
         assert_eq!(ok.status, Status::Ok);
     }
 
+    /// 分页游标在 `data` 内（Go 的 `get_panel_list` / `get_group_join_request_list` 都这样放），
+    /// 响应顶层没有 `next_cursor` 字段（`get_group_member_list` 在 Go 里连游标都不给）。
     #[test]
-    fn next_cursor_is_optional_top_level_field() {
-        // `data` 保持数组（OneBot 兼容），游标只加在响应顶层
-        let plain: ActionResponse<Vec<i32>> = ActionResponse::ok(vec![1, 2]);
-        let yaml = serde_norway::to_string(&plain).expect("序列化失败");
-        assert!(!yaml.contains("next_cursor"), "None 不应序列化: {yaml}");
-
-        let paged: ActionResponse<Vec<i32>> =
-            ActionResponse::ok(vec![1]).with_next_cursor(Some("nc".to_owned()));
-        let json = serde_json::to_value(&paged).expect("序列化失败");
-        assert_eq!(json["next_cursor"], serde_json::json!("nc"));
-        assert_eq!(json["data"], serde_json::json!([1]), "data 仍是数组");
+    fn paging_cursor_lives_in_data() {
+        let response: ActionResponse<serde_json::Value> =
+            ActionResponse::ok(serde_json::json!({ "next_cursor": "nc", "records": [] }));
+        assert_eq!(
+            serde_json::to_string(&response).expect("序列化失败"),
+            r#"{"data":{"next_cursor":"nc","records":[]},"echo":null,"message":"","retcode":0,"status":"ok"}"#
+        );
     }
 
     /// 键序：字段声明序 = 线上键序（Go 的 map 字母序），整串钉死。
@@ -686,13 +690,26 @@ mod tests {
         );
     }
 
-    /// `wording` 是 Go 不存在的字段，只保留在结构体里、不上线。
+    /// `mark_msg_as_read` 的 Go 形状：`msg` 顶替 `message`，`wording` 紧跟其后（两者都没有
+    /// omitempty，成功回执里是空串）。其余 action 一个键都不多。
     #[test]
-    fn wording_is_never_serialized() {
-        let mut response: ActionResponse<()> = ActionResponse::ok(());
-        response.wording = Some("提示".to_owned());
-        let json = serde_json::to_string(&response).expect("序列化失败");
-        assert!(!json.contains("wording"), "wording 不应上线: {json}");
+    fn mark_read_uses_msg_and_wording() {
+        let mut response: ActionResponse<serde_json::Value> =
+            ActionResponse::ok(serde_json::Value::Null);
+        response.msg = Some(String::new());
+        response.wording = Some(String::new());
+        assert_eq!(
+            serde_json::to_string(&response).expect("序列化失败"),
+            r#"{"data":null,"echo":null,"msg":"","retcode":0,"status":"ok","wording":""}"#
+        );
+
+        let plain: ActionResponse<serde_json::Value> = ActionResponse::ok(serde_json::Value::Null);
+        let json = serde_json::to_string(&plain).expect("序列化失败");
+        assert!(!json.contains("msg"), "msg 只属于 mark_msg_as_read: {json}");
+        assert!(
+            !json.contains("wording"),
+            "wording 只属于 mark_msg_as_read: {json}"
+        );
     }
 
     // ---- P86c：B 管理类的 Compact 信封（Go `sendActionResult` / `sendActionResultWithData`） ----

@@ -43,6 +43,7 @@ use gensokyo_protocol::Registry;
 use gensokyo_protocol::action::{ActionRequest, ActionResponse, Echo, Status};
 use gensokyo_protocol::envelope::{EnvelopeKind, envelope_for};
 use gensokyo_storage::{BotStatsStore, EchoStore};
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::deferred::DeferredDeps;
@@ -417,8 +418,8 @@ fn deferred_retcode(err: &CoreError) -> i32 {
 
 /// 解析一条线上 JSON（WS 文本帧 / HTTP body），分发并返回响应 JSON 文本。
 ///
-/// 解析失败按 OneBot 语义回 `retcode=1400`；响应序列化失败时返回固定形状的兜底 JSON
-/// （`ActionResponse<Value>` 的序列化理论上不会失败，但响应不能因为 codec 问题凭空消失）。
+/// 解析失败按 OneBot 语义回 `retcode=1400`；响应序列化失败时由 [`encode`] 回该信封模式的
+/// 兜底形状（`ActionResponse` 的序列化理论上不会失败，但响应不能因为 codec 问题凭空消失）。
 pub async fn dispatch_json(dispatcher: Dispatcher, payload: Vec<u8>) -> String {
     let request = match serde_json::from_slice::<ActionRequest<Value>>(&payload) {
         Ok(request) => request,
@@ -449,12 +450,22 @@ fn retcode_for(err: &CoreError) -> i32 {
     }
 }
 
-fn encode(response: &ActionResponse<Value>) -> String {
+/// 序列化响应；codec 出问题时按**当前信封模式**回一个同形状的兜底，响应不能凭空消失。
+///
+/// 兜底形状必须与本模式正常输出一致：Full 有 `data` / `echo` / `message`（D6：三者恒在），
+/// Compact 三者都没有（Go 的 B 类失败只有 `sendActionResult`）。`message` 留空串而不是塞一句
+/// 说明——失败原因进 `tracing::error!`，线上形状只负责让客户端拿到 `retcode`。
+///
+/// 模式取自 `response.envelope`：[`Dispatcher::dispatch`] 已用
+/// [`envelope_for`] 按 action 名设置；解析失败的请求没进 `dispatch`，保持默认 Full。
+fn encode<T: Serialize>(response: &ActionResponse<T>) -> String {
     serde_json::to_string(response).unwrap_or_else(|err| {
         tracing::error!(error = %err, "action 响应序列化失败");
-        // 信封按当前模式兜底：B 类不补上 Go 那里没有的 `data` / `echo`。
         match response.envelope {
-            EnvelopeKind::Full => r#"{"data":null,"retcode":1500,"status":"failed"}"#.to_owned(),
+            EnvelopeKind::Full => {
+                r#"{"data":null,"echo":null,"message":"","retcode":1500,"status":"failed"}"#
+                    .to_owned()
+            }
             EnvelopeKind::Compact(_) => {
                 r#"{"message":"","retcode":100,"status":"failed"}"#.to_owned()
             }
@@ -477,7 +488,7 @@ mod tests {
     use gensokyo_core::Error;
     use gensokyo_protocol::Registry;
     use gensokyo_protocol::action::{ActionRequest, ActionResponse};
-    use gensokyo_protocol::envelope::EnvelopeKind;
+    use gensokyo_protocol::envelope::{CompactData, EnvelopeKind};
     use gensokyo_protocol::registry::{Handler, HandlerFuture};
     use gensokyo_storage::EchoStore;
     use serde_json::{Value, json};
@@ -695,6 +706,37 @@ mod tests {
         let body = super::encode(&response);
         assert!(body.contains(r#""data":null"#), "Full 仍带 data: {body}");
         assert!(body.contains(r#""echo":null"#), "Full 仍带 echo: {body}");
+    }
+
+    /// 序列化失败时按信封模式回**同形状**兜底：Full 仍带 `data` / `echo` / `message`，
+    /// B 类仍不带这三者，`retcode` 也取各自模式的值（1500 / 100）。
+    #[test]
+    fn encode_fallback_matches_the_envelope() {
+        use serde::ser::Error as SerError;
+
+        /// 任何序列化都失败的载荷（`ActionResponse` 的 `data` 是泛型，测试里才造得出来）。
+        struct Broken;
+
+        impl serde::Serialize for Broken {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(SerError::custom("boom"))
+            }
+        }
+
+        let full: ActionResponse<Broken> = ActionResponse::ok(Broken).with_echo(Some(json!("e1")));
+        assert_eq!(
+            super::encode(&full),
+            r#"{"data":null,"echo":null,"message":"","retcode":1500,"status":"failed"}"#
+        );
+
+        // 只有 `AsIs` 会序列化 `data`（Omit / EmptyObject / Null 根本不碰它），所以 B 类
+        // 兜底只在 `AsIs` 下可达——失败路径本来也不写 `data`。
+        let mut compact: ActionResponse<Broken> = ActionResponse::ok(Broken);
+        compact.envelope = EnvelopeKind::Compact(CompactData::AsIs);
+        assert_eq!(
+            super::encode(&compact),
+            r#"{"message":"","retcode":100,"status":"failed"}"#
+        );
     }
 
     #[tokio::test]

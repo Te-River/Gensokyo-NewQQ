@@ -35,9 +35,10 @@
 //!   缺参等于「立即解禁」并放行（不报 1400）；给了非数字仍按 1400 拒绝。
 //! - **`set_group_ban` 超 30 天按 30 天算**：官方 `mute_expire_at` 最长 30 天
 //!   （[`MAX_BAN_SECONDS`]），超出即截断；`duration <= 0` 仍表示立即解除，原样透传。
-//! - **`get_group_member_list` 单页 + 游标接力**：`cursor` 入参原样透传给官方接口（空串等同
-//!   首屏），末页之后由客户端拿响应顶层的 `next_cursor` 继续翻；Go 的「最多 100 页全量拉取 +
-//!   页间节流」未移植，`data` 仍保持 OneBot 的数组形态。
+//! - **`get_group_member_list` 单页**：`cursor` 入参原样透传给官方接口（空串等同首屏），
+//!   响应**没有游标字段**（Go `buildResponse` 只有 `retcode` / `status` / `data` / `echo`，
+//!   翻页在 Go 内部循环完成），`data` 保持 OneBot 的数组形态。Go 的「最多 100 页全量拉取 +
+//!   页间节流」未移植：Rust 只回当前页，后续页要客户端自己带 `cursor` 重发。
 //! - **idmap 缺失时的中性值**：Go 侧 `StoreIDv2` 失败直接跳过成员；这里保留条目并置 `user_id=0`，
 //!   由调用方按 `member_openid` 决策。
 //! - **`joined_at` 解析**：Go 用 `time.Parse(RFC3339)`；这里用 `rfc3339`（无 `time` 依赖），
@@ -315,10 +316,10 @@ impl GetGroupMemberListHandler {
                 member_info(&group_id, &ob11_id(&user_id, string_mode), member)
             })
             .collect();
-        // 官方末页的 `next_cursor` 是空串：空串不当作「还有下一页」外露；
-        // `data` 保持数组（OneBot 兼容），游标走响应顶层
-        let next_cursor = Some(page.next_cursor).filter(|cursor| !cursor.is_empty());
-        Ok(ok_data(request, &members)?.with_next_cursor(next_cursor))
+        // Go `buildResponse`（handlers/get_group_member_list.go:228-257）只有
+        // `retcode` / `status` / `data` / `echo`——翻页在 Go 内部循环完成，响应里**没有游标**。
+        // 这里同样不外露游标，`data` 保持 OneBot 的数组形态。
+        ok_data(request, &members)
     }
 }
 
@@ -974,7 +975,7 @@ mod tests {
     }
 
     #[test]
-    fn get_group_member_list_forwards_cursor_and_returns_next_cursor() {
+    fn get_group_member_list_forwards_cursor_and_drops_it() {
         let (context, api) = context();
         *api.member_list.lock().unwrap() = Some(Ok(QqGroupMemberList {
             members: vec![QqGroupMember {
@@ -1001,12 +1002,17 @@ mod tests {
             "cursor 必须原样透传给上游"
         );
         let json = serde_json::to_value(&response).expect("响应应可序列化");
-        assert_eq!(json["next_cursor"], json!("nc2"), "游标走响应顶层");
         assert!(json["data"].is_array(), "data 仍是数组（OneBot 兼容）");
+        // Go 的成员列表响应没有游标（`buildResponse` 只有 retcode/status/data/echo）
+        let body = serde_json::to_string(&response).expect("响应应可序列化");
+        assert!(
+            !body.contains("next_cursor"),
+            "上游给了游标也不能上线: {body}"
+        );
     }
 
     #[test]
-    fn get_group_member_list_omits_empty_next_cursor() {
+    fn get_group_member_list_wire_shape_has_no_cursor() {
         let (context, api) = context();
         *api.member_list.lock().unwrap() = Some(Ok(QqGroupMemberList::default()));
 
@@ -1022,12 +1028,10 @@ mod tests {
             api.calls(),
             vec![Call::MemberList(GROUP.to_owned(), None, 30)]
         );
-        let json = serde_json::to_value(&response).expect("响应应可序列化");
-        assert!(
-            json.get("next_cursor").is_none(),
-            "末页空串不应序列化 next_cursor: {json}"
+        assert_eq!(
+            serde_json::to_string(&response).expect("响应应可序列化"),
+            r#"{"data":[],"echo":"e-1","message":"","retcode":0,"status":"ok"}"#
         );
-        assert_eq!(json["data"], json!([]));
     }
 
     #[test]
@@ -1211,7 +1215,15 @@ mod tests {
             "get_group_join_request_list",
             json!({"group_id": GROUP}),
         )));
-        let data = ok_data(response.expect("handler 不应返回 Err"));
+        let mut response = response.expect("handler 不应返回 Err");
+        // Go 的 `JoinRequestListResponse`：游标与旧字段 `next_index` 都在 `data` 内
+        response.envelope =
+            gensokyo_protocol::envelope::envelope_for("get_group_join_request_list");
+        assert_eq!(
+            serde_json::to_string(&response).expect("响应应可序列化"),
+            r#"{"data":{"join_requests":[],"list":[],"next_cursor":"1234567890123","next_index":0},"echo":"e-1","message":"","retcode":0,"status":"ok"}"#
+        );
+        let data = ok_data(response);
 
         assert_eq!(
             api.calls(),
@@ -1228,6 +1240,10 @@ mod tests {
             "超出 i32 的游标不同步到旧字段"
         );
         assert_eq!(data["list"], json!([]));
+        assert!(
+            data.get("next_cursor").is_some(),
+            "游标必须在 data 内（不是响应顶层）: {data}"
+        );
     }
 
     #[test]
