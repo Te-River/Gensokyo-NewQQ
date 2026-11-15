@@ -299,6 +299,12 @@ P86 审计（parity §F）确认的 D1/D3/D4：Go numeric 模式（默认 `strin
 - **影响**：发送类 action 顶层 JSON 与 Go 对齐；已知差异登记：失败回执不填 ID、numeric 下原数字串不重复分配、`channel_id`/`guild_id` 未覆盖。群管理/查询类的 per-action 信封另立 **P86c**。
 - **测试**：协议 4 例 + runtime 6 例整串断言（群/私聊 × numeric/string + 空回执 × 群/私聊）；全量 **43 suites / 1416 passed / 0 failed**、clippy 零告警、release Finished、fmt 退出码 0。
 
+### per-action 响应信封（管理类 Compact，Rust 侧 P86c，2026-11-15）
+
+- **修复**：新增 `EnvelopeKind`（`Full`/`Compact(CompactData::{Omit,AsIs,EmptyObject,Null})`）与 `envelope_for(action)` 表（B 类 23 个管理 action 逐条对 Go 源码映射）；`ActionResponse` 改为手写 `Serialize`（两套键集、恒按字母序）。Compact 下：`data` 按子形态（4 省略 / 15 有值 / 2 `{}` / 2 `null`；**失败一律不写 data**）、`echo` 缺省省略、`message` 恒在、不写 `group_id`/`user_id`；B 类失败 `retcode 100 / failed`。dispatcher 在唯一出口按 action 设置信封，**未改任何 handler 业务逻辑**。
+- **影响**：群管理类响应不再多出 `data`/`echo` 字段；A 发送类与 C 查询类保持 Full；A 类失败仍 1400/1500（D7）。剩余见 P86d（`next_cursor` 进 data、`mark_msg_as_read` 的 `msg`/`wording`、C 类个别字段）。
+- **测试**：协议 8 例 + runtime 3 例（Compact 七条 golden 整串）；全量 **44 suites / 1427 passed / 0 failed**、clippy 零告警、release Finished、fmt 退出码 0。
+
 ### Action 响应信封审计（P86，2026-11-15，审计项）
 
 - **发现**：Go 的 numeric 模式（默认 `string_ob11=false`）响应里 `data.message_id` 是 **int**、`group_id` 为 int64；string 模式为原串 + OpenID；Rust dispatcher 恒回字符串且缺 `group_id`/`user_id`；空回执 `0` vs `"0"`；顶层 `message`/`echo` 缺省省略；键序不同。D1–D9 详见 `reports/refactor/17-go-rust-parity.md` §F。
