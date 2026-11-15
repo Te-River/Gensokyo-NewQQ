@@ -1,5 +1,8 @@
-# Changelog — Release016
+# Changelog — Release 016 Rust
 
+> **Rust 重构分支的首个 Release，发布名（GitHub Release 标题）为 `Release 016 Rust`**（tag 建议 `Release016Rust`）。
+> 本文件随 `Refactor` 分支维护；Go 主线仍是 `Release016`。
+>
 > 自 Release015 以来的所有变更。
 
 ---

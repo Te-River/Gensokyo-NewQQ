@@ -26,6 +26,7 @@
 
 | 指标 | 现值 | 来源 / 取数命令 |
 |------|------|-----------------|
+| 发布名 | **Release 016 Rust**（Rust 重构分支首个 Release；GitHub Release 标题用此名，tag 建议 `Release016Rust`） | 本文件随 `Refactor` 分支维护；Go 主线仍为 `Release016`；见 `release_log/CHANGELOG_v016.md` 首部 |
 | parity 覆盖面 | A/B/C 三表逐项标注状态，主干/功能/边角项均为「已对齐 / 关闭」；B6 是**历史 severity 汇总**，个别行只写估量、未逐条回写状态 | `reports/refactor/17-go-rust-parity.md`：**按节定位**（A 表 / C 表 / B1-3 / B4 CQ 码进出站 / B5 / B6 缺口汇总 / D / E），该文件行号随每次 parity 回写浮动，不再钉死数字区间 |
 | 测试基线 | **43 suites / 1382 passed / 0 failed**（2026-11-14 P79+P82 后实测；`ignored` 计数以门禁输出为准） | `cargo test --workspace --no-fail-fast`（计数随新增用例变化，取数见 §9） |
 | clippy | `-D warnings` **零告警** | `cargo clippy --workspace --all-targets -- -D warnings` |

@@ -210,10 +210,14 @@ darwin / MSVC / android 目标仍需各自工具链。
 |----|-------|---------|
 | 工具链依赖 | `go`、`GOPROXY` | 仅 `cargo`（+ 可选 `upx`） |
 | `-All` 目标数 | 5（linux×3 + windows×2） | 9（对齐 CI 矩阵：linux×4、darwin×2、windows×2、android×1） |
-| 版本信息 | `-ldflags -X buildinfo.BuildType/BuildSpec` 注入 git commit | **暂未注入**，版本取自 crate `version`（0.1.0）；等 `buildinfo` 落地再接线 |
+| 版本信息 | `-ldflags -X buildinfo.BuildType/BuildSpec` 注入 `git-<short>`（无 git 时 `dev-<epoch>.<ms>`） | `cargo xtask build` 给 cargo 子进程设 `GENSOKYO_BUILD_VERSION`（同一规则：git 时 `git-<7位短 hash>`、否则 `dev-<epoch>.<ms>`；同名环境变量优先，发布流水线可覆盖）；直接 `cargo build` 不注入、走运行时 `dev-…` 回退 |
 | WebUI 占位 | 脚本内 `Ensure-WebUIDist` | xtask 内 `ensure_webui_dist`（同一组占位文件） |
 | `-NoWebUI` | `-tags=small`，真实裁剪 | `--no-default-features`，当前 no-op（见上节） |
 | 交叉编译 | Go 自带 | linux-gnu×4 自动引导 zig + cargo-zigbuild；其余目标需 `rustup target add` + 各自工具链 |
+
+版本串口径补充：`GENSOKYO_BUILD_VERSION` 是构建版本串的覆盖开关（不受上文 zig 版本号的数字约束）喵~
+`Release 016 Rust` 起 Go 与 Rust 两侧产物版本串同口径（`git-<7 位短 hash>` / `dev-<epoch>.<ms>`），可按短 hash 追溯喵~
+PGO 基准路径（`xtask/src/pgo.rs`）故意不注入，便于 A/B 比性能喵~
 
 ## 验证命令
 
