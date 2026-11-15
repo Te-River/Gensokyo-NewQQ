@@ -305,6 +305,12 @@ P86 审计（parity §F）确认的 D1/D3/D4：Go numeric 模式（默认 `strin
 - **影响**：群管理类响应不再多出 `data`/`echo` 字段；A 发送类与 C 查询类保持 Full；A 类失败仍 1400/1500（D7）。剩余见 P86d（`next_cursor` 进 data、`mark_msg_as_read` 的 `msg`/`wording`、C 类个别字段）。
 - **测试**：协议 8 例 + runtime 3 例（Compact 七条 golden 整串）；全量 **44 suites / 1427 passed / 0 failed**、clippy 零告警、release Finished、fmt 退出码 0。
 
+### 响应信封收尾（Rust 侧 P86d-1，2026-11-15）
+
+- **修复**：删除 `ActionResponse` 顶层 `next_cursor`（Go 无此字段）——分页 action 的游标按 Go 放在 `data` 内（join request list / panel list / blacklist / media list），`get_group_member_list` 不再输出游标；`mark_msg_as_read` 顶层改为 Go 的 `msg` + `wording`（空串、无 omitempty，`msg` 顶替 `message`）；`dispatcher::encode` 兜底按信封模式输出（Full 带 `data/echo/message`，Compact 带 `message/retcode 100`）。
+- **影响**：分页与已读回执的键集/位置与 Go 对齐。已知差异（登记）：`mark_msg_as_read` 的 `data`——Go 是 `gjson.Result` 零值结构体转储、Rust 按语义回 `null`；成员列表 Rust 仍只回一页（Go 内部拉全量）另项。
+- **测试**：新增/改写 4 条整串断言（join request / panel list / member list / mark read / encode 兜底）；全量 **43 suites / 1429 passed / 0 failed**、clippy 零告警、release Finished、fmt 退出码 0。
+
 ### Action 响应信封审计（P86，2026-11-15，审计项）
 
 - **发现**：Go 的 numeric 模式（默认 `string_ob11=false`）响应里 `data.message_id` 是 **int**、`group_id` 为 int64；string 模式为原串 + OpenID；Rust dispatcher 恒回字符串且缺 `group_id`/`user_id`；空回执 `0` vs `"0"`；顶层 `message`/`echo` 缺省省略；键序不同。D1–D9 详见 `reports/refactor/17-go-rust-parity.md` §F。

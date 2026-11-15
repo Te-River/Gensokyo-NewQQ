@@ -59,7 +59,7 @@
 
 **Action 全集**：Go 53 个唯一注册名（50 canonical + 3 别名）→ Rust **53/53 覆盖，缺失 0**；清单漂移：Rust `KNOWN_ACTIONS` 多 3 个 Go 从未注册的素材管理扩展（upload/get_list/delete_media_image），属 Rust 扩展（Medium，登记）。
 
-**消息链特性矩阵**（对齐=已对齐）：reply/echo ✓；msg_type 0/2/6/7/8 ✓；markdown/keyboard ✓；card 分侧差异登记见 B4 表 P77-1~4（必填校验 / 最终 https / 参数别名 / 单聊路径，两侧行为不同：单聊 card=Rust 扩展、必填与 https=Rust 本地从严、别名=Rust 兼容并集）；本地 pic 上传 ✓ P29a；input_notify ✓；stream/SSE ✓；qqmusic ✓（P29b：查询→markdown+键盘，失败回退分享文案）；forward ✓（保留 node 媒体）；raw ✓；wakeup/active 部分（空内容口径两侧不同：Go 补发 `" "` 唤醒 vs Rust 1400，见 B4 表 P77-5；active 段名严格度见 P77-6）；SSM ✓（仅群入队同 Go）；懒消息/2000/seq ✓；at：AppID→BotID ✓（P15）、add_at_group ✓；auto_escape 刻意差异（Rust 尊重该字段）；array ✓；**发送类（A）与管理类（B）响应已对齐（P86a/P86b/P86c）；查询类（C）保持 Full，个别字段见 P86d**。
+**消息链特性矩阵**（对齐=已对齐）：reply/echo ✓；msg_type 0/2/6/7/8 ✓；markdown/keyboard ✓；card 分侧差异登记见 B4 表 P77-1~4（必填校验 / 最终 https / 参数别名 / 单聊路径，两侧行为不同：单聊 card=Rust 扩展、必填与 https=Rust 本地从严、别名=Rust 兼容并集）；本地 pic 上传 ✓ P29a；input_notify ✓；stream/SSE ✓；qqmusic ✓（P29b：查询→markdown+键盘，失败回退分享文案）；forward ✓（保留 node 媒体）；raw ✓；wakeup/active 部分（空内容口径两侧不同：Go 补发 `" "` 唤醒 vs Rust 1400，见 B4 表 P77-5；active 段名严格度见 P77-6）；SSM ✓（仅群入队同 Go）；懒消息/2000/seq ✓；at：AppID→BotID ✓（P15）、add_at_group ✓；auto_escape 刻意差异（Rust 尊重该字段）；array ✓；**发送类（A）与管理类（B）响应已对齐（P86a–P86c）；查询类（C）Full，游标已进 data（P86d-1），成员列表缺 message/只回一页另项**。
 
 **媒体链**：local/url/base64 四类 ✓；多媒体段拆分 ✓（P1）；**>5MB 分片上传 ✓（P29a）**；**silk 转码/图片压缩 ✓（P29a）**；素材链 oss_type=7 ✓；图床 provider 4~10 ✓（P7）；图床上传重试 ✓（P7）；**card 本地 pic_url ✓（P29a）**；markdown 内嵌图替换 ✓；unknown_* 透传 ✓（仅非空值；裸码 `file`/`url` 皆空时按 Go 原位保留字面、不产 `Unknown("")` 空 `file_info`，P59）；qqmusic ✓（P29b：真实 markdown+键盘）。
 
@@ -163,6 +163,8 @@ P81 收口空消息回执时发现响应形态疑点，专项审计（黑板 `p8
 
 | D10 | 群管理/查询类信封（per-action，P86c） | Go 多用 map 直出：可能**无 `data`、无 `message`**、`echo` 带 omitempty（如 `handlers/set_group_add_request.go:59-69`） | 全局 `ActionResponse` 恒有 `data`/`message`/`echo` ⇒ 会多出字段 | **已修（P86c）**：B 类 23 action 按 Go Compact（data 四形态、echo omitempty、失败 retcode 100）；A/C 保持 Full | High |
 
-> 结论：D1–D4、D6、D9 是正常路径的**硬性外部 JSON 差异**，已修（P86a→P86b）；D5/D7/D8 为 Go 的错误路径怪癖，Rust 保留更安全行为并登记为刻意分侧；D10 已由 P86c 收口。剩余 P86d：`next_cursor` 进 `data`、`mark_msg_as_read` 的 `msg`/`wording`、C 类 `get_group_member_list` 缺 `message`、D 类幽灵 action 登记、`encode`/SSE/forward 兜底。
+| D11 | 分页游标位置（P86d-1） | 游标在 `data` 内：join request list `handlers/get_group_join_request_list.go:47-52`、panel list `get_panel_list.go:39-47`、blacklist `:29`；member list **无游标**（`get_group_member_list.go:228-257`） | 顶层 `next_cursor` 扩展已删除；分页 action 游标在 `data` 内；member list 不输出 | **已修（P86d-1）**：另登记 `mark_msg_as_read` 的 data（Go gjson 零值转储 vs Rust null）与成员列表只回一页 | High |
+
+> 结论：D1–D4、D6、D9 是正常路径的**硬性外部 JSON 差异**，已修（P86a→P86b）；D5/D7/D8 为 Go 的错误路径怪癖，Rust 保留更安全行为并登记为刻意分侧；D10 已由 P86c 收口；D11 已由 P86d-1 收口。剩余 P86d-2（SSE/forward）与登记项（成员列表缺 `message`/只回一页、mark read 的 data、D 类幽灵 action）。
 
 （本文由三分域审计汇总；A/B/C/D 表与 §E 状态已按 R4k 波次回写，时点见 `docs/rust-m0.md`。）
