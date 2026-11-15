@@ -324,11 +324,11 @@ mod tests {
         );
         // 外部 JSON 逐字节对 Go：key 字节序升序（`Bob:` < `alice:`），空 `user_id` 行被
         // 过滤（`get_friend_list.go:36-40`）；条目字段序 nickname,remark,user_id（Go 声明序
-        // 与字母序恰好一致，`serde_json::Value` 按 BTreeMap 排序输出）；信封沿用本仓
-        // ActionResponse 声明序口径（R3a 未重排，见 P64a 文档）
+        // 与字母序恰好一致，`serde_json::Value` 按 BTreeMap 排序输出）；信封按
+        // ActionResponse 的字母序声明（P86b），`message` 恒序列化（Go 无 omitempty）
         assert_eq!(
             serde_json::to_string(&response).expect("序列化响应"),
-            r#"{"status":"ok","retcode":0,"data":[{"nickname":"Bob","remark":"b-note","user_id":"100002"},{"nickname":"Alice","remark":"a-note","user_id":"200001"}],"echo":"e-1"}"#
+            r#"{"data":[{"nickname":"Bob","remark":"b-note","user_id":"100002"},{"nickname":"Alice","remark":"a-note","user_id":"200001"}],"echo":"e-1","message":"","retcode":0,"status":"ok"}"#
         );
         assert_eq!(handler.name(), "get_friend_list");
     }
@@ -344,7 +344,7 @@ mod tests {
             .expect("handler 不应返回 Err");
         assert_eq!(
             serde_json::to_string(&response).expect("序列化响应"),
-            r#"{"status":"ok","retcode":0,"data":null,"echo":"e-1"}"#
+            r#"{"data":null,"echo":"e-1","message":"","retcode":0,"status":"ok"}"#
         );
     }
 

@@ -16,7 +16,7 @@ use gensokyo_qq::dto::{
     MessageToCreate,
 };
 use gensokyo_runtime::{AppState, RETCODE_INTERNAL};
-use gensokyo_storage::EchoStore;
+use gensokyo_storage::{EchoStore, IdMapOptions, IdMapStore};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -189,6 +189,36 @@ fn state_with_echo(settings: &str) -> (TempDir, Arc<FakeQqApi>, AppState, Arc<Ec
     let echo = Arc::new(EchoStore::new());
     let state = AppState::with_actions(manager, context).with_echo(Arc::clone(&echo));
     (dir, api, state, echo)
+}
+
+/// 同 [`state_with_echo`]，并装配 idmap：numeric 模式的虚拟号要它才能反查回 OpenID。
+fn state_with_idmap(
+    settings: &str,
+) -> (
+    TempDir,
+    Arc<FakeQqApi>,
+    AppState,
+    Arc<EchoStore>,
+    Arc<IdMapStore>,
+) {
+    let (manager, dir) = config(settings);
+    let api = Arc::new(FakeQqApi::default());
+    let api_dyn: Arc<dyn QqApi> = api.clone();
+    let idmap = Arc::new(
+        IdMapStore::open(
+            IdMapOptions::new(
+                dir.path().join("openid-map.redb"),
+                dir.path().join("msgid-map.redb"),
+            )
+            .with_app_id("12345"),
+        )
+        .expect("idmap 应能打开"),
+    );
+    let context =
+        Arc::new(ActionContext::new(api_dyn, Arc::clone(&manager)).with_idmap(Arc::clone(&idmap)));
+    let echo = Arc::new(EchoStore::new());
+    let state = AppState::with_actions(manager, context).with_echo(Arc::clone(&echo));
+    (dir, api, state, echo, idmap)
 }
 
 fn request(action: &str, params: Value, echo: Option<Value>) -> ActionRequest<Value> {
@@ -742,4 +772,183 @@ async fn empty_receipt_is_numeric_zero_in_both_modes() {
             "空回执必须是数字 0（配置 {settings:?}）"
         );
     }
+}
+
+// ---- P86b：响应外层信封（Go `ServerResponse` / `ServerResponseSB` 口径） ----
+
+/// 群发送 numeric：顶层 `group_id` 是数字虚拟号；整串键序与 Go 的 map 字母序一致。
+#[tokio::test]
+async fn group_envelope_is_alphabetical_in_numeric_mode() {
+    let (_dir, api, state, echo, idmap) = state_with_idmap("app_id: 12345\n");
+    let (_, group_vuin) = idmap.retrieve_virtual_value(OPENID).expect("分配群虚拟号");
+    api.push_group(api.ok("m-g1"));
+
+    let response = state
+        .dispatcher()
+        .dispatch(&request(
+            "send_group_msg",
+            json!({ "group_id": group_vuin, "message": "hello" }),
+            None,
+        ))
+        .await;
+
+    let message_id = echo.store_cache_in_memory("m-g1").expect("派生行号");
+    assert_eq!(
+        serde_json::to_string(&response).expect("序列化失败"),
+        format!(
+            r#"{{"data":{{"message_id":{message_id}}},"echo":null,"group_id":{group_vuin},"message":"","retcode":0,"status":"ok"}}"#
+        ),
+        "numeric 模式的群回执（Go `SendResponse`）"
+    );
+    match &api.sent()[0] {
+        Sent::Group(openid, _) => assert_eq!(openid, OPENID, "虚拟号要反查回群 OpenID"),
+        other => panic!("应为群消息: {other:?}"),
+    }
+}
+
+/// 群发送 string 模式：`group_id` 是请求原串（`ServerResponseSB.GroupID` 是 string）。
+#[tokio::test]
+async fn group_envelope_is_alphabetical_in_string_mode() {
+    let (_dir, api, state) = state("  app_id: 12345\n  string_ob11: true\n");
+    api.push_group(api.ok("m-g2"));
+
+    let response = state
+        .dispatcher()
+        .dispatch(&request(
+            "send_group_msg",
+            json!({ "group_id": OPENID, "message": "hello" }),
+            None,
+        ))
+        .await;
+
+    assert_eq!(
+        serde_json::to_string(&response).expect("序列化失败"),
+        format!(
+            r#"{{"data":{{"message_id":"m-g2"}},"echo":null,"group_id":"{OPENID}","message":"","retcode":0,"status":"ok"}}"#
+        ),
+        "string 模式的群回执（Go `SendResponseSB`）"
+    );
+}
+
+/// 私聊 numeric：顶层 `user_id` 是数字虚拟号，`group_id` 不出现；带 echo 时 echo 落在 data 后。
+#[tokio::test]
+async fn private_envelope_carries_numeric_user_id() {
+    let (_dir, api, state, echo, idmap) = state_with_idmap("app_id: 12345\n");
+    let (_, user_vuin) = idmap
+        .retrieve_virtual_value(USER_OPENID)
+        .expect("分配用户虚拟号");
+    api.push_c2c(api.ok("m-p1"));
+
+    let response = state
+        .dispatcher()
+        .dispatch(&request(
+            "send_private_msg",
+            json!({ "user_id": user_vuin, "message": "hi" }),
+            Some(json!("e-p1")),
+        ))
+        .await;
+
+    let message_id = echo.store_cache_in_memory("m-p1").expect("派生行号");
+    assert_eq!(
+        serde_json::to_string(&response).expect("序列化失败"),
+        format!(
+            r#"{{"data":{{"message_id":{message_id}}},"echo":"e-p1","message":"","retcode":0,"status":"ok","user_id":{user_vuin}}}"#
+        ),
+        "私聊回执（Go `SendC2CResponse`）"
+    );
+}
+
+/// 私聊 string 模式：`user_id` 仍是**数字**虚拟号——照抄 Go 的内部不一致（`SendC2CResponse`
+/// 恒用数字结构），`message_id` 才是字符串。
+#[tokio::test]
+async fn private_envelope_keeps_numeric_user_id_in_string_mode() {
+    let (_dir, api, state, _echo, idmap) =
+        state_with_idmap("  app_id: 12345\n  string_ob11: true\n");
+    let (_, user_vuin) = idmap
+        .retrieve_virtual_value(USER_OPENID)
+        .expect("分配用户虚拟号");
+    api.push_c2c(api.ok("m-p2"));
+
+    let response = state
+        .dispatcher()
+        .dispatch(&request(
+            "send_private_msg",
+            json!({ "user_id": user_vuin, "message": "hi" }),
+            None,
+        ))
+        .await;
+
+    assert_eq!(
+        serde_json::to_string(&response).expect("序列化失败"),
+        format!(
+            r#"{{"data":{{"message_id":"m-p2"}},"echo":null,"message":"","retcode":0,"status":"ok","user_id":{user_vuin}}}"#
+        ),
+        "string 模式私聊的 user_id 仍是数字（Go 缺陷照抄）"
+    );
+}
+
+/// 空消息回执也带顶层 ID：Go 在判空前就用同一 `message.Params` 构造 `group_id` / `user_id`。
+#[tokio::test]
+async fn empty_receipt_still_carries_target_id() {
+    let (_dir, api, state, _echo, idmap) = state_with_idmap("app_id: 12345\n");
+    let (_, group_vuin) = idmap.retrieve_virtual_value(OPENID).expect("分配群虚拟号");
+    let (_, user_vuin) = idmap
+        .retrieve_virtual_value(USER_OPENID)
+        .expect("分配用户虚拟号");
+
+    let group = state
+        .dispatcher()
+        .dispatch(&request(
+            "send_group_msg",
+            json!({ "group_id": group_vuin, "message": "[CQ:card]" }),
+            None,
+        ))
+        .await;
+    assert_eq!(
+        serde_json::to_string(&group).expect("序列化失败"),
+        format!(
+            r#"{{"data":{{"message_id":0}},"echo":null,"group_id":{group_vuin},"message":"","retcode":0,"status":"ok"}}"#
+        ),
+        "群空回执"
+    );
+
+    let private = state
+        .dispatcher()
+        .dispatch(&request(
+            "send_private_msg",
+            json!({ "user_id": user_vuin, "message": "[CQ:card]" }),
+            None,
+        ))
+        .await;
+    assert_eq!(
+        serde_json::to_string(&private).expect("序列化失败"),
+        format!(
+            r#"{{"data":{{"message_id":0}},"echo":null,"message":"","retcode":0,"status":"ok","user_id":{user_vuin}}}"#
+        ),
+        "私聊空回执"
+    );
+    assert!(api.sent().is_empty(), "纯码空消息不应触达上游");
+}
+
+/// 非发送类 action 的信封里没有 `group_id` / `user_id`，但 `message` / `echo` 恒在。
+#[tokio::test]
+async fn non_send_actions_keep_the_plain_envelope() {
+    let (_dir, _api, state) = state("app_id: 12345\n");
+
+    let response = state
+        .dispatcher()
+        .dispatch(&request("get_status", json!({}), Some(json!("e-s"))))
+        .await;
+
+    let value = serde_json::to_value(&response).expect("序列化失败");
+    assert!(
+        value.get("group_id").is_none(),
+        "非发送类不带 group_id: {value}"
+    );
+    assert!(
+        value.get("user_id").is_none(),
+        "非发送类不带 user_id: {value}"
+    );
+    assert_eq!(value["message"], json!(""), "成功回执的 message 是空串");
+    assert_eq!(value["echo"], json!("e-s"), "echo 原样回传");
 }

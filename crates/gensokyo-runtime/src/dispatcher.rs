@@ -35,8 +35,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::FutureExt;
-use gensokyo_actions::{ActionContext, ForwardRequest, SendRequest, SseRequest};
+use gensokyo_actions::{ActionContext, ForwardRequest, SendRequest, SendTarget, SseRequest};
 use gensokyo_core::Error as CoreError;
+use gensokyo_core::Ob11Id;
 use gensokyo_core::telemetry::metrics;
 use gensokyo_protocol::Registry;
 use gensokyo_protocol::action::{ActionRequest, ActionResponse, Echo};
@@ -182,9 +183,18 @@ impl Dispatcher {
             // 计划只是 handler → runtime 的内部握手载荷，不能泄漏给客户端。
             let echo = response.echo.clone();
             response = match self.run_deferred(data, echo.as_ref()).await {
-                Ok(outcome) => {
+                Ok((outcome, target)) => {
                     self.record_message_sent();
-                    ActionResponse::ok(outcome).with_echo(echo)
+                    let mut sent = ActionResponse::ok(outcome).with_echo(echo);
+                    // 顶层 ID 按收件人填（Go `SendResponse` / `SendC2CResponse` 用同一
+                    // `message.Params` 构造）：空消息回执没打上游，同样要带。
+                    if let (Some(context), Some(target)) = (self.actions.as_ref(), target.as_ref())
+                    {
+                        let (group_id, user_id) = receipt_ids(context, target);
+                        sent.group_id = group_id;
+                        sent.user_id = user_id;
+                    }
+                    sent
                 }
                 Err((retcode, message)) => failure(retcode, message, echo),
             };
@@ -201,7 +211,8 @@ impl Dispatcher {
     ///
     /// 三种握手形状按载荷键判别：`message_sse` → [`crate::deferred::execute_sse`]、
     /// `forward` → [`crate::deferred::execute_forward`]（合并转发逐条重发）、其余 →
-    /// [`crate::deferred::execute`] 单条。返回的 JSON 即给客户端的 `data`。
+    /// [`crate::deferred::execute`] 单条。返回的 JSON 即给客户端的 `data`，第二项只有单条
+    /// 发送分支给得出来（收件人；SSE / 合并转发回执没有顶层 ID）。
     ///
     /// `echo` 是请求回执原值：规划层看不到它，这里补进单条计划的
     /// [`gensokyo_actions::EchoContext::echo_key`]（Go `message.Echo` 直接当 `msg_id` 键查表）。
@@ -212,7 +223,7 @@ impl Dispatcher {
         &self,
         data: Value,
         echo: Option<&Value>,
-    ) -> Result<Value, (i32, String)> {
+    ) -> Result<(Value, Option<SendTarget>), (i32, String)> {
         let Some(context) = self.actions.as_ref() else {
             return Err((
                 RETCODE_INTERNAL,
@@ -237,17 +248,20 @@ impl Dispatcher {
                 .into_iter()
                 .map(|item| json!({ "index": item.index, "error": item.error }))
                 .collect();
-            return Ok(json!({
-                "message_ids": outcome.message_ids,
-                "failed": failed,
-            }));
+            return Ok((
+                json!({
+                    "message_ids": outcome.message_ids,
+                    "failed": failed,
+                }),
+                None,
+            ));
         }
         if data.get("message_sse").is_some() {
             let request = serde_json::from_value::<SseRequest>(data).map_err(bad_plan)?;
             let message_id = crate::deferred::execute_sse(context, &request, &deps)
                 .await
                 .map_err(|err| (deferred_retcode(&err), err.to_string()))?;
-            return Ok(json!({ "message_id": message_id }));
+            return Ok((json!({ "message_id": message_id }), None));
         }
         let mut plan: SendRequest = serde_json::from_value(data).map_err(bad_plan)?;
         // 规划层拿不到请求回执，这里补进去：Go 用 `message.Echo` 的字符串形态查 `msg_id` 表
@@ -257,9 +271,12 @@ impl Dispatcher {
         let message_id = crate::deferred::execute(context, &plan, &deps)
             .await
             .map_err(|err| (deferred_retcode(&err), err.to_string()))?;
-        Ok(json!({
-            "message_id": message_id_value(context.string_ob11(), self.echo.as_deref(), &message_id),
-        }))
+        Ok((
+            json!({
+                "message_id": message_id_value(context.string_ob11(), self.echo.as_deref(), &message_id),
+            }),
+            Some(plan.target),
+        ))
     }
 
     /// 一条 deferred 计划发送成功后记账（Go `botstats.RecordMessageSent` 的等价物）。
@@ -327,6 +344,44 @@ fn message_id_value(string_ob11: bool, echo: Option<&EchoStore>, raw: &str) -> V
                 "回执 message_id 无法转成数字（未装配 echo 或非数字 ID），按原字符串回传"
             );
             json!(raw)
+        }
+    }
+}
+
+/// 回执顶层的 `group_id` / `user_id`（Go `ServerResponse.GroupID` / `UserID`）。
+///
+/// 值只取自 deferred 计划的收件人**请求原串**，不来自 `data`、不来自反查结果：
+///
+/// - 群聊 numeric：请求原串是十进制数字（numeric 部署下客户端发的就是虚拟号）直接用，否则
+///   走 idmap 反查虚拟号（Go `StoreIDv2`，`handlers/message_parser.go:252`），未装配 / 失败
+///   时留空——那边是 `omitempty` 吞掉 0，这里不写字段，**不伪造 0**；
+/// - 群聊 string（`string_ob11`）：请求原串，`ServerResponseSB.GroupID` 是 `string`
+///   （`:429` 赋值、`:211` 声明）；
+/// - 私聊：两种模式都是数字虚拟号（Go `SendC2CResponse` 恒用数字结构 `ServerResponse`，
+///   `:605-609`）——这是 Go 自身的不一致，照抄以保 parity。
+fn receipt_ids(context: &ActionContext, target: &SendTarget) -> (Option<Ob11Id>, Option<Ob11Id>) {
+    match target {
+        SendTarget::Group(raw) if context.string_ob11() => (Some(Ob11Id::Str(raw.clone())), None),
+        SendTarget::Group(raw) => (target_virtual_id(context, raw), None),
+        SendTarget::Private(raw) => (None, target_virtual_id(context, raw)),
+    }
+}
+
+/// 收件人原串 → 数字虚拟号：纯数字原串本身就是虚拟号，其余走 idmap 反查（查不到会分配）。
+fn target_virtual_id(context: &ActionContext, raw: &str) -> Option<Ob11Id> {
+    if let Ok(value) = raw.parse::<i64>() {
+        return Some(Ob11Id::Num(value));
+    }
+    let idmap = context.idmap()?;
+    match idmap.retrieve_virtual_value(raw) {
+        Ok((_, vuin)) => Some(Ob11Id::Num(vuin)),
+        Err(err) => {
+            tracing::warn!(
+                target = %raw,
+                error = %err,
+                "回执顶层 ID 反查虚拟号失败，省略该字段"
+            );
+            None
         }
     }
 }

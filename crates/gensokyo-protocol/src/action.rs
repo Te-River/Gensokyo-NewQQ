@@ -65,28 +65,43 @@ pub enum Status {
 }
 
 /// 一条 action 响应。
+///
+/// **字段声明序 = 线上键序**：Go 用 `structToMap` 转 map 再 `json.Marshal`，顶层键按字母序
+/// （`handlers/message_parser.go:398-404`），所以这里按字母序声明字段；新增字段必须插到正确
+/// 位置，否则 golden 整串断言会失配。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ActionResponse<T = ()> {
-    /// 状态。
-    pub status: Status,
-    /// 返回码，0 为成功。
-    pub retcode: i32,
     /// 业务数据：恒序列化（None 输出 `null`，对齐 OneBot 响应结构，不省略字段）。
     #[serde(default)]
     pub data: Option<T>,
-    /// 错误信息。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    /// 补充说明。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wording: Option<String>,
-    /// 原样回传的 echo。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// 原样回传的 echo：恒序列化（Go 的 `Echo` 没有 omitempty，无请求回执时是 `null`）。
+    #[serde(default)]
     pub echo: Option<Echo>,
-    /// 分页游标（Gensokyo 扩展，放响应顶层）：仅分页类 action 填，
+    /// 群号（Go `ServerResponse.GroupID`）：numeric 模式是虚拟号数字，string 模式是请求原串。
+    ///
+    /// `None` 不序列化，模拟 Go 的 `group_id,omitempty`：那边反查失败是 0 被吞掉，这里同样
+    /// 不写字段，**绝不伪造 0**。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<Ob11Id>,
+    /// 错误信息：恒序列化（Go 的 `Message` 没有 omitempty，成功回执是空串）。
+    #[serde(default, serialize_with = "message_or_empty")]
+    pub message: Option<String>,
+    /// 分页游标（Gensokyo 扩展，放响应顶层；Go 的响应没有该字段）：仅分页类 action 填，
     /// `None` 不序列化，既有响应形态不受影响。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+    /// 返回码，0 为成功。
+    pub retcode: i32,
+    /// 状态。
+    pub status: Status,
+    /// 用户号（Go `ServerResponse.UserID`）：群发送不填；私聊两种模式都是数字虚拟号
+    /// （照抄 Go `SendC2CResponse` 的数字结构，见 `handlers/message_parser.go:605-609`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<Ob11Id>,
+    /// 补充说明（Gensokyo 扩展）：Go 的响应结构没有该字段（`wording` 只出现在请求参数里），
+    /// 因此不上线——保留字段但不参与序列化 / 反序列化。
+    #[serde(skip)]
+    pub wording: Option<String>,
 }
 
 impl<T> ActionResponse<T> {
@@ -101,6 +116,8 @@ impl<T> ActionResponse<T> {
             wording: None,
             echo: None,
             next_cursor: None,
+            group_id: None,
+            user_id: None,
         }
     }
 
@@ -115,6 +132,8 @@ impl<T> ActionResponse<T> {
             wording: None,
             echo: None,
             next_cursor: None,
+            group_id: None,
+            user_id: None,
         }
     }
 
@@ -519,6 +538,14 @@ fn is_empty(map: &Extra) -> bool {
     map.is_empty()
 }
 
+/// `message` 恒序列化：`None` 输出空串（Go 的 `ServerResponse.Message` 没有 omitempty）。
+fn message_or_empty<S>(value: &Option<String>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(value.as_deref().unwrap_or_default())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ActionRequest, ActionResponse, GetGroupInfoParams, SendGroupMsgParams, Status};
@@ -550,6 +577,64 @@ mod tests {
         let json = serde_json::to_value(&paged).expect("序列化失败");
         assert_eq!(json["next_cursor"], serde_json::json!("nc"));
         assert_eq!(json["data"], serde_json::json!([1]), "data 仍是数组");
+    }
+
+    /// 键序：字段声明序 = 线上键序（Go 的 map 字母序），整串钉死。
+    #[test]
+    fn envelope_serializes_keys_alphabetically() {
+        let mut response: ActionResponse<serde_json::Value> =
+            ActionResponse::ok(serde_json::json!({ "message_id": 1 }));
+        response.group_id = Some(crate::parse_id("456"));
+        assert_eq!(
+            serde_json::to_string(&response).expect("序列化失败"),
+            r#"{"data":{"message_id":1},"echo":null,"group_id":456,"message":"","retcode":0,"status":"ok"}"#
+        );
+
+        let mut response: ActionResponse<serde_json::Value> =
+            ActionResponse::ok(serde_json::json!({ "message_id": "m-1" }));
+        response.user_id = Some(crate::parse_id("789"));
+        assert_eq!(
+            serde_json::to_string(&response).expect("序列化失败"),
+            r#"{"data":{"message_id":"m-1"},"echo":null,"message":"","retcode":0,"status":"ok","user_id":789}"#
+        );
+    }
+
+    /// `data` 内的键也是字母序：依赖 `serde_json::Map` 是 BTreeMap（未开 `preserve_order`）。
+    /// 谁给 `serde_json` 打开 `preserve_order`，这条会立刻红。
+    #[test]
+    fn data_keys_are_alphabetical() {
+        let response: ActionResponse<serde_json::Value> =
+            ActionResponse::ok(serde_json::json!({ "message_id": 1, "alpha": 2, "zeta": 3 }));
+        assert_eq!(
+            serde_json::to_string(&response).expect("序列化失败"),
+            r#"{"data":{"alpha":2,"message_id":1,"zeta":3},"echo":null,"message":"","retcode":0,"status":"ok"}"#
+        );
+    }
+
+    /// `message` / `echo` 恒在：成功时 `message` 是空串、无 echo 时是 `null`；失败时 `message`
+    /// 带错误串、`data` 是 `null`，且不发 `group_id` / `user_id`。
+    #[test]
+    fn message_and_echo_are_always_serialized() {
+        let ok: ActionResponse<String> = ActionResponse::ok("x".to_owned());
+        assert_eq!(
+            serde_json::to_string(&ok).expect("序列化失败"),
+            r#"{"data":"x","echo":null,"message":"","retcode":0,"status":"ok"}"#
+        );
+
+        let failed: ActionResponse<String> = ActionResponse::failed(1400, "boom");
+        assert_eq!(
+            serde_json::to_string(&failed).expect("序列化失败"),
+            r#"{"data":null,"echo":null,"message":"boom","retcode":1400,"status":"failed"}"#
+        );
+    }
+
+    /// `wording` 是 Go 不存在的字段，只保留在结构体里、不上线。
+    #[test]
+    fn wording_is_never_serialized() {
+        let mut response: ActionResponse<()> = ActionResponse::ok(());
+        response.wording = Some("提示".to_owned());
+        let json = serde_json::to_string(&response).expect("序列化失败");
+        assert!(!json.contains("wording"), "wording 不应上线: {json}");
     }
 
     #[test]
