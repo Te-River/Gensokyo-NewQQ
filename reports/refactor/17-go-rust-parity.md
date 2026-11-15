@@ -108,16 +108,16 @@
 | ~~High~~ | ~~qqmusic 降级为分享文案~~ | ~~歌曲查询 + markdown 模板 + 键盘（music_prefix）~~ | **已修（P29b）** |
 | High | 多媒体段无 markdown 时 1400 | 照 Go 逐媒体段各发一条 | ~~120-200 行~~ **已修（P1 `3fcb426`）** |
 | ~~High~~ | ~~card 本地 pic_url 未上传~~ | ~~照 resolveCardPic 接素材链~~ | **已修（P29a）** |
-| Medium | 图床 provider 仅 7/8，缺 4/5/6/9/10 | 每 provider 一个 backend（hosting trait 已有） | ~~500-700 行~~ **已修（P7，待提交；接线 P11）** |
+| Medium | 图床 provider 仅 7/8，缺 4/5/6/9/10 | 每 provider 一个 backend（hosting trait 已有） | ~~500-700 行~~ **已修并接线（P7/P11）：4/5/6/9/10 全量 backend + 分派** |
 | Medium | 图床上传无重试 | 3 次 1s/2s 退避 | ~~40-60 行~~ **已修（P7 retry.rs）** |
-| Medium | 无发送队列/5qps/发送间隔 | runtime 全局令牌桶 + 串行队列 | 200-300 行 |
+| ~~Medium~~ | ~~无发送队列/5qps/发送间隔~~ | ~~runtime 全局令牌桶 + 串行队列~~ | **已对齐（P10/P10b）**：令牌桶 + 3 次线性退避；Go 队列为死代码，按活路径对照，见 B5 |
 | Medium | get_g_list_delay 缺失 | get_group_list/成员列表逐群 sleep | ~~30-50 行~~ **已修（P2 `e1f822c`）** |
 | ~~Medium~~ | ~~add_at_group 无消费者、AppID→BotID 缺失~~ | ~~入站/文本渲染各补一处~~ | **已修（P15 + 入站 add_at_group）** |
 | ~~Low~~ | ~~lib.rs:50 陈旧文档（SSM/#62 已落地仍写未接线）~~ | ~~改注释~~ | ~~5 行~~ **已修（注释级：锚点是 `crates/gensokyo-actions/src/lib.rs:50-52` 与 `:62-63`——actions 包，非 runtime 的 lib.rs（runtime :50 讲 WebUI 挂载，不陈旧）；同一 #62 陈旧话术旧 `:60` 还重复一次，P58 两处一并改实，5 增 2 删、全 `//!` 文档注释行、零逻辑改动，规模保持「5 行」口径；#62 第一版曾误写成 prepare→PUT→complete，已按 `deferred.rs:1473-1562` 实际三分支（OSS 直传／素材库／图床）改定；SSM／懒消息／#62 均已落地）** |
-| Low | KNOWN_ACTIONS 3 个幽灵项 | 对齐 Go 实际注册表 | 10 行 |
+| ~~Low~~ | ~~KNOWN_ACTIONS 3 个幽灵项~~ | — | **已裁决**：3 个素材管理 action 为 Rust 扩展，登记在 `EXTENSION_ACTIONS`（官网 `docs/rust/actions.md`），不视为缺口 |
 | ~~Medium~~ | `get_friend_list` 行为不等：Go 本地 idmap `UserInfo` 桶活实现（`get_friend_list.go:29-47`）vs Rust 曾与「官方无端点」并列回 `1500` | storage `IdMapStore::list_all_users` 读 API + `users.rs` 直读 idmap 装配 | **已对齐（读侧 P64a + 写侧 P64b，两侧全齐）**：读侧 key 字节序枚举、滤空 `user_id`、恒 `retcode=0`、空态 `"data":null`；写侧 `IdMapStore::store_user_info`（键 `"<rawID>:<user_id>"` 与 value 三字段紧凑 JSON 逐字对齐 Go `service.go:2270-2276`、复用同一 `UserInfoRow` 无第二套编码器、单写事务且不得在 `with_write_batch` 内调用、重复键报错不覆盖 ⇒ 独立变体 `StorageError::DuplicateKey`，`Display` 与 Go `duplicate key: <key>` 逐字节一致）+ 入站 C2C 接线（`inbound.rs:756`/调用点 `:1106`，写失败不阻断上报，重复键 debug·真损坏 warn）+ 空 `Author.ID` 守卫（`:756-760`）。**数据可得性**：纯 Rust 部署**运行期自然积累**该表（收过私信即出数据、重启仍在），`"data":null` 只剩「既没导入也没收到私信」的初始态 |
 
-**推荐顺序**：媒体四件套（分片、silk/压缩、多媒体拆条、card pic）→ qqmusic → 图床 provider → 队列/限速 → 其余。
+**推荐顺序**：媒体四件套（分片、silk/压缩、多媒体拆条、card pic）→ qqmusic → 图床 provider → 队列/限速 —— **均已收口**；当前剩余见 §F（P86a/b 响应信封）与 `docs/rust-handover.md` §7（P83 管理动作 / P84 观察项）。
 
 ## D. 运行效率（Rust 侧特化，非 Go 对照项）
 
