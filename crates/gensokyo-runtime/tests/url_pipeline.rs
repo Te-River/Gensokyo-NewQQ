@@ -23,7 +23,7 @@ use gensokyo_qq::dto::{
 };
 use gensokyo_runtime::url_pipeline::{LocalMint, LotusMint, UrlMint};
 use gensokyo_runtime::{AppState, Runtime, RuntimeOptions};
-use gensokyo_storage::{ShortUrlStore, short_url::hashed_code};
+use gensokyo_storage::{EchoStore, ShortUrlStore, short_url::hashed_code};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -184,12 +184,17 @@ impl QqApi for FakeQqApi {
 }
 
 /// 装配「内置 action + actions 全集」的 `AppState`，可注入短链 mint。
+///
+/// echo 一并挂上：生产 `boot` 必然装配（`boot.rs:150`），numeric 模式的 `message_id` 回执
+/// 靠它把真实 ID 派生成虚拟行号。
 fn state(settings: &str, url_mint: Option<Arc<UrlMint>>) -> (TempDir, Arc<FakeQqApi>, AppState) {
     let (manager, dir) = config(settings);
     let api = Arc::new(FakeQqApi::default().with_upload("FI-QR-1"));
     let api_dyn: Arc<dyn QqApi> = api.clone();
     let context = Arc::new(ActionContext::new(api_dyn, Arc::clone(&manager)));
-    let state = AppState::with_actions(manager, context).with_url_mint(url_mint);
+    let state = AppState::with_actions(manager, context)
+        .with_echo(Arc::new(EchoStore::new()))
+        .with_url_mint(url_mint);
     (dir, api, state)
 }
 
@@ -335,7 +340,11 @@ async fn transfer_url_off_keeps_everything_unchanged() {
         .await;
 
     assert_eq!(response.retcode, 0);
-    assert_eq!(response.data, Some(json!({ "message_id": "m-off" })));
+    let data = response.data.expect("data");
+    assert!(
+        data["message_id"].is_i64(),
+        "numeric 模式（默认 string_ob11=false）的 message_id 是派生行号数字: {data}"
+    );
     let sent = api.sent();
     assert_eq!(sent.len(), 1, "关闭态不得触发 QR 侧发送");
     assert_eq!(content_of(&sent[0]), Some(text.as_str()), "文本逐字节原样");
@@ -363,7 +372,11 @@ async fn qr_image_sends_before_main_text_and_client_gets_one_response() {
 
     assert_eq!(response.retcode, 0);
     // 客户端只收到一份响应，且回执取主消息（最后一条）的结果。
-    assert_eq!(response.data, Some(json!({ "message_id": "main-1" })));
+    let data = response.data.expect("data");
+    assert!(
+        data["message_id"].is_i64(),
+        "numeric 模式的 message_id 是派生行号数字: {data}"
+    );
 
     let sent = api.sent();
     assert_eq!(sent.len(), 2, "QR 图条 + 主消息");

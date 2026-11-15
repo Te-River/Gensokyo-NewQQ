@@ -257,7 +257,9 @@ impl Dispatcher {
         let message_id = crate::deferred::execute(context, &plan, &deps)
             .await
             .map_err(|err| (deferred_retcode(&err), err.to_string()))?;
-        Ok(json!({ "message_id": message_id }))
+        Ok(json!({
+            "message_id": message_id_value(context.string_ob11(), self.echo.as_deref(), &message_id),
+        }))
     }
 
     /// 一条 deferred 计划发送成功后记账（Go `botstats.RecordMessageSent` 的等价物）。
@@ -282,6 +284,51 @@ fn bad_plan(err: serde_json::Error) -> (i32, String) {
         RETCODE_INTERNAL,
         format!("deferred 计划反序列化失败: {err}"),
     )
+}
+
+/// 回执里的 `message_id`：Go `SendResponse` 的两套模式（`handlers/message_parser.go:307-376`
+/// 群、`:575-600` 私聊）。
+///
+/// - 空消息回执 [`crate::deferred::EMPTY_MESSAGE_ID`]：**两种模式都是数字 `0`**（`:375` / `:599`，
+///   上游 `resp=nil` 的分支绕过 string 分派）；
+/// - `string_ob11 = true`：上游原 ID 字符串（`:419`，且不登记 echo 缓存）；
+/// - 否则：真实 ID 经 echo 行号派生出虚拟号（`:311-324`，`memory_msgid` 缺省 true 走
+///   `echo.StoreCacheInMemory`）。
+///
+/// 派生失败（未装配 echo / 存储报错）时先按整数解析（上游直接回数字 ID 的部署也走这条）；
+/// 仍不行就保留原字符串并告警，**不伪造 `0`**——把真实 ID 换成 0 会让客户端的撤回 / 引用
+/// 指向错误对象。
+fn message_id_value(string_ob11: bool, echo: Option<&EchoStore>, raw: &str) -> Value {
+    if raw == crate::deferred::EMPTY_MESSAGE_ID {
+        return json!(0);
+    }
+    if string_ob11 {
+        return json!(raw);
+    }
+    let derived = echo.and_then(|echo| match echo.store_cache_in_memory(raw) {
+        Ok(row) => Some(row),
+        Err(err) => {
+            tracing::warn!(
+                message_id = %raw,
+                error = %err,
+                "回执 message_id 派生虚拟号失败，退回整数解析"
+            );
+            None
+        }
+    });
+    if let Some(row) = derived {
+        return json!(row);
+    }
+    match raw.parse::<i64>() {
+        Ok(row) => json!(row),
+        Err(_) => {
+            tracing::warn!(
+                message_id = %raw,
+                "回执 message_id 无法转成数字（未装配 echo 或非数字 ID），按原字符串回传"
+            );
+            json!(raw)
+        }
+    }
 }
 
 /// deferred 失败的 retcode：请求侧问题（媒体来源 / 大小 / 类型、reply 无法还原）是 `1400`，
@@ -353,11 +400,13 @@ mod tests {
     use gensokyo_protocol::Registry;
     use gensokyo_protocol::action::{ActionRequest, ActionResponse};
     use gensokyo_protocol::registry::{Handler, HandlerFuture};
+    use gensokyo_storage::EchoStore;
     use serde_json::{Value, json};
 
     use super::{
         Dispatcher, RETCODE_BAD_REQUEST, RETCODE_INTERNAL, RETCODE_UNKNOWN_ACTION, dispatch_json,
     };
+    use crate::deferred::EMPTY_MESSAGE_ID;
 
     #[derive(Debug)]
     struct Fixed;
@@ -546,6 +595,60 @@ mod tests {
         assert_eq!(
             super::deferred_retcode(&Error::Unsupported("upload_group_file".to_owned())),
             RETCODE_INTERNAL
+        );
+    }
+
+    // ---- P86a：回执 message_id 的类型与空回执（Go `SendResponse` 口径） ----
+
+    /// numeric 模式（`string_ob11=false`，默认）：真实 ID 经 echo 派生成虚拟行号，回执是数字。
+    #[test]
+    fn numeric_mode_returns_derived_virtual_row_as_number() {
+        let echo = EchoStore::new();
+        let expected = echo.store_cache_in_memory("real-1").expect("派生行号");
+
+        let value = super::message_id_value(false, Some(&echo), "real-1");
+        assert!(value.is_i64(), "numeric 模式必须是 JSON 数字: {value}");
+        assert_eq!(value, json!(expected));
+    }
+
+    /// string 模式（`string_ob11=true`）：上游原 ID 原样回字符串（`message_parser.go:419`）。
+    #[test]
+    fn string_mode_returns_upstream_id_string() {
+        let echo = EchoStore::new();
+        assert_eq!(
+            super::message_id_value(true, Some(&echo), "real-2"),
+            json!("real-2")
+        );
+    }
+
+    /// 空消息回执（上游 `resp=nil`）：两种模式都是数字 `0`（`:375` / `:599`）。
+    #[test]
+    fn empty_receipt_is_numeric_zero_in_both_modes() {
+        for string_ob11 in [false, true] {
+            let value = super::message_id_value(string_ob11, None, EMPTY_MESSAGE_ID);
+            assert!(
+                value.is_i64(),
+                "string_ob11={string_ob11} 时空回执必须是数字: {value}"
+            );
+            assert_eq!(value, json!(0));
+        }
+    }
+
+    /// 派生失败（未装配 echo）且 ID 非数字：保留原字符串，不伪造 `0`。
+    #[test]
+    fn underivable_id_keeps_the_string() {
+        assert_eq!(
+            super::message_id_value(false, None, "upstream-alpha"),
+            json!("upstream-alpha")
+        );
+    }
+
+    /// 派生失败但上游回的就是数字：退回整数解析，numeric 模式仍回数字。
+    #[test]
+    fn underivable_numeric_id_falls_back_to_integer_parse() {
+        assert_eq!(
+            super::message_id_value(false, None, "987654321"),
+            json!(987_654_321)
         );
     }
 }

@@ -2401,7 +2401,10 @@ fn unix_timestamp() -> u64 {
 
 /// 纯码空消息的回执 ID：Go `SendResponse(client, nil, &message, nil, …)` 在没有真实
 /// 消息 ID 时把 `data.message_id` 如实置 0（`handlers/message_parser.go:372-376`）。
-const EMPTY_MESSAGE_ID: &str = "0";
+///
+/// 这里用字符串形态在内部传递，分发器回执时按 Go 的口径渲染成**数字** `0`（两种模式都一样，
+/// 见 [`crate::dispatcher`] 的 `message_id_value`）。
+pub(crate) const EMPTY_MESSAGE_ID: &str = "0";
 
 /// 计划里没有任何要发的内容（正文 trim 后为空）——Go `send_group_msg.go:557-562` 的
 /// `strings.TrimSpace(messageText) == "" && len(foundItems) == 0`。

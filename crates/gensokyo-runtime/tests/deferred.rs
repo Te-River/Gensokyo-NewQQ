@@ -16,6 +16,7 @@ use gensokyo_qq::dto::{
     MessageToCreate,
 };
 use gensokyo_runtime::{AppState, RETCODE_INTERNAL};
+use gensokyo_storage::EchoStore;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -174,12 +175,20 @@ impl QqApi for FakeQqApi {
 
 /// 装配「内置 action + actions 全集」的 `AppState` 与共享替身。
 fn state(settings: &str) -> (TempDir, Arc<FakeQqApi>, AppState) {
+    let (dir, api, state, _echo) = state_with_echo(settings);
+    (dir, api, state)
+}
+
+/// 同 [`state`]，并返回内存 echo 存储的句柄：生产 `boot` 必然装配 echo（`boot.rs:150`），
+/// numeric 模式的虚拟行号派生就靠它，回执断言需要同一份句柄算期望值。
+fn state_with_echo(settings: &str) -> (TempDir, Arc<FakeQqApi>, AppState, Arc<EchoStore>) {
     let (manager, dir) = config(settings);
     let api = Arc::new(FakeQqApi::default());
     let api_dyn: Arc<dyn QqApi> = api.clone();
     let context = Arc::new(ActionContext::new(api_dyn, Arc::clone(&manager)));
-    let state = AppState::with_actions(manager, context);
-    (dir, api, state)
+    let echo = Arc::new(EchoStore::new());
+    let state = AppState::with_actions(manager, context).with_echo(Arc::clone(&echo));
+    (dir, api, state, echo)
 }
 
 fn request(action: &str, params: Value, echo: Option<Value>) -> ActionRequest<Value> {
@@ -210,7 +219,7 @@ async fn registry_contains_all_actions_and_aliases() {
 
 #[tokio::test]
 async fn send_group_msg_sends_text_and_returns_message_id() {
-    let (_dir, api, state) = state("app_id: 12345\n");
+    let (_dir, api, state, echo) = state_with_echo("app_id: 12345\n");
     api.push_group(api.ok("m-1"));
 
     let response = state
@@ -224,8 +233,14 @@ async fn send_group_msg_sends_text_and_returns_message_id() {
 
     assert_eq!(response.retcode, 0);
     assert_eq!(response.echo, Some(json!("echo-1")));
-    // deferred 计划不泄漏：最终 data 只有 message_id。
-    assert_eq!(response.data, Some(json!({ "message_id": "m-1" })));
+    // deferred 计划不泄漏：最终 data 只有 message_id；numeric 模式（默认 string_ob11=false）
+    // 回的是 echo 派生的虚拟行号数字（Go `SendResponse`）。
+    let expected = echo.store_cache_in_memory("m-1").expect("派生行号");
+    assert_eq!(
+        response.data,
+        Some(json!({ "message_id": expected })),
+        "numeric 模式的 message_id 必须是 JSON 数字"
+    );
 
     let sent = api.sent();
     assert_eq!(sent.len(), 1);
@@ -340,7 +355,7 @@ async fn upstream_failure_is_1500_and_echo_kept() {
 /// （`event_id` 被清空这一步由 `deferred` 的单元测试直接盯消息体断言。）
 #[tokio::test]
 async fn event_expired_resends_once_through_the_action_chain() {
-    let (_dir, api, state) = state("app_id: 12345\n");
+    let (_dir, api, state, echo) = state_with_echo("app_id: 12345\n");
     api.push_group(Outcome::Code(40_034_025, "请求参数event_id无效"));
     api.push_group(api.ok("m-fallback"));
 
@@ -354,7 +369,8 @@ async fn event_expired_resends_once_through_the_action_chain() {
         .await;
 
     assert_eq!(response.retcode, 0, "重发成功应回 0");
-    assert_eq!(response.data, Some(json!({ "message_id": "m-fallback" })));
+    let expected = echo.store_cache_in_memory("m-fallback").expect("派生行号");
+    assert_eq!(response.data, Some(json!({ "message_id": expected })));
     let sent = api.sent();
     assert_eq!(sent.len(), 2, "Go：40034025 重发一次");
     assert!(
@@ -448,7 +464,7 @@ async fn deferred_without_action_context_is_1500() {
 
 #[tokio::test]
 async fn wakeup_send_marks_is_wakeup_on_c2c_endpoint() {
-    let (_dir, api, state) = state("app_id: 12345\n");
+    let (_dir, api, state, echo) = state_with_echo("app_id: 12345\n");
     api.push_c2c(api.ok("w-1"));
 
     let response = state
@@ -462,7 +478,8 @@ async fn wakeup_send_marks_is_wakeup_on_c2c_endpoint() {
 
     assert_eq!(response.retcode, 0);
     assert_eq!(response.echo, Some(json!("e-w")));
-    assert_eq!(response.data, Some(json!({ "message_id": "w-1" })));
+    let expected = echo.store_cache_in_memory("w-1").expect("派生行号");
+    assert_eq!(response.data, Some(json!({ "message_id": expected })));
 
     let sent = api.sent();
     match &sent[0] {
@@ -482,7 +499,7 @@ async fn wakeup_send_marks_is_wakeup_on_c2c_endpoint() {
 
 #[tokio::test]
 async fn raw_send_replies_with_params_message_id() {
-    let (_dir, api, state) = state("app_id: 12345\n");
+    let (_dir, api, state, echo) = state_with_echo("app_id: 12345\n");
     api.push_group(api.ok("r-1"));
 
     let response = state
@@ -495,7 +512,8 @@ async fn raw_send_replies_with_params_message_id() {
         .await;
 
     assert_eq!(response.retcode, 0);
-    assert_eq!(response.data, Some(json!({ "message_id": "r-1" })));
+    let expected = echo.store_cache_in_memory("r-1").expect("派生行号");
+    assert_eq!(response.data, Some(json!({ "message_id": expected })));
 
     let sent = api.sent();
     match &sent[0] {
@@ -675,4 +693,53 @@ async fn private_forward_loops_c2c_endpoint() {
         Sent::C2c(openid, message)
             if openid == USER_OPENID && message.content.as_deref() == Some("第二条")
     ));
+}
+
+// ---- P86a：回执 message_id 的类型与空回执（Go `SendResponse` 口径） ----
+
+/// `string_ob11 = true`：`data.message_id` 是上游原 ID 字符串（Go `SendResponseSB`）。
+#[tokio::test]
+async fn string_ob11_receipt_keeps_upstream_message_id() {
+    let (_dir, api, state) = state("  app_id: 12345\n  string_ob11: true\n");
+    api.push_group(api.ok("m-str"));
+
+    let response = state
+        .dispatcher()
+        .dispatch(&request(
+            "send_group_msg",
+            json!({ "group_id": OPENID, "message": "hello" }),
+            None,
+        ))
+        .await;
+
+    assert_eq!(response.retcode, 0);
+    assert_eq!(
+        response.data,
+        Some(json!({ "message_id": "m-str" })),
+        "string_ob11=true 时应回上游原 ID 字符串"
+    );
+}
+
+/// 空消息回执（CQ 管线吃空正文）：两种模式下都是数字 `0`（`message_parser.go:375` / `:599`）。
+#[tokio::test]
+async fn empty_receipt_is_numeric_zero_in_both_modes() {
+    for settings in ["app_id: 12345\n", "  app_id: 12345\n  string_ob11: true\n"] {
+        let (_dir, api, state) = state(settings);
+        let response = state
+            .dispatcher()
+            .dispatch(&request(
+                "send_group_msg",
+                json!({ "group_id": OPENID, "message": "[CQ:card]" }),
+                None,
+            ))
+            .await;
+
+        assert_eq!(response.retcode, 0, "纯码空消息仍回执成功");
+        assert!(api.sent().is_empty(), "纯码空消息不应触达上游");
+        assert_eq!(
+            response.data,
+            Some(json!({ "message_id": 0 })),
+            "空回执必须是数字 0（配置 {settings:?}）"
+        );
+    }
 }
