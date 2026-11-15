@@ -17,6 +17,7 @@
 //! | `markdown` | `markdown` + `msg_type=2` | 只取 `content`：模板字段（`template_id` / `custom_template_id`）已废弃，出站不构造；文本被丢弃、`card` 让位；正文里的本地图片按 `oss_type` 换引用：`7` → `qqbot-media://` 素材库，`1~3` → 内置云 OSS 对象 URL，`4~6/8~10` → 图床 CDN URL（[`resolve_markdown_images`]）；与媒体同现时先发这一条，媒体另起 `msg_type=7` 条 |
 //! | `card` | `card` + `msg_type=8` | 群聊与单聊同构；`{type:"tuwen", content:{title,description,url,pic_url}}`，四字段校验见 [`compose_card`]；`pic_url` 是本地路径时先上传成公网 URL（Go `resolveCardPic`，失败保留原值）；与媒体同现时卡片先发、媒体另起 `msg_type=7` 条 |
 //! | 图片 / 语音 / 视频 / 文件 | `media` + `msg_type=7` | 见下节「媒体」 |
+//! | `[CQ:avatar,qq=…]` | `media` + `msg_type=7` | 按 Go 段路径 / `cqparse` 口径发真图：`qq` 经 idmap 反查 openid → `https://q.qlogo.cn/qqapp/{app_id}/{openid}/640` → 走普通图片上传链；反查失败、`qq` 非数字/未绑定、或 `app_id` 未配置时**吞段 + `warn`**，不 `1400`（[`resolve_avatars`]）；无 `qq` 的形态由协议层留字面 |
 //! | `[CQ:reply]` | `msg_id` | 虚拟号先经 idmap / echo 还原成真实消息 ID；还原失败 `1400`，不静默丢 |
 //! | `keyboard` | `keyboard` | 与 text / markdown / card 同发，不改变 `msg_type`（Go `applyGroupMarkdownKeyboard` 口径）；`data` 必须是 JSON 对象，否则 `1400` |
 //! | `input_notify` | `input_notify` + `msg_type=6` | 仅单聊；不承载正文 / 媒体，与其它内容同条出现 `1400` |
@@ -287,6 +288,13 @@ async fn execute_inner(
     // 覆盖面：群聊 / 私聊 / 主动消息都从这里过，合并转发逐 node 重入 `execute` 也走同一条
     // （Go 的转发同样是逐 node 重入发送 handler）；SSE 是独立入口（`execute_sse` 直接发
     // `message_sse`，正文由调用方给定）。
+    //
+    // 头像必须在判空**之前**折成图片：Go 在 parseMessageContent 里就把 avatar 段消费掉
+    // （`handlers/cqparse/handlers_media.go:118-138`），反查失败时正文与 foundItems 同时为空
+    // ⇒ 命中同一条空回执（`send_group_msg.go:557-562`）。放在这里同样早于任何 fetch / 上传 /
+    // 限流取令牌，且解析本身不触网（只 mint URL）。
+    let avatar_plan = resolve_avatars(context, plan);
+    let plan = avatar_plan.as_ref().unwrap_or(plan);
     if is_empty_message(plan) {
         return Ok(EMPTY_MESSAGE_ID.to_owned());
     }
@@ -2409,9 +2417,52 @@ fn is_empty_message(request: &SendRequest) -> bool {
         && request.message.plan.active.is_none()
 }
 
+/// 把 `plan.avatars` 折成 `plan.images`——Go 段路径 / `cqparse` 的头像口径。
+///
+/// 每个 `qq` 反查 openid 后拼 `https://q.qlogo.cn/qqapp/{app_id}/{openid}/640`
+/// （`handlers/get_avatar.go:87-91`），以 [`MediaRef::Url`] **追加**在既有图片之后：图片链
+/// （[`compose_media_extras`]）与 markdown / 卡片分支共用 `plan.images`，不必另接线。
+///
+/// 失败只 `warn` + 丢该段，绝不让整条消息失败：cqparse 的口径是「码移除 + 日志，不产出破损
+/// URL」（`handlers/cqparse/handlers_media.go:129-132`），段路径是「什么都不 append」
+/// （`handlers/message_parser.go:1004`）——头像属于降级丢内容，不是参数错误 ⇒ 不 `1400`，
+/// 也不占用限流令牌。
+///
+/// 返回 `None` 表示计划里没有头像（零 clone 直通）。
+fn resolve_avatars(context: &ActionContext, plan: &SendRequest) -> Option<SendRequest> {
+    if plan.message.plan.avatars.is_empty() {
+        return None;
+    }
+    let mut resolved = plan.clone();
+    for qq in std::mem::take(&mut resolved.message.plan.avatars) {
+        match avatar_url(context, &qq) {
+            Ok(url) => resolved.message.plan.images.push(MediaRef::Url(url)),
+            Err(err) => {
+                tracing::warn!(qq = %qq, error = %err, "[CQ:avatar] 无法反查，已丢弃该段");
+            }
+        }
+    }
+    Some(resolved)
+}
+
+/// `qq` → qlogo 头像地址（Go `handlers/get_avatar.go:87-91`）。
+///
+/// `app_id` 未配置（0）时**刻意偏离 Go**：Go 会拼出 `qqapp//<openid>/640` 的坏 URL 送去上游
+/// 换 `1500`，这里直接失败，由 [`resolve_avatars`] 吞段 + 告警（分侧差异，parity B4）。
+fn avatar_url(context: &ActionContext, qq: &str) -> Result<String> {
+    let app_id = context.config().snapshot().get_app_id();
+    if app_id == 0 {
+        return Err(Error::Protocol("app_id 未配置，无法拼头像地址".to_owned()));
+    }
+    let openid = context.resolve_openid("qq", qq, "user_openid")?;
+    Ok(format!("https://q.qlogo.cn/qqapp/{app_id}/{openid}/640"))
+}
+
 /// 本阶段仍不支持的消息段；返回第一个命中的段名。
 ///
 /// `keyboard` / `music` / `stream` / `input_notify` 已按 Go 口径落地，不再走这里。
+/// `avatar` 同样不在候选表：它在 [`execute_inner`] 判空之前就被 [`resolve_avatars`] 折成
+/// 图片（失败则丢掉），不存在「整条拒发」的形态。
 fn unsupported_segment(plan: &OutboundPlan) -> Option<&'static str> {
     let candidates: [(&'static str, bool); 3] = [
         ("unknown", !plan.extra.is_empty()),
@@ -2438,7 +2489,6 @@ mod tests {
     use gensokyo_media::silk::{ProcessOutput, ProcessRunner, SilkCodec};
     use gensokyo_media::{BoxFuture, FetchRequest, Fetcher, MediaTransport, TransportResponse};
     use gensokyo_media::{HostingTransport, UploadMethod, UploadRequest, UploadResponse};
-    use gensokyo_protocol::cqcode;
     use gensokyo_protocol::outbound::{
         ActiveKind, CardFields, CardPayload, InputNotifyPayload, KeyboardPayload, MarkdownPayload,
         StreamKind, StreamPayload,
@@ -4211,26 +4261,231 @@ mod tests {
         assert!(api.sent().is_empty(), "不支持的段不应发送");
     }
 
-    /// P79：不可消费的 `[CQ:avatar]` / `[CQ:music]` 按原文字面发出，不再整条 1400
-    /// （Go 默认 legacy 字符串路径同口径：两者都只会留在 `messageText` 里）。
+    /// P80 改写（原 P79 `unconsumable_avatar_and_music_are_sent_as_literal_text`）：
+    /// 带 `qq` 的 avatar 段已改走「发真图」口径（见下方 P80 段用例），字面形态只剩
+    /// **无 `qq`** 的 avatar 与**形态不命中**的 music（Go cqparse 的 `Replacement: tok.Raw`，
+    /// `handlers/cqparse/handlers_media.go:122-124`）。按生产链 `MessageOut::from_content`
+    /// 构造（旧用例手工把整条原文塞回 `text`，会把已消费的段重复留在正文里）。
     #[tokio::test]
-    async fn unconsumable_avatar_and_music_are_sent_as_literal_text() {
+    async fn avatar_without_qq_and_music_stay_literal_text() {
         let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
         let (_dir, context) = context(Arc::clone(&api));
         let media = no_media();
-        let text = "看 [CQ:avatar,qq=123] 和 [CQ:music,type=163,id=1]";
-        // 生产侧 action 层同时填 `text` 与 `plan`（`from_segments` 只做计划归一），测试照此还原
-        let mut request_plan = group_request(OutboundPlan::from_segments(&cqcode::parse(text)));
-        request_plan.message.text = text.to_owned();
+        let text = "看 [CQ:avatar] 和 [CQ:avatar,qq=] 和 [CQ:music,type=163,id=1]";
+        let request_plan = cq_request(SendTarget::Group(OPENID.to_owned()), text);
 
         execute(&context, &request_plan, &deps(&media, None))
             .await
-            .expect("不可消费的段应按字面发出，不返回 1400");
+            .expect("无 qq 的 avatar 与不命中形态的 music 都应按字面发出");
 
         let sent = api.sent();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].msg_type, None, "纯文本消息不带 msg_type");
         assert_eq!(sent[0].content.as_deref(), Some(text), "字面逐字节保留");
+    }
+
+    // ---- P80：avatar 出站图片化（Go 段路径 / cqparse 口径） ----
+
+    /// `[CQ:avatar,qq=<虚拟号>]` → 反查 openid → `q.qlogo.cn` 真图（`handlers/get_avatar.go:87-91`
+    /// 的 URL 模板即唯一定型的金样；出站请求体含运行时 `file_info`，无法离线固化）。
+    ///
+    /// 走真握手（`SendRequest` serde 往返）：`OutboundPlan` 没有 serde derive，线上形态是
+    /// `plan.to_segments()`，字段不进 `to_segments` 就会在这里静默消失。
+    #[tokio::test]
+    async fn avatar_becomes_qlogo_image_after_handshake() {
+        let api = Arc::new(FakeQqApi::with_upload("FILE-INFO").with_send("MSG-1"));
+        let (_dir, context) = context_with_settings(Arc::clone(&api), "  app_id: 10001\n");
+        let (_idmap_dir, idmap) = idmap_store();
+        let (_, vuin) = idmap
+            .retrieve_virtual_value(MEMBER_OPENID)
+            .expect("登记身份失败");
+        let context = context.with_idmap(Arc::clone(&idmap));
+        let transport = FakeTransport::new(b"PNG-BYTES");
+        let media = MediaRuntime::with_transport(Arc::new(transport.clone()));
+        let request = cq_request(
+            SendTarget::Group(OPENID.to_owned()),
+            &format!("[CQ:avatar,qq={vuin}]"),
+        );
+        let wired: SendRequest =
+            serde_json::from_value(serde_json::to_value(&request).expect("序列化失败"))
+                .expect("反序列化失败");
+        assert_eq!(wired, request, "握手必须保真（含 avatars）");
+
+        let message_id = execute(&context, &wired, &deps(&media, None))
+            .await
+            .expect("头像应发送成功");
+        assert_eq!(message_id, "MSG-1");
+
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 1, "头像必须先经下载器");
+        assert_eq!(
+            requests[0].url,
+            format!("https://q.qlogo.cn/qqapp/10001/{MEMBER_OPENID}/640")
+        );
+        let uploads = api.uploads();
+        assert_eq!(uploads.len(), 1, "上传恰好一次");
+        assert_eq!(uploads[0].file_type, file_type::IMAGE);
+
+        let sent = api.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0].media.as_ref().map(|media| media.file_info.as_str()),
+            Some("FILE-INFO")
+        );
+        assert_eq!(sent[0].msg_type, Some(msg_type::RICH_MEDIA));
+        assert!(sent[0].content.is_none(), "正文不带 avatar 码");
+    }
+
+    /// 反查失败 / 非数字 qq ⇒ 吞段 + `warn`：不下载、不上传、不 `1400`
+    /// （`handlers/cqparse/handlers_media.go:129-132`、`handlers/message_parser.go:1004`）。
+    ///
+    /// 只有头像且反查失败时正文也空 ⇒ 命中 P81 的空回执出口（Go 是消费完段才判
+    /// `messageText == "" && len(foundItems) == 0`，`send_group_msg.go:557-562`），
+    /// 回 `"0"` 且不调上游；有正文时其余文本照发。
+    #[tokio::test]
+    async fn avatar_resolve_failure_swallows_segment() {
+        // 无 idmap：虚拟号与 32 位 OpenID 之外的形态都反查不出来，`abc` 更是解析即失败
+        for qq in ["123", "abc"] {
+            let api = Arc::new(FakeQqApi::default());
+            let (_dir, context) = context_with_settings(Arc::clone(&api), "  app_id: 10001\n");
+            let transport = FakeTransport::new(b"PNG-BYTES");
+            let media = MediaRuntime::with_transport(Arc::new(transport.clone()));
+            let request = cq_request(
+                SendTarget::Group(OPENID.to_owned()),
+                &format!("[CQ:avatar,qq={qq}]"),
+            );
+
+            let message_id = execute(&context, &request, &deps(&media, None))
+                .await
+                .expect("头像反查失败不该让整条消息失败");
+            assert_eq!(message_id, "0", "段被吞后无内容，应走空回执: {qq}");
+            assert!(api.sent().is_empty(), "不应调用上游发送: {qq}");
+            assert!(transport.requests().is_empty(), "不应尝试下载: {qq}");
+        }
+
+        // 有正文：头像段消失，其余文本原样发出
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context_with_settings(Arc::clone(&api), "  app_id: 10001\n");
+        let transport = FakeTransport::new(b"PNG-BYTES");
+        let media = MediaRuntime::with_transport(Arc::new(transport.clone()));
+        let request = cq_request(
+            SendTarget::Group(OPENID.to_owned()),
+            "你好 [CQ:avatar,qq=123] 世界",
+        );
+
+        execute(&context, &request, &deps(&media, None))
+            .await
+            .expect("头像反查失败只吞段");
+
+        let sent = api.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].content.as_deref(), Some("你好  世界"), "段位置留空");
+        assert_eq!(sent[0].msg_type, None);
+        assert!(transport.requests().is_empty(), "不应尝试下载");
+    }
+
+    /// `app_id` 未配置 ⇒ 吞段 + `warn`。**刻意偏离 Go**：Go 会拼出 `qqapp//<openid>/640`
+    /// 的坏 URL 送去上游换 `1500`（`handlers/get_avatar.go:87-91`），本仓不发坏请求。
+    ///
+    /// 用 32 位 OpenID 直通，把失败因素隔离到 `app_id` 一项上（不依赖 idmap）。
+    #[tokio::test]
+    async fn avatar_without_app_id_is_swallowed() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let transport = FakeTransport::new(b"PNG-BYTES");
+        let media = MediaRuntime::with_transport(Arc::new(transport.clone()));
+        let request = cq_request(
+            SendTarget::Group(OPENID.to_owned()),
+            &format!("看 [CQ:avatar,qq={MEMBER_OPENID}]"),
+        );
+
+        execute(&context, &request, &deps(&media, None))
+            .await
+            .expect("app_id 未配置不该让整条消息失败");
+
+        let sent = api.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].content.as_deref(), Some("看 "));
+        assert!(transport.requests().is_empty(), "不该把坏 URL 送去下载");
+    }
+
+    /// 头像与普通图片同现：段序是 image 先、avatar 后（头像追加在 `plan.images` 末尾），
+    /// 各发一条 `msg_type=7`。Go 侧 `foundItems` 是 map，两类本就随机序，不追求严格同序。
+    ///
+    /// 普通图片用已上传的 `file_info`（`file=` 无协议前缀 ⇒ [`MediaRef::Unknown`]，不再上传），
+    /// 这样一次真上传就够验证两条媒体条的次序。
+    #[tokio::test]
+    async fn avatar_and_image_are_sent_as_two_media_bodies() {
+        let api = Arc::new(
+            FakeQqApi::with_upload("AVATAR-FILE")
+                .with_send("MSG-1")
+                .with_send("MSG-2"),
+        );
+        let (_dir, context) = context_with_settings(Arc::clone(&api), "  app_id: 10001\n");
+        let transport = FakeTransport::new(b"PNG-BYTES");
+        let media = MediaRuntime::with_transport(Arc::new(transport.clone()));
+        let request = cq_request(
+            SendTarget::Group(OPENID.to_owned()),
+            &format!("[CQ:avatar,qq={MEMBER_OPENID}][CQ:image,file=IMAGE-FILE]"),
+        );
+
+        execute(&context, &request, &deps(&media, None))
+            .await
+            .expect("头像 + 图片都应发送成功");
+
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 1, "只有头像需要下载");
+        assert_eq!(
+            requests[0].url,
+            format!("https://q.qlogo.cn/qqapp/10001/{MEMBER_OPENID}/640")
+        );
+        assert_eq!(api.uploads().len(), 1, "只有头像需要上传");
+
+        let sent = api.sent();
+        assert_eq!(sent.len(), 2, "单条消息只有一个 media 槽，一段一条");
+        assert_eq!(
+            sent[0].media.as_ref().map(|media| media.file_info.as_str()),
+            Some("IMAGE-FILE"),
+            "图片段在前"
+        );
+        assert_eq!(
+            sent[1].media.as_ref().map(|media| media.file_info.as_str()),
+            Some("AVATAR-FILE"),
+            "头像追加在末尾"
+        );
+        for body in &sent {
+            assert_eq!(body.msg_type, Some(msg_type::RICH_MEDIA));
+        }
+    }
+
+    /// `auto_escape = true` 不解析 CQ 码（与 Go 同口径）：avatar 码原样发出、不下载。
+    #[tokio::test]
+    async fn auto_escape_keeps_avatar_code_verbatim() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context_with_settings(Arc::clone(&api), "  app_id: 10001\n");
+        let transport = FakeTransport::new(b"PNG-BYTES");
+        let media = MediaRuntime::with_transport(Arc::new(transport.clone()));
+        let request = SendRequest {
+            target: SendTarget::Group(OPENID.to_owned()),
+            message: MessageOut::from_content(
+                &MessageContent::Text("[CQ:avatar,qq=1]".to_owned()),
+                true,
+            ),
+            wakeup: false,
+            echo_context: EchoContext::default(),
+        };
+
+        execute(&context, &request, &deps(&media, None))
+            .await
+            .expect("auto_escape 消息应原样发送");
+
+        let sent = api.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].content.as_deref(), Some("[CQ:avatar,qq=1]"));
+        assert!(
+            transport.requests().is_empty(),
+            "auto_escape 不解析、不下载"
+        );
     }
 
     // ---- P81：纯码空消息 / 字面保留 ----

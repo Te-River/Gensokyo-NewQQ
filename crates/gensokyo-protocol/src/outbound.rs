@@ -9,7 +9,7 @@
 //!
 //! ```text
 //! reply → text（含 [CQ:at] 字面量，按 CQ 重新分词）→ active → wakeup
-//!       → images → records → videos → files → qqmusic
+//!       → avatars → images → records → videos → files → qqmusic
 //!       → markdown → keyboard → card → input_notify → stream → extra
 //! ```
 //!
@@ -26,7 +26,7 @@
 //!      `cq_legacy_semantics_test.go:173-174`）；
 //!    - 形态不命中的码：`music` 非 `type=qq,id=<数字>`（`handlers/cqcode.go:38`）、
 //!      `markdown` / `keyboard` 的 `data` 不是 `base64://` 或 `{` 开头、`stream` / `input_notify`
-//!      缺参数、`avatar`（见下方已知差异）。
+//!      缺参数、`avatar` 缺 `qq`（或 `qq=` 为空）。
 //!
 //!    入口统一走 [`push_literal`]（只回写 [`Segment::raw_or_cq`] 的原文切片）：写回的字面再次
 //!    经 [`OutboundPlan::to_segments`] 重分词得到同一段，两个方向互为逆运算（用例见
@@ -39,9 +39,12 @@
 //!    `handlers/cqcode.go:235-240` 踢人 / 禁言 / 撤回），本仓未实现（P83）；留在 `extra` 让
 //!    下游以 `1400` 明确拒绝，静默吞掉会悄悄丢掉管理动作。
 //!
-//! `avatar` 在 Go 字符串路径会被替换成 `[CQ:image,file=…]` 字面、段路径进 `url_images`
-//! （`handlers/avatar.go:44`、`handlers/message_parser.go:991-1016`），本仓协议层拿不到
-//! idmap/app_id，暂按原文回写 ⇒ **字节形态与 Go 不同，属已知差异**（parity B4、P80）。
+//! `avatar` 走 Go「段路径 / `cqparse`」口径：带 `qq` 的段进 [`OutboundPlan::avatars`]，由 runtime
+//! 反查 openid 后拼接 `q.qlogo.cn` 地址发真图（`handlers/message_parser.go:991-1016`、
+//! `handlers/cqparse/handlers_media.go:118-138`）。协议层拿不到 idmap / app_id，所以只搬 `qq`
+//! 原值；无 `qq`（或 `qq=` 为空）的形态按 Go 的 `Replacement: tok.Raw` 留原文
+//! （`handlers_media.go:122-124`）。Go 字符串路径那支会替换成 `[CQ:image,file=…]` 字面
+//! （`handlers/avatar.go:44`），本仓**有意不复刻**（parity B4、P80）。
 //!
 //! # 与 Go 的字段差异
 //!
@@ -327,6 +330,12 @@ pub struct OutboundPlan {
     pub reply_msg_id: Option<Ob11Id>,
     /// 主动推送 / 唤醒标记。
     pub active: Option<ActiveKind>,
+    /// 头像（`[CQ:avatar,qq=…]` 的 `qq` 原值，按到达顺序）。
+    ///
+    /// Go 段路径 / `cqparse` 的 `url_images` 同位物：qq 是虚拟号或 32 位 OpenID 原值（非数字
+    /// 也收），openid 反查与 `q.qlogo.cn` 地址拼接在 runtime 合成阶段做
+    /// （`deferred::resolve_avatars`）——协议层没有 idmap / app_id。
+    pub avatars: Vec<String>,
     /// Markdown 消息。
     pub markdown: Vec<MarkdownPayload>,
     /// 按钮 / 键盘。
@@ -368,6 +377,7 @@ impl OutboundPlan {
         self.text.is_empty()
             && self.markdown.is_empty()
             && self.keyboard.is_empty()
+            && self.avatars.is_empty()
             && self.images.is_empty()
             && self.records.is_empty()
             && self.videos.is_empty()
@@ -647,11 +657,15 @@ impl OutboundPlan {
                         plan.card.push(CardPayload { raw });
                     }
                 }
-                // avatar：本仓协议层无 idmap/app_id，无法复刻 Go 的可见形态——Go 字符串路径把
-                // `[CQ:avatar,qq=<数字>]` 替换成 `[CQ:image,file=…]` 字面（handlers/avatar.go:14/44），
-                // 段路径反查 openid 后进 url_images（handlers/message_parser.go:991-1016）。这里按
-                // 原文写回正文（不整条拒发），字节与 Go 不同，属已知差异（P80）。
-                "avatar" => push_literal(&mut plan, segment),
+                // avatar：Go「段路径 / cqparse」口径——带 qq 的段由其反查 openid 后进
+                // `url_images` 发真图（handlers/message_parser.go:991-1016、
+                // handlers/cqparse/handlers_media.go:118-138）。本仓协议层没有 idmap / app_id，
+                // 只搬 `qq` 原值进 `avatars`，拼接与反查交给 runtime 合成阶段。
+                // 无 qq / `qq=` 为空：cqparse 回填 `tok.Raw`（handlers_media.go:122-124）⇒ 留原文。
+                "avatar" => match segment.get("qq") {
+                    Some(qq) if !qq.is_empty() => plan.avatars.push(qq.to_owned()),
+                    _ => push_literal(&mut plan, segment),
+                },
                 // Go legacy 字符串解析只匹配 `[CQ:music,type=qq,id=<数字>]`
                 // （handlers/cqcode.go:38，消费点 cqcode_pipeline.go:170-178）：裸码、非 qq
                 // type、非数字 id 都不命中 ⇒ 原样留在 messageText，不因此拒发整条消息。
@@ -732,6 +746,7 @@ impl OutboundPlan {
             }
         }
 
+        out.extend(self.avatars.iter().map(|qq| Segment::avatar(qq.as_str())));
         out.extend(self.images.iter().map(Segment::image));
         out.extend(self.records.iter().map(Segment::record));
         out.extend(self.videos.iter().map(Segment::video));
@@ -1619,18 +1634,14 @@ mod tests {
         );
     }
 
-    /// 出站不可消费的 `[CQ:avatar]` / `[CQ:music]` 按原文留在正文（不再整条 1400）。
+    /// 出站不可消费的 `[CQ:music]` 按原文留在正文（不再整条 1400）。
     ///
     /// music 与 Go legacy 字符串路径同口径：只认 `[CQ:music,type=qq,id=<数字>]`
-    /// （`handlers/cqcode.go:38`，消费点 `handlers/cqcode_pipeline.go:170-178`）。avatar 在 Go
-    /// 字符串路径会被替换成 `[CQ:image,file=…]` 字面（`handlers/avatar.go:44`）、段路径发真图，
-    /// 本仓暂按原文回写 ⇒ 字节形态与 Go 不同，属已知差异（parity B4、P80）。
+    /// （`handlers/cqcode.go:38`，消费点 `handlers/cqcode_pipeline.go:170-178`）。
     /// 若落进 `extra`，`deferred::unsupported_segment` 会把整条消息变成 1400。
     #[test]
-    fn unconsumable_avatar_and_music_stay_literal() {
+    fn unconsumable_music_stays_literal() {
         for code in [
-            "[CQ:avatar]",
-            "[CQ:avatar,qq=123]",
             "[CQ:music]",
             "[CQ:music,id=123]",
             "[CQ:music,type=163,id=1]",
@@ -1642,6 +1653,73 @@ mod tests {
             assert!(plan.extra.is_empty(), "不应进 extra（下游会 1400）: {code}");
             assert!(plan.qqmusic.is_empty(), "不应产出 qqmusic: {code}");
         }
+    }
+
+    /// P80：带 `qq` 的 `[CQ:avatar]` 进 `avatars`（qq 原值），段从正文摘除。
+    ///
+    /// 口径 = Go 段路径 / `cqparse`（`handlers/message_parser.go:991-1016`、
+    /// `handlers/cqparse/handlers_media.go:118-138`）：反查 openid 与发真图在 runtime 做，
+    /// 协议层只搬 `qq`。非数字 qq 也收（cqparse 会先尝试反查再失败，`handlers_media.go:128-132`）。
+    #[test]
+    fn avatar_with_qq_goes_to_avatars() {
+        let plan = OutboundPlan::from_segments(&cqcode::parse("hi [CQ:avatar,qq=123] there"));
+        assert_eq!(plan.avatars, vec!["123".to_owned()]);
+        assert_eq!(plan.text, "hi  there", "段从正文摘除、前后文本原样保留");
+        assert!(
+            plan.images.is_empty(),
+            "协议层不产出图片（那是 runtime 的事）"
+        );
+        assert!(plan.extra.is_empty(), "不该进 extra（下游会 1400）");
+
+        for qq in ["abc", "0123456789ABCDEF0123456789ABCDEF"] {
+            let code = format!("[CQ:avatar,qq={qq}]");
+            let plan = OutboundPlan::from_segments(&cqcode::parse(&code));
+            assert_eq!(plan.avatars, vec![qq.to_owned()], "qq 原值照收: {code}");
+            assert!(plan.text.is_empty(), "消费后正文不留码: {code}");
+        }
+    }
+
+    /// 无 `qq` / `qq=` 为空的 avatar 仍留原文（互斥于上面那条：有 qq ⇒ 消费，无 qq ⇒ 字面）。
+    ///
+    /// 依据 cqparse 的 `Replacement: tok.Raw`（`handlers/cqparse/handlers_media.go:122-124`）。
+    #[test]
+    fn avatar_without_qq_stays_literal() {
+        for code in ["[CQ:avatar]", "[CQ:avatar,qq=]"] {
+            let plan = OutboundPlan::from_segments(&cqcode::parse(code));
+            assert!(plan.avatars.is_empty(), "无 qq 不该产出头像: {code}");
+            assert_eq!(plan.text, code, "应逐字节留在正文: {code}");
+            assert!(plan.extra.is_empty(), "不该进 extra（下游会 1400）: {code}");
+        }
+    }
+
+    /// P80 硬验收（握手保真）：`avatars` 必须同时被 `from_segments` 与 `to_segments` 认识。
+    ///
+    /// `OutboundPlan` 没有 serde derive，`SendRequest` 的线上形态就是 `plan.to_segments()`
+    /// （`gensokyo-actions/src/send.rs:255`）：只加字段、不改 `to_segments` 会让头像在
+    /// handler → runtime 的握手上静默消失（不报错、不 panic，只是永远不发）。
+    #[test]
+    fn avatar_survives_segment_round_trip() {
+        let plan = OutboundPlan::from_segments(&cqcode::parse(
+            "看 [CQ:avatar,qq=123][CQ:avatar,qq=456][CQ:image,file=https://x/a.png]",
+        ));
+        assert_eq!(plan.avatars, vec!["123".to_owned(), "456".to_owned()]);
+
+        let wire = plan.to_segments();
+        assert_eq!(
+            wire.iter()
+                .map(|segment| segment.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["text", "avatar", "avatar", "image"],
+            "avatar 段还原在 images 之前（顺序见模块文档）"
+        );
+        let restored = OutboundPlan::from_segments(&wire);
+        assert_eq!(restored, plan, "段往返必须幂等");
+        assert_eq!(restored.avatars.len(), 2, "avatars 不能在往返里丢");
+        // 再转一轮：段形态稳定，不会越转越多
+        assert_eq!(
+            OutboundPlan::from_segments(&restored.to_segments()),
+            restored
+        );
     }
 
     /// 反面对照：`type=qq` + 纯数字 id 仍按 `foundItems["qqmusic"]` 消费，段从正文摘除。
@@ -2040,7 +2118,8 @@ mod tests {
             "[CQ:stream,type=start,qq=abc]",
             "[CQ:input_notify]",
             "[CQ:input_notify,type=x]",
-            "[CQ:avatar,qq=123]",
+            "[CQ:avatar]",
+            "[CQ:avatar,qq=]",
             "[CQ:music,type=163,id=1]",
         ] {
             let plan = OutboundPlan::from_segments(&cqcode::parse(code));

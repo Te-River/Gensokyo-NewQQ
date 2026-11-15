@@ -877,9 +877,11 @@ pub const CODES: &[CodeSpec] = &[
     CodeSpec {
         // 出站 Go 有消费点：cqparse `handlers/cqparse/handlers_media.go:120-137`、段路径
         // `handlers/message_parser.go:991-1016`（反查 openid 后进 `url_images` 发真图）；字符串
-        // 路径则由 `avatar.go:14/44` 替换成 `[CQ:image,file=…]` 字面文本。本仓协议层无
-        // idmap/app_id，暂按原文回写正文（不整条拒发）⇒ 字节形态与 Go 不同，属已知差异
-        // （parity B4、P80）。入站无产出点。
+        // 路径则由 `avatar.go:14/44` 替换成 `[CQ:image,file=…]` 字面文本。
+        // P80 起本仓按「段路径 / cqparse」口径落地：带 `qq` 的段进 `OutboundPlan::avatars`，
+        // runtime 反查 openid 后发 `q.qlogo.cn` 真图；只剩无 `qq`（含 `qq=` 为空）的形态按
+        // 原文回写正文（cqparse 的 `tok.Raw`，`handlers_media.go:122-124`）。字符串路径那支
+        // **有意不复刻**（parity B4）。入站无产出点。
         name: "avatar",
         params: &["qq"],
         inbound: false,

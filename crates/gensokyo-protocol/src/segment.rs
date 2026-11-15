@@ -205,6 +205,15 @@ impl Segment {
         Self::new("image").param("file", media.to_wire())
     }
 
+    /// `[CQ:avatar,qq=…]`（`qq` 是虚拟号或 32 位 OpenID 原值）。
+    ///
+    /// 只承载参数，不承载图片：反查 openid 与拼 `q.qlogo.cn` 地址在 runtime 合成阶段做
+    /// （[`crate::outbound::OutboundPlan::avatars`]）。
+    #[must_use]
+    pub fn avatar(qq: impl Into<String>) -> Self {
+        Self::new("avatar").param("qq", qq)
+    }
+
     /// `[CQ:record,file=…]`。
     #[must_use]
     pub fn record(media: &MediaRef) -> Self {
