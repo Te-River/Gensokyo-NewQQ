@@ -17,14 +17,31 @@
 //! 等价于"引用先于正文"；数组形态下这就是第一个 `reply` 段。
 //!
 //! # 无法归类的段
-//! `face` / `node` / `poke` / `set_group` 等没有对应 `foundItems` key 的段落进
-//! [`OutboundPlan::extra`]，按到达顺序原样保留，`to_segments` 时排在最后。
-//! 例外：**不可消费形态**的 `music`（非 `type=qq` / 非纯数字 id）与 `avatar` 按原文写回
-//! [`OutboundPlan::text`]，不进 `extra`（否则整条消息会被拒发）。`music` 与 Go legacy 字符串
-//! 路径一致（只认 `type=qq,id=<数字>`，`handlers/cqcode.go:38`）；`avatar` 在 Go 字符串路径会
-//! 被替换成 `[CQ:image,file=…]` 字面、段路径进 `url_images`（`handlers/avatar.go:44`、
-//! `handlers/message_parser.go:991-1016`），本仓协议层拿不到 idmap/app_id，暂按原文回写
-//! ⇒ **字节形态与 Go 不同，属已知差异**（parity B4「avatar / music 出站」行、P80）。
+//!
+//! 没有 `foundItems` key 的段与**形态不命中**的段按 Go legacy（默认 `cq_parse_mode`）分三类：
+//!
+//! 1. **字面保留**：写回 [`OutboundPlan::text`]，跟着正文一起发出去。
+//!    - 无消费点的码：`face` / `node` / `poke` / `group_info` / `json` / 未知码——Go 的 `cqparse`
+//!      没有 handler 时回填 `tok.Raw`（`handlers/cqparse/walk.go:61-72`，金样
+//!      `cq_legacy_semantics_test.go:173-174`）；
+//!    - 形态不命中的码：`music` 非 `type=qq,id=<数字>`（`handlers/cqcode.go:38`）、
+//!      `markdown` / `keyboard` 的 `data` 不是 `base64://` 或 `{` 开头、`stream` / `input_notify`
+//!      缺参数、`avatar`（见下方已知差异）。
+//!
+//!    入口统一走 [`push_literal`]（只回写 [`Segment::raw_or_cq`] 的原文切片）：写回的字面再次
+//!    经 [`OutboundPlan::to_segments`] 重分词得到同一段，两个方向互为逆运算（用例见
+//!    `literal_segments_round_trip_byte_for_byte`）。
+//! 2. **静默丢弃**：`ark`（Go 在 `parseMessageContent` 之后由 `ProcessCQInboundOnlyCodes`
+//!    整段剥掉，`handlers/cqcode.go:198-205`、`handlers/cqcode_pipeline.go:57-59`）与空 `card`
+//!    （`handlers/cqcode_pipeline.go:124-130`：cardData 为空时不入 `foundItems`、正文也不留）。
+//! 3. **进 [`OutboundPlan::extra`]**：`member` / `set_group` / `remove`——Go 是**真执行**管理动作
+//!    （`handlers/message_parser.go:1166-1173`、`:1175-1181`、`:1611-1617` 还原 CQ →
+//!    `handlers/cqcode.go:235-240` 踢人 / 禁言 / 撤回），本仓未实现（P83）；留在 `extra` 让
+//!    下游以 `1400` 明确拒绝，静默吞掉会悄悄丢掉管理动作。
+//!
+//! `avatar` 在 Go 字符串路径会被替换成 `[CQ:image,file=…]` 字面、段路径进 `url_images`
+//! （`handlers/avatar.go:44`、`handlers/message_parser.go:991-1016`），本仓协议层拿不到
+//! idmap/app_id，暂按原文回写 ⇒ **字节形态与 Go 不同，属已知差异**（parity B4、P80）。
 //!
 //! # 与 Go 的字段差异
 //!
@@ -36,7 +53,7 @@
 //! | keyboard | 对象 → JSON 串；`base64://` → 解码；其余原样（同文件 `1103-1134`） | 同左（[`KeyboardPayload`]） |
 //! | card | 段路径只认 `title`/`desc`/`pic`/`url`（`handlers/message_parser.go:988-1010`），CQ 文本路径收全部 `k=v`（`handlers/cqcode_pipeline.go:114-132`） | 收全部 `k=v`（CQ 路径口径），另提供 [`CardPayload::fields`] 取四个官方字段 |
 //! | stream | `foundItems` 只写 `type`/`qq`；`stream_msg_id`/`index`/`msg_seq` 由 `handlers/send_private_msg.go:51-55` 的进程内 `streamCache` 维护，不落 `foundItems` | 升为 [`StreamPayload`] 的可选字段 `id`/`index`/`seq`，只在有值时附加进 JSON（解析时也认 Go 的 `stream_msg_id`/`msg_seq` 键名） |
-//! | input_notify | `type` 恒写、`second` 可缺，值均为字符串 | [`InputNotifyPayload::kind`] 为 `i64`（非数字段的整段进 `extra`），`second` 为 `Option<i64>` |
+//! | input_notify | `type` 恒写、`second` 可缺，值均为字符串 | [`InputNotifyPayload::kind`] 为 `i64`（`type` 缺失 / 非数字的段按字面写回正文），`second` 为 `Option<i64>` |
 //! | wakeup | 独立 key `wakeup` | 归到 [`ActiveKind::wakeup`]（分组不同，值相同） |
 //!
 //! `markdown` / `keyboard` / `card` 在此是 `Vec`：Go 对同名 key 是 `append`，一条消息可带多份，
@@ -337,7 +354,10 @@ pub struct OutboundPlan {
     /// 与图片分开保留：Go 的两路兜底发送不同（`handlers/send_group_msg.go` 分别走图片/语音
     /// 通道），合成一个桶会在回写 `foundItems` 时丢失原类型。
     pub unknown_records: Vec<MediaRef>,
-    /// 无 `foundItems` 对应 key 的消息段（`face` / `node` / `poke` …），按到达顺序保留。
+    /// 本仓尚未实现、必须整条拒绝的段（`member` / `set_group` / `remove`），按到达顺序保留。
+    ///
+    /// Go 对这些码是**真执行**管理动作（见模块文档「无法归类的段」第 3 类），本仓未实现前
+    /// 留在 `extra` 由下游回 `1400`，不静默丢弃。
     pub extra: Vec<Segment>,
 }
 
@@ -554,7 +574,8 @@ impl OutboundPlan {
     /// - `text` 段按原样拼接进 [`Self::text`]；`at` 段也写回 `text`（保留 CQ 字面量），
     ///   与 Go 的 `messageText` 一致。
     /// - `reply` 段取第一个，落到 [`Self::reply_msg_id`]。
-    /// - 其余无法归类的段进 [`Self::extra`]，不静默丢弃。
+    /// - 无消费点 / 形态不命中的段按字面写回 `text`，`ark` 与空 `card` 静默丢弃，
+    ///   `member` / `set_group` / `remove` 进 [`Self::extra`]（三类分界见模块文档）。
     #[must_use]
     pub fn from_segments(segments: &[Segment]) -> Self {
         let mut plan = Self::default();
@@ -566,7 +587,7 @@ impl OutboundPlan {
             // resolveFileValue :87-91——file 臂只读 file，故 `[CQ:file,url=…]` 同样算裸码）；
             // 在归一点统一把原文放回 text，不产出 `Unknown("")` 空 file_info。
             if is_bare_media_segment(segment) {
-                plan.text.push_str(&segment.raw_or_cq());
+                push_literal(&mut plan, segment);
                 continue;
             }
             match segment.kind.as_str() {
@@ -576,7 +597,7 @@ impl OutboundPlan {
                 "at" => {
                     // at 段是透传臂：回写 parse 的原文切片（自产段回退规范化序列化），
                     // 用户的空白形态不被 to_cq() 改写，to_segments 重分词时逐字节还原
-                    plan.text.push_str(&segment.raw_or_cq());
+                    push_literal(&mut plan, segment);
                 }
                 "reply" => {
                     if plan.reply_msg_id.is_none() {
@@ -602,9 +623,9 @@ impl OutboundPlan {
                 "markdown" => {
                     let raw = markdown_payload(segment);
                     if raw.is_empty() {
-                        // Go 缺 data.data 时记日志后跳过（message_parser.go:1099-1101）；
-                        // 这里保留段本身，模型层不静默丢载荷
-                        plan.extra.push(segment.clone());
+                        // 未命中 Go legacy 的 `data=base64://(.+?)` 正则（handlers/cqcode.go:36-45）
+                        // ⇒ 字符串路径把它当普通文本照发，这里按字面写回正文
+                        push_literal(&mut plan, segment);
                     } else {
                         plan.markdown.push(MarkdownPayload { raw });
                     }
@@ -612,16 +633,17 @@ impl OutboundPlan {
                 "keyboard" => {
                     let raw = keyboard_payload(segment);
                     if raw.is_empty() {
-                        plan.extra.push(segment.clone());
+                        // 只认 `base64://` / `{` 两种形态，其余同 markdown 按字面保留
+                        push_literal(&mut plan, segment);
                     } else {
                         plan.keyboard.push(KeyboardPayload { raw });
                     }
                 }
                 "card" => {
                     let raw = card_payload(segment);
-                    if raw.is_empty() {
-                        plan.extra.push(segment.clone());
-                    } else {
+                    // Go `cqcode_pipeline.go:124-130`：cardData 为空 ⇒ 不入 foundItems、正文里
+                    // 也没留下东西 ⇒ 整段消失（不推 extra、不留字面）
+                    if !raw.is_empty() {
                         plan.card.push(CardPayload { raw });
                     }
                 }
@@ -629,7 +651,7 @@ impl OutboundPlan {
                 // `[CQ:avatar,qq=<数字>]` 替换成 `[CQ:image,file=…]` 字面（handlers/avatar.go:14/44），
                 // 段路径反查 openid 后进 url_images（handlers/message_parser.go:991-1016）。这里按
                 // 原文写回正文（不整条拒发），字节与 Go 不同，属已知差异（P80）。
-                "avatar" => plan.text.push_str(&segment.raw_or_cq()),
+                "avatar" => push_literal(&mut plan, segment),
                 // Go legacy 字符串解析只匹配 `[CQ:music,type=qq,id=<数字>]`
                 // （handlers/cqcode.go:38，消费点 cqcode_pipeline.go:170-178）：裸码、非 qq
                 // type、非数字 id 都不命中 ⇒ 原样留在 messageText，不因此拒发整条消息。
@@ -639,15 +661,17 @@ impl OutboundPlan {
                     {
                         plan.qqmusic.push(id.to_owned());
                     }
-                    _ => plan.text.push_str(&segment.raw_or_cq()),
+                    _ => push_literal(&mut plan, segment),
                 },
                 "stream" => match stream_from_segment(segment) {
                     Some(stream) => plan.stream = Some(stream),
-                    None => plan.extra.push(segment.clone()),
+                    // 缺 `type` / `qq`、qq 非数字：Go 的冒号正则不命中 ⇒ 字面
+                    None => push_literal(&mut plan, segment),
                 },
                 "input_notify" => match input_notify_from_segment(segment) {
                     Some(notify) => plan.input_notify = Some(notify),
-                    None => plan.extra.push(segment.clone()),
+                    // 缺 `type` 或非数字：Go 的 `type=(\d+)` 不命中 ⇒ 字面
+                    None => push_literal(&mut plan, segment),
                 },
                 "active" => {
                     active.active = true;
@@ -663,7 +687,19 @@ impl OutboundPlan {
                         active.wakeup = Some(user.to_owned());
                     }
                 }
-                _ => plan.extra.push(segment.clone()),
+                // ark：Go 在 parseMessageContent 之后由 ProcessCQInboundOnlyCodes 整段剥掉
+                // （handlers/cqcode.go:198-205、handlers/cqcode_pipeline.go:57-59）——既不发送
+                // 也不留字面，这里同样静默丢弃
+                "ark" => {}
+                // member / set_group / remove：Go **真执行**管理动作（踢人 / 禁言 / 撤回），
+                // 链路是 message_parser.go:1166-1173、:1175-1181、:1611-1617 还原 CQ 文本 →
+                // cqcode.go:235-240 分派。本仓未实现（P83）：静默吞掉会悄悄丢管理动作，
+                // 所以留在 extra 让下游以 1400 明确拒绝
+                "member" | "set_group" | "remove" => plan.extra.push(segment.clone()),
+                // face / node / poke / group_info / json / 未知码：Go 的 cqparse 没有消费点时
+                // 回填 `tok.Raw`（cqparse/walk.go:61-72；金样 cq_legacy_semantics_test.go:173-174）
+                // ⇒ 逐字节留在正文
+                _ => push_literal(&mut plan, segment),
             }
         }
 
@@ -741,6 +777,17 @@ impl OutboundPlan {
         out.extend(self.extra.iter().cloned());
         out
     }
+}
+
+/// 段的「字面保留」出口：把原文写回 [`OutboundPlan::text`]。
+///
+/// Go legacy 对没有消费点 / 形态不命中的码保留 `tok.Raw`（`handlers/cqparse/walk.go:61-72`，
+/// 金样 `cq_legacy_semantics_test.go:173-174`），段既不出站成富媒体、也不整条拒发。
+///
+/// 只回写 [`Segment::raw_or_cq`]：parse 而来的段逐字节还原原文，[`OutboundPlan::to_segments`]
+/// 重分词时得到同一段，两个方向互为逆运算（不自造序列化，自产段才退回 `to_cq`）。
+fn push_literal(plan: &mut OutboundPlan, segment: &Segment) {
+    plan.text.push_str(&segment.raw_or_cq());
 }
 
 const IMAGE_KEYS: &[&str] = &["local_image", "url_image", "url_images", "base64_image"];
@@ -833,8 +880,12 @@ fn is_bare_media_segment(segment: &Segment) -> bool {
 
 /// `[CQ:markdown,data=…]` → `foundItems["markdown"]` 契约（base64(JSON)）。
 ///
-/// Go `handlers/message_parser.go:1048-1097`：`data` 是对象时 marshal 后编码；字符串先认
-/// `base64://` 前缀，再认裸 base64（必须解出 JSON），最后按旧格式 JSON 串处理。
+/// 只认两种形态，其余返回空串（调用方按字面保留整段）：
+/// - `base64://…`：取编码体，命中 Go legacy 的 `data=base64://(.+?)` 正则
+///   （`handlers/cqcode.go:36-45`）；
+/// - `{…}`：JSON 对象，先 marshal 再编码（段路径的旧格式写法，`handlers/message_parser.go:1048-1097`）。
+///
+/// 空 `data=`、裸 base64、非 JSON 文本都不在 Go legacy 的消费范围内（P81）。
 fn markdown_payload(segment: &Segment) -> String {
     let Some(data) = segment.get("data") else {
         return String::new();
@@ -842,35 +893,36 @@ fn markdown_payload(segment: &Segment) -> String {
     if let Some(encoded) = data.strip_prefix("base64://") {
         return encoded.to_owned();
     }
-    // 裸 base64：解出合法 JSON 才算（Go 段路径先试 base64，再试 JSON）
-    let is_base64_json = base64::decode(data)
-        .is_some_and(|decoded| serde_json::from_slice::<Value>(&decoded).is_ok());
-    if is_base64_json {
-        return data.to_owned();
-    }
-    if let Ok(value) = serde_json::from_str::<Value>(data) {
+    if data.starts_with('{')
+        && let Ok(value) = serde_json::from_str::<Value>(data)
+    {
         return base64::encode(value.to_string().as_bytes());
     }
-    // 既不是 base64 也不是 JSON：保留原文，模型层不静默丢载荷（Go 这里记日志后跳过）
-    data.to_owned()
+    String::new()
 }
 
 /// `[CQ:keyboard,data=…]` → `foundItems["keyboard"]` 契约（JSON 串）。
 ///
-/// Go `handlers/message_parser.go:1103-1134`：`data` 为对象时 marshal；字符串带
-/// `base64://` 前缀时解码，否则按原始 JSON 原样保留。
+/// 只认两种形态，其余返回空串（调用方按字面保留整段）：`base64://…`（解码成 JSON 串）与
+/// `{…}`（原样 JSON）。Go legacy 的键盘正则同样只吃 `base64://`
+/// （`handlers/cqcode.go:36-45` 同族），裸 JSON 在字符串路径里不是合法形态（P81）。
+///
+/// `base64://` 解码失败也按「不可消费」处理 ⇒ 字面（Go 在这里记日志后丢弃，本仓宁可让
+/// 用户看见原文）。
 fn keyboard_payload(segment: &Segment) -> String {
     let Some(data) = segment.get("data") else {
         return String::new();
     };
     let Some(encoded) = data.strip_prefix("base64://") else {
-        return data.to_owned();
+        return if data.starts_with('{') {
+            data.to_owned()
+        } else {
+            String::new()
+        };
     };
-    match base64::decode(encoded).and_then(|bytes| String::from_utf8(bytes).ok()) {
-        Some(text) => text,
-        // 解码失败保留原文（Go 在这里记日志后丢弃）
-        None => data.to_owned(),
-    }
+    base64::decode(encoded)
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_default()
 }
 
 /// `[CQ:card,…]` → `foundItems["card"]` 契约（JSON 对象串）。
@@ -929,9 +981,15 @@ impl MediaRef {
 }
 
 fn stream_from_segment(segment: &Segment) -> Option<StreamPayload> {
+    // Go 的冒号正则只认数字 qq（`\[CQ:stream,type:(\w+),qq:(\d+)\]`，handlers/cqcode.go:41）：
+    // 缺 qq / 非数字都不命中 ⇒ 调用方按字面保留整段
+    let qq = segment.get("qq")?;
+    if qq.is_empty() || !qq.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
     Some(StreamPayload {
         kind: StreamKind::from(segment.get("type")?),
-        qq: segment.id_param("qq")?,
+        qq: parse_id(qq),
         id: segment
             .get("id")
             .or_else(|| segment.get("stream_msg_id"))
@@ -1169,7 +1227,7 @@ mod tests {
         ];
         let plan = OutboundPlan::from_segments(&segments);
         assert_eq!(plan.reply_msg_id, Some(Ob11Id::Num(1)));
-        assert_eq!(plan.text, "看图");
+        assert_eq!(plan.text, "看图[CQ:face,id=14]", "face 按字面写回正文");
         assert_eq!(
             plan.images,
             vec![
@@ -1178,7 +1236,7 @@ mod tests {
             ]
         );
         assert_eq!(plan.records, vec![MediaRef::Base64("QUJD".to_owned())]);
-        assert_eq!(plan.extra.len(), 1, "face 无对应 key，应进 extra");
+        assert!(plan.extra.is_empty(), "face 不再进 extra（P81 字面保留）");
     }
 
     #[test]
@@ -1917,18 +1975,112 @@ mod tests {
         );
     }
 
+    /// P81：形如 `[CQ:card]`（无参）或 `data=` 的卡片刻度在 Go 里是**静默丢弃**
+    /// （`handlers/cqcode_pipeline.go:124-130`：cardData 为空 ⇒ 不入 foundItems、正文也不留）。
     #[test]
-    fn missing_rich_payloads_stay_visible_in_extra() {
-        let segments = vec![
-            Segment::new("markdown"),
-            Segment::new("keyboard"),
-            Segment::new("card"),
-        ];
-        let plan = OutboundPlan::from_segments(&segments);
-        assert!(plan.markdown.is_empty());
-        assert!(plan.keyboard.is_empty());
-        assert!(plan.card.is_empty());
-        assert_eq!(plan.extra, segments, "缺载荷的段进 extra，不静默丢弃");
-        assert_eq!(plan.to_found_items().get("markdown"), None);
+    fn empty_card_is_dropped_silently() {
+        for code in ["[CQ:card]", "[CQ:card,data=]"] {
+            let plan = OutboundPlan::from_segments(&cqcode::parse(code));
+            assert!(plan.card.is_empty(), "空卡片不该产出 card 载荷: {code}");
+            assert!(
+                plan.extra.is_empty(),
+                "空卡片不该进 extra（下游 1400）: {code}"
+            );
+            assert!(plan.text.is_empty(), "空卡片不留字面: {code}");
+            assert!(plan.is_empty(), "整条消息应视为空: {code}");
+        }
+    }
+
+    /// `ark` 在 Go legacy 里被整段剥掉（`handlers/cqcode.go:198-205`、
+    /// `handlers/cqcode_pipeline.go:57-59`）：既不发送也不留字面，也不拒发整条消息。
+    #[test]
+    fn ark_is_stripped_silently() {
+        let plan =
+            OutboundPlan::from_segments(&cqcode::parse("hi[CQ:ark,ark_type=tuwen,prompt=点我]"));
+        assert_eq!(plan.text, "hi", "ark 整段消失，前后文本原样保留");
+        assert!(plan.extra.is_empty(), "ark 不该进 extra（下游 1400）");
+    }
+
+    /// `member` / `set_group` / `remove` 在 Go 是**真执行**管理动作（踢人 / 禁言 / 撤回，
+    /// `handlers/message_parser.go:1166-1173`/`:1175-1181`/`:1611-1617` → `cqcode.go:235-240`）。
+    /// 本仓未实现（P83）：留在 `extra` 让下游回 1400，静默吞掉会悄悄丢管理动作。
+    #[test]
+    fn management_codes_stay_in_extra() {
+        for (code, kind) in [
+            ("[CQ:member,qq=123,group_id=456]", "member"),
+            ("[CQ:set_group,group_id=456,ban=1]", "set_group"),
+            ("[CQ:remove,message_id=789]", "remove"),
+        ] {
+            let plan = OutboundPlan::from_segments(&cqcode::parse(code));
+            assert_eq!(plan.extra.len(), 1, "管理码应留在 extra: {code}");
+            assert_eq!(plan.extra[0].kind, kind, "段名不变: {code}");
+            assert!(plan.text.is_empty(), "管理码不该同时留字面: {code}");
+        }
+    }
+
+    /// P81 硬验收：字面保留的每一种形态写回正文后，`to_segments` 重分词必须还原成同一计划——
+    /// 既不能把字面重新解析成码段（会再走一遍消费臂），也不许改写字节。
+    #[test]
+    fn literal_segments_round_trip_byte_for_byte() {
+        for code in [
+            "[CQ:face,id=1]",
+            "[CQ:face , id = 14, name=a&#44;b]",
+            "[CQ:node,id=1,user_id=2,nickname=n,content=c]",
+            "[CQ:poke,qq=10086]",
+            "[CQ:group_info]",
+            "[CQ:json,data=abc]",
+            "[CQ:unknown_code,x=1]",
+            "[CQ:markdown]",
+            "[CQ:markdown,data=]",
+            "[CQ:markdown,data=abc]",
+            "[CQ:keyboard]",
+            "[CQ:keyboard,data=abc]",
+            "[CQ:stream]",
+            "[CQ:stream,type=start]",
+            "[CQ:stream,type=start,qq=abc]",
+            "[CQ:input_notify]",
+            "[CQ:input_notify,type=x]",
+            "[CQ:avatar,qq=123]",
+            "[CQ:music,type=163,id=1]",
+        ] {
+            let plan = OutboundPlan::from_segments(&cqcode::parse(code));
+            assert_eq!(plan.text, code, "应逐字节留在正文: {code}");
+            assert!(plan.extra.is_empty(), "字面形态不该进 extra: {code}");
+            assert_eq!(
+                OutboundPlan::from_segments(&plan.to_segments()),
+                plan,
+                "字面往返必须幂等: {code}"
+            );
+        }
+    }
+
+    /// 收紧后的载荷形态：`markdown` / `keyboard` 只认 `base64://` 与 `{` 两种前缀，
+    /// 其余（含裸 base64 markdown）按字面保留，与 Go legacy 正则一致。
+    #[test]
+    fn rich_payload_prefixes_are_enforced() {
+        let bare_base64 = crate::base64::encode(br#"{"content":"hi"}"#);
+        let code = format!("[CQ:markdown,data={bare_base64}]");
+        let plan = OutboundPlan::from_segments(&cqcode::parse(&code));
+        assert!(plan.markdown.is_empty(), "裸 base64 不再消费: {code}");
+        assert_eq!(plan.text, code, "裸 base64 按字面保留");
+
+        let ok = OutboundPlan::from_segments(&cqcode::parse(&format!(
+            "[CQ:markdown,data=base64://{bare_base64}]"
+        )));
+        assert_eq!(ok.markdown[0].raw, bare_base64, "base64:// 仍照旧消费");
+
+        let json = OutboundPlan::from_segments(&cqcode::parse(r#"[CQ:keyboard,data={"id":"k1"}]"#));
+        assert_eq!(
+            json.keyboard[0].raw, r#"{"id":"k1"}"#,
+            "花括号开头的裸 JSON 仍消费"
+        );
+
+        let base64 = OutboundPlan::from_segments(&cqcode::parse(
+            "[CQ:keyboard,data=base64://eyJpZCI6ImsxIn0=]",
+        ));
+        assert_eq!(
+            base64.keyboard[0].raw, r#"{"id":"k1"}"#,
+            "base64:// 解码成 JSON"
+        );
     }
 }

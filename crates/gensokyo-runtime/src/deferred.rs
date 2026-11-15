@@ -280,6 +280,16 @@ async fn execute_inner(
     openid: String,
     depth: usize,
 ) -> Result<String> {
+    // 纯码 / 纯动作消息被 CQ 管线吃空时的出口（Go `send_group_msg.go:557-562`）：
+    // 正文 trim 后为空且没有任何 foundItems ⇒ 直接回执成功、不调 QQ API。
+    // 放在合成之前（而非 compose 内）：compose 的产物就是一条要发的消息体，
+    // 没东西可发时不该走媒体上传 / @全员 占位 / 被动身份盖章任何一步。
+    // 覆盖面：群聊 / 私聊 / 主动消息都从这里过，合并转发逐 node 重入 `execute` 也走同一条
+    // （Go 的转发同样是逐 node 重入发送 handler）；SSE 是独立入口（`execute_sse` 直接发
+    // `message_sse`，正文由调用方给定）。
+    if is_empty_message(plan) {
+        return Ok(EMPTY_MESSAGE_ID.to_owned());
+    }
     // 出站 URL 变换（Go `transformMessageTextUrl`，`message_parser.go:1749-1793`）：位置
     // 在 compose 之前，等价 Go 的 parseMessageContent 尾部（CQ 管线之后、文本最后）。
     // `transfer_url=false`（默认配置）时返回 None，plan 原样进 compose，出站行为零变化。
@@ -2381,6 +2391,24 @@ fn unix_timestamp() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
+/// 纯码空消息的回执 ID：Go `SendResponse(client, nil, &message, nil, …)` 在没有真实
+/// 消息 ID 时把 `data.message_id` 如实置 0（`handlers/message_parser.go:372-376`）。
+const EMPTY_MESSAGE_ID: &str = "0";
+
+/// 计划里没有任何要发的内容（正文 trim 后为空）——Go `send_group_msg.go:557-562` 的
+/// `strings.TrimSpace(messageText) == "" && len(foundItems) == 0`。
+///
+/// `reply` / `active` 也算「有内容」：它们在 Go 侧会写成 `foundItems` 的键
+/// （`reply_msg_id` / `active*`），命中该判定就不会进「不发送」分支，本仓同样照发。
+/// `extra`（`member` / `set_group` / `remove`）不算空：那几类要交给 compose 回 `1400`，
+/// 不能在这里被静默吞掉。
+fn is_empty_message(request: &SendRequest) -> bool {
+    request.message.text.trim().is_empty()
+        && request.message.plan.is_empty()
+        && request.message.plan.reply_msg_id.is_none()
+        && request.message.plan.active.is_none()
+}
+
 /// 本阶段仍不支持的消息段；返回第一个命中的段名。
 ///
 /// `keyboard` / `music` / `stream` / `input_notify` 已按 Go 口径落地，不再走这里。
@@ -3015,6 +3043,16 @@ mod tests {
         request
     }
 
+    /// 客户端字符串形态的完整入参链：`MessageOut::from_content`（CQ 解析 → 计划 + 正文）。
+    fn cq_request(target: SendTarget, message: &str) -> SendRequest {
+        SendRequest {
+            target,
+            message: MessageOut::from_content(&MessageContent::Text(message.to_owned()), false),
+            wakeup: false,
+            echo_context: EchoContext::default(),
+        }
+    }
+
     /// deferred 用不到的传输：纯文本 / markdown / card 路径不下载任何东西。
     fn no_media() -> MediaRuntime {
         MediaRuntime::with_transport(Arc::new(FakeTransport::new(b"")))
@@ -3612,10 +3650,8 @@ mod tests {
         let (_dir, context) = context(Arc::clone(&api));
         let media = MediaRuntime::with_transport(Arc::new(FakeTransport::new(b"x")));
         let echo = EchoStore::new();
-        let plan = request(
-            SendTarget::Private(OPENID.to_owned()),
-            OutboundPlan::default(),
-        );
+        // 有正文才会真的发上游（纯空计划走 P81 的「成功回执、不发送」出口）
+        let plan = text_plan(SendTarget::Private(OPENID.to_owned()), "hi");
 
         execute(&context, &plan, &deps(&media, Some(&echo)))
             .await
@@ -4195,6 +4231,71 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].msg_type, None, "纯文本消息不带 msg_type");
         assert_eq!(sent[0].content.as_deref(), Some(text), "字面逐字节保留");
+    }
+
+    // ---- P81：纯码空消息 / 字面保留 ----
+
+    /// Go `send_group_msg.go:557-562`：CQ 管线把正文吃干净、也没留下任何 foundItems 时
+    /// 直接回执成功、不调 QQ API。`[CQ:card]`（无参）在协议层就是静默丢弃，
+    /// 正好落进这个出口（群聊 / 私聊都走同一条 `execute`）。
+    #[tokio::test]
+    async fn empty_pure_code_message_acks_without_sending() {
+        for target in [
+            SendTarget::Group(OPENID.to_owned()),
+            SendTarget::Private(OPENID.to_owned()),
+        ] {
+            let api = Arc::new(FakeQqApi::default());
+            let (_dir, context) = context(Arc::clone(&api));
+            let plan = cq_request(target, "[CQ:card]");
+
+            let message_id = execute(&context, &plan, &deps(&no_media(), None))
+                .await
+                .expect("纯码空消息应成功回执");
+
+            assert_eq!(
+                message_id, "0",
+                "无真实消息 ID 时如实置 0（Go resp=nil 分支）"
+            );
+            assert!(api.sent().is_empty(), "不应调用上游发送");
+        }
+    }
+
+    /// `member` / `set_group` / `remove` 仍是 1400：Go 真执行管理动作，本仓未实现（P83），
+    /// 静默吞掉会悄悄丢动作（见 `outbound.rs` 的 `extra` 出口）。
+    #[tokio::test]
+    async fn management_code_is_still_a_request_error() {
+        let api = Arc::new(FakeQqApi::default());
+        let (_dir, context) = context(Arc::clone(&api));
+        let plan = cq_request(
+            SendTarget::Group(OPENID.to_owned()),
+            "[CQ:member,qq=123,group_id=456]",
+        );
+
+        let err = execute(&context, &plan, &deps(&no_media(), None))
+            .await
+            .expect_err("管理码必须仍是 1400");
+
+        assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
+        assert!(api.sent().is_empty(), "被拒绝的消息不应发送");
+    }
+
+    /// 无消费点的码按字面发出（Go legacy 保留 `tok.Raw`），不再整条 1400。
+    #[tokio::test]
+    async fn unconsumable_code_is_sent_as_literal_text() {
+        for text in ["[CQ:face,id=1]", "[CQ:markdown]", "[CQ:stream,type=start]"] {
+            let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+            let (_dir, context) = context(Arc::clone(&api));
+            let plan = cq_request(SendTarget::Group(OPENID.to_owned()), text);
+
+            execute(&context, &plan, &deps(&no_media(), None))
+                .await
+                .expect("字面形态应按文本发出");
+
+            let sent = api.sent();
+            assert_eq!(sent.len(), 1, "只发一条: {text}");
+            assert_eq!(sent[0].msg_type, None, "纯文本消息不带 msg_type: {text}");
+            assert_eq!(sent[0].content.as_deref(), Some(text), "字面逐字节保留");
+        }
     }
 
     #[tokio::test]
