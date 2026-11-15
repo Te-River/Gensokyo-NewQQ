@@ -28,14 +28,14 @@
 |------|------|-----------------|
 | 发布名 | **Release 016 Rust**（Rust 重构分支首个 Release；GitHub Release 标题用此名，tag 建议 `Release016Rust`） | 本文件随 `Refactor` 分支维护；Go 主线仍为 `Release016`；见 `release_log/CHANGELOG_v016.md` 首部 |
 | parity 覆盖面 | A/B/C 三表逐项标注状态，主干/功能/边角项均为「已对齐 / 关闭」；B6 是**历史 severity 汇总**，个别行只写估量、未逐条回写状态 | `reports/refactor/17-go-rust-parity.md`：**按节定位**（A 表 / C 表 / B1-3 / B4 CQ 码进出站 / B5 / B6 缺口汇总 / D / E），该文件行号随每次 parity 回写浮动，不再钉死数字区间 |
-| 测试基线 | **43 suites / 1391 passed / 0 failed**（2026-11-15 P81+P85 后实测；`ignored` 计数以门禁输出为准） | `cargo test --workspace --no-fail-fast`（计数随新增用例变化，取数见 §9） |
+| 测试基线 | **43 suites / 1399 passed / 0 failed**（2026-11-15 P80 后实测；`ignored` 计数以门禁输出为准） | `cargo test --workspace --no-fail-fast`（计数随新增用例变化，取数见 §9） |
 | clippy | `-D warnings` **零告警** | `cargo clippy --workspace --all-targets -- -D warnings` |
 | 格式 | `cargo fmt --all -- --check` **退出码 0** | 同左 |
 | release 产物 | **≈10.3 MiB**（同表记录 Go `44.82 MiB`，≈4.3× 更小） | `docs/rust-perf.md:167`（2026-11-10 口径）；当前体积以 `cargo xtask build` 打印为准 |
 
 > 关于测试数字：suite/passed 随新增用例变化，且各里程碑文档记的是各自时点值
 > （如 `docs/rust-m0.md` 的 R4m 记 1356、R4n 记 1359，均对当时成立）。
-> 当前实测以 2026-11-15（P81+P85 后）为准：**43 suites / 1391 passed / 0 failed**；
+> 当前实测以 2026-11-15（P80 后）为准：**43 suites / 1399 passed / 0 failed**；
 > `ignored` 是 `#[ignore]` 用例（要 `--ignored` 才跑），计数随用例增删浮动。
 > 引用时以**你刚跑出的
 > `test result:` 行**为准，以最终门禁输出为最终口径。
@@ -124,7 +124,7 @@
 | ⑭ | C2C 空 `Author.ID`：Rust 只「不写库」，不整条早退 | Go `Processor/ProcessC2CMessage.go:30-33` 对 `data.Author == nil \|\| data.Author.ID == ""` 是 `return nil`——整条事件**既不上报也不入库**；Rust 只取「不写库」这一半（`record_user_info` 进门判空串直接返回，**只判空、不 trim** ⇒ 与 Go 两个子条件等价），事件上报字节不变。取舍：改上报形态会动外部 JSON，收益不抵风险；不补守卫则会写出键 `":"` 的垃圾身份行（Go 库绝无此行） | `crates/gensokyo-runtime/src/inbound.rs:756-760`；Go `Processor/ProcessC2CMessage.go:30-33`；登记 `docs/rust-m0.md` R4p |
 | ⑮ | 入站不做 alias 替换与 visual 前缀剥离 | Rust 入站两条路径都不做 Go `message_parser.go:2003-2024` 的 alias 替换与 visual 前缀剥离，框架指令/黑白名单前缀场景仍与 Go 不同——**既有范围限定，未随 P72 改变**，不要当成 P72 的回归 | Go `handlers/message_parser.go:2003-2024`；Rust 入站无对应实现（`gensokyo-runtime` 的 `revert_mentions` 只做 @，`reported_message` 只做落段/折回判定） |
 | ⑯ | `CodeSpec::inbound` 已无生产读取点 | **P73 之后**：数组路径不再解析 CQ（`revert_mentions` 写 NUL 哨兵 + 槽位表、`expand_at_placeholders` 只按哨兵切片直出 text/at 段），`reported_message` 的 `cqcode::parse` 调用已删 ⇒ `CodeSpec::inbound` 与 `params`/`outbound` 同属**描述性元数据**（仅测试模块读）。`at` 也已置 `false`，手打 `[CQ:at,qq=…]` 与 Go 一样按原文留 text；真实 @ 仍由 `<@!hex>` 占位符产 at 段 | `crates/gensokyo-protocol/src/cqcode.rs` 的 `CodeSpec` 文档块与 `name: "at"` 条目（按符号定位）；`crates/gensokyo-runtime/src/inbound.rs` 的 `revert_mentions`/`expand_at_placeholders`；登记 `docs/rust-m0.md` R4s、parity B4 |
-| ⑰ | 出站 `[CQ:avatar]` / `[CQ:music]` 的可见形态与 Go 不同 | P79 起两者不再让整条消息 1400：不可消费形态按原文写回正文。但 `avatar` 在 Go 字符串路径会被替换成 `[CQ:image,file=…]` 字面、段路径发真图，Rust 协议层无 idmap/app_id，暂只能保留 `[CQ:avatar,…]` 原文 ⇒ **字节/媒体形态不同，属已知差异**（P80）。`music` 仅 `type=qq`+纯数字 id 被消费，与 Go legacy 字符串路径一致；残余：Go 正则要求参数顺序/个数，Rust 有序 params 取首个同名键 ⇒ 乱序/多余参数 Rust 会消费 | `crates/gensokyo-protocol/src/outbound.rs` 的 `avatar`/`music` 臂；Go `handlers/cqcode.go:38`、`handlers/avatar.go:44`、`handlers/message_parser.go:991-1016`；登记 parity B4、`docs/rust-m0.md` R4t |
+| ⑰ | avatar 出站已按段路径对齐；`music` 参数判别仍有残余差异 | **P80 起**：带 `qq` 的 `[CQ:avatar]` 经 idmap 反查 openid 后发 `https://q.qlogo.cn/qqapp/{app_id}/{openid}/640` 真图，失败/`app_id` 未配置吞段 + warn，无 `qq` 按字面。残余：① `app_id` 未配置时 Go 发坏 URL 换 1500、Rust 吞段；② idmap 仅一维（Go Pro 二维）；③ 头像图追加在 images 末尾、多图混排次序不严格同序；④ 无 qq 形态两种输入统一按字面。`music` 仅 `type=qq`+纯数字 id 被消费（与 Go legacy 字符串一致）；Go 正则要求参数顺序/个数，Rust 有序 params 取首个同名键 ⇒ 乱序/多余参数 Rust 会消费 | `crates/gensokyo-protocol/src/outbound.rs` 的 `avatar`/`music` 臂、`crates/gensokyo-runtime/src/deferred.rs` 的 `resolve_avatars`/`avatar_url`；Go `handlers/avatar.go`、`handlers/cqcode.go:38`；登记 parity B4、`docs/rust-m0.md` R4y |
 
 ## 7. 未完成项与下一步
 
@@ -140,7 +140,7 @@
 | ✅ | 入站用例（P75①，原 P2） | **已完成（2026-11-14，主仓提交 `39a4d5b`）**：新建 `handlers/inbound_handtyped_cq_test.go`——poke/json/node/face 断言「段数=1、类型=text、载荷与原文逐字节一致」，并断言手打 `[CQ:image]` 留 text 而同条真实 `attachments` 仍产 image 段；复用既有 `atAssertConsistency` 校验 string/array 两路径同序 | —（已闭环） | 主仓 `handlers/inbound_handtyped_cq_test.go`；`go test ./handlers` ok、`go build ./...` 退出码 0 |
 | ✅ | 主仓文档与代码不符（P75②） | **已完成（2026-11-14，主仓提交 `39a4d5b`）**：`readme.md` 三处「戳一戳」已标注「未实现，仅码表占位 / 仅列表占位」（CQ 码表 `[CQ:poke]`、通知事件群内戳一戳、拓展 Event 好友/群内戳一戳），不删行、不虚报；本仓 `readme.md` 同名表述同步标注 | —（已闭环） | 主仓 `readme.md:153/297/310-311`；依据：全仓 `*.go` 产品代码 `poke` 零命中、botgo 无 `POKED` 类常量 |
 | ✅ | P79（出站不可消费码保留字面） | **已完成（2026-11-14）**：`from_segments` 新增 `avatar` 臂按原文写回、`music` 臂收紧为 `type=qq`+纯 ASCII 数字；含 `[CQ:avatar,…]` / 裸或非 qq `[CQ:music,…]` 的消息不再整条 1400；协议 2 例 + runtime 1 例 | —（剩余形态差异见 P80/P81） | `crates/gensokyo-protocol/src/outbound.rs`；登记 R4t、parity B4 |
-| P1 | P80（avatar 出站图片化） | 未开工：Go 段路径反查 openid 后进 `url_images` 发真图；Rust 需给 `OutboundPlan` 增承载 qq 的字段并在 runtime compose 用 idmap/app_id 生成 qlogo URL | 需先设计（跨 protocol/actions/runtime 约 4-5 文件），再 implementer→tester→reviewer 全流程 | `docs/rust-m0.md` R4t 已知差异；parity B4「avatar 出站」行 |
+| ✅ | P80（avatar 出站图片化） | **已完成（2026-11-15）**：`OutboundPlan.avatars` + `Segment::avatar` + `to_segments`/`from_segments` 往返；runtime `resolve_avatars` 反查 openid 后发 qlogo 640 真图；失败/`app_id` 未配置吞段 + warn；无 `qq` 字面 | —（残余差异见 §6 ⑰） | `crates/gensokyo-protocol/src/{outbound.rs,segment.rs}`、`crates/gensokyo-runtime/src/deferred.rs`；提交 `843d4d3` |
 | P2 | P81（其它不可消费码 `extra→1400`） | 未开工（**pre-existing**）：`face`/`node`/`poke`/`ark`/未知码、空载荷 `markdown`/`keyboard`/`card`、非法 `stream`/`input_notify` 仍会整条 1400，而 Go legacy 对多数是保留字面 | 先逐码 research 核实 Go 归宿，再按「不可消费保留字面」统一口径修，勿盲目放宽 | parity B4「出站其它不可消费码」行 |
 | ✅ | P82（环回假红测试加固） | **已完成（2026-11-14，仅测试）**：media ssrf hop / runtime lotus×2 / storage idmap 17-op 改用「stub 是否收到完整请求」判据 + ≤3 次重试 + 轮间退避 + 每轮清 stub，断言不降；三处五连跑全绿、workspace 43/1382/0 | —（残留：url_pipeline 无法识别「stub 已收完整请求、回程被掐断」） | `crates/gensokyo-media/src/fetch.rs`、`crates/gensokyo-runtime/src/url_pipeline.rs`、`crates/gensokyo-storage/src/idmap/http_remote.rs`；登记 R4u |
 | ✅ | P81（出站三分界 + 纯码空消息回执） | **已完成（2026-11-15）**：`face`/`node`/`poke`/`group_info`/`json`/未知码与形态不命中的 `markdown`/`keyboard`/`stream`/`input_notify` 按字面保留；`ark`/空 `card` 静默丢弃；`member`/`set_group`/`remove` 仍 1400（P83）；纯码空消息成功回执、不发送 | —（botstats 多记 1 条仍为 P84 观察项） | `crates/gensokyo-protocol/src/outbound.rs`、`crates/gensokyo-runtime/src/deferred.rs`；提交 `b1c25f5` |

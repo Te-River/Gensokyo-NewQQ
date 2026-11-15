@@ -279,6 +279,12 @@ P81 逐码核实 Go 三条出站路径后定界：字面保留 / 静默丢弃 / 
 - **影响**：发布产物 `--version` 与 Go `Get-BuildLdflags` 同形态、可按短 hash 追溯；直接 `cargo build` 仍走 `dev-…` 回退。
 - **测试**：xtask 30 passed、bin 28+4 passed、clippy 0、fmt 0；`cargo xtask build` 产物输出 `gensokyo git-c8206f2`。
 
+### avatar 出站发 qlogo 真图（Rust 侧 P80，2026-11-15）
+
+- **修复**：带 `qq` 的 `[CQ:avatar]` 出站按 Go 段路径/cqparse 口径补齐——协议层把 `qq` 搬进 `OutboundPlan.avatars`（握手经 `to_segments`/`from_segments` 往返），runtime 在 `execute_inner` 判空之前反查 openid 并生成 `https://q.qlogo.cn/qqapp/{app_id}/{openid}/640`，走既有图片链上传；反查失败或 `app_id` 未配置只吞段 + `warn`，不再 1400、不再把 CQ 码字面发给用户。
+- **影响**：avatar 出站可见形态与 Go 段路径一致；无 `qq` 的形态仍按字面保留。已知差异（登记）：`app_id` 未配置时 Go 发坏 URL 换 1500、Rust 吞段；idmap 仅一维反查（Go Pro 二维）；头像图追加在 `plan.images` 末尾、多图混排次序不严格同序。
+- **测试**：protocol 3 例 + runtime 6 例（含真 serde 握手往返 `avatar_becomes_qlogo_image_after_handshake`、反查失败吞段、`app_id` 未配置吞段、与真实图片混排）；全量 **43 suites / 1399 passed / 0 failed**、clippy 零告警、release Finished、fmt 退出码 0。
+
 ### Action 响应信封审计（P86，2026-11-15，审计项）
 
 - **发现**：Go 的 numeric 模式（默认 `string_ob11=false`）响应里 `data.message_id` 是 **int**、`group_id` 为 int64；string 模式为原串 + OpenID；Rust dispatcher 恒回字符串且缺 `group_id`/`user_id`；空回执 `0` vs `"0"`；顶层 `message`/`echo` 缺省省略；键序不同。D1–D9 详见 `reports/refactor/17-go-rust-parity.md` §F。
