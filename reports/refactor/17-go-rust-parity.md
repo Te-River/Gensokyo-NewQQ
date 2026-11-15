@@ -59,7 +59,7 @@
 
 **Action 全集**：Go 53 个唯一注册名（50 canonical + 3 别名）→ Rust **53/53 覆盖，缺失 0**；清单漂移：Rust `KNOWN_ACTIONS` 多 3 个 Go 从未注册的素材管理扩展（upload/get_list/delete_media_image），属 Rust 扩展（Medium，登记）。
 
-**消息链特性矩阵**（对齐=已对齐）：reply/echo ✓；msg_type 0/2/6/7/8 ✓；markdown/keyboard ✓；card 分侧差异登记见 B4 表 P77-1~4（必填校验 / 最终 https / 参数别名 / 单聊路径，两侧行为不同：单聊 card=Rust 扩展、必填与 https=Rust 本地从严、别名=Rust 兼容并集）；本地 pic 上传 ✓ P29a；input_notify ✓；stream/SSE ✓；qqmusic ✓（P29b：查询→markdown+键盘，失败回退分享文案）；forward ✓（保留 node 媒体）；raw ✓；wakeup/active 部分（空内容口径两侧不同：Go 补发 `" "` 唤醒 vs Rust 1400，见 B4 表 P77-5；active 段名严格度见 P77-6）；SSM ✓（仅群入队同 Go）；懒消息/2000/seq ✓；at：AppID→BotID ✓（P15）、add_at_group ✓；auto_escape 刻意差异（Rust 尊重该字段）；array/string_ob11 ✓。
+**消息链特性矩阵**（对齐=已对齐）：reply/echo ✓；msg_type 0/2/6/7/8 ✓；markdown/keyboard ✓；card 分侧差异登记见 B4 表 P77-1~4（必填校验 / 最终 https / 参数别名 / 单聊路径，两侧行为不同：单聊 card=Rust 扩展、必填与 https=Rust 本地从严、别名=Rust 兼容并集）；本地 pic 上传 ✓ P29a；input_notify ✓；stream/SSE ✓；qqmusic ✓（P29b：查询→markdown+键盘，失败回退分享文案）；forward ✓（保留 node 媒体）；raw ✓；wakeup/active 部分（空内容口径两侧不同：Go 补发 `" "` 唤醒 vs Rust 1400，见 B4 表 P77-5；active 段名严格度见 P77-6）；SSM ✓（仅群入队同 Go）；懒消息/2000/seq ✓；at：AppID→BotID ✓（P15）、add_at_group ✓；auto_escape 刻意差异（Rust 尊重该字段）；array ✓；**string_ob11 仅参数/入站侧对齐，响应侧未对齐**（P86 审计：`message_id` 数值/字符串形态、`group_id`/`user_id` 缺失、空回执、顶层字段与键序，见 §F）。
 
 **媒体链**：local/url/base64 四类 ✓；多媒体段拆分 ✓（P1）；**>5MB 分片上传 ✓（P29a）**；**silk 转码/图片压缩 ✓（P29a）**；素材链 oss_type=7 ✓；图床 provider 4~10 ✓（P7）；图床上传重试 ✓（P7）；**card 本地 pic_url ✓（P29a）**；markdown 内嵌图替换 ✓；unknown_* 透传 ✓（仅非空值；裸码 `file`/`url` 皆空时按 Go 原位保留字面、不产 `Unknown("")` 空 `file_info`，P59）；qqmusic ✓（P29b：真实 markdown+键盘）。
 
@@ -144,5 +144,23 @@ P36 是「库 / 函数已落地、生产调用点未接」的收口波次。A �
 | 5 | 存量短码导入（impact 评审） | Go 短码在 `gensokyo.db` bbolt bucket `shortURLs`；Rust 用独立 `short-urls.redb` | 复用既有 bbolt 读取通路 | **缺口（不迁移）**：仓内唯一的导入通路是 G1 `legacy-export` 的 idmap JSONL（`importer/mod.rs` 明确「不读 bbolt」，`kind` 表里没有短链行）；Go 侧 `legacy-export` 也**不导出** `shortURLs`（全仓 grep 仅 `url/shorturl.go` 命中该 bucket）。按边界不为它新写 bbolt 解析器或加依赖——**老短码不迁移，需重新生成** |
 | 6 | 短链 token 校验自指 bug | Go `isValidToken`（`shorturl.go:303-324`）比较 `hex(HMAC(pwd, token)) == token` | 保持 Go 实际行为 | **已照抄**：`http_api::is_valid_token`（实现随 P36 接线迁到 `runtime/http_api.rs`），`lotus_password` 非空时创建一律 400（Go 客户端送的是 `HMAC(pwd, 长链)`，两端口径从来不一致）。修复要两端同时改，不在 P36 |
 | 7 | `cleanupDuplicateSettings` | Go `config.go:717-792` 在 `LoadConfig` 早期删重复 `settings:`、补缺失顶层键 | 配置载入前清洗 | **已移植（P43；P45 收口评审 1C/2M/3m；P46 复评 2 条非阻断建议收口）**：`loader::cleanup_duplicate_settings` 逐行对齐四步（`\r\n`/`\r`→`\n`；第二个**列 0** 的 `settings:` 起整段截断；首个内容行（跳过空行 / 注释 / 文档标记 `---`·`...` / null 标量）既不是 `settings:` 也不以 `version:` 开头时重建 `version: 1` + `settings:` 外壳、其余行只整体 `"  "+line.trim_end()`（**保留行内相对缩进**）、注释原样、空行与文档标记丢弃）。`loader::load` 读盘后清洗、**内容有变化才原子写回**并 `tracing::warn!` 一次（写失败只 warn、继续用内存结果，Go `config.go:61-64` 同样 `_ = os.WriteFile`）。`startup::load_config` 在 `ensure_config_complete` **之前**跑同一个 `cleanup_config_file`，故「重复 settings + 缺键」一次启动内都修好。**与 Go 的差异（登记）**：① 写回走 `loader::write_atomic`（同目录 `config.yml.<pid>.tmp` → rename，rename 前搬权限位；加载期清洗、`complete.rs` 补键、`template.rs` 首启生成三处共用同一份，全仓只有这一份 temp + rename），Go 是原地 `os.WriteFile`——换来「写一半不留半截配置」；② BOM 先剥开再原样接回，Go 会把 `\ufeff` 当内容行触发重建；③ Go 只比长度决定写回，这里比内容（长度相同但内容不同的清洗也会落盘）；④ 告警走 `warn_early`（`logging::init` 之前直接写 stderr，之后交 `tracing`）而非 `fmt.Printf`——早期三条路径（模板生成 / 清洗 / 补键）的告警在生产上不再被丢弃（P46）；⑤ 重建时 `settings:` **无条件**补——Go 只在全文没有任何 `settings:` 行时才补，`settings:` 掉在正文后面的形态（`port: "1"\nsettings:`）它会省掉外壳又不保留该行，写出 `version: 1\n  port: "1"` 这种非法 YAML；这里以「写回的文件必须仍可解析」优先；⑥ **重建只整体 +2、保留行内相对缩进**（Go `config.go:782-784` 用 `TrimSpace`，多级结构被拍平——`cos:` 的 `secret_id` / `bucket` 静默丢失）；⑦ **列 0 的文档标记 `---` / `...` 与 null 标量不当内容**（Go 会把 `---\nversion: 1` 判成结构损坏，重建出 `settings:\n  ---\n  port: …` 这种非法 YAML，进程起不来；块标量内容按 YAML 规则必缩进，缩进的 `---` 列号不为 0，重建时原样保留——P46 更正此前"会丢掉块标量内 `---`"的表述）；⑧ **截断只认列 0 的 `settings:`**（Go 的 `TrimSpace` 口径会被正文里缩进的 `settings:` 键骗到，把后面整段截掉）；⑨ **写回前先 `parse_str` 自检**——清洗结果解析不了就放弃写回（原文可解析则退回原文并 warn），Go 无条件写。**与 P40 守护的交互**：`NoSettings` 分支只覆盖清洗修不出的形态（`settings: null` / 流式映射 / 裸 `version: 1`）；「settings 正文」现在先被清洗重建成带 `settings:` 外壳，补键照常生效，P36 定的「正文形态不改文件」随之作废 |
+
+## F. Action 响应信封（P86 审计，2026-11-15）
+
+P81 收口空消息回执时发现响应形态疑点，专项审计（黑板 `p86-action-response/01-researcher-findings.md`）确认**响应侧未对齐**；以下 D1–D9 为双仓锚点结论，修复拆 P86a/P86b/P86c。
+
+| # | 场景 | Go | Rust 现状 | 裁决 |
+|---|---|---|---|---|
+| D1 | 群发送成功 / numeric（默认 `string_ob11=false`） | `data.message_id` 为 int（`handlers/message_parser.go:324`，echo 虚拟行号）+ `group_id` int64（`:380`） | `data.message_id` 为 String（`dispatcher.rs:260`）、无 `group_id` | **对齐（P86a/b）**：numeric 用 `echo.store_cache_in_memory` 的 i64 行号（禁止伪造 0）；补 `group_id` |
+| D2 | 群发送成功 / string | `data.message_id` 为上游原串 + `group_id` 为 OpenID 串（`:419/:426`） | 串形态对、缺 `group_id` | **对齐（P86b）** |
+| D3 | 私聊成功（两模式） | `SendC2CResponse` 恒数字（`:593`）+ `user_id`（`:606`） | 字符串、无 `user_id` | **对齐（P86a/b）** |
+| D4 | 空消息回执（群） | `data.message_id = 0`（int，`:375`，两模式皆数字） | `"0"`（字符串） | **对齐（P86a）** |
+| D5 | 空消息（私聊） | **无回执**（`handlers/send_private_msg.go:490`/`:780`） | 有成功回执 | **刻意分侧**：Rust 保持回执（不响应会让客户端超时），登记 |
+| D6 | 顶层字段 | `message` 恒在、`echo` 恒在（null） | None 时省略 | **对齐（P86b）** |
+| D7 | 发送失败 | 恒 `retcode 0 / status ok`（`message_parser.go:386-387`） | 1400/1500 failed | **刻意分侧**：生产级要求失败可见，登记 |
+| D8 | 参数非法 | 无回执（`send_group_msg.go:129-133`） | 1400 | **刻意分侧**：保持 1400，登记 |
+| D9 | 键序 | `map` 字母序（`wsclient/ws.go:47-71`） | 结构体声明序（`action.rs:69-90`） | **对齐（P86b）**：响应按字母序序列化 |
+
+> 结论：D1–D4、D6、D9 是正常路径的**硬性外部 JSON 差异**，必须修（P86a→P86b）；D5/D7/D8 为 Go 的错误路径怪癖，Rust 保留更安全行为并登记为刻意分侧。
 
 （本文由三分域审计汇总；A/B/C/D 表与 §E 状态已按 R4k 波次回写，时点见 `docs/rust-m0.md`。）

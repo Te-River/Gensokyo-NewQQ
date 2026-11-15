@@ -265,6 +265,26 @@ P74 双仓核实发现：Go 默认 `cq_parse_mode=legacy` 下，`[CQ:music]` 只
 - **影响**：仅测试代码；本机安全软件间歇掐环回导致的假红不再污染门禁。
 - **测试**：三处各五连跑全绿；三 crate 822 passed；workspace **43 suites / 1382 passed / 0 failed**。
 
+### 出站不可消费段三分界与纯码空消息回执（Rust 侧 P81，2026-11-15）
+
+P81 逐码核实 Go 三条出站路径后定界：字面保留 / 静默丢弃 / 仍 1400。
+
+- **修复**：`from_segments` 改为三分界——`face`/`node`/`poke`/`group_info`/`json`/未知码按原文写回正文；`ark` 与空 `[CQ:card]` 静默丢弃；空或非法 `markdown`/`keyboard`/`stream`/`input_notify` 按字面保留（payload 接受形态收紧为 `base64://` 或 JSON，对齐 Go 正则）；`member`/`set_group`/`remove` 仍 1400（Go 真执行、Rust 未实现，P83）。`execute_inner` 新增纯码空消息出口：正文空且无内容时直接成功回执、不调 QQ API（对齐 `handlers/send_group_msg.go:557-562`）。
+- **影响**：含 `[CQ:face]` 等无消费点码的消息不再整条 1400，改为按字面发出；空 `[CQ:card]`/`[CQ:ark]` 静默消失；纯码消息回执的 `message_id` 类型修正另见 P86。
+- **测试**：协议 5 例 + runtime 3 例（含 `literal_segments_round_trip_byte_for_byte` 幂等、`empty_pure_code_message_acks_without_sending`）；全量 **43 suites / 1391 passed / 0 failed**、clippy 零告警、release Finished、fmt 退出码 0。
+
+### 构建版本串注入（P85，2026-11-15）
+
+- **修改**：`cargo xtask build` 给 cargo 子进程注入 `GENSOKYO_BUILD_VERSION`——git 时 `git-<7 位短 hash>`、否则 `dev-<epoch>.<ms>`，同名环境变量优先；`version.rs` 文档与 `build.ps1` 注释同步。
+- **影响**：发布产物 `--version` 与 Go `Get-BuildLdflags` 同形态、可按短 hash 追溯；直接 `cargo build` 仍走 `dev-…` 回退。
+- **测试**：xtask 30 passed、bin 28+4 passed、clippy 0、fmt 0；`cargo xtask build` 产物输出 `gensokyo git-c8206f2`。
+
+### Action 响应信封审计（P86，2026-11-15，审计项）
+
+- **发现**：Go 的 numeric 模式（默认 `string_ob11=false`）响应里 `data.message_id` 是 **int**、`group_id` 为 int64；string 模式为原串 + OpenID；Rust dispatcher 恒回字符串且缺 `group_id`/`user_id`；空回执 `0` vs `"0"`；顶层 `message`/`echo` 缺省省略；键序不同。D1–D9 详见 `reports/refactor/17-go-rust-parity.md` §F。
+- **裁决**：D1–D4、D6、D9 是正常路径硬性差异，必须修（P86a→P86b）；D5（私聊空消息 Go 无回执）/D7（Go 失败恒 ok）/D8（Go 参数错无回执）保留 Rust 更安全行为，登记为刻意分侧。
+- **状态**：修复待 P80 落地后开始（同改 `dispatcher`/`deferred`）。
+
 ---
 
 ## 📝 工程与文档变更

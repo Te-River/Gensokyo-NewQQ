@@ -158,7 +158,7 @@ gcc --version                                                     # 确认链接
 
 | 门禁 | 基线（旧机 HEAD `69afb8d` 时点实测） |
 |------|----------------------------------------|
-| `cargo test --workspace --no-fail-fast` | **43 suites / 1382 passed / 0 failed**（2026-11-14 P79+P82 后实测；数字随新增用例增长，以命令输出为准） |
+| `cargo test --workspace --no-fail-fast` | **43 suites / 1391 passed / 0 failed**（2026-11-15 P81+P85 后实测；数字随新增用例增长，以命令输出为准） |
 | `cargo clippy --workspace --all-targets -- -D warnings` | **零告警** |
 | `cargo fmt --all -- --check` | **退出码 0** |
 
