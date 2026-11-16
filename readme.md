@@ -63,11 +63,11 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 
 实现插件开发和用户开发者无需重新开发，**复用过往生态的插件和使用体验**。
 
-原版交流群：**196173384**
+交流群：**196173384**
 
 ## 快速开始
 
-1. 前往 [Releases](https://github.com/hoshinonyaruko/gensokyo/releases) 下载对应系统的二进制文件
+1. 前往 [Releases](https://github.com/Te-River/Gensokyo-NewQQ) 下载对应系统的二进制文件
 2. 参考[开始使用](/docs/开始使用.md) 创建机器人并配置
 3. 启动 gensokyo，连接你的 OneBot V11 客户端
 
