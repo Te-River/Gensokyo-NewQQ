@@ -974,6 +974,7 @@ func applyPrivateMarkdownKeyboard(gm *dto.MessageToCreate, foundItems map[string
 		}
 		if kb != nil {
 			ResolvePlaceholderUserIDs(kb, idmap.ResolveOriginalID(userOpenID))
+			NormalizeC2CKeyboardPermission(kb)
 			ResolveKeyboardImages(kb, apiv2)
 		}
 		if md != nil {
@@ -989,6 +990,7 @@ func applyPrivateMarkdownKeyboard(gm *dto.MessageToCreate, foundItems map[string
 			kb, err := parseKeyboardData([]byte(kbItems[0]))
 			if err == nil && kb != nil {
 				ResolvePlaceholderUserIDs(kb, idmap.ResolveOriginalID(userOpenID))
+				NormalizeC2CKeyboardPermission(kb)
 				ResolveKeyboardImages(kb, apiv2)
 				gm.Keyboard = kb
 				delete(foundItems, "keyboard")

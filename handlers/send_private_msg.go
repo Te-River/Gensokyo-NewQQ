@@ -511,9 +511,10 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			                     }
 			                     if kb != nil {
 			                      // 替换 keyboard 中 __USER_ID__ 占位符为实际用户 OpenID，
-			                      // 并将 C2C 不支持的 permission.type=0 转为 type=2（所有人）
+			                      // 并把 C2C 不支持的 permission.type（0/1/3）统一归一为 type=2（所有人）
 			                      userOpenID := idmap.ResolveOriginalID(UserID)
 			                      ResolvePlaceholderUserIDs(kb, userOpenID)
+			                      NormalizeC2CKeyboardPermission(kb)
 			                      ResolveKeyboardImages(kb, apiv2)
 			                     }
 			         if md != nil {
@@ -538,9 +539,11 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			          if err != nil || kb == nil {
 			           mylog.Printf("[CQ:keyboard] 解析键盘数据失败: %v", err)
 			          } else {
-			           // 替换 keyboard 中 __USER_ID__ 占位符为实际用户 OpenID
+			           // 替换 keyboard 中 __USER_ID__ 占位符为实际用户 OpenID，
+			           // 并把 C2C 不支持的 permission.type 统一归一为 type=2（所有人）
 			           userOpenID := idmap.ResolveOriginalID(UserID)
 			           ResolvePlaceholderUserIDs(kb, userOpenID)
+			           NormalizeC2CKeyboardPermission(kb)
 			           // 处理 keyboard 按钮中的本地图片路径
 			           ResolveKeyboardImages(kb, apiv2)
 			           groupMessage.Keyboard = kb
@@ -633,9 +636,11 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 						         if err != nil || kb == nil {
 						          mylog.Printf("[CQ:keyboard] 解析键盘数据失败: %v", err)
 						         } else {
-						          // 替换 keyboard 中 __USER_ID__ 占位符为实际用户 OpenID
+						          // 替换 keyboard 中 __USER_ID__ 占位符为实际用户 OpenID，
+						          // 并把 C2C 不支持的 permission.type 统一归一为 type=2（所有人）
 						          userOpenID := idmap.ResolveOriginalID(UserID)
 						          ResolvePlaceholderUserIDs(kb, userOpenID)
+						          NormalizeC2CKeyboardPermission(kb)
 						          ResolveKeyboardImages(kb, apiv2)
 						          groupMessage.Keyboard = kb
 						          delete(foundItems, "keyboard")

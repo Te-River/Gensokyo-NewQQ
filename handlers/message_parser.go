@@ -2757,6 +2757,7 @@ func ResolveKeyboardVirtualIDs(kb *keyboard.MessageKeyboard) {
 
 // ResolvePlaceholderUserIDs 将 keyboard 中 specify_user_ids 的 __USER_ID__
 // 占位符替换为实际的用户 OpenID，确保 QQ API 能正确识别权限用户。
+// 群聊/私聊共用，只替换占位符，不改动 permission.type（私聊归一化见 NormalizeC2CKeyboardPermission）。
 func ResolvePlaceholderUserIDs(kb *keyboard.MessageKeyboard, realUserOpenID string) {
 	if kb == nil || kb.Content == nil || realUserOpenID == "" {
 		return
@@ -2774,10 +2775,27 @@ func ResolvePlaceholderUserIDs(kb *keyboard.MessageKeyboard, realUserOpenID stri
 					btn.Action.Permission.SpecifyUserIDs[i] = realUserOpenID
 				}
 			}
-			// C2C 单聊场景下 QQ 不支持 permission.type=0（指定用户），
-			// 将 specify_user_ids 有值且 permission.type=0 改为 type=2（所有人）
-			if len(btn.Action.Permission.SpecifyUserIDs) > 0 && btn.Action.Permission.Type == 0 {
-				btn.Action.Permission.Type = 2
+		}
+	}
+}
+
+// NormalizeC2CKeyboardPermission 将 C2C 单聊 keyboard 的按钮权限统一归一为 type=2（所有人）。
+// QQ 官方 C2C 场景只支持 type=2：type=0（指定用户）/1（仅管理者）/3（指定身份组）下点击都会被服务端拒绝；
+// 单聊只有对话双方，权限限制没有意义。specify_user_ids / specify_role_ids 原样保留，不影响 C2C 下发。
+func NormalizeC2CKeyboardPermission(kb *keyboard.MessageKeyboard) {
+	if kb == nil || kb.Content == nil {
+		return
+	}
+	for _, row := range kb.Content.Rows {
+		if row == nil {
+			continue
+		}
+		for _, btn := range row.Buttons {
+			if btn == nil || btn.Action == nil || btn.Action.Permission == nil {
+				continue
+			}
+			if btn.Action.Permission.Type != keyboard.PermissionTypAll {
+				btn.Action.Permission.Type = keyboard.PermissionTypAll
 			}
 		}
 	}

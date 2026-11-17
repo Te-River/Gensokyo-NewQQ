@@ -2256,10 +2256,12 @@ if isPrivateOrLoopback("https://" + recordURLs[0]) {
 			return nil
 		}
 
-		// 替换 keyboard 中 __USER_ID__ 占位符为实际用户 OpenID
+		// 替换 keyboard 中 __USER_ID__ 占位符为实际用户 OpenID；
+		// 本函数只构造 C2C 单聊消息，按钮权限同步归一为 type=2（所有人）
 		if keyboard != nil {
 			userOpenID := idmap.ResolveOriginalID(userid)
 			ResolvePlaceholderUserIDs(keyboard, userOpenID)
+			NormalizeC2CKeyboardPermission(keyboard)
 		}
 
 		// 将 markdown 内容中的 CQ at 码转换为 QQ @ 语法

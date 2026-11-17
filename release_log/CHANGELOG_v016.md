@@ -55,6 +55,15 @@
 
 ## 🐛 修复
 
+### 私聊 keyboard 按钮权限全类型归一化（`type=1`/`3` 与空名单同样是死按钮）+ 群聊合法 `permission.type` 不再误转
+
+C2C 单聊只支持按钮 `permission.type=2`（所有人）：此前的兜底只处理「`specify_user_ids` 非空且 `type=0`」，插件带 `type=1`（仅管理者）、`type=3`（指定身份组）或不带名单的 `type=0` 时按钮依旧点不动；且该兜底写在群聊、私聊共用的 `ResolvePlaceholderUserIDs` 内，群聊里合法的 `type=0` 名单也被误转成 `type=2`，破坏群权限控制：
+
+- **修改**：`handlers/message_parser.go` 拆分职责——`ResolvePlaceholderUserIDs` 只替换 `specify_user_ids` 中的 `__USER_ID__` 占位符（群聊、私聊共用，不再改动 `permission.type`）；新增 C2C 专用 `NormalizeC2CKeyboardPermission`，遍历全部按钮，`permission.type != 2` 一律置 2（`specify_user_ids` / `specify_role_ids` 原样保留）
+- **修改**：私聊每条构造路径都调用两者——`handlers/send_private_msg.go` 三处（markdown 内嵌、独立 `[CQ:keyboard]`、foundItems 循环）、`handlers/outbound_bridge.go` 两处（`applyPrivateMarkdownKeyboard`）、`handlers/send_group_msg.go` 中 `generatePrivateMessage` 的 markdown 分支（`send_private_msg_wakeup` 等私聊路径共用，此前漏归一）
+- **影响**：私聊任何非 2 类型按钮统一归一为 2，点击不再提示"无权限操作"；群聊保留插件原始 `permission.type`（`type=0` 指定用户名单照旧生效），群、私聊各自符合 QQ 能力边界
+- **测试**：新增 `handlers/keyboard_permission_test.go`——`type=0`（带名单 / 空名单）、`type=1`、`type=2`、`type=3` 归一表驱动；占位符解析不改 `permission.type`；私聊 markdown 内嵌（`type=3`）与独立 `[CQ:keyboard]`（`type=1`）出站断言 `type=2`；`generatePrivateMessage` 私聊分支；群聊 legacy（`HandleSendGroupMsg`）与新链（`SendFoundItemsGroup`）均断言 `type=0` + 名单保留
+
 ### 官方口径再对齐（2026-10-19）
 
 按 QQ 官方现文档核对三处口径，均不影响对外契约：
