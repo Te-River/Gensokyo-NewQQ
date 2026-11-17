@@ -10,8 +10,8 @@
 use serde::de::Error as _;
 
 use crate::settings::Settings;
-/// 需要重启进程才生效的 YAML tag（Go `restartRequiredFields`，34 项）。
-pub const RESTART_REQUIRED_TAGS: [&str; 34] = [
+/// 需要重启进程才生效的 YAML tag（Go `restartRequiredFields`，36 项）。
+pub const RESTART_REQUIRED_TAGS: [&str; 36] = [
     "ws_address",
     "ws_token",
     "reconnect_times",
@@ -47,6 +47,9 @@ pub const RESTART_REQUIRED_TAGS: [&str; 34] = [
     "server_user_password",
     "title",
     "cq_parse_mode",
+    // 自定义数据库位置：Setup 只在启动时跑一次，热改必须重启
+    "custom_db_enabled",
+    "custom_db_path",
 ];
 
 /// 该 YAML tag 是否属于"重启后生效"的配置项。
@@ -107,11 +110,13 @@ mod tests {
 
     #[test]
     fn restart_table_matches_go_source() {
-        // 与 `config/config.go:38-48` 的 34 项逐一对齐（顺序也保持一致）
-        assert_eq!(RESTART_REQUIRED_TAGS.len(), 34);
+        // 与 `config/config.go:38-48` 的 36 项逐一对齐（顺序也保持一致）
+        assert_eq!(RESTART_REQUIRED_TAGS.len(), 36);
         assert!(is_restart_required("port"));
         assert!(is_restart_required("server_user_name"));
         assert!(is_restart_required("cq_parse_mode"));
+        assert!(is_restart_required("custom_db_enabled"));
+        assert!(is_restart_required("custom_db_path"));
         assert!(!is_restart_required("bind_prefix"));
         assert!(!is_restart_required("server_user_passwordx"));
     }

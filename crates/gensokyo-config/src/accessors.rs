@@ -427,6 +427,20 @@ impl Settings {
         &self.password
     }
 
+    // ---- 数据库位置类 ----
+
+    /// 是否启用自定义数据库位置（Go `GetCustomDbEnabled`）。
+    #[must_use]
+    pub fn get_custom_db_enabled(&self) -> bool {
+        self.custom_db_enabled
+    }
+
+    /// 自定义数据库目录（Go `GetCustomDbPath`）。
+    #[must_use]
+    pub fn get_custom_db_path(&self) -> &str {
+        &self.custom_db_path
+    }
+
     // ---- 指令魔法类 ----
 
     #[must_use]

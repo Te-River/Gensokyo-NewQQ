@@ -34,6 +34,7 @@ use gensokyo_qq::{HttpTransport, OpenApiClient, TokenConfig, TokenManager};
 use gensokyo_runtime::{
     AppState, DEFAULT_SHUTDOWN_TIMEOUT, Runtime, RuntimeHandle, RuntimeOptions,
 };
+use gensokyo_storage::db_location::{self, DbLocationError};
 use gensokyo_storage::idmap::{DEFAULT_IDENTITY_PATH, DEFAULT_MSG_PATH};
 use gensokyo_storage::{
     IdMapOptions, IdMapStore, ImportError, ImportOptions, ImportReport, importer,
@@ -66,6 +67,9 @@ pub enum StartupError {
     /// idmap JSONL 导入失败（`import-idmap` 子命令）。
     #[error(transparent)]
     Import(#[from] ImportError),
+    /// 自定义数据库位置不可用（路径非法 / 不可达 / 迁移冲突 / 校验失败）。
+    #[error("自定义数据库位置启用失败,拒绝启动(绝不回退本地,以免本地与目标两侧数据分叉): {0}")]
+    DbLocation(#[from] DbLocationError),
 }
 
 /// 加载后的配置。
@@ -305,9 +309,22 @@ pub fn address_lines(started: &Started) -> Vec<String> {
 /// 配置加载、打开库或导入失败时返回 [`StartupError`]。
 pub fn import_idmap(file: &Path, options: &ImportOptions) -> Result<ImportReport, StartupError> {
     let loaded = load_config(CONFIG_FILE)?;
+    apply_db_location(&loaded.config.snapshot())?;
     let store =
         IdMapStore::open(idmap_options(&loaded.config.snapshot())).map_err(ImportError::Storage)?;
     Ok(importer::import_file(&store, file, options)?)
+}
+
+/// 应用自定义数据库位置（Go `main.go:167-169` 的 `dblocation.Setup`）。
+///
+/// 必须在任何 storage 打开之前调用：启动期最早打开库的是 [`auto_import_idmap`]，所以
+/// [`serve`] 在 `logging::init` 之后、自动导入之前调用本函数；失败即拒绝启动。
+fn apply_db_location(settings: &Settings) -> Result<(), StartupError> {
+    db_location::setup(
+        settings.get_custom_db_enabled(),
+        settings.get_custom_db_path(),
+    )?;
+    Ok(())
 }
 
 /// 导入结果的单行摘要（`import-idmap` 的打印与启动期自动导入的 info 日志共用）。
@@ -339,9 +356,12 @@ pub fn report_line(report: &ImportReport) -> String {
 /// 与 `gensokyo_runtime::boot::idmap_options`（私有）**必须逐字段一致**：自动导入要在
 /// `Runtime::start` 的 `attach_idmap` 之前先打开同一对库文件，两处都只读同一份 `config.yml`。
 fn idmap_options(settings: &Settings) -> IdMapOptions {
-    let mut options = IdMapOptions::new(DEFAULT_IDENTITY_PATH, DEFAULT_MSG_PATH)
-        .with_app_id(settings.get_app_id().to_string())
-        .with_hash_id(settings.get_hash_id());
+    let mut options = IdMapOptions::new(
+        db_location::resolve_file(DEFAULT_IDENTITY_PATH),
+        db_location::resolve_file(DEFAULT_MSG_PATH),
+    )
+    .with_app_id(settings.get_app_id().to_string())
+    .with_hash_id(settings.get_hash_id());
     if settings.get_idmap_isolation() {
         options = options.with_uin(settings.get_uin().to_string());
     }
@@ -402,6 +422,9 @@ pub async fn serve(faststart: bool, auto_import: bool) -> Result<(), StartupErro
     let loaded = load_config(CONFIG_FILE)?;
     // 日志级别来自 config.yml，所以要在配置加载之后初始化；`RUST_LOG` 优先。
     logging::init(loaded.config.snapshot().get_log_level());
+    // Go `main.go:167-169`：配置加载后、任何数据库打开前（启动期最早打开库的是下面的
+    // 自动导入），先完成自定义数据库位置的解析 / 探测 / 迁移裁决。
+    apply_db_location(&loaded.config.snapshot())?;
     if loaded.created {
         tracing::info!(path = CONFIG_FILE, "config.yml 不存在，已按模板生成");
     }

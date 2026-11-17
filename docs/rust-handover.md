@@ -66,6 +66,7 @@
 | | QR 图条**先发**、无 reply、`msg_type=7`；`depth` 防递归重入 | parity `:50`；`crates/gensokyo-runtime/src/deferred.rs:356` |
 | 重试分类 | `22009`→SSM 入队；`40034025`→清空 `event_id` 重发一次；超时重试 3 次、`attempt×1s`；`40034026` 是 Go 死码**不移植** | parity `:84` |
 | 短链 | 本地 / lotus 双 mint；`POST /url` + `GET /url/:shortURL`（301/404） | parity `:126`；`boot.rs::attach_short_url` |
+| 数据库位置 | 自定义数据库位置（Go `dblocation/` 移植）：`custom_db_enabled`/`custom_db_path` 下只覆盖 idmap 族（`openid-map.redb`/`msgid-map.redb`）；启动期解析 → 目录可写 + redb 锁探针 → 四裁决迁移（冲突 / 已迁移 / 复制校验后 `.bak.<时间戳>` / 全新），任何失败**拒绝启动、不回退本地**；`smb://` 等协议 URL 拒绝（预留扩展缝）；开关关闭零行为变化 | `crates/gensokyo-storage/src/db_location.rs`；挂接 `boot.rs::start_with`、`startup.rs::serve`（自动导入前） |
 
 ## 4. 构建与验证（接手第一件事）
 
@@ -101,6 +102,7 @@
 | gRPC 两个 Update RPC | 错误码由 `Unimplemented` 变为 `NotFound` / `AlreadyExists` | 调用方按新码判分支 | `docs/rust-build.md:237-238` |
 | lotus 远程模式 | 启动建连失败只 warn 降级本地（Go 是 panic）；成功后远端不可达**无自动切回** | 人工介入或重启；`lotus=true` 时主 listener 用 `backup_port` | `docs/rust-build.md:239-244` |
 | 配置写回 | 加载期清洗 / 补键 / 首启模板三处共用**原子写**（`config.yml.<pid>.tmp` → rename），不会写一半留半截；写回前先自检可解析 | 备份策略按普通配置文件处理即可；不要手工制造「两个 `settings:`」验证 | parity `:132` |
+| 自定义数据库位置 + 网络盘 | 网络文件系统（NFS/SMB/挂载盘）的锁语义**无官方保证**：探针能发现明显失效，但多进程并发仍会损坏库文件 | 按**单实例**使用、用户自担风险；改 `custom_db_path` 后必须重启（重启项），冲突 / 校验失败会**拒绝启动**，此时按日志手工保留一份再重启 | `crates/gensokyo-storage/src/db_location.rs`；Go 同口径（etcd-io/bbolt issue #257） |
 
 ## 6. 已知缺口与有意差异（「不要当成 bug」清单）
 

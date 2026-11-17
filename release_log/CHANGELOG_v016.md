@@ -137,9 +137,28 @@ Go 在每条 C2C 私信末尾把好友写进 idmap 的 `UserInfo` 桶（`Process
 - **影响**：**动作在发送前执行、失败不回滚已执行的动作**——多码按到达顺序串行，任一条 L2 失败 / 上游失败时以第一个错误作为整条结果（`1400`/`1500`），**正文整条丢弃**（`crates/gensokyo-runtime/src/deferred.rs:303` 的 `?`）；这与 Go「吞码但正文照发」不同，属刻意差异。**默认 `legacy` 下正文里夹带的管理码会被真执行**：转发、复读或未转义的用户输入只要含 `[CQ:set_group,action=kick,…]` / `[CQ:remove,…]` 就会真踢人 / 禁言 / 撤回——插件须对不可信文本转义，或把 `cq_admin_actions` 设为 `off`（整条拒绝）。其余登记差异：私聊 member/set_group 留字面（Go 私聊不消费）；反查失败 / 上游失败大声拒绝（Go 仅日志）
 - **测试**：`crates/gensokyo-runtime/tests/cq_admin.rs` 7 例（入群申请 reason 反转义、上游失败 `1500`、多码保序且中间失败不中断、私聊 `set_group` 留字面、私聊 `remove` 走 C2C、`member add/remove` 身份覆盖）+ 协议单测（三码解析与 L1 留字面 / 吞码、wire 往返、同名参数后者覆盖）；门禁以最终 `cargo test --workspace` 输出为准
 
+### 自定义数据库位置（Rust 侧移植 Go `dblocation/`，2026-11-18）
+
+对齐 Go `dblocation` 包与 `main.go:167-169` 的挂接：idmap 族数据库可在启动时迁到自定义目录，开关关闭时行为零变化。Go 侧第一阶段注册表是 5 个 bbolt 文件（`idmap.db` / `idmap-identity.db` / `idmap-msg.db` / `openid-map.db` / `msgid-map.db`），Rust 侧等价物是 **2 个 redb 文件**：`openid-map.redb`（身份库）/ `msgid-map.redb`（消息库）；botstats / 短链 / union 缓存不进注册表。
+
+- **配置**：新增 `custom_db_enabled`（默认 `false`）/ `custom_db_path`（默认 `""`，空串即未启用），访问器 `get_custom_db_enabled` / `get_custom_db_path`，模板 `templates/config.yml` 照 Go 模板措辞补两键；两项均登记为重启项（`RESTART_REQUIRED_TAGS` 34 → 36，Go `restartRequiredFields` 同步口径）
+- **修改**：新增 `crates/gensokyo-storage/src/db_location.rs`——注册表 `KNOWN_DB_FILES`；`normalize`（相对→工作目录、绝对/UNC 直用、含 `://` 拒绝并预留协议客户端扩展缝）；`probe`（建目录 + 写探针文件 + 一次性 redb 库的锁探针，3 次退避重试，成功即删）；`migrate` 四裁决（目标与本地同在→冲突拒绝启动；目标有→直接用；本地有→复制 + 大小校验 + 只读打开校验 → 本地改名 `.bak.<YYYYMMDD-HHMMSS>`；两边无→全新）；`setup` 进程级一次性、`resolve_file` 作为 idmap 族唯一取路径入口
+- **挂接点**：`gensokyo_runtime::Runtime::start_with` 在 `attach_echo` / `attach_idmap` 之前调用（library 消费者兜底），`gensokyo-bin` 的 `serve` 在 `logging::init` 之后、启动期自动导入 `auto_import_idmap`（最早打开库的一步）之前调用；两处失败都按 Go `Fatalf` 口径**拒绝启动**，绝不静默回退本地。idmap 打开参数（`boot.rs` / `startup.rs` 两份 `idmap_options`）改经 `resolve_file` 取路径
+- **影响**：启用时 WARN 网络文件系统（NFS/SMB/挂载盘）锁语义无官方保证、按单实例自担风险（Go 同口径，引用 etcd-io/bbolt issue #257）；`custom_db_path` 与工作目录相同视为未启用（与 Go 一致）
+- **测试**：`db_location` 单测 12 例（normalize 表驱动含空路径 / `smb://`·`http://`·`https://` 拒绝、探测可写目录 / 可创建子目录 / 目标是文件 / 探针库被锁、四裁决表、校验失败保留本地、工作目录同路径视为未启用、备份名 `YYYYMMDD-HHMMSS`）+ 集成 1 例（开关关闭零变化；开关打开迁移后按 `resolve_file` 打开 idmap 写入读回）；配置侧 fixture/重启项断言同步更新。门禁以最终 `cargo test --workspace` 输出为准
+
 ---
 
 ## 🐛 修复
+
+### 私聊 keyboard 按钮权限全类型归一化（`permission.type` 非 2 一律转 2）
+
+QQ 官方 C2C 单聊只支持按钮 `permission.type=2`（所有人）：`type=0`（指定用户）/ `1`（仅管理者）/ `3`（指定身份组）下点击都会被服务端拒绝并提示"无权限操作"。此前只有「`type=0` 且带非空 `specify_user_ids`」的内嵌键盘路径被改写，私聊其余类型与空名单仍原样下发。
+
+- **参照**：Go 主仓 `255af02`——`handlers/message_parser.go` 新增 `NormalizeC2CKeyboardPermission`（遍历 `content.rows[].buttons[].action.permission`，非 2 全归 2，`specify_user_ids` / `specify_role_ids` 等其余字段原样保留），`ResolvePlaceholderUserIDs` 只管 `__USER_ID__` → 对方 OpenID、不再顺带改权限类型；调用点收敛在私聊路径（`send_private_msg.go:516/545/642`、`outbound_bridge.go:976/992`、`send_group_msg.go:2263-2264` 的 `generatePrivateMessage`，该函数只构造 C2C 消息）
+- **修改（Rust）**：`crates/gensokyo-runtime/src/deferred.rs` 的 `compose_keyboard` 在挂载前对 `SendTarget::Private` 目标做同样归一（缺 `permission` 的按钮跳过，非对象载荷沿用既有 `1400`）；同时补齐 markdown 内嵌键盘的取用——markdown 载荷里的 `keyboard` 优先、独立 `[CQ:keyboard]` 兜底（此前内嵌键盘只读 `content`，实际上被丢弃），群聊目标不做归一
+- **影响**：私聊内嵌 keyboard 与独立 `[CQ:keyboard]` 一律按 `type=2` 下发，按钮不再被服务端拒绝；群聊保留插件原始 `permission.type`、也不解析 `__USER_ID__`（与 Go 群侧现状一致，属已登记差异）
+- **测试**：Go `handlers/keyboard_permission_test.go`；Rust `cargo test -p gensokyo-runtime --lib`（348 passed）与 `--test deferred`（22 passed）——覆盖 type 0（带名单 / 空名单）、1、2、3 五组，内嵌与独立两形态，群聊保持 `type=0` 且 `__USER_ID__` 不解析，`__USER_ID__` 在 C2C 换成对方 OpenID
 
 ### 官方口径再对齐（2026-10-19）
 

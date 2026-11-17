@@ -89,6 +89,8 @@
 //! `1..=800`。
 
 pub mod botstats;
+/// 数据库文件的自定义位置（Go `dblocation/`）：注册表 + 解析 + 探测 + 迁移裁决。
+pub mod db_location;
 mod error;
 pub mod idmap;
 pub mod importer;

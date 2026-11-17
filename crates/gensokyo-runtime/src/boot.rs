@@ -74,6 +74,7 @@ use axum::Router;
 use gensokyo_config::{ConfigWatcher, ReloadOutcome, Settings, WatcherHandle};
 use gensokyo_core::{Error, Result};
 use gensokyo_qq::{ReqwestTransport, TokenConfig, TokenManager};
+use gensokyo_storage::db_location;
 use gensokyo_storage::idmap::grpc::{IdMapService, pb};
 use gensokyo_storage::idmap::http_remote::HttpRemoteBridge;
 use gensokyo_storage::idmap::remote::{IdMapRemoteMode, RemoteBridge, idmap_remote_mode};
@@ -367,6 +368,18 @@ impl Runtime {
     pub async fn start_with(state: AppState, options: RuntimeOptions) -> Result<RuntimeHandle> {
         // 锚定 uptime 起点：Go 在包初始化时记 `mylog.StartTime`，这里贴近进程启动（幂等）。
         gensokyo_core::telemetry::metrics::mark_start();
+        // Go `main.go:167-169`：配置加载后、任何数据库打开前完成 idmap 族路径解析 / 可达性
+        // 探测 / 迁移裁决。失败按 Go `Fatalf` 口径拒绝启动——绝不静默回退本地，避免本地与
+        // 目标两侧数据分叉。
+        let boot_settings = state.config().snapshot();
+        if let Err(err) = db_location::setup(
+            boot_settings.get_custom_db_enabled(),
+            boot_settings.get_custom_db_path(),
+        ) {
+            return Err(Error::Config(format!(
+                "自定义数据库位置启用失败,拒绝启动(绝不回退本地,以免本地与目标两侧数据分叉): {err}"
+            )));
+        }
         let state = Self::attach_echo(state);
         let (state, idmap_remote) = Self::attach_idmap(state);
         let state = Self::attach_botstats(state);
@@ -606,12 +619,15 @@ fn start_gateway(state: &AppState) -> Option<GatewayHandle> {
 /// idmap 的打开参数：AppID 参与 OpenID 的 key、`hash_id` 决定 vUIN 的派生方式、
 /// `idmap_isolation` 开启时带 `uin` 前缀（对齐 Go `uinPrefix`）。
 ///
-/// 路径没有配置项，用 `gensokyo_storage::idmap::DEFAULT_*`——与 Go 一样落在工作目录，
-/// 只是扩展名 / 文件格式不同（redb vs bbolt），见该 crate 的差异清单。
+/// 路径经 [`db_location::resolve_file`] 取：开关关闭时仍是 `DEFAULT_*`（相对工作目录，
+/// 与历史行为一致），启用后是 `custom_db_path` 下的绝对路径（Go `dblocation.Resolve`）。
 fn idmap_options(settings: &Settings) -> IdMapOptions {
-    let mut options = IdMapOptions::new(DEFAULT_IDENTITY_PATH, DEFAULT_MSG_PATH)
-        .with_app_id(settings.get_app_id().to_string())
-        .with_hash_id(settings.get_hash_id());
+    let mut options = IdMapOptions::new(
+        db_location::resolve_file(DEFAULT_IDENTITY_PATH),
+        db_location::resolve_file(DEFAULT_MSG_PATH),
+    )
+    .with_app_id(settings.get_app_id().to_string())
+    .with_hash_id(settings.get_hash_id());
     if settings.get_idmap_isolation() {
         options = options.with_uin(settings.get_uin().to_string());
     }

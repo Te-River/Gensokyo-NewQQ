@@ -1,8 +1,8 @@
 //! `config.yml` 顶层映射。
 //!
-//! 字段类型与 yaml tag **逐字段对照 Go 真源 `structs/structs.go`**：`Settings` 顶层 184 个
+//! 字段类型与 yaml tag **逐字段对照 Go 真源 `structs/structs.go`**：`Settings` 顶层 186 个
 //! tag（第 9~225 行）+ 嵌套类型 13 个 tag（`VisualPrefixConfig` / `ImageHostingCOS` /
-//! `ImageHostingBilibili` / `ImageHostingQQChannel`，第 227~261 行），合计 197 个，M1a 起
+//! `ImageHostingBilibili` / `ImageHostingQQChannel`，第 227~261 行），合计 199 个，M1a 起
 //! 全量对齐。任何字段漏迁或 tag 写错都会被
 //! `tests::fixture_covers_every_settings_field` 的键集比对抓住。
 //!
@@ -253,6 +253,13 @@ pub struct Settings {
         deserialize_with = "de_string_lenient"
     )]
     pub password: String,
+
+    // ---- 数据库位置类 ----
+    /// 是否启用自定义数据库位置（Go `bool`，`custom_db_enabled`）。
+    pub custom_db_enabled: bool,
+    /// 自定义数据库目录（Go `string`，`custom_db_path`）。
+    #[serde(deserialize_with = "de_string_lenient")]
+    pub custom_db_path: String,
 
     // ---- 指令魔法类 ----
     /// 是否移除消息前缀（Go `bool`，`remove_prefix`）。
@@ -897,6 +904,8 @@ log_slow_event_threshold_ms: 500
 disable_webui: true
 server_user_name: admin
 server_user_password: webui-pass
+custom_db_enabled: true
+custom_db_path: D:/gsk-data
 remove_prefix: true
 remove_at: true
 convert_other_at: true
@@ -1232,6 +1241,8 @@ msgid_ttl_seconds: -1_000
         );
         assert_eq!(settings.username, "admin", "server_user_name");
         assert_eq!(settings.password, "webui-pass", "server_user_password");
+        assert!(settings.custom_db_enabled, "custom_db_enabled");
+        assert_eq!(settings.custom_db_path, "D:/gsk-data", "custom_db_path");
         assert_eq!(settings.image_size_limit, 1_048_576, "image_sizelimit");
         assert_eq!(settings.image_limit, 6, "image_limit");
         assert_eq!(
@@ -1401,7 +1412,7 @@ msgid_ttl_seconds: -1_000
         // 185 是 Go `Settings` 的顶层 yaml tag 数；`cq_admin_actions` 是 Rust-only 新增（P83），共 186
         assert_eq!(
             fixture_keys.len(),
-            186,
+            188,
             "Settings 顶层 yaml tag 总数（含 Rust-only）"
         );
         assert_eq!(

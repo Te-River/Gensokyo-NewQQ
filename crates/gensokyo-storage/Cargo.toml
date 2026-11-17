@@ -18,6 +18,8 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+# 迁移备份名的时间戳（Go `time.Now().Format("20060102-150405")`）；已在 workspace 依赖图
+time = { workspace = true, features = ["local-offset"] }
 tonic.workspace = true
 tonic-prost.workspace = true
 prost.workspace = true

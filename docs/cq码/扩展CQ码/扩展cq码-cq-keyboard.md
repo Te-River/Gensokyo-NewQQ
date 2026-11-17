@@ -122,8 +122,8 @@
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `type` | integer | 否 | 0=指定用户, 1=管理员, 2=所有人 |
-| `specify_user_ids` | string[] | 否 | 有权限的用户 id 列表（Gensokyo 自动将数字虚拟 ID 转为 OpenID） |
+| `type` | integer | 否 | 0=指定用户, 1=管理员, 2=所有人, 3=指定身份组。**单聊（C2C）下发前一律归一为 2**（0/1/3 会被服务端拒绝），群聊保留原值 |
+| `specify_user_ids` | string[] | 否 | 有权限的用户 id 列表（Gensokyo 自动将数字虚拟 ID 转为 OpenID）；`__USER_ID__` 占位符在单聊替换为对话对方的 OpenID |
 | `specify_role_ids` | string[] | 否 | 有权限的身份组 id 列表（仅频道可用） |
 
 ### 完整示例（三按钮：指令 + 回调 + 跳转）

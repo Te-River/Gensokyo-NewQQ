@@ -19,7 +19,7 @@
 //! | 图片 / 语音 / 视频 / 文件 | `media` + `msg_type=7` | 见下节「媒体」 |
 //! | `[CQ:avatar,qq=…]` | `media` + `msg_type=7` | 按 Go 段路径 / `cqparse` 口径发真图：`qq` 经 idmap 反查 openid → `https://q.qlogo.cn/qqapp/{app_id}/{openid}/640` → 走普通图片上传链；反查失败、`qq` 非数字/未绑定、或 `app_id` 未配置时**吞段 + `warn`**，不 `1400`（[`resolve_avatars`]）；无 `qq` 的形态由协议层留字面 |
 //! | `[CQ:reply]` | `msg_id` | 虚拟号先经 idmap / echo 还原成真实消息 ID；还原失败 `1400`，不静默丢 |
-//! | `keyboard` | `keyboard` | 与 text / markdown / card 同发，不改变 `msg_type`（Go `applyGroupMarkdownKeyboard` 口径）；`data` 必须是 JSON 对象，否则 `1400` |
+//! | `keyboard` | `keyboard` | markdown 内嵌键盘优先、独立 `[CQ:keyboard]` 兜底，与 text / markdown / card 同发，不改变 `msg_type`（Go `applyGroupMarkdownKeyboard` 口径）；`data` 必须是 JSON 对象，否则 `1400`；C2C 目标额外把 `permission.type` 归一为 2、`__USER_ID__` 换成对方 OpenID（[`compose_keyboard`]） |
 //! | `input_notify` | `input_notify` + `msg_type=6` | 仅单聊；不承载正文 / 媒体，与其它内容同条出现 `1400` |
 //! | `stream` | `stream` + `msg_type=2` | 仅单聊；正文进 `markdown.content`，`stream.state` 取 1（start / mid）/ 10（finish），见 [`compose_stream`] |
 //! | `music` / `qqmusic` | `markdown` + `keyboard` + `msg_type=2` | 取第一首：查 QQ 音乐歌曲详情（Go `FetchSongDetail`，走媒体下载 seam）→ 原生 markdown（封面 `T002R180x180M000{album_mid}.jpg` + 曲名 / 歌手）→ 键盘「立刻播放 / 我也要点歌」（第二个按钮的 `data` 是 `music_prefix` + 空格）；查询失败降级成分享文案并 `warn`（Go 直接丢整条消息） |
@@ -42,6 +42,8 @@
 //! 胜 card」一致。
 //!
 //! `keyboard` 是加性字段，不参与上面的优先级：文本 / markdown / card 谁胜出都照样挂上去；
+//! 单聊目标的键盘挂载前还要按官方 C2C 口径归一（`permission.type` 非 2 → 2、`__USER_ID__`
+//! → 对方 OpenID，见 [`compose_keyboard`]），群聊原样透传插件配置；
 //! 拆条时只挂在首条，后续媒体条不带（Go 只在 markdown 那轮挂键盘，
 //! `send_group_msg.go:831-843`）。`[CQ:reply]` 同样只落在首条（`:659-680`；循环里只在
 //! `key == "markdown"` 时补 reply，`:815`、`send_private_msg.go:625`）。
@@ -187,7 +189,7 @@ use gensokyo_media::{HostingKind, ImageKind, MediaSource, OssKind, sniff_image};
 
 use gensokyo_protocol::cqcode;
 use gensokyo_protocol::event::NoticeEvent;
-use gensokyo_protocol::outbound::{InputNotifyPayload, StreamKind, StreamPayload};
+use gensokyo_protocol::outbound::{InputNotifyPayload, MarkdownPayload, StreamKind, StreamPayload};
 use gensokyo_protocol::{Event, MediaRef, MessageContent, OutboundPlan};
 use gensokyo_qq::dto::message::{MessageCard, MessageCardContent};
 use gensokyo_qq::dto::{
@@ -1139,7 +1141,7 @@ pub async fn compose(
         out.content = None;
         out.msg_type = Some(msg_type::MARKDOWN);
         out.markdown = Some(markdown);
-        out.keyboard = compose_keyboard(&message.plan)?;
+        out.keyboard = compose_keyboard(target, openid, &message.plan)?;
         // 其余媒体各一条 msg_type=7：单条消息只有一个 media 槽，只能拆；音乐同样自成一条
         let mut extras: Vec<MessageToCreate> = music.into_iter().collect();
         extras.extend(compose_media_extras(context, target, openid, &message.plan, deps).await?);
@@ -1150,7 +1152,7 @@ pub async fn compose(
         out.content = None;
         out.msg_type = Some(msg_type::CARD);
         out.card = Some(card);
-        out.keyboard = compose_keyboard(&message.plan)?;
+        out.keyboard = compose_keyboard(target, openid, &message.plan)?;
         // 卡片胜出只改本轮消息体：Go 的 card 分支（`send_group_msg.go:742-783`）之后
         // foundItems 循环照旧把每个媒体段各发一条（`:787-802`）
         let mut extras: Vec<MessageToCreate> = music.into_iter().collect();
@@ -1160,7 +1162,7 @@ pub async fn compose(
     if !rendered.is_empty() {
         out.content = Some(rendered);
     }
-    out.keyboard = compose_keyboard(&message.plan)?;
+    out.keyboard = compose_keyboard(target, openid, &message.plan)?;
     let mut music_bodies = Vec::new();
     if out.content.is_none() {
         // 只有音乐时它自己就是主消息（Go 的 qqmusic 分支：msg_type=2 + 自带键盘）。独立
@@ -1709,22 +1711,96 @@ const STREAM_STATE_CONTINUE: i64 = 1;
 /// 流式消息 `stream.state`：结束（`finish`）。
 const STREAM_STATE_FINISH: i64 = 10;
 
-/// `[CQ:keyboard,data=…]` → `keyboard` 字段（与 text / markdown / card 同条发送）。
+/// `permission.type` 的「所有人」取值：C2C 单聊唯一受支持的按钮权限。
+const KEYBOARD_PERMISSION_ALL: i64 = 2;
+
+/// `specify_user_ids` 里的占位符：出站前换成对话对方的真实 OpenID。
+const KEYBOARD_PLACEHOLDER_USER_ID: &str = "__USER_ID__";
+
+/// markdown 内嵌键盘 / `[CQ:keyboard,data=…]` → `keyboard` 字段（与 text / markdown / card 同条发送）。
 ///
-/// Go `applyGroupMarkdownKeyboard` 只在 markdown 之外单独挂键盘时赋值，且不动 `msg_type`：
-/// 键盘是加性字段，不参与 msg_type 的优先级。`foundItems["keyboard"]` 已是 JSON 串
-/// （协议层把对象 / `base64://` 归一成 JSON），多份只发第一份（与 markdown / card 同口径）。
+/// 取用顺序照 Go（`applyPrivateMarkdownKeyboard` / `applyGroupMarkdownKeyboard`）：markdown
+/// 内嵌的 keyboard 优先，它缺省时才用独立 `[CQ:keyboard]`；两者都不动 `msg_type`（键盘是加性
+/// 字段，不参与 msg_type 的优先级）。`foundItems["keyboard"]` 已是 JSON 串（协议层把对象 /
+/// `base64://` 归一成 JSON），多份只发第一份（与 markdown / card 同口径）。
 /// 非 JSON / 非对象一律 `1400`：Go 那边是静默不挂键盘，Rust 侧不吞用户配置。
-fn compose_keyboard(plan: &OutboundPlan) -> Result<Option<Value>> {
-    let Some(payload) = plan.keyboard.first() else {
-        return Ok(None);
+///
+/// 挂上前先对 **C2C 目标** 归一（Go `NormalizeC2CKeyboardPermission` /
+/// `ResolvePlaceholderUserIDs`）：`__USER_ID__` → 对方 OpenID，`permission.type` 非 2 一律
+/// 置 2（0 指定用户 / 1 仅管理者 / 3 指定身份组在单聊都会被服务端拒绝，单聊只有对话双方，
+/// 权限限制没有意义），`specify_user_ids` 等其余字段原样保留。群聊保留插件原始类型，
+/// 占位符也不解析——与 Go 群侧口径一致（已登记的差异）。
+fn compose_keyboard(
+    target: &SendTarget,
+    openid: &str,
+    plan: &OutboundPlan,
+) -> Result<Option<Value>> {
+    let mut keyboard = match plan.markdown.first().and_then(MarkdownPayload::keyboard) {
+        Some(embedded) if embedded.is_object() => embedded,
+        _ => {
+            let Some(payload) = plan.keyboard.first() else {
+                return Ok(None);
+            };
+            let value: Value = serde_json::from_str(&payload.raw)
+                .map_err(|error| Error::Protocol(format!("keyboard 载荷不是合法 JSON: {error}")))?;
+            if !value.is_object() {
+                return Err(Error::Protocol("keyboard 载荷不是 JSON 对象".to_owned()));
+            }
+            value
+        }
     };
-    let value: Value = serde_json::from_str(&payload.raw)
-        .map_err(|error| Error::Protocol(format!("keyboard 载荷不是合法 JSON: {error}")))?;
-    if !value.is_object() {
-        return Err(Error::Protocol("keyboard 载荷不是 JSON 对象".to_owned()));
+    if matches!(target, SendTarget::Private(_)) {
+        replace_user_id_placeholder(&mut keyboard, openid);
+        normalize_c2c_permission(&mut keyboard);
     }
-    Ok(Some(value))
+    Ok(Some(keyboard))
+}
+
+/// 遍历 keyboard 的 `content.rows[].buttons[]`（缺 `action.permission` 的按钮由调用方跳过）。
+fn keyboard_buttons_mut(keyboard: &mut Value) -> impl Iterator<Item = &mut Value> {
+    keyboard
+        .pointer_mut("/content/rows")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row.get_mut("buttons").and_then(Value::as_array_mut))
+        .flatten()
+}
+
+/// `specify_user_ids` 里的 `__USER_ID__` → 对话对方的真实 OpenID（Go `ResolvePlaceholderUserIDs`）。
+fn replace_user_id_placeholder(keyboard: &mut Value, openid: &str) {
+    if openid.is_empty() {
+        return;
+    }
+    for button in keyboard_buttons_mut(keyboard) {
+        let Some(ids) = button
+            .pointer_mut("/action/permission/specify_user_ids")
+            .and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        for id in ids {
+            if id.as_str() == Some(KEYBOARD_PLACEHOLDER_USER_ID) {
+                *id = Value::String(openid.to_owned());
+            }
+        }
+    }
+}
+
+/// `permission.type` 非 2 一律置 2，其余字段原样保留（Go `NormalizeC2CKeyboardPermission`）。
+fn normalize_c2c_permission(keyboard: &mut Value) {
+    for button in keyboard_buttons_mut(keyboard) {
+        let Some(permission) = button
+            .pointer_mut("/action/permission")
+            .and_then(Value::as_object_mut)
+        else {
+            continue;
+        };
+        // Go 的 `Permission.Type` 缺省即 0（指定用户），与显式 0 同样归一
+        if permission.get("type").and_then(Value::as_i64) != Some(KEYBOARD_PERMISSION_ALL) {
+            permission.insert("type".to_owned(), json!(KEYBOARD_PERMISSION_ALL));
+        }
+    }
 }
 
 /// `[CQ:input_notify]` → `msg_type=6` + `input_notify`（仅单聊）。
@@ -2534,6 +2610,7 @@ mod tests {
     use gensokyo_storage::echo::MessageGroupPair;
     use gensokyo_storage::{EchoStore, IdMapOptions, IdMapStore, UnionCache};
     use serde_json::Value;
+    use serde_json::json;
     use tempfile::TempDir;
 
     use super::{
@@ -3874,6 +3951,62 @@ mod tests {
         }
     }
 
+    /// 单行单按钮的独立 `[CQ:keyboard]`：`permission.type` 与 `specify_user_ids` 可参数化。
+    fn permission_keyboard(permission_type: i64, user_ids: &[&str]) -> OutboundPlan {
+        keyboard_plan(
+            &json!({
+            "content": {"rows": [{
+                "buttons": [{
+                    "render_data": {"label": "确认", "visited_label": "确认", "style": 1},
+                    "action": {
+                        "type": 2,
+                        "permission": {"type": permission_type, "specify_user_ids": user_ids},
+                        "data": "confirm"
+                    }
+                }]
+            }]}})
+            .to_string(),
+        )
+    }
+
+    /// markdown 载荷内嵌 keyboard（qbind 等插件的真实形态）：`content` 与 `keyboard` 同层。
+    fn markdown_with_keyboard(permission_type: i64, user_ids: &[&str]) -> OutboundPlan {
+        OutboundPlan {
+            markdown: vec![
+                MarkdownPayload::from_json(
+                    &json!({
+                        "content": "### 确认绑定",
+                        "keyboard": {"content": {"rows": [{
+                            "buttons": [{
+                                "render_data": {"label": "确认", "visited_label": "确认", "style": 1},
+                                "action": {
+                                    "type": 2,
+                                    "permission": {"type": permission_type, "specify_user_ids": user_ids},
+                                    "data": "confirm"
+                                }
+                            }]
+                        }]}}
+                    })
+                    .to_string(),
+                )
+                .expect("markdown 载荷"),
+            ],
+            ..OutboundPlan::default()
+        }
+    }
+
+    /// 取发出去那条消息第一个按钮的 `action.permission`。
+    fn sent_permission(api: &FakeQqApi) -> Value {
+        let sent = api.sent();
+        sent[0]
+            .keyboard
+            .as_ref()
+            .expect("键盘必须挂上")
+            .pointer("/content/rows/0/buttons/0/action/permission")
+            .cloned()
+            .expect("按钮必须带 permission")
+    }
+
     #[tokio::test]
     async fn keyboard_is_attached_without_changing_msg_type() {
         let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
@@ -3943,6 +4076,113 @@ mod tests {
 
         assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
         assert!(api.sent().is_empty(), "非法键盘不应发送");
+    }
+
+    #[tokio::test]
+    async fn c2c_keyboard_permission_is_normalized_to_everyone() {
+        // Go `TestNormalizeC2CKeyboardPermissionAllTypes`：单聊只支持 type=2，其余一律归一
+        let cases: [(i64, Vec<&str>); 5] = [
+            (0, vec!["openid-a"]),
+            (0, Vec::new()),
+            (1, Vec::new()),
+            (2, Vec::new()),
+            (3, Vec::new()),
+        ];
+        for (permission_type, user_ids) in cases {
+            let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+            let (_dir, context) = context(Arc::clone(&api));
+            let media = no_media();
+            let plan = request(
+                SendTarget::Private(OPENID.to_owned()),
+                permission_keyboard(permission_type, &user_ids),
+            );
+
+            execute(&context, &plan, &deps(&media, None))
+                .await
+                .expect("单聊键盘应发送成功");
+
+            let permission = sent_permission(&api);
+            assert_eq!(
+                permission["type"],
+                json!(2),
+                "C2C 的 type={permission_type} 应归一为 2"
+            );
+            assert_eq!(
+                permission["specify_user_ids"],
+                json!(user_ids),
+                "specify_user_ids 应原样保留"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn c2c_markdown_embedded_keyboard_permission_is_normalized() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let plan = request(
+            SendTarget::Private(OPENID.to_owned()),
+            markdown_with_keyboard(3, &["openid-a"]),
+        );
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("markdown + 内嵌键盘应发送成功");
+
+        let sent = api.sent();
+        assert_eq!(sent[0].msg_type, Some(msg_type::MARKDOWN));
+        let permission = sent_permission(&api);
+        assert_eq!(permission["type"], json!(2), "内嵌键盘 type=3 应归一为 2");
+        assert_eq!(permission["specify_user_ids"], json!(["openid-a"]));
+    }
+
+    #[tokio::test]
+    async fn c2c_placeholder_user_id_becomes_counterpart_openid() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let plan = request(
+            SendTarget::Private(OPENID.to_owned()),
+            permission_keyboard(0, &["__USER_ID__"]),
+        );
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("单聊键盘应发送成功");
+
+        let permission = sent_permission(&api);
+        assert_eq!(
+            permission["specify_user_ids"],
+            json!([OPENID]),
+            "__USER_ID__ 应换成对话对方 OpenID"
+        );
+        assert_eq!(permission["type"], json!(2));
+    }
+
+    #[tokio::test]
+    async fn group_keyboard_keeps_plugin_permission_and_placeholder() {
+        // 群聊是插件合法能力：type 原样、占位符不解析（与 Go 群侧现状一致）
+        for plan in [
+            permission_keyboard(0, &["__USER_ID__"]),
+            markdown_with_keyboard(0, &["__USER_ID__"]),
+        ] {
+            let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+            let (_dir, context) = context(Arc::clone(&api));
+            let media = no_media();
+            let plan = group_request(plan);
+
+            execute(&context, &plan, &deps(&media, None))
+                .await
+                .expect("群聊键盘应发送成功");
+
+            let permission = sent_permission(&api);
+            assert_eq!(permission["type"], json!(0), "群聊保留插件原始类型");
+            assert_eq!(
+                permission["specify_user_ids"],
+                json!(["__USER_ID__"]),
+                "群聊不解析占位符"
+            );
+        }
     }
 
     // ---- input_notify ----
