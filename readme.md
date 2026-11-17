@@ -143,7 +143,7 @@ Gensokyo 是一款兼容 [OneBot V11](https://github.com/botuniverse/onebot-11) 
 | [CQ:forward] | [合并转发]                  |
 | [CQ:node]    | [合并转发节点]              |
 | [CQ:xml]     | [XML 消息]                  |
-| [CQ:json]    | [JSON 消息]                 |
+| [CQ:json]    | [JSON 消息]（两端均未实现） |
 
 #### 拓展 CQ 码及与 OneBot 标准有略微差异的 CQ 码
 
