@@ -45,6 +45,7 @@ var restartRequiredFields = []string{
 	"DeveloperLog", "LogLevel", "SaveLogs",
 	"DisableWebui", "Username", "Password",
 	"Title", "CQParseMode", // 继续检查和增加
+	"CustomDbEnabled", "CustomDbPath",
 }
 
 // LoadConfig 从文件中加载配置并初始化单例配置
@@ -3084,6 +3085,30 @@ func GetLogSlowEventThresholdMS() int {
 		return 500
 	}
 	return instance.Settings.LogSlowEventThresholdMS
+}
+
+// GetCustomDbEnabled 获取自定义数据库位置开关
+func GetCustomDbEnabled() bool {
+	mu.RLock()
+	defer mu.RUnlock()
+
+	if instance == nil {
+		fmt.Println("Warning: instance is nil when trying to GetCustomDbEnabled value.")
+		return false
+	}
+	return instance.Settings.CustomDbEnabled
+}
+
+// GetCustomDbPath 获取自定义数据库目录路径
+func GetCustomDbPath() string {
+	mu.RLock()
+	defer mu.RUnlock()
+
+	if instance == nil {
+		fmt.Println("Warning: instance is nil when trying to GetCustomDbPath value.")
+		return ""
+	}
+	return instance.Settings.CustomDbPath
 }
 
 // SetMePrefix 设置 me 命令前缀（用于测试）

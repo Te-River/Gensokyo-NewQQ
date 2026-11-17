@@ -14,6 +14,7 @@ import (
 	"unicode"
 
 	"github.com/hoshinonyaruko/gensokyo/config"
+	"github.com/hoshinonyaruko/gensokyo/dblocation"
 	ididentity "github.com/hoshinonyaruko/gensokyo/internal/domain/identity"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"go.etcd.io/bbolt"
@@ -70,11 +71,11 @@ type legacyMigrationStats struct {
 func initNewDBs() {
 	newDBOnce.Do(func() {
 		var err error
-		identityDB, err = bbolt.Open(IdentityDBName, 0600, nil)
+		identityDB, err = bbolt.Open(dblocation.Resolve(IdentityDBName), 0600, &bbolt.Options{Timeout: 30 * time.Second})
 		if err != nil {
 			mylog.Fatalf("Error opening %s: %v", IdentityDBName, err)
 		}
-		msgDB, err = bbolt.Open(MsgDBName, 0600, nil)
+		msgDB, err = bbolt.Open(dblocation.Resolve(MsgDBName), 0600, &bbolt.Options{Timeout: 30 * time.Second})
 		if err != nil {
 			mylog.Fatalf("Error opening %s: %v", MsgDBName, err)
 		}

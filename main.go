@@ -30,6 +30,7 @@ import (
 	"github.com/hoshinonyaruko/gensokyo/buildinfo"
 	"github.com/hoshinonyaruko/gensokyo/callapi"
 	"github.com/hoshinonyaruko/gensokyo/config"
+	"github.com/hoshinonyaruko/gensokyo/dblocation"
 	"github.com/hoshinonyaruko/gensokyo/echo"
 	"github.com/hoshinonyaruko/gensokyo/handlers"
 	"github.com/hoshinonyaruko/gensokyo/httpapi"
@@ -162,6 +163,9 @@ func main() {
 	loggerAdapter := mylog.NewMyLogAdapter(logLevel, localFileLogger)
 	mylog.SetLogLevel(logLevel)
 	botgo.SetLogger(loggerAdapter)
+
+	// 自定义数据库位置:配置加载后、任何数据库打开前,完成 idmap 族路径解析/可达性探测/迁移裁决
+	dblocation.Setup()
 
 	if *m {
 		// 维护模式

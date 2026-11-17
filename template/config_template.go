@@ -112,6 +112,10 @@ settings:
   server_user_name : ""             #默认网页面板用户名 建议设置强密码
   server_user_password : ""         #默认网页面板密码 建议设置强密码
 
+  #数据库位置类
+  custom_db_enabled: false          #是否启用自定义数据库位置(第一阶段仅idmap族:idmap.db/idmap-identity.db/idmap-msg.db,含历史openid-map.db/msgid-map.db) 默认关闭;启用后启动时自动迁移并从该目录打开,目标不可达/两侧冲突时拒绝启动,绝不回退本地;变更需重启生效
+  custom_db_path: ""                #数据库目录,支持绝对路径/相对路径(相对工作目录)/UNC网络挂载,如 "D:\\gsk-data" 或 "\\\\nas\\gsk";不支持 smb:// 等协议URL;注意:网络文件系统(NFS/SMB/挂载盘)文件锁语义无官方保证,多进程并发访问同一目录会损坏数据,请单实例使用
+
   #指令魔法类
   remove_prefix : false             #是否忽略公域机器人指令前第一个/
   remove_at : false                 #是否忽略公域机器人指令前第一个[CQ:aq,qq=机器人] 场景(公域机器人,但插件未适配at开头)

@@ -41,6 +41,16 @@
 - **软限制降级为提示**：按类型软限制（图片 20MB / 视频 30MB / 语音 20MB / 文件 200MB）不再作为直传判据，仅打印"平台侧将降级为文件类型下发"日志；硬限制 200MB（`getHardLimit`）不变
 - **入口重构**：`images.CreateAndUploadMediaMessage` / `CreateAndUploadMediaMessagePrivate` 调用点统一换为 `handlers` 包内的 `createAndUploadMediaMessage` / `...Private` 包装（超限先分流，≤5MB 仍交 `images` 包走 `file_data` 直传）；`images/upload_api.go` 同步补充字段
 
+### 自定义数据库位置：本地/网络挂载路径 + 自动迁移（idmap 族一期，2026-11-17）
+
+新增 `custom_db_enabled`（默认 `false`）/ `custom_db_path` 配置，可将 idmap 族数据库置于用户指定位置（本地相对/绝对路径、UNC、宝塔等面板挂载后的网络存储目录）：
+
+- **修改**：新增独立单元 `dblocation/`（注册表 + 路径解析 + bbolt 锁探针 + 迁移裁决 + `Resolve`）；idmap 族五处打开点（`idmap/service.go`、`new_service.go`、`map_service.go`）全部经 `Resolve` 取路径，旧库惰性迁移逻辑原样保留在解析后的目录内
+- **修改**：`main.go` 启动序列在任何数据库打开前挂接 `dblocation.Setup()`；五处打开点补 `30s` `Timeout`；`Compaction` 源/目标路径经 `Resolve`；`template/config_template.go` 与 `readme.md` 同步说明
+- **影响**：开关关闭时行为零变化；开启后——目标有族内同名文件 → **拒绝启动**（防数据分叉）；本地有目标无 → 文件级复制 + 校验（大小 + 只读可打开），本地原件改名 `.bak.<时间戳>` 保留；复制/校验失败删目标残留并拒绝启动；协议 URL（含 `://`）拒绝并提示先挂载再用；启用即 WARN 网络文件系统锁风险（依据 `etcd-io/bbolt#257`，按单实例自担风险运行）
+- **影响**：注册表驱动，`botstats.db`/`cookie.db`/`gensokyo.db` 等后续加一行即接入；本期不涉及
+- **测试**：`dblocation` 表驱动单测 + 补测 + `idmap/dblocation_integration_test.go` 运行时集成用例；黑盒 e2e 六场景（本地有→迁移 / 目标有→直接用 / 两侧都有→拒绝启动 / `smb://` 拒绝 / 两边无 / 关闭零变化）通过；`go build ./...`、`go vet ./...`、`go test ./...` 全绿
+
 ---
 
 ## 🐛 修复

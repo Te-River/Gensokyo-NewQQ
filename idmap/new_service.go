@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hoshinonyaruko/gensokyo/config"
+	"github.com/hoshinonyaruko/gensokyo/dblocation"
 	ididentity "github.com/hoshinonyaruko/gensokyo/internal/domain/identity"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"go.etcd.io/bbolt"
@@ -49,12 +50,12 @@ func initNewDBs() {
 	newDBOnce.Do(func() {
 		var err error
 
-		identityDB, err = bbolt.Open(IdentityDBName, 0600, nil)
+		identityDB, err = bbolt.Open(dblocation.Resolve(IdentityDBName), 0600, &bbolt.Options{Timeout: 30 * time.Second})
 		if err != nil {
 			mylog.Fatalf("Error opening %s: %v", IdentityDBName, err)
 		}
 
-		msgDB, err = bbolt.Open(MsgDBName, 0600, nil)
+		msgDB, err = bbolt.Open(dblocation.Resolve(MsgDBName), 0600, &bbolt.Options{Timeout: 30 * time.Second})
 		if err != nil {
 			mylog.Fatalf("Error opening %s: %v", MsgDBName, err)
 		}
@@ -81,7 +82,7 @@ func initNewDBs() {
 			}
 		}
 
-		mylog.Printf("新 idmap 数据库已就绪: %s, %s", IdentityDBName, MsgDBName)
+		mylog.Printf("新 idmap 数据库已就绪: %s, %s", dblocation.Resolve(IdentityDBName), dblocation.Resolve(MsgDBName))
 
 		// 启动 msg_id 缓存自动清理（每分钟扫描，过期 ≥6 分钟删除）
 		startMsgCleanup()

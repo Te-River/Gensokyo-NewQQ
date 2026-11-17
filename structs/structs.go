@@ -95,6 +95,9 @@ type Settings struct {
 	DisableWebui bool   `yaml:"disable_webui"`
 	Username     string `yaml:"server_user_name"`
 	Password     string `yaml:"server_user_password"`
+	//数据库位置类
+	CustomDbEnabled bool   `yaml:"custom_db_enabled"`
+	CustomDbPath    string `yaml:"custom_db_path"`
 	//指令魔法类
 	RemovePrefix        bool                 `yaml:"remove_prefix"`
 	RemoveAt            bool                 `yaml:"remove_at"`

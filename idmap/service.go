@@ -23,6 +23,7 @@ import (
   "time"
 
 	"github.com/hoshinonyaruko/gensokyo/config"
+	"github.com/hoshinonyaruko/gensokyo/dblocation"
 	ididentity "github.com/hoshinonyaruko/gensokyo/internal/domain/identity"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	proto "github.com/hoshinonyaruko/gensokyo/proto"
@@ -156,7 +157,8 @@ var ErrKeyNotFound = errors.New("key not found")
 
 func InitializeDB() {
 	initNewDBs()
-	if _, err := os.Stat(DBName); err != nil {
+	legacyDBPath := dblocation.Resolve(DBName)
+	if _, err := os.Stat(legacyDBPath); err != nil {
 		if !os.IsNotExist(err) {
 			log.Fatalf("Error checking legacy DB: %v", err)
 		}
@@ -165,7 +167,7 @@ func InitializeDB() {
 	}
 
 	var err error
-	db, err = bbolt.Open(DBName, 0600, nil)
+	db, err = bbolt.Open(legacyDBPath, 0600, &bbolt.Options{Timeout: 30 * time.Second})
 	if err != nil {
 		log.Fatalf("Error opening legacy DB: %v", err)
 	}
@@ -261,7 +263,7 @@ func CleanBucket(bucketName string) {
 }
 
 func CompactionIdmap() {
-	err := Compaction("idmap.db", "idmap_compacted.db")
+	err := Compaction(dblocation.Resolve(DBName), dblocation.Resolve("idmap_compacted.db"))
 	if err != nil {
 		log.Fatalf("Failed to compact database: %v", err)
 	} else {

@@ -408,6 +408,14 @@ settings:
   server_user_name: "admin"
   server_user_password: "admin"
 
+  #── 数据库位置 ────────────────────────────────────────
+  # 第一阶段仅 idmap 族数据库（idmap.db / idmap-identity.db / idmap-msg.db，含历史 openid-map.db / msgid-map.db）
+  # 开启后启动时自动迁移到 custom_db_path 并从该目录打开；目标不可达 / 两侧同名冲突时拒绝启动（不回退本地）
+  # ⚠️ 网络文件系统（NFS/SMB/挂载盘）上文件锁语义无官方保证，多进程并发访问同一目录会损坏数据，
+  #    请保持单实例运行（etcd-io/bbolt issue #257 实测）
+  custom_db_enabled: false            # 变更需重启生效
+  custom_db_path: ""                  # 如 "D:\\gsk-data" 或 UNC "\\\\nas\\gsk"；不支持 smb:// 等协议 URL
+
   #── Markdown 消息 ──────────────────────────────────
   twoway_echo: false                  # 双向 echo
   custom_template_id: ""              # 图文转 MD 模板 ID
