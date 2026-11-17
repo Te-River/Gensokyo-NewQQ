@@ -5,6 +5,8 @@
 >
 > 自 Release015 以来的所有变更。
 
+> 🚀 **已封版**：Release 016 Rust 已封版（tag `Release016Rust`，2026-11-18），后续变更请记录到 [CHANGELOG_v017.md](./CHANGELOG_v017.md)。
+
 ---
 
 ## ✨ 新功能 / 变更
