@@ -147,6 +147,17 @@ Go 在每条 C2C 私信末尾把好友写进 idmap 的 `UserInfo` 桶（`Process
 - **影响**：启用时 WARN 网络文件系统（NFS/SMB/挂载盘）锁语义无官方保证、按单实例自担风险（Go 同口径，引用 etcd-io/bbolt issue #257）；`custom_db_path` 与工作目录相同视为未启用（与 Go 一致）
 - **测试**：`db_location` 单测 12 例（normalize 表驱动含空路径 / `smb://`·`http://`·`https://` 拒绝、探测可写目录 / 可创建子目录 / 目标是文件 / 探针库被锁、四裁决表、校验失败保留本地、工作目录同路径视为未启用、备份名 `YYYYMMDD-HHMMSS`）+ 集成 1 例（开关关闭零变化；开关打开迁移后按 `resolve_file` 打开 idmap 写入读回）；配置侧 fixture/重启项断言同步更新。门禁以最终 `cargo test --workspace` 输出为准
 
+### `get_group_member_list` 内部翻页拉全量（Rust 侧，2026-11-18）
+
+对齐 Go `handlers/get_group_member_list.go:96-154` 的 `fetchMembersByAPI`：Rust 新链的成员列表不再只回一页，改在 handler 内部按游标链拉到末页，响应形态保持 Go `buildResponse` 口径。
+
+- **修改**：`crates/gensokyo-actions/src/group.rs` 的 handler 由「单页透传」改为游标循环——入参 `cursor` 只当**起始游标**（缺省 / 空串即首页），逐页按 `next_cursor` 推进并合并；终止条件为末页（`next_cursor` 空串）/ 页数上限 `MAX_MEMBER_PAGES = 100`（对齐 Go `groupMemberListMaxPages`）/ **游标原地重复**（新增死循环防护，Go 只用页数上限兜底，代码内注释标明这是刻意增强）
+- **节流**：页间按 `get_g_list_delay` 等待（与 `get_group_list` 共用 Go `config.GetGroupListDelay()` 同一配置项），每请求读一次配置快照、热重载即时生效；`<= 0` 不等待，末页后不等待
+- **错误路径对齐 Go**：中途页失败返回**已收集成员 + `retcode 0`**（不整表丢弃、不再报 `1500`）；首页失败或全量为空回退 idmap `find_sub_keys_by_id_pro` 本地缓存，条目与 Go `fetchFallbackMembers` 同款（`nickname`/`card="未知"`、`sex="0"`、`level`/`title="0"`、`role="member"`、`join_time`=昨天）；无 idmap 或反查失败时回空数组，仍是 `retcode 0`
+- **响应**：仍只有 `data` / `echo` / `message` / `retcode` / `status`，**不含游标**（Go `buildResponse` 没有 `next_cursor`）
+- **影响**：一次 `get_group_member_list` 返回自 `cursor` 起的剩余全量（默认单页 30、至多 100 页），大群首次调用耗时随成员数上升，页与页之间有 `get_g_list_delay` 间隔
+- **测试**：`crates/gensokyo-actions/src/group.rs` 的替身改为多页脚本（`VecDeque<Result<..>>`），用例覆盖两页游标链与末页即停、入参游标作起点、中途页失败保留首页成员、首页失败回退空列表、100 页上限截断、游标不推进即停、`delay = 0` 不等待 / 正延迟只在页间等一次；并持续断言响应不含 `next_cursor`
+
 ---
 
 ## 🐛 修复
@@ -240,7 +251,7 @@ QQ 官方 C2C 单聊只支持按钮 `permission.type=2`（所有人）：`type=0
 ### Rust 新链补齐事件 / 分页 / 上传上限 / 出站类型
 
 - **事件**：新增 `INTERACTION_CREATE` → `notice.interaction`（`sub_type=create`，互动对象整体落在 `data`）
-- **分页**：`get_group_member_list` 支持 `cursor`，响应顶层带 `next_cursor`
+- **分页**：`get_group_member_list` 支持 `cursor`（后改为 handler 内部翻页拉全量、响应不带游标，见上条「`get_group_member_list` 内部翻页拉全量」）
 - **上传上限**：直传统一 5,000,000 字节（十进制 5MB），与 Go `file_data` 口径一致
 - **出站**：支持 markdown（`msg_type=2`，只带 `content`）与卡片（`msg_type=8`，群聊 / 单聊）
 
@@ -337,6 +348,16 @@ P86 审计（parity §F）确认的 D1/D3/D4：Go numeric 模式（默认 `strin
 - **修复**：删除 `ActionResponse` 顶层 `next_cursor`（Go 无此字段）——分页 action 的游标按 Go 放在 `data` 内（join request list / panel list / blacklist / media list），`get_group_member_list` 不再输出游标；`mark_msg_as_read` 顶层改为 Go 的 `msg` + `wording`（空串、无 omitempty，`msg` 顶替 `message`）；`dispatcher::encode` 兜底按信封模式输出（Full 带 `data/echo/message`，Compact 带 `message/retcode 100`）。
 - **影响**：分页与已读回执的键集/位置与 Go 对齐。已知差异（登记）：`mark_msg_as_read` 的 `data`——Go 是 `gjson.Result` 零值结构体转储、Rust 按语义回 `null`；成员列表 Rust 仍只回一页（Go 内部拉全量）另项。
 - **测试**：新增/改写 4 条整串断言（join request / panel list / member list / mark read / encode 兜底）；全量 **43 suites / 1429 passed / 0 failed**、clippy 零告警、release Finished、fmt 退出码 0。
+
+### SSE / 合并转发回执补齐（Rust 侧 P86d-2，2026-11-18）
+
+P86 审计遗留的两条回执路径（`send_private_msg_sse` 与 `send_*_forward_msg`）此前既不按 `string_ob11` 渲染 `message_id`，也不带顶层收件人 ID——Go 的两条回执都从 `message.Params` 取 `user_id` / `group_id`。
+
+- **修复（SSE）**：`dispatcher::run_deferred` 的 `message_sse` 分支把 `message_id` 改经 `message_id_value` 双模式渲染（空回执恒数字 `0` / string 模式原串 / numeric 模式 echo 派生），`target` 由 `None` 改为计划收件人（`SseRequest.target` 恒私聊），经 `receipt_ids` 补顶层 `user_id`（数字虚拟号，与 Go `SendC2CResponse` 一致）
+- **修复（合并转发）**：`message_ids` 元素逐个过 `message_id_value`（此前是上游原串）；顶层补 `group_id`——**恒数字**，因为 Go 的转发 handler 直接调 `SendResponse`（`handlers/send_group_forward_msg.go:75`），不经 `send_group_msg.go:1020` 的 `string_ob11` 分派；`failed` 清单（含原 node 序号）保留
+- **影响**：默认 numeric 配置下 `send_private_msg_sse` 的 `data.message_id` 与 `message_ids` 元素由字符串改为数字，回执多出 `user_id` / `group_id`。已知边界：整次转发没有任何可发 node 时计划里拿不到收件人（`ForwardRequest` 无顶层 `target`），`group_id` / `user_id` 留空而非伪造
+- **分侧登记（刻意差异）**：① SSE 的 `message_id`——Go `SendC2CResponse` 无 string 分支、恒派生数字，Rust `string_ob11=true` 时回上游原串（超集，照 P86a 双模式口径）；② `message_ids` / `failed` 是 Rust 独有增强，Go 转发只回 `message_id: 0`；③ `send_private_forward_msg` 在 Go 未注册（Rust 扩展 action），其回执 ID 按私聊口径给数字虚拟号
+- **测试**：`crates/gensokyo-runtime/tests/deferred.rs` 新增 3 例（SSE string 模式整串断言、转发两模式 `message_ids` 元素类型 + `group_id` 恒数字 + `failed` 保留、全空 node 转发回 `message_ids: []` 且顶层 ID 留空），并按新口径改写 3 例旧断言（SSE 整串、群转发 `message_ids` + `group_id`、私聊转发 `message_ids` + `user_id`）；`deferred` 目标 **25 passed / 0 failed**
 
 ### Action 响应信封审计（P86，2026-11-15，审计项）
 

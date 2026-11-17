@@ -201,14 +201,12 @@ impl Dispatcher {
             // 计划只是 handler → runtime 的内部握手载荷，不能泄漏给客户端。
             let echo = response.echo.clone();
             response = match self.run_deferred(data, echo.as_ref()).await {
-                Ok((outcome, target)) => {
+                Ok((outcome, ids)) => {
                     self.record_message_sent();
                     let mut sent = ActionResponse::ok(outcome).with_echo(echo);
                     // 顶层 ID 按收件人填（Go `SendResponse` / `SendC2CResponse` 用同一
                     // `message.Params` 构造）：空消息回执没打上游，同样要带。
-                    if let (Some(context), Some(target)) = (self.actions.as_ref(), target.as_ref())
-                    {
-                        let (group_id, user_id) = receipt_ids(context, target);
+                    if let Some((group_id, user_id)) = ids {
                         sent.group_id = group_id;
                         sent.user_id = user_id;
                     }
@@ -229,8 +227,8 @@ impl Dispatcher {
     ///
     /// 三种握手形状按载荷键判别：`message_sse` → [`crate::deferred::execute_sse`]、
     /// `forward` → [`crate::deferred::execute_forward`]（合并转发逐条重发）、其余 →
-    /// [`crate::deferred::execute`] 单条。返回的 JSON 即给客户端的 `data`，第二项只有单条
-    /// 发送分支给得出来（收件人；SSE / 合并转发回执没有顶层 ID）。
+    /// [`crate::deferred::execute`] 单条。返回的 JSON 即给客户端的 `data`，第二项是顶层的
+    /// `group_id` / `user_id`：Go 三种回执都从 `message.Params` 取，这里只能从计划收件人取。
     ///
     /// `echo` 是请求回执原值：规划层看不到它，这里补进单条计划的
     /// [`gensokyo_actions::EchoContext::echo_key`]（Go `message.Echo` 直接当 `msg_id` 键查表）。
@@ -241,7 +239,7 @@ impl Dispatcher {
         &self,
         data: Value,
         echo: Option<&Value>,
-    ) -> Result<(Value, Option<SendTarget>), (i32, String)> {
+    ) -> Result<(Value, Option<ReceiptIds>), (i32, String)> {
         let Some(context) = self.actions.as_ref() else {
             return Err((
                 RETCODE_INTERNAL,
@@ -266,20 +264,41 @@ impl Dispatcher {
                 .into_iter()
                 .map(|item| json!({ "index": item.index, "error": item.error }))
                 .collect();
+            // `message_ids` / `failed` 是 Rust 独有增强（Go 只有 `message_id: 0`），元素按
+            // 回执口径渲染：空回执恒数字 `0`、string 模式回原串、numeric 模式派生虚拟号。
+            let message_ids: Vec<Value> = outcome
+                .message_ids
+                .iter()
+                .map(|raw| message_id_value(context.string_ob11(), self.echo.as_deref(), raw))
+                .collect();
+            // 顶层 ID 取计划收件人：各条计划同目标，取首条即可；整次转发没有可发 node 时
+            // 拿不到目标（Go 的 `message.Params.GroupID` 恒在），字段留空而不是伪造。
+            let ids = request
+                .forward
+                .first()
+                .map(|plan| forward_receipt_ids(context, &plan.request.target));
             return Ok((
                 json!({
-                    "message_ids": outcome.message_ids,
+                    "message_ids": message_ids,
                     "failed": failed,
                 }),
-                None,
+                ids,
             ));
         }
         if data.get("message_sse").is_some() {
             let request = serde_json::from_value::<SseRequest>(data).map_err(bad_plan)?;
-            let message_id = crate::deferred::execute_sse(context, &request, &deps)
+            let raw = crate::deferred::execute_sse(context, &request, &deps)
                 .await
                 .map_err(|err| (deferred_retcode(&err), err.to_string()))?;
-            return Ok((json!({ "message_id": message_id }), None));
+            // 收件人恒为私聊：`receipt_ids` 的私聊分支两种模式都是数字虚拟号，与 Go
+            // `SendC2CResponse` 一致；`message_id` 则按 `string_ob11` 双模式渲染（Go 恒数字，
+            // string 模式回原串是 Rust 的超集，已登记）。
+            return Ok((
+                json!({
+                    "message_id": message_id_value(context.string_ob11(), self.echo.as_deref(), &raw),
+                }),
+                Some(receipt_ids(context, &request.target)),
+            ));
         }
         let mut plan: SendRequest = serde_json::from_value(data).map_err(bad_plan)?;
         // 规划层拿不到请求回执，这里补进去：Go 用 `message.Echo` 的字符串形态查 `msg_id` 表
@@ -293,7 +312,7 @@ impl Dispatcher {
             json!({
                 "message_id": message_id_value(context.string_ob11(), self.echo.as_deref(), &message_id),
             }),
-            Some(plan.target),
+            Some(receipt_ids(context, &plan.target)),
         ))
     }
 
@@ -366,6 +385,9 @@ fn message_id_value(string_ob11: bool, echo: Option<&EchoStore>, raw: &str) -> V
     }
 }
 
+/// 回执顶层 ID 对：`group_id` / `user_id`（Go `ServerResponse.GroupID` / `UserID`）。
+type ReceiptIds = (Option<Ob11Id>, Option<Ob11Id>);
+
 /// 回执顶层的 `group_id` / `user_id`（Go `ServerResponse.GroupID` / `UserID`）。
 ///
 /// 值只取自 deferred 计划的收件人**请求原串**，不来自 `data`、不来自反查结果：
@@ -377,11 +399,22 @@ fn message_id_value(string_ob11: bool, echo: Option<&EchoStore>, raw: &str) -> V
 ///   （`:429` 赋值、`:211` 声明）；
 /// - 私聊：两种模式都是数字虚拟号（Go `SendC2CResponse` 恒用数字结构 `ServerResponse`，
 ///   `:605-609`）——这是 Go 自身的不一致，照抄以保 parity。
-fn receipt_ids(context: &ActionContext, target: &SendTarget) -> (Option<Ob11Id>, Option<Ob11Id>) {
+fn receipt_ids(context: &ActionContext, target: &SendTarget) -> ReceiptIds {
     match target {
         SendTarget::Group(raw) if context.string_ob11() => (Some(Ob11Id::Str(raw.clone())), None),
         SendTarget::Group(raw) => (target_virtual_id(context, raw), None),
         SendTarget::Private(raw) => (None, target_virtual_id(context, raw)),
+    }
+}
+
+/// 合并转发的回执顶层 ID：Go 的转发 handler 直接调 `SendResponse`
+/// （`handlers/send_group_forward_msg.go:75`），不经过 `send_group_msg.go:1020` 的
+/// `string_ob11` 分派，于是 `ServerResponse` 的数字结构恒定——string 模式也不回原串。
+fn forward_receipt_ids(context: &ActionContext, target: &SendTarget) -> ReceiptIds {
+    let id = target_virtual_id(context, target.id());
+    match target {
+        SendTarget::Group(_) => (id, None),
+        SendTarget::Private(_) => (None, id),
     }
 }
 

@@ -35,16 +35,21 @@
 //!   缺参等于「立即解禁」并放行（不报 1400）；给了非数字仍按 1400 拒绝。
 //! - **`set_group_ban` 超 30 天按 30 天算**：官方 `mute_expire_at` 最长 30 天
 //!   （[`MAX_BAN_SECONDS`]），超出即截断；`duration <= 0` 仍表示立即解除，原样透传。
-//! - **`get_group_member_list` 单页**：`cursor` 入参原样透传给官方接口（空串等同首屏），
-//!   响应**没有游标字段**（Go `buildResponse` 只有 `retcode` / `status` / `data` / `echo`，
-//!   翻页在 Go 内部循环完成），`data` 保持 OneBot 的数组形态。Go 的「最多 100 页全量拉取 +
-//!   页间节流」未移植：Rust 只回当前页，后续页要客户端自己带 `cursor` 重发。
+//! - **`get_group_member_list` 内部翻页拉全量**：`cursor` 入参只当**起始游标**（缺省 / 空串
+//!   即首页），handler 按 `next_cursor` 链一路拉到末页，响应**没有游标字段**（Go
+//!   `buildResponse` 只有 `retcode` / `status` / `data` / `echo`，翻页在 Go 内部循环完成），
+//!   `data` 保持 OneBot 的数组形态。页间延迟沿用 `get_g_list_delay`（与 Go 共用配置项，
+//!   非正数不等待、末页不等），页数上限 [`MAX_MEMBER_PAGES`]；中途页失败返回已收集成员 +
+//!   `retcode 0`，首页失败或全量为空回 idmap 本地缓存（Go `fetchFallbackMembers` 同口径）。
+//! - **`get_group_member_list` 游标原地重复即停**：Go 只靠 100 页上限兜底，这里多加一条
+//!   「上游游标未推进」判据，避免异常响应导致无进展空转（刻意增强）。
 //! - **idmap 缺失时的中性值**：Go 侧 `StoreIDv2` 失败直接跳过成员；这里保留条目并置 `user_id=0`，
 //!   由调用方按 `member_openid` 决策。
 //! - **`joined_at` 解析**：Go 用 `time.Parse(RFC3339)`；这里用 `rfc3339`（无 `time` 依赖），
 //!   解析失败同样置 0。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -71,6 +76,10 @@ pub const DEFAULT_MEMBER_PAGE: u32 = 30;
 
 /// `get_group_member_list` 单页上限：客户端要更多也截断，防止一次拉爆官方 QPM。
 pub const MAX_MEMBER_PAGE: u32 = 100;
+
+/// `get_group_member_list` 翻页安全上限（对齐 Go `groupMemberListMaxPages`）：
+/// 默认单页 30 时 100 页 = 3000 人，防止异常响应导致死循环。
+pub const MAX_MEMBER_PAGES: usize = 100;
 
 /// 官方群成员禁言上限：30 天（秒）。`restrict_chat_setting` 的 `mute_expire_at`
 /// 最远只能落在 30 天后，超出部分官方拒绝或不可预期，这里主动截断。
@@ -287,8 +296,8 @@ impl GetGroupMemberListHandler {
             Ok(group) => group,
             Err(err) => return Ok(bad_request(request, &err)),
         };
-        // `cursor` 缺省 / 空串都是首页（官方语义），统一收敛成 `None`
-        let cursor = match params::optional_text(object, "cursor") {
+        // `cursor` 是**起始游标**：从该页一路拉到末页（缺省 / 空串都是首页，官方语义）
+        let mut cursor = match params::optional_text(object, "cursor") {
             Ok(cursor) => cursor.filter(|cursor| !cursor.is_empty()),
             Err(err) => return Ok(bad_request(request, &err)),
         };
@@ -296,26 +305,74 @@ impl GetGroupMemberListHandler {
             Ok(limit) => limit,
             Err(err) => return Ok(bad_request(request, &err)),
         };
-        let page = match self
-            .context
-            .api()
-            .get_group_member_page(&group.openid, cursor.as_deref(), limit)
-            .await
-        {
-            Ok(page) => page,
-            Err(err) => return Ok(upstream_error(request, &err)),
-        };
 
         let string_mode = self.context.string_ob11();
         let group_id = ob11_id(&group.requested, string_mode);
-        let members: Vec<GroupMemberInfo> = page
-            .members
-            .iter()
-            .map(|member| {
+        // 页间节流（毫秒）：与 Go `config.GetGroupListDelay()` 同一配置项，每个请求读一次
+        // 当前快照（热重载即时生效），非正数表示不等待
+        let delay_ms = self.context.config().snapshot().get_get_group_list_delay();
+        let mut members: Vec<GroupMemberInfo> = Vec::new();
+        for page_index in 0..MAX_MEMBER_PAGES {
+            let page = match self
+                .context
+                .api()
+                .get_group_member_page(&group.openid, cursor.as_deref(), limit)
+                .await
+            {
+                Ok(page) => page,
+                Err(err) if page_index == 0 => {
+                    // 首页失败（无权限 / 官方接口未开放）：Go 回退 idmap 本地缓存，不报错
+                    tracing::warn!(
+                        group = %group.requested,
+                        error = %err,
+                        "get_group_member_list: 首页拉取失败，回退本地成员缓存"
+                    );
+                    let fallback = fallback_members(&self.context, &group.requested, string_mode);
+                    return ok_data(request, &fallback);
+                }
+                Err(err) => {
+                    // 中途页失败：返回已收集的成员（Go 同口径，retcode 0），不整表丢弃
+                    tracing::warn!(
+                        group = %group.requested,
+                        page = page_index + 1,
+                        error = %err,
+                        "get_group_member_list: 中途页拉取失败，返回已收集成员"
+                    );
+                    return ok_data(request, &members);
+                }
+            };
+            members.extend(page.members.iter().map(|member| {
                 let user_id = virtual_id_text(&self.context, &member.member_openid);
                 member_info(&group_id, &ob11_id(&user_id, string_mode), member)
-            })
-            .collect();
+            }));
+            if page.next_cursor.is_empty() {
+                break; // 末页
+            }
+            // 游标原地重复：Go 只用 100 页上限兜底，这里刻意增强，避免上游返回同一游标时空转
+            if cursor.as_deref() == Some(page.next_cursor.as_str()) {
+                tracing::warn!(
+                    group = %group.requested,
+                    cursor = %page.next_cursor,
+                    "get_group_member_list: 上游游标未推进，停止翻页"
+                );
+                break;
+            }
+            // 页间节流，防止大群连续请求触发官方 QPM 限制；末页已在上面 break，
+            // 触顶（本页是最后一轮）后也不再发请求，两种情况都不多等
+            if delay_ms > 0 && page_index + 1 < MAX_MEMBER_PAGES {
+                tokio::time::sleep(Duration::from_millis(delay_ms.unsigned_abs())).await;
+            }
+            cursor = Some(page.next_cursor);
+        }
+        if members.is_empty() {
+            // 官方返回空列表：与 Go 一致回退本地缓存，保持旧行为可用
+            tracing::warn!(
+                group = %group.requested,
+                "get_group_member_list: 官方返回空列表，回退本地成员缓存"
+            );
+            let fallback = fallback_members(&self.context, &group.requested, string_mode);
+            return ok_data(request, &fallback);
+        }
         // Go `buildResponse`（handlers/get_group_member_list.go:228-257）只有
         // `retcode` / `status` / `data` / `echo`——翻页在 Go 内部循环完成，响应里**没有游标**。
         // 这里同样不外露游标，`data` 保持 OneBot 的数组形态。
@@ -539,6 +596,54 @@ fn member_info(group_id: &Ob11Id, user_id: &Ob11Id, member: &QqGroupMember) -> G
     }
 }
 
+/// idmap 本地回退（Go `fetchFallbackMembers`）：把该群已缓存的成员虚拟号列成 OneBot 条目。
+/// 无 idmap 或反查失败回空列表——与 Go 同口径（`FindSubKeysByIdPro` 失败即 nil）。
+fn fallback_members(
+    context: &ActionContext,
+    group_key: &str,
+    string_mode: bool,
+) -> Vec<GroupMemberInfo> {
+    let Some(store) = context.idmap() else {
+        return Vec::new();
+    };
+    // `find_sub_keys_by_id` 在远端模式下就是 Go 的 `FindSubKeysByIdPro`（同一桥方法），
+    // 本地 redb 按 `"<id>:"` 前缀扫正表：现代 schema 恒空，与 Go 退役的 `ids` 桶同口径
+    let ids = match store.find_sub_keys_by_id(group_key) {
+        Ok(ids) => ids,
+        Err(err) => {
+            tracing::warn!(
+                group = %group_key,
+                error = %err,
+                "get_group_member_list: idmap 反查群成员失败，回退空列表"
+            );
+            return Vec::new();
+        }
+    };
+    // 本地缓存无昵称 / 入群时间：与 Go 一样给中性占位（入群时间取昨天）
+    let join_time = rfc3339::now_unix_secs() - 86_400;
+    let group_id = ob11_id(group_key, string_mode);
+    ids.iter()
+        .map(|id| GroupMemberInfo {
+            group_id: group_id.clone(),
+            user_id: ob11_id(id, string_mode),
+            nickname: "未知".to_owned(),
+            card: "未知".to_owned(),
+            sex: Some("0".to_owned()),
+            age: None,
+            area: None,
+            join_time: Some(join_time),
+            last_sent_time: None,
+            level: Some("0".to_owned()),
+            role: Some("member".to_owned()),
+            unfriendly: None,
+            title: Some("0".to_owned()),
+            title_expire_time: None,
+            card_changeable: None,
+            extra: Extra::new(),
+        })
+        .collect()
+}
+
 /// 法庭外的角色归一：官方 `member_role` 与 OneBot `role` 枚举一致，未知值保底 `member`。
 fn normalize_role(role: &str) -> String {
     match role {
@@ -601,16 +706,19 @@ fn next_index(next_cursor: &str) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::{Duration, Instant};
 
     use serde_json::{Value, json};
 
     use super::{
         BotStateData, DEFAULT_JOIN_REQUEST_LIMIT, GetGroupBotStateHandler, GetGroupInfoHandler,
         GetGroupJoinRequestListHandler, GetGroupMemberInfoHandler, GetGroupMemberListHandler,
-        JoinRequestListData, MAX_BAN_SECONDS, MAX_JOIN_REQUEST_LIMIT, RETCODE_UPSTREAM,
-        SetGroupBanHandler, clamp_ban_duration,
+        JoinRequestListData, MAX_BAN_SECONDS, MAX_JOIN_REQUEST_LIMIT, MAX_MEMBER_PAGES,
+        RETCODE_UPSTREAM, SetGroupBanHandler, clamp_ban_duration,
     };
     use crate::handler::RETCODE_BAD_REQUEST;
     use crate::qqapi::{ActionContext, QqApi, QqFuture};
@@ -645,7 +753,7 @@ mod tests {
         calls: Mutex<Vec<Call>>,
         group_info: Mutex<Option<Result<QqGroupInfo, ApiError>>>,
         member_info: Mutex<Option<Result<QqGroupMember, ApiError>>>,
-        member_list: Mutex<Option<Result<QqGroupMemberList, ApiError>>>,
+        member_list: Mutex<VecDeque<Result<QqGroupMemberList, ApiError>>>,
         ban: Mutex<Option<ApiError>>,
         bot_state: Mutex<Option<Result<BotInGroupState, ApiError>>>,
         join_requests: Mutex<Option<Result<QqJoinRequestList, ApiError>>>,
@@ -670,6 +778,30 @@ mod tests {
                 code: err.code,
                 message: err.message,
             })
+    }
+
+    /// 按序排好成员列表的每页应答：handler 内部翻页会按游标链逐页 `pop_front`。
+    fn enqueue_member_pages(api: &FakeQqApi, pages: Vec<QqGroupMemberList>) {
+        let mut slot = api.member_list.lock().expect("成员列表槽锁未中毒");
+        for page in pages {
+            slot.push_back(Ok(page));
+        }
+    }
+
+    fn member_page(members: Vec<QqGroupMember>, next_cursor: &str) -> QqGroupMemberList {
+        QqGroupMemberList {
+            members,
+            next_cursor: next_cursor.to_owned(),
+        }
+    }
+
+    fn qq_member(openid: &str, name: &str) -> QqGroupMember {
+        QqGroupMember {
+            member_openid: openid.to_owned(),
+            username: name.to_owned(),
+            member_role: "member".to_owned(),
+            ..QqGroupMember::default()
+        }
     }
 
     impl QqApi for FakeQqApi {
@@ -713,7 +845,15 @@ mod tests {
             let cursor = cursor.map(str::to_owned);
             Box::pin(async move {
                 self.record(Call::MemberList(group_openid, cursor, limit));
-                take(&self.member_list)
+                self.member_list
+                    .lock()
+                    .expect("成员列表槽锁未中毒")
+                    .pop_front()
+                    .expect("测试未配置该页的成员列表响应")
+                    .map_err(|err| Error::Upstream {
+                        code: err.code,
+                        message: err.message,
+                    })
             })
         }
 
@@ -829,6 +969,56 @@ mod tests {
         (response.status, response.retcode, response.data)
     }
 
+    /// 带时间驱动的单线程 runtime：`block_on` 用 noop waker，驱动不了 `tokio::time::sleep`。
+    fn block_on_timed<F: Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("构建单线程 runtime 失败")
+            .block_on(future)
+    }
+
+    /// 写一份带 `get_g_list_delay` 的最小配置，返回（快照, 文件路径供用例末尾清理）。
+    fn delay_config(delay_ms: i64, tag: &str) -> (Arc<ConfigManager>, std::path::PathBuf) {
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "gensokyo-actions-member-delay-{tag}-{}-{}.yml",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::write(
+            &path,
+            format!("string_ob11: true\napp_id: 102001234\nget_g_list_delay: {delay_ms}\n"),
+        )
+        .expect("写临时 config.yml 失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载临时 config.yml 失败"));
+        (manager, path)
+    }
+
+    /// 带正 / 零 `get_g_list_delay` 的上下文与配置文件路径。
+    fn context_with_delay(
+        delay_ms: i64,
+        tag: &str,
+    ) -> (Arc<ActionContext>, Arc<FakeQqApi>, std::path::PathBuf) {
+        let (manager, path) = delay_config(delay_ms, tag);
+        let api = Arc::new(FakeQqApi::default());
+        let context = Arc::new(ActionContext::new(api.clone(), manager));
+        (context, api, path)
+    }
+
+    /// 跑一次 `get_group_member_list`，返回（data 行数, 耗时）。
+    fn timed_member_list(handler: &GetGroupMemberListHandler) -> (usize, Duration) {
+        let started = Instant::now();
+        let response = block_on_timed(handler.handle(&request(
+            "get_group_member_list",
+            json!({"group_id": GROUP}),
+        )))
+        .expect("handler 不应返回 Err");
+        let elapsed = started.elapsed();
+        let data = ok_data(response);
+        (data.as_array().expect("data 是数组").len(), elapsed)
+    }
+
     #[test]
     fn get_group_info_maps_upstream_fields() {
         let (context, api) = context();
@@ -916,23 +1106,13 @@ mod tests {
     #[test]
     fn get_group_member_list_passes_limit_and_returns_array() {
         let (context, api) = context();
-        *api.member_list.lock().unwrap() = Some(Ok(QqGroupMemberList {
-            members: vec![
-                QqGroupMember {
-                    member_openid: MEMBER.to_owned(),
-                    username: "甲".to_owned(),
-                    member_role: "member".to_owned(),
-                    ..QqGroupMember::default()
-                },
-                QqGroupMember {
-                    member_openid: "1".repeat(32),
-                    username: "乙".to_owned(),
-                    member_role: "admin".to_owned(),
-                    ..QqGroupMember::default()
-                },
-            ],
-            next_cursor: "nc".to_owned(),
-        }));
+        enqueue_member_pages(
+            &api,
+            vec![member_page(
+                vec![qq_member(MEMBER, "甲"), qq_member(&"1".repeat(32), "乙")],
+                "",
+            )],
+        );
 
         let handler = GetGroupMemberListHandler::new(context);
         let response = block_on(handler.handle(&request(
@@ -951,7 +1131,7 @@ mod tests {
         assert_eq!(members.len(), 2);
         assert_eq!(members[0]["user_id"], json!(0));
         assert_eq!(members[0]["member_openid"], json!(MEMBER));
-        assert_eq!(members[1]["role"], json!("admin"));
+        assert_eq!(members[1]["role"], json!("member"));
         assert_eq!(handler.name(), "get_group_member_list");
     }
 
@@ -963,7 +1143,7 @@ mod tests {
             (json!({"group_id": GROUP, "limit": "500"}), 100),
         ] {
             let (context, api) = context();
-            *api.member_list.lock().unwrap() = Some(Ok(QqGroupMemberList::default()));
+            enqueue_member_pages(&api, vec![QqGroupMemberList::default()]);
             let handler = GetGroupMemberListHandler::new(context);
             block_on(handler.handle(&request("get_group_member_list", params)))
                 .expect("handler 不应返回 Err");
@@ -975,34 +1155,37 @@ mod tests {
     }
 
     #[test]
-    fn get_group_member_list_forwards_cursor_and_drops_it() {
+    fn get_group_member_list_follows_cursor_chain_and_drops_cursor() {
         let (context, api) = context();
-        *api.member_list.lock().unwrap() = Some(Ok(QqGroupMemberList {
-            members: vec![QqGroupMember {
-                member_openid: MEMBER.to_owned(),
-                ..QqGroupMember::default()
-            }],
-            next_cursor: "nc2".to_owned(),
-        }));
+        enqueue_member_pages(
+            &api,
+            vec![
+                member_page(vec![qq_member(MEMBER, "甲")], "nc1"),
+                member_page(vec![qq_member(&"1".repeat(32), "乙")], ""),
+            ],
+        );
 
         let handler = GetGroupMemberListHandler::new(context);
         let response = block_on(handler.handle(&request(
             "get_group_member_list",
-            json!({"group_id": GROUP, "cursor": "nc1", "limit": 30}),
+            json!({"group_id": GROUP, "limit": 30}),
         )));
         let response = response.expect("handler 不应返回 Err");
 
         assert_eq!(
             api.calls(),
-            vec![Call::MemberList(
-                GROUP.to_owned(),
-                Some("nc1".to_owned()),
-                30
-            )],
-            "cursor 必须原样透传给上游"
+            vec![
+                Call::MemberList(GROUP.to_owned(), None, 30),
+                Call::MemberList(GROUP.to_owned(), Some("nc1".to_owned()), 30),
+            ],
+            "按 next_cursor 链翻页，末页空串即停（不多调一页）"
         );
-        let json = serde_json::to_value(&response).expect("响应应可序列化");
-        assert!(json["data"].is_array(), "data 仍是数组（OneBot 兼容）");
+        let members = response
+            .data
+            .as_ref()
+            .and_then(Value::as_array)
+            .expect("data 是数组");
+        assert_eq!(members.len(), 2, "两页成员合并在同一份 data 里");
         // Go 的成员列表响应没有游标（`buildResponse` 只有 retcode/status/data/echo）
         let body = serde_json::to_string(&response).expect("响应应可序列化");
         assert!(
@@ -1012,9 +1195,33 @@ mod tests {
     }
 
     #[test]
+    fn get_group_member_list_uses_input_cursor_as_start() {
+        let (context, api) = context();
+        enqueue_member_pages(&api, vec![member_page(vec![qq_member(MEMBER, "甲")], "")]);
+
+        let handler = GetGroupMemberListHandler::new(context);
+        let response = block_on(handler.handle(&request(
+            "get_group_member_list",
+            json!({"group_id": GROUP, "cursor": "nc1", "limit": 30}),
+        )));
+        let data = ok_data(response.expect("handler 不应返回 Err"));
+
+        assert_eq!(
+            api.calls(),
+            vec![Call::MemberList(
+                GROUP.to_owned(),
+                Some("nc1".to_owned()),
+                30
+            )],
+            "入参 cursor 就是起始游标"
+        );
+        assert_eq!(data.as_array().expect("data 是数组").len(), 1);
+    }
+
+    #[test]
     fn get_group_member_list_wire_shape_has_no_cursor() {
         let (context, api) = context();
-        *api.member_list.lock().unwrap() = Some(Ok(QqGroupMemberList::default()));
+        enqueue_member_pages(&api, vec![QqGroupMemberList::default()]);
 
         let handler = GetGroupMemberListHandler::new(context);
         let response = block_on(handler.handle(&request(
@@ -1032,6 +1239,155 @@ mod tests {
             serde_json::to_string(&response).expect("响应应可序列化"),
             r#"{"data":[],"echo":"e-1","message":"","retcode":0,"status":"ok"}"#
         );
+    }
+
+    #[test]
+    fn get_group_member_list_survives_mid_page_error() {
+        let (context, api) = context();
+        enqueue_member_pages(
+            &api,
+            vec![member_page(vec![qq_member(MEMBER, "甲")], "nc1")],
+        );
+        api.member_list.lock().unwrap().push_back(Err(ApiError {
+            http_status: 500,
+            code: 30500,
+            message: "upstream boom".to_owned(),
+            trace_id: None,
+        }));
+
+        let handler = GetGroupMemberListHandler::new(context);
+        let response = block_on(handler.handle(&request(
+            "get_group_member_list",
+            json!({"group_id": GROUP}),
+        )));
+        let data = ok_data(response.expect("中途页失败也应是 retcode 0 的成功响应"));
+
+        assert_eq!(api.calls().len(), 2, "首页 + 失败的第二页");
+        let members = data.as_array().expect("data 是数组");
+        assert_eq!(members.len(), 1, "已收集的首页成员保留");
+        assert_eq!(members[0]["member_openid"], json!(MEMBER));
+    }
+
+    #[test]
+    fn get_group_member_list_first_page_error_falls_back_without_failing() {
+        let (context, api) = context();
+        api.member_list.lock().unwrap().push_back(Err(ApiError {
+            http_status: 403,
+            code: 11244,
+            message: "无权限".to_owned(),
+            trace_id: None,
+        }));
+
+        // 未装配 idmap：回退结果为空列表，但仍是 retcode 0（Go 同口径，不报上游错）
+        let handler = GetGroupMemberListHandler::new(context);
+        let response = block_on(handler.handle(&request(
+            "get_group_member_list",
+            json!({"group_id": GROUP}),
+        )));
+        let data = ok_data(response.expect("首页失败也应回成功响应"));
+
+        assert_eq!(api.calls().len(), 1, "首页失败不重试");
+        assert_eq!(data, json!([]));
+    }
+
+    #[test]
+    fn get_group_member_list_stops_at_page_cap() {
+        let (context, api) = context();
+        // 每页都让游标推进、永不返回末页：只有页数上限能停住翻页
+        enqueue_member_pages(
+            &api,
+            (0..MAX_MEMBER_PAGES)
+                .map(|index| member_page(vec![qq_member(MEMBER, "甲")], &format!("nc{index}")))
+                .collect(),
+        );
+
+        let handler = GetGroupMemberListHandler::new(context);
+        let response = block_on(handler.handle(&request(
+            "get_group_member_list",
+            json!({"group_id": GROUP}),
+        )));
+        let data = ok_data(response.expect("handler 不应返回 Err"));
+
+        let calls = api.calls();
+        assert_eq!(calls.len(), MAX_MEMBER_PAGES, "第 101 页不该发出");
+        assert_eq!(
+            calls[1],
+            Call::MemberList(GROUP.to_owned(), Some("nc0".to_owned()), 30)
+        );
+        assert_eq!(
+            data.as_array().expect("data 是数组").len(),
+            MAX_MEMBER_PAGES
+        );
+    }
+
+    #[test]
+    fn get_group_member_list_stops_when_cursor_does_not_advance() {
+        let (context, api) = context();
+        // 上游第二页原样吐回第一页的游标：不额外判据就会一直空转到 100 页
+        enqueue_member_pages(
+            &api,
+            vec![
+                member_page(vec![qq_member(MEMBER, "甲")], "nc1"),
+                member_page(vec![qq_member(&"1".repeat(32), "乙")], "nc1"),
+            ],
+        );
+
+        let handler = GetGroupMemberListHandler::new(context);
+        let response = block_on(handler.handle(&request(
+            "get_group_member_list",
+            json!({"group_id": GROUP}),
+        )));
+        let data = ok_data(response.expect("handler 不应返回 Err"));
+
+        assert_eq!(api.calls().len(), 2, "游标未推进即停");
+        assert_eq!(data.as_array().expect("data 是数组").len(), 2);
+    }
+
+    #[test]
+    fn get_group_member_list_with_zero_delay_never_sleeps() {
+        let (context, api, config_path) = context_with_delay(0, "zero");
+        enqueue_member_pages(
+            &api,
+            vec![
+                member_page(vec![qq_member(MEMBER, "甲")], "nc1"),
+                member_page(vec![qq_member(&"1".repeat(32), "乙")], ""),
+            ],
+        );
+
+        let handler = GetGroupMemberListHandler::new(context);
+        let (rows, elapsed) = timed_member_list(&handler);
+        assert_eq!(rows, 2);
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "delay = 0 时不得等待，实际 {elapsed:?}"
+        );
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[test]
+    fn get_group_member_list_waits_between_pages_only() {
+        let (context, api, config_path) = context_with_delay(50, "gap");
+        enqueue_member_pages(
+            &api,
+            vec![
+                member_page(vec![qq_member(MEMBER, "甲")], "nc1"),
+                member_page(vec![qq_member(&"1".repeat(32), "乙")], ""),
+            ],
+        );
+
+        let handler = GetGroupMemberListHandler::new(context);
+        let (rows, elapsed) = timed_member_list(&handler);
+        assert_eq!(rows, 2);
+        // 2 页 = 1 次间隔；末页后不等，所以不会到 2 × 50ms
+        assert!(
+            elapsed >= Duration::from_millis(50),
+            "页间应等一次 50ms，实际 {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "末页后不应再等，实际 {elapsed:?}"
+        );
+        let _ = std::fs::remove_file(config_path);
     }
 
     #[test]
@@ -1260,11 +1616,6 @@ mod tests {
                 "member_info",
             ),
             (
-                "get_group_member_list",
-                json!({"group_id": GROUP}),
-                "member_list",
-            ),
-            (
                 "get_group_bot_state",
                 json!({"group_id": GROUP}),
                 "bot_state",
@@ -1285,7 +1636,6 @@ mod tests {
             match slot {
                 "group_info" => *api.group_info.lock().unwrap() = Some(Err(error)),
                 "member_info" => *api.member_info.lock().unwrap() = Some(Err(error)),
-                "member_list" => *api.member_list.lock().unwrap() = Some(Err(error)),
                 "bot_state" => *api.bot_state.lock().unwrap() = Some(Err(error)),
                 _ => *api.join_requests.lock().unwrap() = Some(Err(error)),
             }
@@ -1293,7 +1643,6 @@ mod tests {
             let handler: Arc<dyn Handler> = match handler {
                 "get_group_info" => Arc::new(GetGroupInfoHandler::new(context)),
                 "get_group_member_info" => Arc::new(GetGroupMemberInfoHandler::new(context)),
-                "get_group_member_list" => Arc::new(GetGroupMemberListHandler::new(context)),
                 "get_group_bot_state" => Arc::new(GetGroupBotStateHandler::new(context)),
                 _ => Arc::new(GetGroupJoinRequestListHandler::new(context)),
             };

@@ -562,7 +562,10 @@ async fn raw_send_replies_with_params_message_id() {
 
 #[tokio::test]
 async fn sse_send_posts_stream_body_to_c2c_endpoint() {
-    let (_dir, api, state) = state("app_id: 12345\n");
+    let (_dir, api, state, echo, idmap) = state_with_idmap("app_id: 12345\n");
+    let (_, user_vuin) = idmap
+        .retrieve_virtual_value(USER_OPENID)
+        .expect("分配用户虚拟号");
     api.push_c2c(api.ok("s-1"));
 
     let response = state
@@ -583,8 +586,16 @@ async fn sse_send_posts_stream_body_to_c2c_endpoint() {
         ))
         .await;
 
-    assert_eq!(response.retcode, 0);
-    assert_eq!(response.data, Some(json!({ "message_id": "s-1" })));
+    // P86d-2：回执改走 `SendC2CResponse` 口径——`message_id` 是 echo 派生数字（numeric 模式），
+    // 顶层 `user_id` 是数字虚拟号（Go 私聊回执恒数字结构）
+    let message_id = echo.store_cache_in_memory("s-1").expect("派生行号");
+    assert_eq!(
+        serde_json::to_string(&response).expect("序列化失败"),
+        format!(
+            r#"{{"data":{{"message_id":{message_id}}},"echo":"e-s","message":"","retcode":0,"status":"ok","user_id":{user_vuin}}}"#
+        ),
+        "SSE 回执（Go `SendC2CResponse`）"
+    );
 
     let sent = api.sent();
     match &sent[0] {
@@ -624,7 +635,9 @@ async fn sse_send_posts_stream_body_to_c2c_endpoint() {
 
 #[tokio::test]
 async fn group_forward_resends_nodes_and_reports_failed_index() {
-    let (_dir, api, state) = state("  app_id: 12345\n  forward_msg_limit: 5\n");
+    let (_dir, api, state, echo, idmap) =
+        state_with_idmap("  app_id: 12345\n  forward_msg_limit: 5\n");
+    let (_, group_vuin) = idmap.retrieve_virtual_value(OPENID).expect("分配群虚拟号");
     api.push_group(api.ok("f-1"));
     api.push_group(Outcome::Fail);
     api.push_group(api.ok("f-3"));
@@ -656,8 +669,18 @@ async fn group_forward_resends_nodes_and_reports_failed_index() {
         response.retcode, 0,
         "部分失败不改整体 retcode（Go 回执语义）"
     );
+    // 顶层 `group_id` 是数字虚拟号：Go 转发直接调 `SendResponse`、不经 `string_ob11` 分派
+    let whole = serde_json::to_value(&response).expect("序列化失败");
+    assert_eq!(whole["group_id"], json!(group_vuin), "实际回执: {whole}");
     let data = response.data.expect("data");
-    assert_eq!(data["message_ids"], json!(["f-1", "f-3"]), "已发不回滚");
+    // P86d-2：`message_ids` 元素过 `message_id_value`——numeric 模式是 echo 派生虚拟号
+    let first_id = echo.store_cache_in_memory("f-1").expect("派生行号");
+    let second_id = echo.store_cache_in_memory("f-3").expect("派生行号");
+    assert_eq!(
+        data["message_ids"],
+        json!([first_id, second_id]),
+        "已发不回滚"
+    );
     // node 1 发送失败 + node 3 段解析失败（日志：规划层 tracing::warn 打点）；
     // node 2 坏形状按 Go 静默跳过、不入册
     let failed = data["failed"].as_array().expect("failed 数组").clone();
@@ -690,7 +713,11 @@ async fn group_forward_resends_nodes_and_reports_failed_index() {
 
 #[tokio::test]
 async fn private_forward_loops_c2c_endpoint() {
-    let (_dir, api, state) = state("  app_id: 12345\n  forward_msg_limit: 5\n");
+    let (_dir, api, state, echo, idmap) =
+        state_with_idmap("  app_id: 12345\n  forward_msg_limit: 5\n");
+    let (_, user_vuin) = idmap
+        .retrieve_virtual_value(USER_OPENID)
+        .expect("分配用户虚拟号");
     api.push_c2c(api.ok("p-1"));
     api.push_c2c(api.ok("p-2"));
     let dispatcher = state
@@ -712,10 +739,14 @@ async fn private_forward_loops_c2c_endpoint() {
         .await;
 
     assert_eq!(response.retcode, 0);
-    assert_eq!(
-        response.data.expect("data")["message_ids"],
-        json!(["p-1", "p-2"])
-    );
+    // 私聊转发是 Rust 扩展 action（Go 未注册）：顶层 ID 照私聊回执口径给数字虚拟号
+    let whole = serde_json::to_value(&response).expect("序列化失败");
+    assert_eq!(whole["user_id"], json!(user_vuin));
+    assert_eq!(whole["group_id"], Value::Null, "私聊回执不带 group_id");
+    let data = response.data.expect("data");
+    let first_id = echo.store_cache_in_memory("p-1").expect("派生行号");
+    let second_id = echo.store_cache_in_memory("p-2").expect("派生行号");
+    assert_eq!(data["message_ids"], json!([first_id, second_id]));
     let sent = api.sent();
     assert_eq!(sent.len(), 2);
     assert!(matches!(
@@ -723,6 +754,150 @@ async fn private_forward_loops_c2c_endpoint() {
         Sent::C2c(openid, message)
             if openid == USER_OPENID && message.content.as_deref() == Some("第二条")
     ));
+}
+
+// ---- P86d-2：SSE / 合并转发回执的 `string_ob11` 双模式渲染 ----
+
+/// `string_ob11` 下 SSE 回执的 `message_id` 与单条发送同口径：回上游原串（Go
+/// `SendC2CResponse` 恒派生数字，Rust 给的是超集，已登记），`user_id` 仍是数字虚拟号。
+#[tokio::test]
+async fn sse_string_mode_receipt_keeps_upstream_id() {
+    let (_dir, api, state, _echo, idmap) =
+        state_with_idmap("  app_id: 12345\n  string_ob11: true\n");
+    let (_, user_vuin) = idmap
+        .retrieve_virtual_value(USER_OPENID)
+        .expect("分配用户虚拟号");
+    api.push_c2c(api.ok("s-str"));
+
+    let response = state
+        .dispatcher()
+        .dispatch(&request(
+            "send_private_msg_sse",
+            json!({
+                "user_id": USER_OPENID,
+                "message": { "content": "片段", "state": 1 }
+            }),
+            None,
+        ))
+        .await;
+
+    assert_eq!(
+        serde_json::to_string(&response).expect("序列化失败"),
+        format!(
+            r#"{{"data":{{"message_id":"s-str"}},"echo":null,"message":"","retcode":0,"status":"ok","user_id":{user_vuin}}}"#
+        ),
+        "string 模式的 SSE 回执"
+    );
+}
+
+/// 合并转发的 `message_ids` 元素按 `string_ob11` 双模式渲染，但顶层 `group_id` 恒数字：
+/// Go 的转发 handler 直接调 `SendResponse`（`send_group_forward_msg.go:75`），不过
+/// `send_group_msg.go:1020` 的 `string_ob11` 分派。`failed` 清单是 Rust 独有增强，两种模式都保留。
+#[tokio::test]
+async fn forward_receipts_follow_mode_for_message_ids_but_group_id_is_numeric() {
+    for (settings, string_mode) in [
+        ("  app_id: 12345\n  forward_msg_limit: 5\n", false),
+        (
+            "  app_id: 12345\n  forward_msg_limit: 5\n  string_ob11: true\n",
+            true,
+        ),
+    ] {
+        let (_dir, api, state, echo, idmap) = state_with_idmap(settings);
+        let (_, group_vuin) = idmap.retrieve_virtual_value(OPENID).expect("分配群虚拟号");
+        api.push_group(api.ok("m-f1"));
+        api.push_group(Outcome::Fail);
+        let dispatcher = state
+            .dispatcher()
+            .with_forward_interval(std::time::Duration::ZERO);
+
+        let response = dispatcher
+            .dispatch(&request(
+                "send_group_forward_msg",
+                json!({
+                    "group_id": OPENID,
+                    "messages": [
+                        {"data": {"content": "一"}},
+                        {"data": {"content": "二"}}
+                    ]
+                }),
+                None,
+            ))
+            .await;
+
+        let whole = serde_json::to_value(&response).expect("序列化失败");
+        assert_eq!(
+            whole["group_id"],
+            json!(group_vuin),
+            "转发回执的 group_id 恒数字（{settings:?}）"
+        );
+        let data = response.data.expect("data");
+        let expected = if string_mode {
+            json!("m-f1")
+        } else {
+            json!(echo.store_cache_in_memory("m-f1").expect("派生行号"))
+        };
+        assert_eq!(
+            data["message_ids"],
+            json!([expected]),
+            "string 模式回原串 / numeric 模式派生数字（{settings:?}）"
+        );
+        assert_eq!(
+            data["failed"].as_array().map(Vec::len),
+            Some(1),
+            "failed 清单两种模式都保留（{settings:?}）"
+        );
+    }
+}
+
+/// 正文被 CQ 管线吃空的转发 node 在**规划层**就被剔除（`gensokyo-actions/src/send.rs:692`：
+/// 空正文 + 无 plan 不入队），因此 `message_ids` 里永远拿不到空回执 `0`——该规则由单条用例
+/// [`empty_receipt_is_numeric_zero_in_both_modes`] 覆盖。整次转发无 node 可发时计划里也没有
+/// 收件人（`ForwardRequest` 无顶层 `target`），顶层 ID 留空是登记在案的已知边界。
+#[tokio::test]
+async fn forward_with_only_empty_nodes_reports_no_ids() {
+    for settings in [
+        "  app_id: 12345\n  forward_msg_limit: 5\n",
+        "  app_id: 12345\n  forward_msg_limit: 5\n  string_ob11: true\n",
+    ] {
+        let (_dir, api, state) = state(settings);
+        let dispatcher = state
+            .dispatcher()
+            .with_forward_interval(std::time::Duration::ZERO);
+
+        let response = dispatcher
+            .dispatch(&request(
+                "send_group_forward_msg",
+                json!({
+                    "group_id": OPENID,
+                    "messages": [{"data": {"content": "[CQ:card]"}}]
+                }),
+                None,
+            ))
+            .await;
+
+        assert_eq!(response.retcode, 0, "纯码 node 仍回执成功（{settings:?}）");
+        assert!(
+            api.sent().is_empty(),
+            "纯码 node 不应触达上游（{settings:?}）"
+        );
+        let whole = serde_json::to_value(&response).expect("序列化失败");
+        let data = response.data.expect("data");
+        assert_eq!(
+            data["message_ids"],
+            json!([]),
+            "空正文 node 不入队（{settings:?}）"
+        );
+        assert_eq!(
+            data["failed"],
+            json!([]),
+            "空正文 node 不入失败册（{settings:?}）"
+        );
+        assert_eq!(
+            whole["group_id"],
+            Value::Null,
+            "已知边界：无可发 node 时计划里没有收件人（{settings:?}）"
+        );
+    }
 }
 
 // ---- P86a：回执 message_id 的类型与空回执（Go `SendResponse` 口径） ----
