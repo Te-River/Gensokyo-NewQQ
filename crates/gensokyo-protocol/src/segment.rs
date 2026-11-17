@@ -110,11 +110,12 @@ impl Segment {
         self
     }
 
-    /// 读取参数。
+    /// 读取参数（同名参数**后者覆盖**：Go `cqParseParams` 建 map，同键后写覆盖先写，m2）。
     #[must_use]
     pub fn get(&self, key: &str) -> Option<&str> {
         self.params
             .iter()
+            .rev()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
     }

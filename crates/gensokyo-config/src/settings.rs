@@ -372,6 +372,10 @@ pub struct Settings {
     /// 分层架构接入模式：`legacy` / `shadow` / `new`（Go `string`，`arch_mode`）。
     #[serde(deserialize_with = "de_string_lenient")]
     pub arch_mode: String,
+    /// 出站管理 CQ 码（`[CQ:member]` / `[CQ:set_group]` / `[CQ:remove]`）的执行开关：
+    /// `legacy`（默认，照 Go 执行 + WARN 审计）/ `off`（整条 1400 拒绝）。Rust-only（P83）。
+    #[serde(deserialize_with = "de_string_lenient")]
+    pub cq_admin_actions: String,
 
     // ---- url 相关 ----
     /// 是否对外暴露真实 IP（Go `bool`，`visible_ip`）。
@@ -943,6 +947,7 @@ string_ob11: true
 string_action: true
 cq_parse_mode: new
 arch_mode: shadow
+cq_admin_actions: off
 visible_ip: true
 url_to_qrimage: true
 qr_size: 256
@@ -1362,6 +1367,7 @@ msgid_ttl_seconds: -1_000
         assert_eq!(settings.put_interaction_delay, 300);
         assert_eq!(settings.cq_parse_mode, "new");
         assert_eq!(settings.arch_mode, "shadow");
+        assert_eq!(settings.cq_admin_actions, "off");
         assert_eq!(settings.qr_size, 256);
         assert_eq!(settings.title, "Gensokyo-Bot");
         assert_eq!(settings.frp_port, "7500");
@@ -1392,7 +1398,12 @@ msgid_ttl_seconds: -1_000
 
         // 键集一一对应：漏迁字段 / tag 写错都会让这里不等
         let fixture_keys = mapping_keys(&fixture);
-        assert_eq!(fixture_keys.len(), 185, "Go Settings 顶层 yaml tag 总数");
+        // 185 是 Go `Settings` 的顶层 yaml tag 数；`cq_admin_actions` 是 Rust-only 新增（P83），共 186
+        assert_eq!(
+            fixture_keys.len(),
+            186,
+            "Settings 顶层 yaml tag 总数（含 Rust-only）"
+        );
         assert_eq!(
             fixture_keys,
             mapping_keys(&serialized),

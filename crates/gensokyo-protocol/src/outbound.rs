@@ -10,7 +10,7 @@
 //! ```text
 //! reply → text（含 [CQ:at] 字面量，按 CQ 重新分词）→ active → wakeup
 //!       → avatars → images → records → videos → files → qqmusic
-//!       → markdown → keyboard → card → input_notify → stream → extra
+//!       → markdown → keyboard → card → input_notify → stream → extra → admin_ops
 //! ```
 //!
 //! reply 恒在首位：Go 会把 `reply_msg_id` 注入到**每条**媒体消息的 `MessageReference`，
@@ -34,10 +34,12 @@
 //! 2. **静默丢弃**：`ark`（Go 在 `parseMessageContent` 之后由 `ProcessCQInboundOnlyCodes`
 //!    整段剥掉，`handlers/cqcode.go:198-205`、`handlers/cqcode_pipeline.go:57-59`）与空 `card`
 //!    （`handlers/cqcode_pipeline.go:124-130`：cardData 为空时不入 `foundItems`、正文也不留）。
-//! 3. **进 [`OutboundPlan::extra`]**：`member` / `set_group` / `remove`——Go 是**真执行**管理动作
-//!    （`handlers/message_parser.go:1166-1173`、`:1175-1181`、`:1611-1617` 还原 CQ →
-//!    `handlers/cqcode.go:235-240` 踢人 / 禁言 / 撤回），本仓未实现（P83）；留在 `extra` 让
-//!    下游以 `1400` 明确拒绝，静默吞掉会悄悄丢掉管理动作。
+//! 3. **进 [`OutboundPlan::admin_ops`]**：`member` / `set_group` / `remove`——Go 是**真执行**
+//!    管理动作（`handlers/message_parser.go:1166-1173`、`:1175-1181`、`:1611-1617` 还原
+//!    CQ → `handlers/cqcode.go:235-240` 踢人 / 禁言 / 撤回），P83 起同样解析成 [`AdminOp`]
+//!    交 runtime 执行；L1 解析期缺陷（缺必填 / 未知 action / 段形态 remove）仍按 Go 口径
+//!    字面留在正文（`member` 例外：Go `cqcode.go:331` 对它无条件吞码，见 [`OutboundPlan::from_segments`]），
+//!    `extra` 只留作下游未知段的防御桶。
 //!
 //! `avatar` 走 Go「段路径 / `cqparse`」口径：带 `qq` 的段进 [`OutboundPlan::avatars`]，由 runtime
 //! 反查 openid 后拼接 `q.qlogo.cn` 地址发真图（`handlers/message_parser.go:991-1016`、
@@ -321,6 +323,266 @@ pub struct InputNotifyPayload {
     pub second: Option<i64>,
 }
 
+/// `[CQ:member]` 的身份指令类型（P83）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberKind {
+    /// `type=add`：入群回复（echo 命中时以该 `event_id` 被动回复）。
+    Add,
+    /// `type=remove`：退群消息，清空被动身份转主动推送。
+    Remove,
+}
+
+/// [`AdminOp::Member`] 的载荷：身份指令，**零 API 调用**（Go `cqcode.go:313-331`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberDirective {
+    /// `type`（`add` / `remove`）。
+    pub kind: MemberKind,
+    /// `group_id`（缺省用发送目标群，运行期替换）。
+    pub group_id: Option<String>,
+    /// `user_id`（仅审计日志，Go 同）。
+    pub user_id: Option<String>,
+}
+
+/// `[CQ:remove]` 的载荷（撤回，`user_id` 必填，L1；`msg_id` 可缺）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoveOp {
+    /// `group_id`（Go 不读该参数，缺省用发送目标群）。
+    pub group_id: Option<String>,
+    /// `user_id`：仅校验与缺 `msg_id` 时定位该用户最新消息（Go `cqcode.go:376-380`）。
+    pub user_id: Option<String>,
+    /// `msg_id`：可缺，运行期自动取该用户最新消息（Go `cqcode.go:350-369`）。
+    pub msg_id: Option<String>,
+}
+
+/// `[CQ:set_group]` 的载荷（7 个 action，Go `cqcode.go:426-444` 分发）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetGroupOp {
+    /// `action=ban`（`duration <= 0` 解除）。
+    Ban {
+        /// `group_id`（缺省用发送目标群）。
+        group_id: Option<String>,
+        /// `user_id`（必填，L1）。
+        user_id: String,
+        /// 禁言秒数（缺省 / 非数字时为 0）。
+        duration: i64,
+        /// 非数字的原始 `duration`：数值非法归 L2（设计 §5），带到运行期大声拒绝。
+        raw_duration: Option<String>,
+    },
+    /// `action=whole_ban`（官方无写入字段，运行期仅告警并跳过该码）。
+    WholeBan {
+        /// `group_id`。
+        group_id: Option<String>,
+        /// `enable`。
+        enable: bool,
+        /// 非布尔的原始 `enable`：数值非法归 L2，带到运行期大声拒绝。
+        raw_enable: Option<String>,
+    },
+    /// `action=add_request`（审批入群申请，`approve` 缺省 `true`）。
+    AddRequest {
+        /// `group_id`。
+        group_id: Option<String>,
+        /// `user_id`（必填，L1）。
+        user_id: String,
+        /// `flag`（申请 ID，必填，L1）。
+        flag: String,
+        /// `approve`（缺省 `true`）。
+        approve: bool,
+        /// 非布尔的原始 `approve`：数值非法归 L2，带到运行期大声拒绝。
+        raw_approve: Option<String>,
+        /// `reason`（拒绝理由）。
+        reason: String,
+        /// `add_to_member_blacklist`（非布尔按 Go 口径忽略，`cqcode.go:542-545`）。
+        add_to_blacklist: Option<bool>,
+    },
+    /// `action=strategy_execute`（`execute=true`）/ `strategy_delete`（`false`）。
+    Strategy {
+        /// `true` = execute / `false` = delete。
+        execute: bool,
+        /// `strategy_id`（必填，L1）。
+        strategy_id: String,
+    },
+    /// `action=kick`（批量移出，单批 ≤ 20）。
+    Kick {
+        /// `group_id`（缺省用发送目标群）。
+        group_id: Option<String>,
+        /// `user_id` + `user_ids` 合并去重保序、超 20 截断后的集合（必非空，L1）。
+        user_ids: Vec<String>,
+        /// `add_blacklist`（非布尔按 Go 口径当 `false`，`cqcode.go:603-611`）。
+        add_blacklist: bool,
+    },
+    /// `action=blacklist_add` / `blacklist_del`（群黑名单增删，单批 ≤ 20）。
+    Blacklist {
+        /// `true` = add / `false` = del。
+        add: bool,
+        /// `group_id`（缺省用发送目标群）。
+        group_id: Option<String>,
+        /// 同 [`SetGroupOp::Kick::user_ids`]。
+        user_ids: Vec<String>,
+    },
+}
+
+/// 出站管理 CQ 码（`[CQ:member]` / `[CQ:set_group]` / `[CQ:remove]`）的类型化载荷（P83）。
+///
+/// 按到达顺序进 [`OutboundPlan::admin_ops`]，运行期由 `gensokyo_runtime::cq_admin` 执行；
+/// L1 解析期可判定的缺陷（缺必填 / 未知 action / `type` 非法 / `user_ids` 空）不产出本类型，
+/// 原样留在正文（与 Go 逐字一致）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdminOp {
+    /// 身份指令（零 API 调用，只决定本条消息的被动回复身份）。
+    Member(MemberDirective),
+    /// 撤回。
+    Remove(RemoveOp),
+    /// 群管理动作（7 个 action）。
+    SetGroup(SetGroupOp),
+}
+
+impl AdminOp {
+    /// 还原为消息段（[`OutboundPlan::to_segments`] 回写与序列化往返共用）。
+    ///
+    /// `raw` 挂规范化 CQ 字面：remove 的「只认字符串路径」判定（[`admin_op_from_segment`]）
+    /// 在序列化往返后必须仍然成立。
+    #[must_use]
+    pub fn to_segment(&self) -> Segment {
+        let segment = match self {
+            Self::Member(directive) => Segment::new("member")
+                .param(
+                    "type",
+                    match directive.kind {
+                        MemberKind::Add => "add",
+                        MemberKind::Remove => "remove",
+                    },
+                )
+                .param_opt("group_id", directive.group_id.as_deref())
+                .param_opt("user_id", directive.user_id.as_deref()),
+            Self::Remove(op) => Segment::new("remove")
+                .param_opt("group_id", op.group_id.as_deref())
+                .param_opt("user_id", op.user_id.as_deref())
+                .param_opt("msg_id", op.msg_id.as_deref()),
+            Self::SetGroup(SetGroupOp::Ban {
+                group_id,
+                user_id,
+                duration,
+                raw_duration,
+            }) => Segment::new("set_group")
+                .param("action", "ban")
+                .param_opt("group_id", group_id.as_deref())
+                .param("user_id", user_id.as_str())
+                .param(
+                    "duration",
+                    raw_duration.clone().unwrap_or_else(|| duration.to_string()),
+                ),
+            Self::SetGroup(SetGroupOp::WholeBan {
+                group_id,
+                enable,
+                raw_enable,
+            }) => Segment::new("set_group")
+                .param("action", "whole_ban")
+                .param_opt("group_id", group_id.as_deref())
+                .param(
+                    "enable",
+                    raw_enable.clone().unwrap_or_else(|| enable.to_string()),
+                ),
+            Self::SetGroup(SetGroupOp::AddRequest {
+                group_id,
+                user_id,
+                flag,
+                approve,
+                raw_approve,
+                reason,
+                add_to_blacklist,
+            }) => {
+                let mut segment = Segment::new("set_group")
+                    .param("action", "add_request")
+                    .param_opt("group_id", group_id.as_deref())
+                    .param("user_id", user_id.as_str())
+                    .param("flag", flag.as_str())
+                    .param(
+                        "approve",
+                        raw_approve.clone().unwrap_or_else(|| approve.to_string()),
+                    );
+                if !reason.is_empty() {
+                    segment = segment.param("reason", reason.as_str());
+                }
+                if let Some(add) = add_to_blacklist {
+                    segment = segment.param("add_to_member_blacklist", add.to_string());
+                }
+                segment
+            }
+            Self::SetGroup(SetGroupOp::Strategy {
+                execute,
+                strategy_id,
+            }) => Segment::new("set_group")
+                .param(
+                    "action",
+                    if *execute {
+                        "strategy_execute"
+                    } else {
+                        "strategy_delete"
+                    },
+                )
+                .param("strategy_id", strategy_id.as_str()),
+            Self::SetGroup(SetGroupOp::Kick {
+                group_id,
+                user_ids,
+                add_blacklist,
+            }) => {
+                let mut segment = Segment::new("set_group")
+                    .param("action", "kick")
+                    .param_opt("group_id", group_id.as_deref())
+                    .param("user_ids", user_ids.join(","));
+                if *add_blacklist {
+                    segment = segment.param("add_blacklist", "true");
+                }
+                segment
+            }
+            Self::SetGroup(SetGroupOp::Blacklist {
+                add,
+                group_id,
+                user_ids,
+            }) => Segment::new("set_group")
+                .param(
+                    "action",
+                    if *add {
+                        "blacklist_add"
+                    } else {
+                        "blacklist_del"
+                    },
+                )
+                .param_opt("group_id", group_id.as_deref())
+                .param("user_ids", user_ids.join(",")),
+        };
+        let raw = segment.to_cq();
+        segment.with_raw(&raw)
+    }
+
+    /// 规范化 CQ 字面（审计日志 `raw_cq` 与私聊留字面共用；参数值按 Go 口径转义）。
+    #[must_use]
+    pub fn to_cq_literal(&self) -> String {
+        self.to_segment().to_cq()
+    }
+
+    /// 审计用的动作名（`member` / `remove` / `set_group:<action>`）。
+    #[must_use]
+    pub fn action_name(&self) -> &'static str {
+        match self {
+            Self::Member(_) => "member",
+            Self::Remove(_) => "remove",
+            Self::SetGroup(SetGroupOp::Ban { .. }) => "set_group:ban",
+            Self::SetGroup(SetGroupOp::WholeBan { .. }) => "set_group:whole_ban",
+            Self::SetGroup(SetGroupOp::AddRequest { .. }) => "set_group:add_request",
+            Self::SetGroup(SetGroupOp::Strategy { execute: true, .. }) => {
+                "set_group:strategy_execute"
+            }
+            Self::SetGroup(SetGroupOp::Strategy { execute: false, .. }) => {
+                "set_group:strategy_delete"
+            }
+            Self::SetGroup(SetGroupOp::Kick { .. }) => "set_group:kick",
+            Self::SetGroup(SetGroupOp::Blacklist { add: true, .. }) => "set_group:blacklist_add",
+            Self::SetGroup(SetGroupOp::Blacklist { add: false, .. }) => "set_group:blacklist_del",
+        }
+    }
+}
+
 /// 一条出站消息的完整意图。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OutboundPlan {
@@ -363,11 +625,15 @@ pub struct OutboundPlan {
     /// 与图片分开保留：Go 的两路兜底发送不同（`handlers/send_group_msg.go` 分别走图片/语音
     /// 通道），合成一个桶会在回写 `foundItems` 时丢失原类型。
     pub unknown_records: Vec<MediaRef>,
-    /// 本仓尚未实现、必须整条拒绝的段（`member` / `set_group` / `remove`），按到达顺序保留。
-    ///
-    /// Go 对这些码是**真执行**管理动作（见模块文档「无法归类的段」第 3 类），本仓未实现前
-    /// 留在 `extra` 由下游回 `1400`，不静默丢弃。
+    /// 防御性保留的拒绝桶（P83 前承载 `member` / `set_group` / `remove`，现无产出点）：
+    /// `deferred::unsupported_segment` 仍以它兜未知段，不静默丢。
     pub extra: Vec<Segment>,
+    /// 出站管理 CQ 码（`[CQ:member]` / `[CQ:set_group]` / `[CQ:remove]`），按到达顺序（P83）。
+    ///
+    /// 运行期由 `gensokyo_runtime::cq_admin` 执行：群聊全量，私聊 member / set_group 留
+    /// 字面、remove 走 C2C 撤回。**不参与** [`Self::is_empty`]：纯动作消息在判空之前
+    /// 执行动作、按空消息回执（Go `send_group_msg.go:557-562` 的出口，设计 §3.3-1）。
+    pub admin_ops: Vec<AdminOp>,
 }
 
 impl OutboundPlan {
@@ -585,7 +851,7 @@ impl OutboundPlan {
     ///   与 Go 的 `messageText` 一致。
     /// - `reply` 段取第一个，落到 [`Self::reply_msg_id`]。
     /// - 无消费点 / 形态不命中的段按字面写回 `text`，`ark` 与空 `card` 静默丢弃，
-    ///   `member` / `set_group` / `remove` 进 [`Self::extra`]（三类分界见模块文档）。
+    ///   `member` / `set_group` / `remove` 进 [`Self::admin_ops`]（三类分界见模块文档）。
     #[must_use]
     pub fn from_segments(segments: &[Segment]) -> Self {
         let mut plan = Self::default();
@@ -705,11 +971,32 @@ impl OutboundPlan {
                 // （handlers/cqcode.go:198-205、handlers/cqcode_pipeline.go:57-59）——既不发送
                 // 也不留字面，这里同样静默丢弃
                 "ark" => {}
-                // member / set_group / remove：Go **真执行**管理动作（踢人 / 禁言 / 撤回），
-                // 链路是 message_parser.go:1166-1173、:1175-1181、:1611-1617 还原 CQ 文本 →
-                // cqcode.go:235-240 分派。本仓未实现（P83）：静默吞掉会悄悄丢管理动作，
-                // 所以留在 extra 让下游以 1400 明确拒绝
-                "member" | "set_group" | "remove" => plan.extra.push(segment.clone()),
+                // member / set_group / remove：P83 起解析成类型化 AdminOp，运行期由
+                // gensokyo_runtime::cq_admin 执行（Go message_parser.go:1166-1181、:1611-1617
+                // 还原 CQ 文本 → cqcode.go:235-240 分派真执行）。L1 解析期缺陷（缺必填 /
+                // 未知 action / type 非法 / user_ids 空 / 段形态 remove）按 Go 的 return
+                // match 原样留字面；`member` 例外——Go cqcode.go:331 对它无条件 `return ""`，
+                // 缺 type / type 非法同样吞码（m3，P83）。数值非法（duration / enable /
+                // approve）以 raw_* 形态带到运行期按 L2 大声拒绝（设计 §5）。
+                "member" | "set_group" | "remove" => match admin_op_from_segment(segment) {
+                    Some(op) => plan.admin_ops.push(op),
+                    None if segment.kind == "member" => {
+                        tracing::warn!(
+                            kind = %segment.kind,
+                            raw_cq = %segment.raw_or_cq(),
+                            "[CQ 管理码] member L1 缺陷，按 Go 口径吞码（不进正文）"
+                        );
+                    }
+                    None => {
+                        // L1 解析期缺陷（设计 §5）：原样留字面 + WARN，运行期零 API 调用
+                        tracing::warn!(
+                            kind = %segment.kind,
+                            raw_cq = %segment.raw_or_cq(),
+                            "[CQ 管理码] L1 解析期缺陷，原样留字面"
+                        );
+                        push_literal(&mut plan, segment);
+                    }
+                },
                 // face / node / poke / group_info / json / 未知码：Go 的 cqparse 没有消费点时
                 // 回填 `tok.Raw`（cqparse/walk.go:61-72；金样 cq_legacy_semantics_test.go:173-174）
                 // ⇒ 逐字节留在正文
@@ -719,6 +1006,29 @@ impl OutboundPlan {
 
         plan.active = (!active.is_empty()).then_some(active);
         plan
+    }
+
+    /// 由**线上形态**（[`Self::to_segments`] 经 serde 往返）还原计划。
+    ///
+    /// [`Segment`] 的线上形态只写 `data` / `type`，解析期挂上的 `raw` 不落地（`segment.rs`）；
+    /// 而 `remove` 的「只认字符串路径」判定（[`admin_op_from_segment`]）依赖 `raw`。计划里的
+    /// `remove` 段只可能由 [`AdminOp::to_segment`] 产生——用户段形态的 remove 在
+    /// [`Self::from_segments`] 里已写成正文——所以这里统一按字符串路径补回 `raw`，
+    /// 否则私聊 `[CQ:remove]` 会退化成字面发出（P83 F1）。
+    #[must_use]
+    pub fn from_wire_segments(segments: &[Segment]) -> Self {
+        let restored: Vec<Segment> = segments
+            .iter()
+            .map(|segment| {
+                if segment.kind == "remove" {
+                    let raw = segment.to_cq();
+                    segment.clone().with_raw(&raw)
+                } else {
+                    segment.clone()
+                }
+            })
+            .collect();
+        Self::from_segments(&restored)
     }
 
     /// 展开为消息段序列（顺序见模块文档）。
@@ -790,6 +1100,9 @@ impl OutboundPlan {
         }
 
         out.extend(self.extra.iter().cloned());
+        // P83：管理码按到达顺序还原成段（`raw` 挂规范化字面——remove 的「只认字符串
+        // 路径」判定在序列化往返后必须仍然成立）。
+        out.extend(self.admin_ops.iter().map(AdminOp::to_segment));
         out
     }
 }
@@ -803,6 +1116,187 @@ impl OutboundPlan {
 /// 重分词时得到同一段，两个方向互为逆运算（不自造序列化，自产段才退回 `to_cq`）。
 fn push_literal(plan: &mut OutboundPlan, segment: &Segment) {
     plan.text.push_str(&segment.raw_or_cq());
+}
+
+/// 取管理码参数（trim 后非空才算有值；Go `cqParseParams` 对值 `TrimSpace`）。
+fn admin_param<'a>(segment: &'a Segment, key: &str) -> Option<&'a str> {
+    segment
+        .get(key)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// Go `strconv.ParseBool` 的等价物（`1` / `t` / `TRUE` 等同形态都接受）。
+fn parse_bool_go(value: &str) -> Option<bool> {
+    match value {
+        "1" | "t" | "T" | "true" | "TRUE" | "True" => Some(true),
+        "0" | "f" | "F" | "false" | "FALSE" | "False" => Some(false),
+        _ => None,
+    }
+}
+
+/// kick / blacklist 的 `user_id` + `user_ids` 合并（Go `cqSetGroupUserIDs`，
+/// `cqcode.go:665-694`）：逗号切分、合并去重保序、空项过滤、超 20 截断并告警。
+fn merged_user_ids(segment: &Segment, action: &str) -> Vec<String> {
+    const MAX_BATCH: usize = 20;
+    let mut ids: Vec<String> = Vec::new();
+    if let Some(user_id) = admin_param(segment, "user_id") {
+        ids.push(user_id.to_owned());
+    }
+    if let Some(list) = admin_param(segment, "user_ids") {
+        ids.extend(list.split(',').map(String::from));
+    }
+    let mut merged: Vec<String> = Vec::with_capacity(ids.len());
+    for id in ids {
+        let id = id.trim();
+        if id.is_empty() || merged.iter().any(|seen| seen.as_str() == id) {
+            continue;
+        }
+        merged.push(id.to_owned());
+    }
+    // 截断必须留痕（设计 §4「kick 超过 20 人」行）：否则少踢的人无从追溯
+    if merged.len() > MAX_BATCH {
+        tracing::warn!(
+            action = %action,
+            count = merged.len(),
+            cap = MAX_BATCH,
+            raw_cq = %segment.raw_or_cq(),
+            "[CQ 管理码] user_ids 超过单批上限，已截断"
+        );
+        merged.truncate(MAX_BATCH);
+    }
+    merged
+}
+
+/// `[CQ:member]` / `[CQ:set_group]` / `[CQ:remove]` 段 → [`AdminOp`]（P83）。
+///
+/// `None` = L1 解析期缺陷（缺必填 / 未知 action / `type` 非法 / `user_ids` 空），
+/// `set_group` / `remove` 按 Go 口径原样留字面（`member` 由调用方吞码，见
+/// [`OutboundPlan::from_segments`]）。remove 只认**字符串路径**（`raw` 存在）：Go 的消息段
+/// 分发没有 `case "remove"`（`message_parser.go:1630-1631` 落 default），段形态不执行。
+fn admin_op_from_segment(segment: &Segment) -> Option<AdminOp> {
+    let group_id = |segment: &Segment| admin_param(segment, "group_id").map(ToOwned::to_owned);
+    match segment.kind.as_str() {
+        "member" => {
+            let kind = match segment.get("type")?.trim() {
+                "add" => MemberKind::Add,
+                "remove" => MemberKind::Remove,
+                _ => return None,
+            };
+            Some(AdminOp::Member(MemberDirective {
+                kind,
+                group_id: group_id(segment),
+                user_id: admin_param(segment, "user_id").map(ToOwned::to_owned),
+            }))
+        }
+        // 缺 user_id 时 Go 留正文（`cqcode.go:371-372` 的 return match）；msg_id 可缺，
+        // 运行期自动取该用户最新消息（`cqcode.go:350-369`）
+        "remove" => {
+            segment.raw.as_ref()?;
+            let user_id = admin_param(segment, "user_id")?;
+            Some(AdminOp::Remove(RemoveOp {
+                group_id: group_id(segment),
+                user_id: Some(user_id.to_owned()),
+                msg_id: admin_param(segment, "msg_id").map(ToOwned::to_owned),
+            }))
+        }
+        "set_group" => {
+            let action = segment
+                .get("action")
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?;
+            let op = match action {
+                "ban" => {
+                    let user_id = admin_param(segment, "user_id")?.to_owned();
+                    let (duration, raw_duration) = match admin_param(segment, "duration") {
+                        Some(raw) => match raw.parse::<i64>() {
+                            Ok(parsed) => (parsed, None),
+                            // Go 对非数字静默当 0（cqcode.go:459-462）；数值非法归 L2
+                            Err(_) => (0, Some(raw.to_owned())),
+                        },
+                        None => (0, None),
+                    };
+                    SetGroupOp::Ban {
+                        group_id: group_id(segment),
+                        user_id,
+                        duration,
+                        raw_duration,
+                    }
+                }
+                "whole_ban" => {
+                    let raw_enable = admin_param(segment, "enable")?;
+                    let (enable, raw_enable) = match parse_bool_go(raw_enable) {
+                        Some(parsed) => (parsed, None),
+                        None => (false, Some(raw_enable.to_owned())),
+                    };
+                    SetGroupOp::WholeBan {
+                        group_id: group_id(segment),
+                        enable,
+                        raw_enable,
+                    }
+                }
+                "add_request" => {
+                    let user_id = admin_param(segment, "user_id")?.to_owned();
+                    let flag = admin_param(segment, "flag")?.to_owned();
+                    let (approve, raw_approve) = match admin_param(segment, "approve") {
+                        Some(raw) => match parse_bool_go(raw) {
+                            Some(parsed) => (parsed, None),
+                            None => (true, Some(raw.to_owned())),
+                        },
+                        None => (true, None),
+                    };
+                    SetGroupOp::AddRequest {
+                        group_id: group_id(segment),
+                        user_id,
+                        flag,
+                        approve,
+                        raw_approve,
+                        reason: admin_param(segment, "reason")
+                            .unwrap_or_default()
+                            .to_owned(),
+                        add_to_blacklist: admin_param(segment, "add_to_member_blacklist")
+                            .and_then(parse_bool_go),
+                    }
+                }
+                "strategy_execute" => SetGroupOp::Strategy {
+                    execute: true,
+                    strategy_id: admin_param(segment, "strategy_id")?.to_owned(),
+                },
+                "strategy_delete" => SetGroupOp::Strategy {
+                    execute: false,
+                    strategy_id: admin_param(segment, "strategy_id")?.to_owned(),
+                },
+                "kick" => {
+                    let user_ids = merged_user_ids(segment, "kick");
+                    if user_ids.is_empty() {
+                        return None;
+                    }
+                    SetGroupOp::Kick {
+                        group_id: group_id(segment),
+                        user_ids,
+                        add_blacklist: admin_param(segment, "add_blacklist")
+                            .and_then(parse_bool_go)
+                            .unwrap_or(false),
+                    }
+                }
+                "blacklist_add" | "blacklist_del" => {
+                    let user_ids = merged_user_ids(segment, action);
+                    if user_ids.is_empty() {
+                        return None;
+                    }
+                    SetGroupOp::Blacklist {
+                        add: action == "blacklist_add",
+                        group_id: group_id(segment),
+                        user_ids,
+                    }
+                }
+                // 未知 action：Go :441-443 原样保留
+                _ => return None,
+            };
+            Some(AdminOp::SetGroup(op))
+        }
+        _ => None,
+    }
 }
 
 const IMAGE_KEYS: &[&str] = &["local_image", "url_image", "url_images", "base64_image"];
@@ -1085,8 +1579,9 @@ mod tests {
     use gensokyo_core::Ob11Id;
 
     use super::{
-        CardFields, CardPayload, FileRef, FoundItems, InputNotifyPayload, MarkdownPayload,
-        MediaRef, OutboundPlan, StreamKind, StreamPayload,
+        AdminOp, CardFields, CardPayload, FileRef, FoundItems, InputNotifyPayload, MarkdownPayload,
+        MediaRef, MemberDirective, MemberKind, OutboundPlan, RemoveOp, SetGroupOp, StreamKind,
+        StreamPayload,
     };
     use crate::cqcode;
     use crate::segment::Segment;
@@ -2079,20 +2574,272 @@ mod tests {
         assert!(plan.extra.is_empty(), "ark 不该进 extra（下游 1400）");
     }
 
-    /// `member` / `set_group` / `remove` 在 Go 是**真执行**管理动作（踢人 / 禁言 / 撤回，
-    /// `handlers/message_parser.go:1166-1173`/`:1175-1181`/`:1611-1617` → `cqcode.go:235-240`）。
-    /// 本仓未实现（P83）：留在 `extra` 让下游回 1400，静默吞掉会悄悄丢管理动作。
+    /// P83：管理三码解析成类型化 `admin_ops`（不再进 `extra`、不再整条 1400）。
+    ///
+    /// Go 对这些码是**真执行**管理动作（踢人 / 禁言 / 撤回，`handlers/cqcode.go:235-240`）。
+    /// 旧样例 `[CQ:remove,message_id=789]` 的参数名顺手校正为 `msg_id`
+    /// （`cqcode.rs` 的 CodeSpec 一直是 `msg_id`）。
     #[test]
-    fn management_codes_stay_in_extra() {
+    fn management_codes_parse_into_admin_ops() {
+        let plan = OutboundPlan::from_segments(&cqcode::parse(
+            "[CQ:member,type=add,group_id=456,user_id=789]",
+        ));
+        assert_eq!(
+            plan.admin_ops,
+            vec![AdminOp::Member(MemberDirective {
+                kind: MemberKind::Add,
+                group_id: Some("456".to_owned()),
+                user_id: Some("789".to_owned()),
+            })],
+            "member 段应解析成身份指令"
+        );
+
+        let plan = OutboundPlan::from_segments(&cqcode::parse(
+            "[CQ:set_group,action=ban,group_id=456,user_id=789,duration=60]",
+        ));
+        assert_eq!(
+            plan.admin_ops,
+            vec![AdminOp::SetGroup(SetGroupOp::Ban {
+                group_id: Some("456".to_owned()),
+                user_id: "789".to_owned(),
+                duration: 60,
+                raw_duration: None,
+            })]
+        );
+
+        let plan =
+            OutboundPlan::from_segments(&cqcode::parse("[CQ:remove,user_id=123,msg_id=789]"));
+        assert_eq!(
+            plan.admin_ops,
+            vec![AdminOp::Remove(RemoveOp {
+                group_id: None,
+                user_id: Some("123".to_owned()),
+                msg_id: Some("789".to_owned()),
+            })]
+        );
+
         for (code, kind) in [
-            ("[CQ:member,qq=123,group_id=456]", "member"),
-            ("[CQ:set_group,group_id=456,ban=1]", "set_group"),
-            ("[CQ:remove,message_id=789]", "remove"),
+            ("[CQ:member,type=remove]", "member"),
+            ("[CQ:set_group,action=ban,user_id=1]", "set_group"),
+            ("[CQ:remove,user_id=1]", "remove"),
         ] {
             let plan = OutboundPlan::from_segments(&cqcode::parse(code));
-            assert_eq!(plan.extra.len(), 1, "管理码应留在 extra: {code}");
-            assert_eq!(plan.extra[0].kind, kind, "段名不变: {code}");
-            assert!(plan.text.is_empty(), "管理码不该同时留字面: {code}");
+            assert_eq!(plan.admin_ops.len(), 1, "管理码应产出动作: {code}");
+            assert_eq!(
+                plan.admin_ops[0].to_segment().kind,
+                kind,
+                "段名不变: {code}"
+            );
+            assert!(
+                plan.extra.is_empty() && plan.text.is_empty(),
+                "管理码不再进 extra / 正文: {code}"
+            );
+        }
+    }
+
+    /// L1 解析期缺陷按 Go 口径原样留字面（设计 §5）：零 `admin_ops`、零 `extra`。
+    #[test]
+    fn malformed_admin_codes_stay_literal() {
+        for code in [
+            "[CQ:set_group]",
+            "[CQ:set_group,action=nonsense]",
+            "[CQ:set_group,action=ban]",
+            "[CQ:set_group,action=whole_ban]",
+            "[CQ:set_group,action=add_request,user_id=1]",
+            "[CQ:set_group,action=strategy_execute]",
+            "[CQ:set_group,action=kick]",
+            "[CQ:set_group,action=blacklist_add]",
+            "[CQ:remove,msg_id=789]",
+        ] {
+            let plan = OutboundPlan::from_segments(&cqcode::parse(code));
+            assert_eq!(plan.text, code, "L1 缺陷应逐字留正文: {code}");
+            assert!(plan.admin_ops.is_empty(), "不该产出管理动作: {code}");
+            assert!(plan.extra.is_empty(), "不该进 extra: {code}");
+        }
+    }
+
+    /// `[CQ:member]` 的 L1 缺陷按 Go `cqcode.go:331` 无条件吞码：不进正文、不进 `admin_ops`
+    /// （m3，P83）——与 `set_group` / `remove` 的「留字面」不同。
+    #[test]
+    fn malformed_member_codes_are_swallowed() {
+        for code in ["[CQ:member]", "[CQ:member,type=invite]", "[CQ:member,qq=1]"] {
+            let plan = OutboundPlan::from_segments(&cqcode::parse(code));
+            assert!(plan.text.is_empty(), "member L1 缺陷不留在正文: {code}");
+            assert!(plan.admin_ops.is_empty(), "不该产出管理动作: {code}");
+        }
+    }
+
+    /// F1：管理码经线上形态（`to_segments` 的 serde 往返，`raw` 不落地）仍能还原——
+    /// `from_wire_segments` 按字符串路径补回 remove 的 `raw`，否则私聊 remove 退化成字面。
+    #[test]
+    fn admin_remove_survives_wire_round_trip() {
+        for code in [
+            "[CQ:remove,user_id=123,msg_id=789]",
+            "[CQ:remove,user_id=123]",
+        ] {
+            let plan = OutboundPlan::from_segments(&cqcode::parse(code));
+            let json = serde_json::to_string(&plan.to_segments()).expect("序列化段");
+            let wire: Vec<Segment> = serde_json::from_str(&json).expect("反序列化段");
+            assert_eq!(
+                OutboundPlan::from_wire_segments(&wire),
+                plan,
+                "remove 应经线上往返原样还原: {code}"
+            );
+        }
+    }
+
+    /// 数值非法（duration / enable / approve）归 L2：解析成动作并以 raw_* 带到运行期。
+    #[test]
+    fn invalid_admin_numerics_carry_raw_for_l2() {
+        let plan = OutboundPlan::from_segments(&cqcode::parse(
+            "[CQ:set_group,action=ban,user_id=1,duration=abc]",
+        ));
+        assert_eq!(
+            plan.admin_ops,
+            vec![AdminOp::SetGroup(SetGroupOp::Ban {
+                group_id: None,
+                user_id: "1".to_owned(),
+                duration: 0,
+                raw_duration: Some("abc".to_owned()),
+            })]
+        );
+
+        let plan = OutboundPlan::from_segments(&cqcode::parse(
+            "[CQ:set_group,action=whole_ban,enable=xyz]",
+        ));
+        assert_eq!(
+            plan.admin_ops,
+            vec![AdminOp::SetGroup(SetGroupOp::WholeBan {
+                group_id: None,
+                enable: false,
+                raw_enable: Some("xyz".to_owned()),
+            })]
+        );
+
+        // approve 缺省 true；add_to_member_blacklist 非布尔按 Go 口径忽略
+        let plan = OutboundPlan::from_segments(&cqcode::parse(
+            "[CQ:set_group,action=add_request,user_id=1,flag=f,approve=zz,add_to_member_blacklist=zz]",
+        ));
+        assert_eq!(
+            plan.admin_ops,
+            vec![AdminOp::SetGroup(SetGroupOp::AddRequest {
+                group_id: None,
+                user_id: "1".to_owned(),
+                flag: "f".to_owned(),
+                approve: true,
+                raw_approve: Some("zz".to_owned()),
+                reason: String::new(),
+                add_to_blacklist: None,
+            })]
+        );
+    }
+
+    /// kick / blacklist 的 `user_id` + `user_ids` 合并去重保序、超 20 截断
+    /// （Go `cqSetGroupUserIDs`，`cqcode.go:665-694`）；`&#44;` 转义逗号在解析时已还原，
+    /// 切分口径与 Go 一致。
+    #[test]
+    fn kick_user_ids_merge_dedupe_and_truncate() {
+        let mut list = String::new();
+        for index in 0..25 {
+            list.push_str(&format!("u{index},"));
+        }
+        let plan = OutboundPlan::from_segments(&cqcode::parse(&format!(
+            "[CQ:set_group,action=kick,user_id=u0,user_ids={list}]"
+        )));
+        let AdminOp::SetGroup(SetGroupOp::Kick { user_ids, .. }) = &plan.admin_ops[0] else {
+            panic!("应解析成 kick");
+        };
+        assert_eq!(user_ids.len(), 20, "超过官方单批上限 20 应截断");
+        assert_eq!(user_ids[0], "u0", "user_id 在前且去重保序");
+        assert_eq!(user_ids[19], "u19");
+
+        let plan = OutboundPlan::from_segments(&cqcode::parse(
+            "[CQ:set_group,action=kick,user_ids=a,b&#44;c]",
+        ));
+        let AdminOp::SetGroup(SetGroupOp::Kick { user_ids, .. }) = &plan.admin_ops[0] else {
+            panic!("应解析成 kick");
+        };
+        assert_eq!(
+            user_ids,
+            &vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]
+        );
+    }
+
+    /// 段路径（数组形态）：member / set_group 进 `admin_ops`；remove 按 Go 无
+    /// `case "remove"`（lead 裁决 5）不执行、按字面回写正文。
+    #[test]
+    fn admin_segment_forms() {
+        let member = Segment::new("member")
+            .param("type", "remove")
+            .param("user_id", "42");
+        let plan = OutboundPlan::from_segments(&[member]);
+        assert!(
+            matches!(
+                plan.admin_ops[0],
+                AdminOp::Member(MemberDirective {
+                    kind: MemberKind::Remove,
+                    ..
+                })
+            ),
+            "段形态 member 同样执行（Go 有 case）"
+        );
+
+        let set_group = Segment::new("set_group")
+            .param("action", "strategy_delete")
+            .param("strategy_id", "s1");
+        let plan = OutboundPlan::from_segments(&[set_group]);
+        assert_eq!(
+            plan.admin_ops.len(),
+            1,
+            "段形态 set_group 同样执行（Go 有 case）"
+        );
+
+        let remove = Segment::new("remove")
+            .param("user_id", "1")
+            .param("msg_id", "2");
+        let plan = OutboundPlan::from_segments(&[remove]);
+        assert!(
+            plan.admin_ops.is_empty(),
+            "段形态 remove 不执行（Go message_parser.go:1630-1631 落 default）"
+        );
+        assert_eq!(
+            plan.text, "[CQ:remove,user_id=1,msg_id=2]",
+            "按字面回写正文，不静默丢弃"
+        );
+    }
+
+    /// §3.3-1：`admin_ops` 不参与 `is_empty`——纯动作消息由 runtime 在判空之前执行、
+    /// 按空消息回执（EMPTY_MESSAGE_ID），不会真发出一条空消息。
+    #[test]
+    fn admin_ops_do_not_count_as_content() {
+        let plan =
+            OutboundPlan::from_segments(&cqcode::parse("[CQ:set_group,action=kick,user_id=1]"));
+        assert!(!plan.admin_ops.is_empty());
+        assert!(plan.is_empty(), "纯动作消息应视为空");
+    }
+
+    /// 管理码的序列化往返：`to_segments` → `from_segments` 还原同一批 ops（remove 的
+    /// 字符串路径判定靠 `raw` 保持）。
+    #[test]
+    fn admin_ops_round_trip_through_segments() {
+        for code in [
+            "[CQ:member,type=add,group_id=456,user_id=789]",
+            "[CQ:set_group,action=ban,group_id=456,user_id=789,duration=60]",
+            "[CQ:set_group,action=ban,user_id=789,duration=abc]",
+            "[CQ:set_group,action=whole_ban,enable=true]",
+            "[CQ:set_group,action=whole_ban,enable=xyz]",
+            "[CQ:set_group,action=add_request,user_id=1,flag=f,approve=false,reason=a&#44;b,add_to_member_blacklist=true]",
+            "[CQ:set_group,action=strategy_execute,strategy_id=s1]",
+            "[CQ:set_group,action=strategy_delete,strategy_id=s1]",
+            "[CQ:set_group,action=kick,user_id=a,user_ids=b,c,add_blacklist=true]",
+            "[CQ:set_group,action=blacklist_del,user_ids=x]",
+            "[CQ:remove,user_id=123,msg_id=789]",
+            "[CQ:remove,user_id=123]",
+        ] {
+            let plan = OutboundPlan::from_segments(&cqcode::parse(code));
+            assert_eq!(plan.admin_ops.len(), 1, "应产出一个管理动作: {code}");
+            let back = OutboundPlan::from_segments(&plan.to_segments());
+            assert_eq!(back, plan, "往返应还原同一计划: {code}");
         }
     }
 

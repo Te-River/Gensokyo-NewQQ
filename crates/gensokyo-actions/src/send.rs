@@ -227,7 +227,11 @@ impl MessageOut {
     /// 末尾，段序内保持原样），[`Self::plan`] 的 `text` 保持为空。
     #[must_use]
     pub fn from_parts(text: impl Into<String>, segments: &[Segment], auto_escape: bool) -> Self {
-        let mut plan = OutboundPlan::from_segments(segments);
+        Self::with_plan(text, OutboundPlan::from_segments(segments), auto_escape)
+    }
+
+    /// 已还原的计划落成 `MessageOut`：段里的 `text` 追加在正文末尾、`plan.text` 清空。
+    fn with_plan(text: impl Into<String>, mut plan: OutboundPlan, auto_escape: bool) -> Self {
         let mut text = text.into();
         text.push_str(&std::mem::take(&mut plan.text));
         Self {
@@ -273,7 +277,13 @@ impl<'de> Deserialize<'de> for MessageOut {
         }
 
         let wire = Wire::deserialize(deserializer)?;
-        Ok(Self::from_parts(wire.text, &wire.plan, wire.auto_escape))
+        // 线上形态的段不带 `raw`，管理码（remove）按字符串路径补回——否则私聊撤回会退化成
+        // 字面发出（P83 F1）。用户段形态的 remove 走 `from_parts`（严格留字面），不受影响。
+        Ok(Self::with_plan(
+            wire.text,
+            OutboundPlan::from_wire_segments(&wire.plan),
+            wire.auto_escape,
+        ))
     }
 }
 

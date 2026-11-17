@@ -24,6 +24,7 @@
 //! | `stream` | `stream` + `msg_type=2` | 仅单聊；正文进 `markdown.content`，`stream.state` 取 1（start / mid）/ 10（finish），见 [`compose_stream`] |
 //! | `music` / `qqmusic` | `markdown` + `keyboard` + `msg_type=2` | 取第一首：查 QQ 音乐歌曲详情（Go `FetchSongDetail`，走媒体下载 seam）→ 原生 markdown（封面 `T002R180x180M000{album_mid}.jpg` + 曲名 / 歌手）→ 键盘「立刻播放 / 我也要点歌」（第二个按钮的 `data` 是 `music_prefix` + 空格）；查询失败降级成分享文案并 `warn`（Go 直接丢整条消息） |
 //! | `unknown` / `unknown_image` / `unknown_record` | 不支持 | `1400`（请求侧段类型），不静默丢 |
+//! | `[CQ:member]` / `[CQ:set_group]` / `[CQ:remove]` | 管理动作（[`crate::cq_admin`]，P83） | `depth == 0` 时在判空之前执行：群聊全量（私聊 member / set_group 留字面、remove 走 C2C 撤回）；`cq_admin_actions=off` 整条 `1400`；L2 失败 `1400` / `1500`；纯动作消息执行后回 `EMPTY_MESSAGE_ID` |
 //! | `active` / `wakeup` | 忽略 | 控制型标记，不影响本条合成；`send_private_msg_wakeup` 的
 //!   召回语义由 [`SendRequest::wakeup`] 承载，[`execute`] 置 `is_wakeup` 并强制不带回复 ID；
 //!   `[CQ:active]` 清空 `msg_id` / `event_id` 强制主动推送（见下节「被动回复身份」）；
@@ -295,6 +296,12 @@ async fn execute_inner(
     // 限流取令牌，且解析本身不触网（只 mint URL）。
     let avatar_plan = resolve_avatars(context, plan);
     let plan = avatar_plan.as_ref().unwrap_or(plan);
+    // P83：出站管理 CQ 码（member / set_group / remove）。depth==0 守门——url_transform_stage
+    // 的 QR 子请求以 depth=1 重入本函数，不双执行（设计 §3.3-2）；必须在 is_empty 判定
+    // 之前——纯动作消息先执行动作、再按空消息回执（§3.3-1）。失败（off / L2）整条
+    // 1400 / 1500，先执行过的动作不回滚（Go 单趟不中断，首错为整体）。
+    let admin = crate::cq_admin::stage(context, plan, deps, &openid, depth).await?;
+    let plan = admin.request.as_ref().unwrap_or(plan);
     if is_empty_message(plan) {
         return Ok(EMPTY_MESSAGE_ID.to_owned());
     }
@@ -321,11 +328,27 @@ async fn execute_inner(
     }
     // 被动回复身份（`msg_id` / `event_id`）与逐条 `msg_seq`：Go 在发送前一次性定好，主条与
     // 后续媒体条共用同一份（`send_group_msg.go:801` 的媒体循环用同一个 messageID）。
-    let passive = if plan.wakeup {
+    let mut passive = if plan.wakeup {
         Passive::default()
     } else {
         resolve_passive(context, plan, deps, &openid)
     };
+    // P83：`[CQ:member]` 的身份覆盖（cq_admin::stage 产出）。add 命中 ⇒ 本条变该入群
+    // 事件的被动回复（清 msg_id，二者互斥）；remove ⇒ 清空转主动推送。reply 仍优先：
+    // compose 已把 reply 写进 msg_id，stamp_message 的「有 msg_id 就清 event_id」维持
+    // Go `send_group_msg.go:419-421` 的二选一口径。
+    if !plan.wakeup {
+        match admin.passive_event_id {
+            Some(Some(event_id)) => {
+                passive = Passive {
+                    msg_id: None,
+                    event_id: Some(event_id),
+                }
+            }
+            Some(None) => passive = Passive::default(),
+            None => {}
+        }
+    }
     // SSM 补发（Go `send_group_msg.go:207-288`）：群聊、`lazy_message_id` 开启、且懒消息池取到
     // 的不是 `"2000"` 时，先把栈里积压的同群消息补发掉，再发本条。补发用懒池那个值当被动身份
     // ——Go 此时还没做后面那几步映射表兜底（`:291-331`）。
@@ -2068,7 +2091,7 @@ fn render_plain(text: &str) -> String {
 /// 2. echo 行号反表（本进程发送成功的消息经 [`EchoStore::store_cache_in_memory`] 登记）。
 ///
 /// 都查不到说明引用的是别的进程 / 已过期的 ID——报 `1400` 说明原因，而不是静默丢掉 reply。
-fn resolve_reply(
+pub(crate) fn resolve_reply(
     context: &ActionContext,
     echo: Option<&EchoStore>,
     reply: &Ob11Id,
@@ -2492,6 +2515,7 @@ mod tests {
     use gensokyo_media::silk::{ProcessOutput, ProcessRunner, SilkCodec};
     use gensokyo_media::{BoxFuture, FetchRequest, Fetcher, MediaTransport, TransportResponse};
     use gensokyo_media::{HostingTransport, UploadMethod, UploadRequest, UploadResponse};
+    use gensokyo_protocol::cqcode;
     use gensokyo_protocol::outbound::{
         ActiveKind, CardFields, CardPayload, InputNotifyPayload, KeyboardPayload, MarkdownPayload,
         StreamKind, StreamPayload,
@@ -3075,6 +3099,87 @@ mod tests {
     fn context_with_settings(api: Arc<FakeQqApi>, settings: &str) -> (TempDir, ActionContext) {
         let (dir, manager) = manager_with(settings);
         (dir, ActionContext::new(api, manager))
+    }
+
+    /// P83：`cq_admin_actions=off` 时管理码整条大声拒绝（Protocol → 1400），零上游调用。
+    #[tokio::test]
+    async fn cq_admin_off_rejects_whole_message() {
+        let api = Arc::new(FakeQqApi::default().with_send("m-off"));
+        let (_dir, context) = context_with_settings(Arc::clone(&api), "  cq_admin_actions: off\n");
+        let plan = SendRequest {
+            target: SendTarget::Group(OPENID.to_owned()),
+            message: MessageOut::from_parts(
+                "",
+                &cqcode::parse("[CQ:set_group,action=kick,user_id=1]"),
+                false,
+            ),
+            wakeup: false,
+            echo_context: EchoContext::default(),
+        };
+
+        let err = execute(&context, &plan, &deps(&no_media(), None))
+            .await
+            .expect_err("off 必须整条拒绝");
+        assert!(
+            matches!(&err, Error::Protocol(message) if message.contains("cq_admin_actions=off")),
+            "off 拒绝是 1400 形态的 Protocol 错误: {err}"
+        );
+        assert!(api.sent().is_empty(), "off 拒绝必须零上游调用");
+    }
+
+    /// P83：depth 守门（设计 §3.3-2）——QR 子请求重入（depth=1）不执行管理码；depth=0
+    /// 进入执行（这里因 `user_id` 无法反查落 1400，证明门是开着的）。
+    #[tokio::test]
+    async fn cq_admin_stage_skips_at_depth_one() {
+        let api = Arc::new(FakeQqApi::default());
+        let (_dir, context) = context(Arc::clone(&api));
+        let plan = SendRequest {
+            target: SendTarget::Group(OPENID.to_owned()),
+            message: MessageOut::from_parts(
+                "",
+                &cqcode::parse("[CQ:set_group,action=ban,user_id=1]"),
+                false,
+            ),
+            wakeup: false,
+            echo_context: EchoContext::default(),
+        };
+
+        let stage = crate::cq_admin::stage(&context, &plan, &deps(&no_media(), None), OPENID, 1)
+            .await
+            .expect("depth=1 不该执行管理码");
+        assert!(stage.request.is_none() && stage.passive_event_id.is_none());
+
+        let err = crate::cq_admin::stage(&context, &plan, &deps(&no_media(), None), OPENID, 0)
+            .await
+            .expect_err("depth=0 应进入执行");
+        assert!(
+            matches!(err, Error::Protocol(_)),
+            "反查失败是 1400 形态: {err}"
+        );
+    }
+
+    /// P83：纯动作消息（设计 §3.3-1）——动作在判空之前执行，正文为空时回 `EMPTY_MESSAGE_ID`；
+    /// `admin_ops` 本身不参与 `is_empty`，否则会先被当成空消息打断。
+    #[tokio::test]
+    async fn pure_admin_action_returns_empty_message_id() {
+        let api = Arc::new(FakeQqApi::default());
+        let (_dir, context) = context(Arc::clone(&api));
+        let plan = SendRequest {
+            target: SendTarget::Group(OPENID.to_owned()),
+            message: MessageOut::from_parts("", &cqcode::parse("[CQ:member,type=remove]"), false),
+            wakeup: false,
+            echo_context: EchoContext::default(),
+        };
+
+        let id = execute(&context, &plan, &deps(&no_media(), None))
+            .await
+            .expect("member remove 零 API 调用");
+        assert_eq!(
+            id,
+            crate::deferred::EMPTY_MESSAGE_ID,
+            "纯动作消息回空消息 ID"
+        );
+        assert!(api.sent().is_empty(), "不发送空正文");
     }
 
     /// 四字段齐备的合法卡片计划。
@@ -4518,23 +4623,49 @@ mod tests {
         }
     }
 
-    /// `member` / `set_group` / `remove` 仍是 1400：Go 真执行管理动作，本仓未实现（P83），
-    /// 静默吞掉会悄悄丢动作（见 `outbound.rs` 的 `extra` 出口）。
+    /// P83：管理码不再是 1400——`set_group` 的 L1 解析期缺陷（这里 `action` 未知）原样留
+    /// 字面，照常发送（`member` 例外，见下一条）。
     #[tokio::test]
-    async fn management_code_is_still_a_request_error() {
-        let api = Arc::new(FakeQqApi::default());
+    async fn malformed_management_code_is_sent_as_literal() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
         let (_dir, context) = context(Arc::clone(&api));
         let plan = cq_request(
             SendTarget::Group(OPENID.to_owned()),
-            "[CQ:member,qq=123,group_id=456]",
+            "hi[CQ:set_group,action=nonsense,user_id=1]",
         );
 
-        let err = execute(&context, &plan, &deps(&no_media(), None))
+        execute(&context, &plan, &deps(&no_media(), None))
             .await
-            .expect_err("管理码必须仍是 1400");
+            .expect("L1 缺陷留字面、照常发送");
 
-        assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
-        assert!(api.sent().is_empty(), "被拒绝的消息不应发送");
+        let sent = api.sent();
+        assert_eq!(sent.len(), 1, "字面照常发出");
+        let content = sent[0].content.as_deref().unwrap_or_default();
+        assert!(
+            content.starts_with("hi[CQ:set_group"),
+            "set_group L1 缺陷原样留字面: {content:?}"
+        );
+    }
+
+    /// P83 F5：`[CQ:member]` 的 L1 缺陷（这里缺 `type`）按 Go `cqcode.go:331` 无条件吞码——
+    /// 码消失、正文其余照发（`set_group` / `remove` 才留字面）。
+    #[tokio::test]
+    async fn malformed_member_code_is_swallowed_and_body_is_kept() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let plan = cq_request(
+            SendTarget::Group(OPENID.to_owned()),
+            "hi[CQ:member,qq=123,group_id=456]",
+        );
+
+        execute(&context, &plan, &deps(&no_media(), None))
+            .await
+            .expect("member L1 缺陷吞码、正文照发");
+
+        let sent = api.sent();
+        assert_eq!(sent.len(), 1, "正文照常发出");
+        let content = sent[0].content.as_deref().unwrap_or_default();
+        assert_eq!(content, "hi", "管理码被吞、其余正文保留: {content:?}");
     }
 
     /// 无消费点的码按字面发出（Go legacy 保留 `tok.Raw`），不再整条 1400。

@@ -112,6 +112,8 @@ pub mod at_everyone;
 pub mod auth;
 pub mod boot;
 pub mod builtin;
+/// 出站管理 CQ 码（`[CQ:member]` / `[CQ:set_group]` / `[CQ:remove]`）的运行期执行（P83）。
+pub mod cq_admin;
 /// `send_*` 的 deferred 计划执行（计划 → `MessageToCreate` → QQ 上游）。
 pub mod deferred;
 pub mod dispatcher;

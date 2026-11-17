@@ -711,6 +711,16 @@ impl Settings {
         }
     }
 
+    /// 出站管理 CQ 码的执行开关（P83，Rust-only）：`legacy` / `off` 原样返回，
+    /// 空值与非法值（大小写敏感）回退 `legacy`（默认照 Go 执行）。
+    #[must_use]
+    pub fn get_cq_admin_actions(&self) -> &str {
+        match self.cq_admin_actions.as_str() {
+            "legacy" | "off" => &self.cq_admin_actions,
+            _ => "legacy",
+        }
+    }
+
     // ---- url 相关 ----
 
     #[must_use]
@@ -1158,6 +1168,27 @@ mod tests {
         for value in ["", "Legacy", " new", "unknown"] {
             settings.arch_mode = value.into();
             assert_eq!(settings.get_arch_mode(), "new", "非法值 {value:?}");
+        }
+    }
+
+    #[test]
+    fn cq_admin_actions_falls_back_to_legacy() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.get_cq_admin_actions(), "legacy", "空值回退 legacy");
+
+        settings.cq_admin_actions = "off".into();
+        assert_eq!(settings.get_cq_admin_actions(), "off");
+        settings.cq_admin_actions = "legacy".into();
+        assert_eq!(settings.get_cq_admin_actions(), "legacy");
+
+        // 非法值与大小写错写同样回退，不 panic
+        for value in ["", "on", "OFF", " Legacy"] {
+            settings.cq_admin_actions = value.into();
+            assert_eq!(
+                settings.get_cq_admin_actions(),
+                "legacy",
+                "非法值 {value:?}"
+            );
         }
     }
 

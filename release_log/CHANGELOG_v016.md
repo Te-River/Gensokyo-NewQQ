@@ -129,6 +129,14 @@ Go 在每条 C2C 私信末尾把好友写进 idmap 的 `UserInfo` 桶（`Process
 - **影响**：纯 Rust 部署收过私信的好友**立即可被 `get_friend_list` 读到**，重启后仍在（落身份库）；该表自此**在运行期自然积累**，出站 JSON 零变化。差异登记两处：① idmap 身份批写失败时本仓回退原始串（key 形如 `"<raw>:<raw>"`），Go 照旧用 `userid64=0`——P35 既有 ID 回退口径，正常路径无差异；② C2C `Author` 为空时 Go 是**整条事件不上报**（`ProcessC2CMessage.go:30-33` 直接 `return nil`），Rust 只取「不写库」这一半、上报字节不变——改上报形态会动外部 JSON，刻意保留，已登记 `docs/rust-handover.md` §6
 - **测试**：storage 3 例（`store_user_info_writes_go_key_and_value_layout` 键与 value 字节形态 / `store_user_info_rejects_duplicate_without_overwrite` 断言变体是 `DuplicateKey` 且载荷为完整 key、`Display` 与 Go 文案**全串比对**、原值不被覆盖、空 `user_id` 照写 / `store_user_info_survives_reopen` 关库重开仍在）+ runtime 2 例（`c2c_message_stores_user_info` 事件后 `list_all_users` 可读、重复私信不影响上报 / `c2c_message_without_author_id_writes_no_user_info` 覆盖 `author.id=""` 与 `author` 字段缺失**两种空法**）；包级 clippy `--all-targets -- -D warnings` 与 `cargo fmt --all -- --check` 在门禁内，用例数与产物体积**不预填**，以最终门禁（`cargo test --workspace`）输出为准
 
+### 出站管理 CQ 码真执行（Rust 侧 P83，2026-11-17）
+
+`[CQ:member]` / `[CQ:set_group]` / `[CQ:remove]` 此前在 Rust 主线被当作「不可消费码」：要么整条 `1400`，要么留字面发进群。本版与 Go `ProcessOutboundCQCodes`（`handlers/cqcode.go:226-244`）对齐，在发送前真正执行管理动作（成员身份、禁言 / 踢人 / 黑名单 / 入群审批、撤回）：
+
+- **修改**：`crates/gensokyo-protocol/src/outbound.rs` 把三码解析成类型化 `OutboundPlan::admin_ops`（L1 缺陷留字面、`[CQ:member]` 缺陷按 Go 吞码；数值非法以 `raw_*` 带到运行期），新增 `OutboundPlan::from_wire_segments` 让序列化往返后仍能识别 `remove` 的字符串路径；`segment.rs` 的同名参数改为**后者覆盖**（Go `cqParseParams`）。新增 `crates/gensokyo-runtime/src/cq_admin.rs`，由 `deferred::execute_inner` 在**判空与发送之前**执行（`depth==0` 守门，URL 变换的 QR 子请求不双执行；`member` 的 `event_id` 覆盖沿用既有被动身份流程）。私聊 `[CQ:remove]` 走 C2C 撤回（`RetractRequest.user_openid`），撤回目标恒为发送目标、**不读 `group_id`**；`whole_ban` 官方无写入字段，记 WARN 后只跳过该码；新增配置 `cq_admin_actions`（`legacy|off`，默认 `legacy`），`off` 为逃生阀：消息含任何管理码即整条 `1400`、零上游调用
+- **影响**：**动作在发送前执行、失败不回滚已执行的动作**——多码按到达顺序串行，任一条 L2 失败 / 上游失败时以第一个错误作为整条结果（`1400`/`1500`），**正文整条丢弃**（`crates/gensokyo-runtime/src/deferred.rs:303` 的 `?`）；这与 Go「吞码但正文照发」不同，属刻意差异。**默认 `legacy` 下正文里夹带的管理码会被真执行**：转发、复读或未转义的用户输入只要含 `[CQ:set_group,action=kick,…]` / `[CQ:remove,…]` 就会真踢人 / 禁言 / 撤回——插件须对不可信文本转义，或把 `cq_admin_actions` 设为 `off`（整条拒绝）。其余登记差异：私聊 member/set_group 留字面（Go 私聊不消费）；反查失败 / 上游失败大声拒绝（Go 仅日志）
+- **测试**：`crates/gensokyo-runtime/tests/cq_admin.rs` 7 例（入群申请 reason 反转义、上游失败 `1500`、多码保序且中间失败不中断、私聊 `set_group` 留字面、私聊 `remove` 走 C2C、`member add/remove` 身份覆盖）+ 协议单测（三码解析与 L1 留字面 / 吞码、wire 往返、同名参数后者覆盖）；门禁以最终 `cargo test --workspace` 输出为准
+
 ---
 
 ## 🐛 修复
