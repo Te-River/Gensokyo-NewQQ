@@ -30,6 +30,8 @@
 
 > **实际运行**：当前使用的数据库文件为 `idmap-identity.db`（桶: `ids`/`config`/`UserInfo`）和 `idmap-msg.db`（桶: `cache`）。上表描述的 `openid-map.db` / `msgid-map.db` 多桶架构是 v2 重构方案，可通过 `go build -tags map_idmap` 启用。两者的对外行为完全一致。
 
+> **目录**：默认相对工作目录打开；开启 `custom_db_enabled` + `custom_db_path` 后改从指定目录打开（启动时自动迁移、两侧同名冲突则拒绝启动），详见 [本版新增功能](./本版新增功能.md)。
+
 ## 身份键格式
 
 所有写入数据库的身份都必须带类型，不能只靠长度猜测：

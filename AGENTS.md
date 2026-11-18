@@ -253,7 +253,7 @@ Handler 签名：`func(client callapi.Client, api openapi.OpenAPI, apiv2 openapi
 
 ### idmap 系统
 
-虚拟数字 ID 与 QQ 真实 OpenID 之间的双向映射，基于 bbolt 本地数据库（`idmap.db`）：
+虚拟数字 ID 与 QQ 真实 OpenID 之间的双向映射，基于 bbolt 本地数据库（实际运行 `idmap-identity.db` / `idmap-msg.db`，旧 `idmap.db` 仅作一次性迁移源；目录可经 `custom_db_enabled` / `custom_db_path` 自定义，见 `dblocation/`）：
 
 - `RetrieveRowByIDv2(虚拟ID)` → 真实 OpenID
 - `RetrieveVirtualValuev2(OpenID)` → 虚拟 ID
@@ -344,6 +344,7 @@ Handler 签名：`func(client callapi.Client, api openapi.OpenAPI, apiv2 openapi
 - **`arrayValue` 模式**：`GetArrayValue()` 控制消息以消息段数组（`[]interface{}`）还是字符串形式上报，影响 `ConvertToSegmentedMessage` 的调用
 - **`msg_type` 字段**：`MsgType=0` 是普通文本，`MsgType=2` 是 Markdown，`MsgType=6` 是输入状态（仅单聊），`MsgType=7` 是图文混合，`MsgType=8` 是卡片消息（仅群聊）
 - **`IsWakeup` 字段**：`send_private_msg_wakeup` 的 `MessageToCreate` 必须设置 `IsWakeup=true` 且 `MsgID`/`EventID` 为空（互斥）
+- **键盘按钮权限归一化**：私聊（C2C）出站键盘的 `permission.type != 2` 一律归一为 `2`（`NormalizeC2CKeyboardPermission`，QQ 单聊仅支持所有人可点）；群聊保留插件原始 `permission.type`；`specify_user_ids` 中的 `__USER_ID__` 由 `ResolvePlaceholderUserIDs` 在私聊替换为对方 OpenID
 
 ## 📁 关键目录结构
 
@@ -353,6 +354,7 @@ Handler 签名：`func(client callapi.Client, api openapi.OpenAPI, apiv2 openapi
 ├── config/           # 配置加载与 GetXxx() 访问器（3100+ 行，含热重载逻辑）
 ├── structs/          # 配置结构体定义（Settings，YAML 标签）
 ├── idmap/            # 虚拟 ID ↔ OpenID 双向映射（bbolt + gRPC）
+├── dblocation/       # 自定义数据库位置（idmap 族）：文件名注册表 + 路径解析 + 可达性/文件锁探测 + 迁移裁决（`Setup`/`Resolve`，开关变更需重启）
 ├── echo/             # 消息 ID 映射、事件缓存、递归计数
 ├── callapi/          # Handler 注册框架 + ActionMessage 定义 + Client 接口
 ├── imagehosting/     # 统一图床后端（oss_type 4~10）

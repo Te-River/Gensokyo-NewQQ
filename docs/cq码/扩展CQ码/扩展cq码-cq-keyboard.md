@@ -126,6 +126,8 @@
 | `specify_user_ids` | string[] | 否 | 有权限的用户 id 列表（Gensokyo 自动将数字虚拟 ID 转为 OpenID） |
 | `specify_role_ids` | string[] | 否 | 有权限的身份组 id 列表（仅频道可用） |
 
+> 私聊（C2C）出站时 `permission.type != 2` 一律归一为 `2`（QQ 单聊只支持所有人可点，其他类型点击提示「无权限操作」），`specify_user_ids` / `specify_role_ids` 原样保留；群聊保留原始 `type`。详见 [本版新增功能](../../本版新增功能.md)。
+
 ### 完整示例（三按钮：指令 + 回调 + 跳转）
 
 ```json
