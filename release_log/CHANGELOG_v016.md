@@ -5,8 +5,6 @@
 >
 > 自 Release015 以来的所有变更。
 
-> 🚀 **已封版**：Release 016 Rust 已封版（tag `Release016Rust`，2026-11-18），后续变更请记录到 [CHANGELOG_v017.md](./CHANGELOG_v017.md)。
-
 ---
 
 ## ✨ 新功能 / 变更
@@ -163,6 +161,14 @@ Go 在每条 C2C 私信末尾把好友写进 idmap 的 `UserInfo` 桶（`Process
 ---
 
 ## 🐛 修复
+
+### `cargo xtask build --all` 缺工具链目标改为 `[skip]`（2026-11-18）
+
+Windows-gnu 宿主上，矩阵中的 macOS / MSVC / Android 目标此前会先 `rustup target add`（下载 rust-std）再硬编失败（ring 的 C 代码被 mingw gcc 拒绝 `-arch`），且失败计入整体结果（exit -1）：
+
+- **修改**：构建循环前增加工具链可用性闸门（纯函数 `target_skip_reason`，`xtask/src/build.rs`）——宿主非 macOS 跳过 darwin、找不到 `link.exe` 跳过 MSVC、无 NDK 跳过 Android；linux 目标继续走 zig 自动引导（`.tools/` 命中即零下载）
+- **影响**：`--all` 输出 `N 个产物 / M 个跳过 / 0 个失败`；显式 `--target <triple>` 不受闸门影响（仍会真实尝试）
+- **测试**：xtask 32 条单测全绿（含两条新增闸门判定用例）
 
 ### 私聊 keyboard 按钮权限全类型归一化（`permission.type` 非 2 一律转 2）
 
