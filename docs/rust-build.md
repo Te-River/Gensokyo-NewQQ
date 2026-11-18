@@ -40,6 +40,9 @@ zig cc 充当交叉 C 编译器，ring 等含 C 代码的依赖不再需要各�
 `.tools/` 齐全时**零网络**；下载/校验失败直接报错（给出 URL 与原因），
 **不静默回退到必败的 plain `cargo build`**。`--all` 矩阵模式下引导失败只打印一条 `[warn]`
 并把 linux 目标记为 `[skip]`，darwin / windows / android 目标照常继续。
+下载失败是**有界的**：单次缺省 600s（`GENSOKYO_DOWNLOAD_MAX_TIME=<秒>` 可收紧）、最多 1 次重试，
+且下载速率 <1 KB/s 持续 120s 即中止当前尝试——断网或镜像停摆时在个位分钟级落到 `[skip]`，
+不会一等几十分钟；离线仍可用 `.tools/` 兜底（探测顺序 PATH → `.tools/` → 官方下载）。
 
 ### 钉死版本与官方 URL（勿换源/勿加代理）
 
@@ -62,6 +65,7 @@ macOS / 32 位宿主没有官方预编译源：引导会报错并提示手动安
 |------|------|------|
 | `GENSOKYO_ZIG_VERSION` | `0.16.0` | 覆盖 zig 版本（只影响下载 URL 与缓存目录名） |
 | `GENSOKYO_CARGO_ZIGBUILD_VERSION` | `0.24.1` | 覆盖 cargo-zigbuild 版本 |
+| `GENSOKYO_DOWNLOAD_MAX_TIME` | `600` | 单次下载上限（秒）；网络差时调小可更快放弃（非法值回退缺省并告警） |
 
 只接受 `数字[.数字]*` 形式的版本号（按 `.` 分段、每段非空纯数字，拒绝 `.`/`1..2`/`.5` 等）；非法值直接报错。例：
 `$env:GENSOKYO_ZIG_VERSION="0.15.2"; cargo xtask build --linux-only`。

@@ -174,9 +174,9 @@ Windows-gnu 宿主上，矩阵中的 macOS / MSVC / Android 目标此前会先 `
 
 Windows-gnu 宿主（PATH 带 `C:\msys64\usr\bin`）上 `cargo xtask build --all` 把 MSVC 目标当成可构建目标硬编失败（ring 0.17.14 的 `error occurred in cc-rs: failed to find tool "cl.exe"`）；zig 引导失败（本机实测 4 个镜像源均不可达）时 4 个 linux 目标被记 `[fail]`，整条 `--all` 非零退出：
 
-- **修改**：MSVC 闸门判据由 `link.exe` 改为 `cl.exe`——MSYS2 coreutils 在 `usr/bin/link.exe` 提供同名 Unix `link`（硬链接工具），按 `link.exe` 探测会误判「MSVC 可用」，而 `cl.exe` 不在 PATH 才正确反映无 MSVC（`xtask/src/build.rs` 的 `target_skip_reason`）；同时 zig/cargo-zigbuild 引导失败降级为跳过：打印一条 `[warn]`（保留完整错误链）、linux 目标全部 `[skip]`，退出码只取决于真实构建失败
+- **修改**：MSVC 闸门判据由 `link.exe` 改为 `cl.exe`——MSYS2 coreutils 在 `usr/bin/link.exe` 提供同名 Unix `link`（硬链接工具），按 `link.exe` 探测会误判「MSVC 可用」，而 `cl.exe` 不在 PATH 才正确反映无 MSVC（`xtask/src/build.rs` 的 `target_skip_reason`）；同时 zig/cargo-zigbuild 引导失败降级为跳过：打印一条 `[warn]`（保留完整错误链）、linux 目标全部 `[skip]`，退出码只取决于真实构建失败。下载侧同步加护栏（`xtask/src/bootstrap.rs` 的 `download`）：`--retry 3` → `--retry 1`、单次 `--max-time` 由固定 900s 改为缺省 600s（`GENSOKYO_DOWNLOAD_MAX_TIME=<秒>` 可收紧，非法值回退缺省并打提示）、并加「<1 KB/s 持续 120s 即中止」的低速护栏——断网或镜像停摆时在个位分钟级落到 `[skip]`，不再干等约 45 分钟
 - **影响**：裸机（无 MSVC、无网络）上 9 个交叉目标全部 `[skip]`，命令以非零退出码结束并给出「没有产出任何产物」的明确指引——不再有 cc-rs 找不到 `cl.exe` 的崩溃噪音，0 产物也不被当成成功；有 MSVC 工具链的机器上两个 windows 目标照常构建并退出 0（本机无 MSVC，未实测）；引导成功后某个 zig 目标真正编译失败仍记 `[fail]`，不被吞
-- **测试**：`cargo test -p xtask` 全绿（闸门两条用例改按 `cl.exe` 口径）；`cargo clippy -p xtask --all-targets -- -D warnings`、`cargo fmt --all -- --check` 零告警；`GENSOKYO_ZIG_VERSION=0.0.0-does-not-exist cargo xtask build --all` → 9 个目标全 `[skip]`（msvc 理由为 `cl.exe` 不在 PATH）、`0 个产物 / 9 个跳过 / 0 个失败`、非零退出码
+- **测试**：`cargo test -p xtask` 全绿（闸门两条用例改按 `cl.exe` 口径）；`cargo clippy -p xtask --all-targets -- -D warnings`、`cargo fmt --all -- --check` 零告警；`GENSOKYO_ZIG_VERSION=0.0.0-does-not-exist cargo xtask build --all` → 9 个目标全 `[skip]`（msvc 理由为 `cl.exe` 不在 PATH）、`0 个产物 / 9 个跳过 / 0 个失败`、非零退出码；`GENSOKYO_DOWNLOAD_MAX_TIME=45 cargo xtask build --linux-only`（真实 zig 0.16.0 版本号、本机 ~12 KB/s）整条 **131s** 结束（xtask 重建 + 2 次下载尝试各 45003/45008 ms，`curl: (28)` 超时），4 个 linux 目标 `[skip]`、退出码 1，`.tools/` 无残留；`GENSOKYO_DOWNLOAD_MAX_TIME=abc` 打出 `[warn] … 非法（需正整数秒），回退缺省 600` 并照常以 600s 启动下载
 
 ### 私聊 keyboard 按钮权限全类型归一化（`permission.type` 非 2 一律转 2）
 

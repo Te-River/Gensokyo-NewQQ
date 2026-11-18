@@ -224,21 +224,40 @@ fn file_sha256(path: &Path) -> Result<String> {
 }
 
 /// curl 下载（系统自带；Windows 显式 curl.exe，避开 PowerShell 的 Invoke-WebRequest 别名）。
+///
+/// 失败必须是**有界的**：断网或镜像停摆时，`--max-time` × 重试次数会累加成 45 分钟干等
+/// （实测 ziglang.org ~8 KB/s、镜像 23–80 KB/s 且会完全停摆）。所以单次上限缺省 600s、
+/// 只重试 1 次（超时类失败重试没意义，留一次扛瞬时抖动），并加 <1 KB/s 持续 120s 即
+/// 中止当前尝试的低速护栏；正常慢链路（数十分钟下完 97 MB）仍由 `--max-time` 兜底，
+/// 可用 `GENSOKYO_DOWNLOAD_MAX_TIME=<秒>` 收紧。
 fn download(url: &str, dest: &Path) -> Result<()> {
+    const DEFAULT_MAX_TIME: u64 = 600;
+    let max_time = match std::env::var("GENSOKYO_DOWNLOAD_MAX_TIME") {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(value) if value > 0 => value,
+            _ => {
+                eprintln!(
+                    "[warn] GENSOKYO_DOWNLOAD_MAX_TIME=`{raw}` 非法（需正整数秒），回退缺省 {DEFAULT_MAX_TIME}"
+                );
+                DEFAULT_MAX_TIME
+            }
+        },
+        Err(_) => DEFAULT_MAX_TIME,
+    };
     let program = if OS == "windows" { "curl.exe" } else { "curl" };
-    println!("  [bootstrap] 下载 {url}");
+    println!("  [bootstrap] 下载 {url}（单次上限 {max_time}s）");
     let status = Command::new(program)
         .args([
             "--fail",
             "--location",
             "--retry",
-            "3",
+            "1",
             "--connect-timeout",
             "30",
             "--max-time",
-            "900",
-            "--output",
         ])
+        .arg(max_time.to_string())
+        .args(["--speed-limit", "1024", "--speed-time", "120", "--output"])
         .arg(dest)
         .arg(url)
         .status()
