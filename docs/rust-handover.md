@@ -31,14 +31,14 @@
 |------|------|-----------------|
 | 发布名 | **Release 016 Rust**（Rust 重构分支首个 Release；GitHub Release 标题用此名，tag 建议 `Release016Rust`） | 本文件随 `Refactor` 分支维护；Go 主线仍为 `Release016`；见 `release_log/CHANGELOG_v016.md` 首部 |
 | parity 覆盖面 | A/B/C 三表逐项标注状态，主干/功能/边角项均为「已对齐 / 关闭」；B6 是**历史 severity 汇总**，个别行只写估量、未逐条回写状态 | `reports/refactor/17-go-rust-parity.md`：**按节定位**（A 表 / C 表 / B1-3 / B4 CQ 码进出站 / B5 / B6 缺口汇总 / D / E），该文件行号随每次 parity 回写浮动，不再钉死数字区间 |
-| 测试基线 | **45 suites / 1476 passed / 0 failed**（2026-11-18，含 P83 三码真执行 / P86d-2 回执 / member_list 翻页 / db-location；`ignored` 计数以门禁输出为准） | `cargo test --workspace --no-fail-fast`（计数随新增用例变化，取数见 §9） |
+| 测试基线 | **45 suites / 1478 passed / 1 ignored / 0 failed**（2026-11-18，HEAD `59510ca`，含 P83 三码真执行 / P86d-2 回执 / member_list 翻页 / db-location；suite 数 = 36 个测试二进制 + 9 个 doc-test，doc-test 均 0 用例；`ignored` 恒为 storage 的那 1 例） | `cargo test --workspace --no-fail-fast`（计数随新增用例变化，取数见 §9） |
 | clippy | `-D warnings` **零告警** | `cargo clippy --workspace --all-targets -- -D warnings` |
 | 格式 | `cargo fmt --all -- --check` **退出码 0** | 同左 |
 | release 产物 | **≈10.3 MiB**（同表记录 Go `44.82 MiB`，≈4.3× 更小） | `docs/rust-perf.md:167`（2026-11-10 口径）；当前体积以 `cargo xtask build` 打印为准 |
 
 > 关于测试数字：suite/passed 随新增用例变化，且各里程碑文档记的是各自时点值
 > （如 `docs/rust-m0.md` 的 R4m 记 1356、R4n 记 1359，均对当时成立）。
-> 当前实测以 2026-11-18（`63cd9b0`）为准：**45 suites / 1476 passed / 0 failed**；
+> 当前实测以 2026-11-18（`59510ca`）为准：**45 suites / 1478 passed / 1 ignored / 0 failed**；
 > `ignored` 是 `#[ignore]` 用例（要 `--ignored` 才跑），计数随用例增删浮动。
 > 引用时以**你刚跑出的
 > `test result:` 行**为准，以最终门禁输出为最终口径。

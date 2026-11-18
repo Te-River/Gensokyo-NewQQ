@@ -30,7 +30,7 @@
 
 产物落 `release/`，命名对齐 Go `build.ps1`（如 `gensokyo-windows-amd64.exe`）。`--all` 在缺工具链的目标上输出 `[skip]`（darwin / msvc / android），linux×4 走 zig 自动引导（缓存落 `.tools/`，二跑零网络）。
 
-门禁基线（2026-11-18，HEAD `63cd9b0`）：`cargo test --workspace` = **45 suites / 1476 passed / 0 failed**；clippy `-D warnings` 零告警；fmt 退出码 0。
+门禁基线（2026-11-18，HEAD `59510ca`）：`cargo test --workspace` = **45 suites / 1478 passed / 1 ignored / 0 failed**；clippy `-D warnings` 零告警；fmt 退出码 0。
 
 ## crate 布局
 

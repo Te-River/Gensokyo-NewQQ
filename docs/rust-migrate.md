@@ -160,7 +160,7 @@ gcc --version                                                     # 确认链接
 
 | 门禁 | 基线（HEAD `63cd9b0` 时点实测，2026-11-18） |
 |------|----------------------------------------|
-| `cargo test --workspace --no-fail-fast` | **45 suites / 1476 passed / 0 failed**（2026-11-18 P83 + P86d-2 + member_list 翻页 + db-location 后实测；数字随新增用例增长，以命令输出为准） |
+| `cargo test --workspace --no-fail-fast` | **45 suites / 1478 passed / 1 ignored / 0 failed**（2026-11-18，HEAD `59510ca`；P83 + P86d-2 + member_list 翻页 + db-location 之后实测；数字随新增用例增长，以命令输出为准） |
 | `cargo clippy --workspace --all-targets -- -D warnings` | **零告警** |
 | `cargo fmt --all -- --check` | **退出码 0** |
 

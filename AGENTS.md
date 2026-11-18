@@ -219,7 +219,7 @@ bin → runtime → actions → {qq, storage, media, webui} → protocol → con
 
 ### 门禁基线
 
-- `cargo test --workspace` = **45 suites / 1476 passed / 0 failed**（2026-11-18，HEAD `63cd9b0`）
+- `cargo test --workspace` = **45 suites / 1478 passed / 1 ignored / 0 failed**（2026-11-18，HEAD `59510ca`）
 - clippy `-D warnings` 零告警；`cargo fmt --all -- --check` 退出码 0
 - 数字随新增用例增长，判读一律以**你刚跑出的 `test result:` 行**为准；出现 `failed` 或 suite 数骤降，先按环境问题排查（工具链 1.99.1、链接器、`webui/dist`、golden fixture）
 
