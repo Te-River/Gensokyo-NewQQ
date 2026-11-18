@@ -616,7 +616,9 @@ pub fn run(args: BuildArgs) -> Result<()> {
             Ok(dirs) => tool_path = Some(path_with_tools(&dirs)?),
             Err(err) if matrix_mode => {
                 eprintln!(
-                    "[warn] Linux 交叉工具链不可用（zig/cargo-zigbuild 引导失败），linux 目标将跳过：{err:#}"
+                    "[warn] Linux 交叉工具链不可用（zig/cargo-zigbuild 引导失败），linux 目标将跳过：{err:#}\n\
+                     零网络兜底：手工把工具解压到 <repo>\\.tools\\<tool>-<version>\\ 后重试\
+                     （如 .tools\\zig-0.16.0\\ 与 .tools\\cargo-zigbuild-0.24.1\\，与自动引导同布局即可复用）"
                 );
                 bootstrap_failed = true;
             }

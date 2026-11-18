@@ -42,7 +42,11 @@ zig cc 充当交叉 C 编译器，ring 等含 C 代码的依赖不再需要各�
 并把 linux 目标记为 `[skip]`，darwin / windows / android 目标照常继续。
 下载失败是**有界的**：单次缺省 600s（`GENSOKYO_DOWNLOAD_MAX_TIME=<秒>` 可收紧）、最多 1 次重试，
 且下载速率 <1 KB/s 持续 120s 即中止当前尝试——断网或镜像停摆时在个位分钟级落到 `[skip]`，
-不会一等几十分钟；离线仍可用 `.tools/` 兜底（探测顺序 PATH → `.tools/` → 官方下载）。
+不会一等几十分钟。Windows 下下载走 schannel 的**软吊销策略**（`--ssl-revoke-best-effort`）：
+CRL/OCSP 服务器不可达时仍做证书链校验、只是吊销检查软失败，不会再出现
+`curl: (35) CRYPT_E_NO_REVOCATION_CHECK (0x80092012)` 直接中止（`--insecure` 不会被使用）。
+离线兜底仍然可用：手工把工具解压到 `.tools\zig-0.16.0\` 与 `.tools\cargo-zigbuild-0.24.1\`
+（与自动引导同一布局：可执行文件在目录根部）后重试即零网络（探测顺序 PATH → `.tools/` → 官方下载）。
 
 ### 钉死版本与官方 URL（勿换源/勿加代理）
 

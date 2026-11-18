@@ -230,6 +230,11 @@ fn file_sha256(path: &Path) -> Result<String> {
 /// 只重试 1 次（超时类失败重试没意义，留一次扛瞬时抖动），并加 <1 KB/s 持续 120s 即
 /// 中止当前尝试的低速护栏；正常慢链路（数十分钟下完 97 MB）仍由 `--max-time` 兜底，
 /// 可用 `GENSOKYO_DOWNLOAD_MAX_TIME=<秒>` 收紧。
+///
+/// Windows 另加 `--ssl-revoke-best-effort`：schannel 在访问不到 CRL/OCSP 时把吊销检查
+/// 当硬失败（`CRYPT_E_NO_REVOCATION_CHECK`，0x80092012 → `curl: (35)`），这是 curl 官方
+/// 给出的软失败开关（≥ 7.70，Win10/11 自带 curl 8.x 均支持）——仍做吊销检查，只是吊销
+/// 服务器不可达时不中止；证书链校验不受影响。openssl/gnutls 后端没有该开关，故仅 Windows。
 fn download(url: &str, dest: &Path) -> Result<()> {
     const DEFAULT_MAX_TIME: u64 = 600;
     let max_time = match std::env::var("GENSOKYO_DOWNLOAD_MAX_TIME") {
@@ -246,16 +251,20 @@ fn download(url: &str, dest: &Path) -> Result<()> {
     };
     let program = if OS == "windows" { "curl.exe" } else { "curl" };
     println!("  [bootstrap] 下载 {url}（单次上限 {max_time}s）");
-    let status = Command::new(program)
-        .args([
-            "--fail",
-            "--location",
-            "--retry",
-            "1",
-            "--connect-timeout",
-            "30",
-            "--max-time",
-        ])
+    let mut command = Command::new(program);
+    command.args([
+        "--fail",
+        "--location",
+        "--retry",
+        "1",
+        "--connect-timeout",
+        "30",
+    ]);
+    if OS == "windows" {
+        command.arg("--ssl-revoke-best-effort");
+    }
+    let status = command
+        .arg("--max-time")
         .arg(max_time.to_string())
         .args(["--speed-limit", "1024", "--speed-time", "120", "--output"])
         .arg(dest)
