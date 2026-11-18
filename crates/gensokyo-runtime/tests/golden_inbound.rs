@@ -98,9 +98,9 @@ const CASES: &[(&str, &str)] = &[
     ),
 ];
 
-/// 金样目录：同仓 Go 侧 `Processor/testdata/inbound/`。
+/// 金样目录：源自 Go 仓 `Processor/testdata/inbound/` 的原样拷贝（已内置本仓 `tests/fixtures/inbound/`）。
 fn golden_dir() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Processor/testdata/inbound")
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/inbound")
 }
 
 /// 按 manifest 的配置矩阵构造入站转换器：`string_ob11` / `native_ob11` 打开，

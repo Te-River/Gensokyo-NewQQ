@@ -1,4 +1,0 @@
-version: 1
-settings:
-  app_id: 12345
-  lotus_grpc_port: 99999
