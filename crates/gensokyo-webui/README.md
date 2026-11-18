@@ -55,7 +55,7 @@ M3 的交付：把前端构建产物嵌进二进制，并提供管理台的登�
 该目录必须存在——与 Go `//go:embed webui/dist` 是同一前提：
 
 - 已有前端构建产物时：`cd frontend && npm run build`（输出到 `webui/dist`）；
-- 只想编译时：`.\build.ps1` 的 `Ensure-WebUIDist` 会生成占位文件；
+- 只想编译时：`cargo xtask build` 会生成占位文件；
 - 占位目录里没有 `index.html`，此时 `/` 由内置兜底页返回（提示前端未构建），不是 404。
 
 ## 性能参考

@@ -1,9 +1,9 @@
 # Rust 构建链（`cargo xtask build`）
 
 构建入口只有一个：`cargo xtask build`（等价于 `cargo run -p xtask -- build`，别名来自 `.cargo/config.toml`）。
-`build.ps1` 已退化成薄包装，只把 Go 命名的参数翻译成 Rust 三元组后转发给 xtask，**不再依赖 Go 工具链**。
+本分支**没有 `build.ps1`**——Go 源码树随提交 `63cd9b0`（2026-11-18）移出，脚本留在 `main` 分支，只作口径参照。
 
-对应实现：`xtask/src/build.rs`；Go 版口径参考仓库根 `build.ps1`（改造前版本）与 `.github/workflows/cross_compile.yml`。
+对应实现：`xtask/src/build.rs`；Go 版口径参考 `main` 分支的 `build.ps1` 与 `.github/workflows/cross_compile.yml`。
 
 ## 前置条件
 
@@ -13,7 +13,7 @@
 | 链接器 | 宿主 abi 必须有可用链接器：MSVC 需 VS Build Tools（`link.exe`），GNU 需 mingw。本仓库当前开发机走 GNU：`rustup override set 1.99.1-x86_64-pc-windows-gnu` |
 | Linux 交叉工具链 | **自动引导，无需预装**：linux-gnu×4 目标构建前 xtask 自动探测/下载 zig + cargo-zigbuild（见下节）；rustup target 缺失时自动 `rustup target add` |
 | 系统工具（仅首次下载需要） | `curl`、`tar`（Windows 10+ 自带两者；Linux 需发行版自带，zip 解压另可回退 `unzip`）、sha256 校验用 `certutil`（Windows）/ `sha256sum`（Linux）。全部系统自带，**不新增任何 cargo 依赖** |
-| `webui/dist` | **`rust-embed` 在编译期读取该目录**，目录缺失会直接编译失败。它以 `.gitignore` 忽略，xtask 会在缺失时自动写入 5 个占位文件（与旧 `build.ps1` 的 `Ensure-WebUIDist`、CI 占位步骤同一组文件） |
+| `webui/dist` | **`rust-embed` 在编译期读取该目录**，目录缺失会直接编译失败。它以 `.gitignore` 忽略，xtask 会在缺失时自动写入 5 个占位文件（与 Go 版 `build.ps1`（`main` 分支）的 `Ensure-WebUIDist`、CI 占位步骤同一组文件） |
 | 前端产物（可选） | `cd frontend && npm run build` 会产出真实的 `webui/dist`；存在 `webui/dist/css/style.css` 时 xtask 不再写占位文件 |
 | UPX（可选） | 默认尝试压缩；PATH 里没有 `upx` 只提示并跳过，不是构建失败 |
 
@@ -64,7 +64,7 @@ macOS / 32 位宿主没有官方预编译源：引导会报错并提示手动安
 | `GENSOKYO_CARGO_ZIGBUILD_VERSION` | `0.24.1` | 覆盖 cargo-zigbuild 版本 |
 
 只接受 `数字[.数字]*` 形式的版本号（按 `.` 分段、每段非空纯数字，拒绝 `.`/`1..2`/`.5` 等）；非法值直接报错。例：
-`$env:GENSOKYO_ZIG_VERSION="0.15.2"; .\build.ps1 -LinuxOnly`。
+`$env:GENSOKYO_ZIG_VERSION="0.15.2"; cargo xtask build --linux-only`。
 
 ### 不自动引导的目标（维持现状）
 
@@ -80,7 +80,7 @@ linux-musl 也不在引导范围（cargo-zigbuild 只路由 linux-gnu；musl 需
   （`target/` 可达数 GB）。走 git 克隆更省：`git clone -b Refactor <repo> && cd <repo>`。
 - 新机前提：装好 rustup（`rust-toolchain.toml` 钉 1.99.1，首次 `cargo` 会自动装工具链）、
   `curl` + `tar`（Windows 10+ 自带）。**不需要**预装 zig / cargo-zigbuild——首次
-  `.\build.ps1 -LinuxOnly` / `cargo xtask build --linux-only` 会自动下载到 `.tools/`
+  `cargo xtask build --linux-only` 会自动下载到 `.tools/`
   （见上文「自动引导」），之后缓存命中零网络。
 - **构建缓存已移出仓库**：本项目的 `CARGO_TARGET_DIR` 统一指向 `D:\rust-target\gensokyo`（不在仓内、
   不在系统盘）。它是纯缓存，可随时整目录删除换取空间，代价是下次冷编译一次。新机自定义位置时
@@ -107,17 +107,16 @@ cargo xtask build --all
 cargo xtask build --linux-only
 ```
 
-薄包装的等价用法：
+从 Go `build.ps1` 迁过来的命令对照（`build.ps1` 已随 Go 树移出本分支，等价用法一律用 xtask）：
 
-```powershell
-.\build.ps1                      # 宿主完整版
-.\build.ps1 linux amd64          # 映射到 --target x86_64-unknown-linux-gnu
-.\build.ps1 -NoWebUI -NoUPX
-.\build.ps1 -All
-.\build.ps1 -LinuxOnly
-```
-
-`.\build.ps1` 的 `-UPXLevel`（默认 7）对应 `cargo xtask build --upx-level <1..9>`。
+| 旧 `build.ps1`（`main` 分支） | 本分支等价 |
+|------|------|
+| `.\build.ps1`（宿主完整版） | `cargo xtask build` |
+| `.\build.ps1 linux amd64` | `cargo xtask build --target x86_64-unknown-linux-gnu` |
+| `.\build.ps1 -NoWebUI -NoUPX` | `cargo xtask build --no-webui --no-upx` |
+| `.\build.ps1 -All` | `cargo xtask build --all` |
+| `.\build.ps1 -LinuxOnly` | `cargo xtask build --linux-only` |
+| `.\build.ps1 -UPXLevel <1..9>`（默认 7） | `cargo xtask build --upx-level <1..9>` |
 
 ## 目标矩阵（`--all`）
 

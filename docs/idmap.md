@@ -28,7 +28,7 @@
 
 > `idmap_pro` 在新结构中不再有意义：MultiMap 身份图已经原生支持「多个真实身份绑定到同一个 vUIN」。配置项会被移除，旧的 Pro API 仅作为兼容 wrapper 保留。
 
-> **实际运行**：当前使用的数据库文件为 `idmap-identity.db`（桶: `ids`/`config`/`UserInfo`）和 `idmap-msg.db`（桶: `cache`）。上表描述的 `openid-map.db` / `msgid-map.db` 多桶架构是 v2 重构方案，可通过 `go build -tags map_idmap` 启用。两者的对外行为完全一致。
+> **实际运行**：当前使用的数据库文件为 `idmap-identity.db`（桶: `ids`/`config`/`UserInfo`）和 `idmap-msg.db`（桶: `cache`）。上表描述的 `openid-map.db` / `msgid-map.db` 多桶架构是 v2 重构方案，可通过 `go build -tags map_idmap` 启用（该命令属 Go 主仓 `main` 分支；本 `Refactor` 分支已无 Go 源码）。两者的对外行为完全一致。
 
 ## 身份键格式
 

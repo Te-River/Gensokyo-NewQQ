@@ -11,17 +11,17 @@
 ## 1. 要带什么、不用带什么
 
 **主路径是「整包拷贝仓库根目录」**：新机不做 `git clone`，直接把整个文件夹搬过去。
-`.git/`（实测 **111.9 MB**）一并带走，所以新机**不需要远端仓库权限**，历史、分支、`git blame` 全在，
+`.git/`（实测 **116.3 MB**）一并带走，所以新机**不需要远端仓库权限**，历史、分支、`git blame` 全在，
 未提交的工作也会原样跟过去——这正是拷贝优于 clone 的地方（两条路径的取舍见 §7）。
 
 | 对象 | 实测大小 | 是否搬运 | 依据 |
 |------|----------|----------|------|
-| 工作树（不含 `target/`、`.git/`） | **23.7 MB** | 必带 | 全部源码 + fixture + 文档 |
-| `.git/` | **111.9 MB** | 必带（整包拷贝天然带走） | 历史、分支、blame；`git clone` 也能重建，但**不含未提交工作** |
-| `target/` | **282.82 MB**（2026-11-14 缓存清扫后实测；清扫前曾达 **3.67 GB**，体积随构建增长） | 排除 | 纯编译缓存，可再生；`.gitignore` 已覆盖 |
+| 工作树（不含 `target/`、`.git/`、`release/`、`.tools/`） | **5.1 MB**（2026-11-18 Go 树移除后实测；移除前为 23.7 MB） | 必带 | Rust 源码 + fixture + 文档 |
+| `.git/` | **116.3 MB** | 必带（整包拷贝天然带走） | 历史、分支、blame；`git clone` 也能重建，但**不含未提交工作** |
+| `target/` | **374.1 MB**（2026-11-18 实测；清扫前曾达 **3.67 GB**，体积随构建增长） | 排除 | 纯编译缓存，可再生；`.gitignore` 已覆盖 |
 | `target-*/`（交叉目标缓存） | 写本手册时点**不存在** | 存在时排除 | `.gitignore` 含 `target/` 与 `target-*/` 两条；名单先枚举再传参，见下 |
 | `.tools/`（zig / cargo-zigbuild 缓存） | 写本手册时点**不存在**（首次交叉构建才生成） | 存在时排除 | 已 gitignore，首次构建自动重新引导（见 §2） |
-| `release/` | **4.12 MB**（随构建次数增长，以 §1 命令输出为准） | 排除 | 已 gitignore，`cargo xtask build` 可重出 |
+| `release/` | **12.5 MB**（随构建次数增长，以 §1 命令输出为准） | 排除 | 已 gitignore，`cargo xtask build` 可重出 |
 
 排除名单与体积都用这两条命令现取，**别凭记忆写死路径**（没实证的路径写进 `/XD` 只是噪声）：
 
@@ -40,7 +40,7 @@ Get-ChildItem -Directory | Where-Object { $_.Name -like 'target*' -or $_.Name -i
 > gitignore 只决定 `git add` 收不收；拷贝工具根本不看它。
 > `target/`、`target-*/`、`release/`、`.tools/` 四条虽然都在 `.gitignore` 里，
 > 整包拷贝时**仍然必须自己排除**，否则编译缓存照样跟过去（本手册写作时点
-> `target/` 实测 282.82 MB；清缓存前是 3.67 GB——量级完全取决于构建历史，
+> `target/` 实测 374.1 MB；清缓存前是 3.67 GB——量级完全取决于构建历史，
 > 所以务必用上面的命令现取，别照抄表里的数字）。
 
 拷贝命令（源路径与目标盘按新机实际改）：
@@ -57,7 +57,7 @@ robocopy D:\Github\Gensokyo-NewQQ-Refactor E:\Gensokyo-NewQQ-Refactor /E /XD @($
 构建缓存目录 `D:\rust-target\gensokyo`（旧机实测 **40 GB+**）在**仓外**，整包拷贝不会、也不需要把它带过去。
 新机首次构建前重新选一个仓外、非系统盘的目录并设 `CARGO_TARGET_DIR`（位置约定见 §3）。
 
-**结论：整包拷贝「工作树 23.7 MB + `.git/` 111.9 MB」≈ 136 MB 即可带走全部有效内容，且不依赖远端权限、包含未提交工作。**
+**结论：整包拷贝「工作树 5.1 MB + `.git/` 116.3 MB」≈ 122 MB 即可带走全部有效内容，且不依赖远端权限、包含未提交工作。**
 
 只有当你决定走 `git clone` 备选路径（只想干净重来，见 §7）时，才需要先复核「有没有游离文件会漏掉」——两条命令输出均为空 ⇒ clone 不会漏东西：
 
@@ -80,7 +80,7 @@ git ls-files --others --exclude-standard
 | mingw 链接器（Windows GNU 宿主） | 必需 | `gcc --version` | PATH 前置 mingw 目录，见下 |
 | `curl` + `tar` | 必需 | `curl --version` / `tar --version` | Windows 10+ 自带，供交叉工具链自动引导 |
 | zig / cargo-zigbuild / protoc | **不需要预装** | — | xtask 首次构建 Linux×4 时自动下载钉死版本：zig **0.16.0**、cargo-zigbuild **v0.24.1**，官方源 + sha256 校验，落到 `.tools/`，二跑零网络。流程与 URL 见 [rust-build.md](./rust-build.md)「Linux 交叉工具链自动引导」 |
-| Go 工具链 | **只有重新生成金样才需要** | — | `crates/gensokyo-protocol/tests/xurls_golden.json`、`crates/gensokyo-media/tests/qr_golden.json` 已作为 fixture 入库，日常跑测试不需要 Go |
+| Go 工具链 | **只有重新生成金样才需要** | — | `crates/gensokyo-protocol/tests/xurls_golden.json`、`crates/gensokyo-media/tests/qr_golden.json` 已作为 fixture 入库，日常跑测试不需要 Go；本分支已无 Go 源码，重新生成金样请用 `main` 分支 / 兄弟目录 `../Gensokyo-NewQQ` |
 | Node / 前端 | 可选 | — | `cd frontend && npm run build`；不构建也行，xtask 自动写 `webui/dist` 占位文件 |
 | UPX | 可选 | `upx --version` | PATH 里没有只提示并跳过，不是构建失败 |
 
@@ -99,7 +99,7 @@ Linux 宿主同理：先确认 `gcc --version` 可用（发行版自带 build-es
 ### 2.2 `webui/dist` 与嵌入资源（务必确认）
 
 `rust-embed` 在**编译期**读取 `webui/dist`，目录缺失会直接编译失败（Go 主仓侧同理：`go:embed` 缺该目录也失败）。
-`build.ps1` / xtask 会在缺失时自动写入占位文件，CI 也有对应占位步骤，因此：
+`cargo xtask build` 会在缺失时自动写入占位文件，CI 也有对应占位步骤，因此：
 clean clone 后**不要**手工删除 `webui/dist`，也**不要**把它拷进搬运清单（它按 `.gitignore` 忽略，入库的是例外占位文件）。
 
 ---
@@ -156,9 +156,9 @@ gcc --version                                                     # 确认链接
 
 ## 5. 验收基线（迁机后应当看到的数字）
 
-| 门禁 | 基线（旧机 HEAD `69afb8d` 时点实测） |
+| 门禁 | 基线（HEAD `63cd9b0` 时点实测，2026-11-18） |
 |------|----------------------------------------|
-| `cargo test --workspace --no-fail-fast` | **43 suites / 1429 passed / 0 failed**（2026-11-15 P86d-1 后实测；数字随新增用例增长，以命令输出为准） |
+| `cargo test --workspace --no-fail-fast` | **45 suites / 1476 passed / 0 failed**（2026-11-18 P83 + P86d-2 + member_list 翻页 + db-location 后实测；数字随新增用例增长，以命令输出为准） |
 | `cargo clippy --workspace --all-targets -- -D warnings` | **零告警** |
 | `cargo fmt --all -- --check` | **退出码 0** |
 
@@ -182,7 +182,7 @@ CI 侧 `rust.yml` 在 push 到 `Refactor` / `main` 时跑：**fmt + clippy + msr
 | 只想格式化自己的文件，结果整个 crate 被刷 | `rustfmt` 会**顺 `mod` 递归**格式化整个 crate 的子模块。对具体文件跑 `rustfmt --edition 2024 <file>`，不要随手 `cargo fmt --all` |
 | PGO 在 Windows GNU 不可用（缺 `profiler_builtins`，报 E0463）；BOLT 仅 Linux | 按平台选择优化档：Windows 只保留 UPX 压缩，PGO/BOLT 留给 Linux 与 CI |
 | 环回连接被间歇中止：`os error 10053` / `error sending request`（火绒等安全软件） | 测试侧已有「仅连接层重试 ≤3」口径；新机出现同类失败先按**环境**定性（安全软件/代理），再复跑，不要当回归改代码 |
-| `webui/dist` 缺失 ⇒ `rust-embed` 编译失败 | 别手删该目录；`build.ps1` / xtask 会自动补占位文件，CI 亦有占位步骤 |
+| `webui/dist` 缺失 ⇒ `rust-embed` 编译失败 | 别手删该目录；`cargo xtask build` 会自动补占位文件，CI 亦有占位步骤 |
 
 ---
 
@@ -216,8 +216,8 @@ Get-Content $env:TEMP\pre-copy-status.txt
 
 | 路径 | 做法 | 带走什么 | 适用 |
 |------|------|----------|------|
-| ① 整包拷贝（**主路径**） | §1 的 robocopy：仓库根目录整体，排除枚举出来的 `target*`、`release`、`.tools` | 工作树 **23.7 MB** + `.git/` **111.9 MB**；未提交改动、`git blame`、全部分支与历史都跟着走；**不需要远端仓库权限** | 现状迁移：工作树有未提交内容，或新机拿不到远端权限 |
-| ② `git clone`（备选，保留） | 旧机先 `git add <确切文件>` → `git commit -F <UTF-8 临时文件>` → `git push`，新机 `git clone -b Refactor` | 约 **136 MB**，只含**已入库**内容，**不含未提交工作** | 只想干净重来：确认工作树没有需要保留的游离改动，或已全部入库 |
+| ① 整包拷贝（**主路径**） | §1 的 robocopy：仓库根目录整体，排除枚举出来的 `target*`、`release`、`.tools` | 工作树 **5.1 MB** + `.git/` **116.3 MB**；未提交改动、`git blame`、全部分支与历史都跟着走；**不需要远端仓库权限** | 现状迁移：工作树有未提交内容，或新机拿不到远端权限 |
+| ② `git clone`（备选，保留） | 旧机先 `git add <确切文件>` → `git commit -F <UTF-8 临时文件>` → `git push`，新机 `git clone -b Refactor` | 约 **122 MB**，只含**已入库**内容，**不含未提交工作** | 只想干净重来：确认工作树没有需要保留的游离改动，或已全部入库 |
 
 > 路径 ② 的前置条件就是 §1 末尾那两条游离文件检查命令输出为空；一旦有输出，走 ①，别指望 clone 带上未提交内容。
 

@@ -301,13 +301,13 @@ host `x86_64-pc-windows-gnu`、`cargo run --release -p xtask -- pgo --iters 200`
 可行路径：
 
 ```bash
-# Linux CI（x86_64-unknown-linux-gnu）：完整流水线；PGO 产物尚未接入 build.ps1/xtask build
+# Linux CI（x86_64-unknown-linux-gnu）：完整流水线；PGO 产物尚未接入 cargo xtask build
 rustup component add llvm-tools-preview
 cargo xtask pgo --iters 20000          # 等价 cargo run --release -p xtask -- pgo
 # 报告：target/pgo/pgo-report.md；要留档就把它作为 CI artifact 上传
 ```
 
-PGO 产物**尚未接入 `build.ps1` / `xtask build`**：发布链仍是 plain release + UPX。要在发布物里用
+PGO 产物**尚未接入 `cargo xtask build`**：发布链仍是 plain release + UPX。要在发布物里用
 PGO，需手工以 profile-use 口径构建，或把接线作为独立事项排期。
 
 Windows 侧只能换 msvc 宿主（本机缺 `link.exe`，见 §3），或等 rustc 给 gnu 宿主补上 profiler runtime。

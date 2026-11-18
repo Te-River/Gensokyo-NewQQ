@@ -18,24 +18,27 @@
 > [!IMPORTANT]
 > **本仓只有一条 Rust 链，没有 `arch_mode` 三态切换。** `arch_mode` 在本仓只是配置兼容字段：解析点 `crates/gensokyo-config/src/accessors.rs:707`，唯一消费者是 WebUI 配置投影 `crates/gensokyo-config/src/config_api.rs:61`。「切回 Go」的开关在主仓，不在本仓。
 
+> [!IMPORTANT]
+> **本分支已是纯 Rust 工程**（提交 `63cd9b0`，2026-11-18）：Go 源码树（`handlers/`、`Processor/`、`adapter/`、`botgo/`、`go-silk/`、`build.ps1` 等）整棵移除，代码只有 `crates/` 与 `xtask/`。需要读 Go 实现取证时请去 `main` 分支或兄弟目录 `../Gensokyo-NewQQ`——本仓 grep 不到 `.go` 属正常，不是文档缺失。本文所有指向 Go 文件的行号，均以**移除前快照**为准。
+
 两仓共用同一份**配置语义**（`config.yml` 字段名不变），但**数据文件不共用**：Go 是 bbolt `gensokyo.db`，本仓是 redb（`openid-map.redb` / `short-urls.redb` / `cookie.redb`）。idmap 与 echo 靠 G1 `legacy-export` 的 JSONL 导入，短链没有导入器（`docs/rust-build.md:232-233`、parity `:130`）。
 
 ## 2. 当前状态：一句话 + 数据
 
-主干链路（连接/入站/出站/媒体/idmap/短链/重试/URL 转换）已对齐；官方 API 审计的**真缺口（注册集口径）= 0**（`reports/refactor/16-official-api-audit.md:3-4`：原「28 项未接线」是 `d00a5ff` 时点的快照，27 项已接线、余 1 项 `get_qq_profile` 裁决「明确不做」）。`get_friend_list` 的**读写两侧均已落地**（P64a/P64b，写侧含评审收口：`StorageError::DuplicateKey` 独立变体 + 空 `Author.ID` 守卫，见 §6 ⑬⑭），CQ 码表元数据已校准（P69）、lotus stub 用例已加固（P70）；上一版挂着的「入站 `inbound` 位与 Go 实际产出集超集」已由 P71 逐码取证、**P72 裁决并实施**（18 条码位 true→false，`array_value` 上报里用户手打的 `[CQ:…]` 除 `at` 外按原文折回 text，与 Go `ConvertToSegmentedMessage` 逐字节一致）；剩余工作只有两项：**P73 的 `at` 结构改造**（`revert_mentions` 合成 → `inbound` 位回解这条链，设计已到、须先复核两根承重假设再动手）、以及文档欠账，见 §7；上一版列的第三项「`poke` 收位依据复扫」**已于 2026-11-14 完成并确证**（`.go` 零命中 + `REACTION_*` 零消费，证据见 parity B4 该行），惟 Go 侧缺对应的入站段数组用例、已另记测试欠账。
+主干链路（连接/入站/出站/媒体/idmap/短链/重试/URL 转换）已对齐；官方 API 审计的**真缺口（注册集口径）= 0**（`reports/refactor/16-official-api-audit.md:3-4`：原「28 项未接线」是 `d00a5ff` 时点的快照，27 项已接线、余 1 项 `get_qq_profile` 裁决「明确不做」）。`get_friend_list` 的**读写两侧均已落地**（P64a/P64b，写侧含评审收口：`StorageError::DuplicateKey` 独立变体 + 空 `Author.ID` 守卫，见 §6 ⑬⑭），CQ 码表元数据已校准（P69）、lotus stub 用例已加固（P70）；上一版挂着的「入站 `inbound` 位与 Go 实际产出集超集」已由 P71 逐码取证、**P72 裁决并实施**（18 条码位 true→false，`array_value` 上报里用户手打的 `[CQ:…]` 除 `at` 外按原文折回 text，与 Go `ConvertToSegmentedMessage` 逐字节一致）；剩余工作以 **§7 表**为准（`at` 的结构改造已于 2026-11-14 完成，§7 已标 ✅；当前挂着的只有 P86 的三项登记项）；上一版列的「`poke` 收位依据复扫」**已于 2026-11-14 完成并确证**（`.go` 零命中 + `REACTION_*` 零消费，证据见 parity B4 该行），惟 Go 侧缺对应的入站段数组用例、已另记测试欠账。
 
 | 指标 | 现值 | 来源 / 取数命令 |
 |------|------|-----------------|
 | 发布名 | **Release 016 Rust**（Rust 重构分支首个 Release；GitHub Release 标题用此名，tag 建议 `Release016Rust`） | 本文件随 `Refactor` 分支维护；Go 主线仍为 `Release016`；见 `release_log/CHANGELOG_v016.md` 首部 |
 | parity 覆盖面 | A/B/C 三表逐项标注状态，主干/功能/边角项均为「已对齐 / 关闭」；B6 是**历史 severity 汇总**，个别行只写估量、未逐条回写状态 | `reports/refactor/17-go-rust-parity.md`：**按节定位**（A 表 / C 表 / B1-3 / B4 CQ 码进出站 / B5 / B6 缺口汇总 / D / E），该文件行号随每次 parity 回写浮动，不再钉死数字区间 |
-| 测试基线 | **43 suites / 1429 passed / 0 failed**（2026-11-15 P86d-1 后实测；`ignored` 计数以门禁输出为准） | `cargo test --workspace --no-fail-fast`（计数随新增用例变化，取数见 §9） |
+| 测试基线 | **45 suites / 1476 passed / 0 failed**（2026-11-18，含 P83 三码真执行 / P86d-2 回执 / member_list 翻页 / db-location；`ignored` 计数以门禁输出为准） | `cargo test --workspace --no-fail-fast`（计数随新增用例变化，取数见 §9） |
 | clippy | `-D warnings` **零告警** | `cargo clippy --workspace --all-targets -- -D warnings` |
 | 格式 | `cargo fmt --all -- --check` **退出码 0** | 同左 |
 | release 产物 | **≈10.3 MiB**（同表记录 Go `44.82 MiB`，≈4.3× 更小） | `docs/rust-perf.md:167`（2026-11-10 口径）；当前体积以 `cargo xtask build` 打印为准 |
 
 > 关于测试数字：suite/passed 随新增用例变化，且各里程碑文档记的是各自时点值
 > （如 `docs/rust-m0.md` 的 R4m 记 1356、R4n 记 1359，均对当时成立）。
-> 当前实测以 2026-11-15（P86d-1 后）为准：**43 suites / 1429 passed / 0 failed**；
+> 当前实测以 2026-11-18（`63cd9b0`）为准：**45 suites / 1476 passed / 0 failed**；
 > `ignored` 是 `#[ignore]` 用例（要 `--ignored` 才跑），计数随用例增删浮动。
 > 引用时以**你刚跑出的
 > `test result:` 行**为准，以最终门禁输出为最终口径。
@@ -106,7 +109,7 @@
 
 ## 6. 已知缺口与有意差异（「不要当成 bug」清单）
 
-下面 16 条都是**已裁决 / 已登记**的差异：看到时先查证据列，不要直接按「和 Go 不一样」开修。真正待办的只在 §7。
+下面 22 条都是**已裁决 / 已登记**的差异：看到时先查证据列，不要直接按「和 Go 不一样」开修。真正待办的只在 §7。
 
 | # | 项 | 说明 | 证据 |
 |---|----|------|------|
@@ -127,6 +130,11 @@
 | ⑮ | 入站不做 alias 替换与 visual 前缀剥离 | Rust 入站两条路径都不做 Go `message_parser.go:2003-2024` 的 alias 替换与 visual 前缀剥离，框架指令/黑白名单前缀场景仍与 Go 不同——**既有范围限定，未随 P72 改变**，不要当成 P72 的回归 | Go `handlers/message_parser.go:2003-2024`；Rust 入站无对应实现（`gensokyo-runtime` 的 `revert_mentions` 只做 @，`reported_message` 只做落段/折回判定） |
 | ⑯ | `CodeSpec::inbound` 已无生产读取点 | **P73 之后**：数组路径不再解析 CQ（`revert_mentions` 写 NUL 哨兵 + 槽位表、`expand_at_placeholders` 只按哨兵切片直出 text/at 段），`reported_message` 的 `cqcode::parse` 调用已删 ⇒ `CodeSpec::inbound` 与 `params`/`outbound` 同属**描述性元数据**（仅测试模块读）。`at` 也已置 `false`，手打 `[CQ:at,qq=…]` 与 Go 一样按原文留 text；真实 @ 仍由 `<@!hex>` 占位符产 at 段 | `crates/gensokyo-protocol/src/cqcode.rs` 的 `CodeSpec` 文档块与 `name: "at"` 条目（按符号定位）；`crates/gensokyo-runtime/src/inbound.rs` 的 `revert_mentions`/`expand_at_placeholders`；登记 `docs/rust-m0.md` R4s、parity B4 |
 | ⑰ | avatar 出站已按段路径对齐；`music` 参数判别仍有残余差异 | **P80 起**：带 `qq` 的 `[CQ:avatar]` 经 idmap 反查 openid 后发 `https://q.qlogo.cn/qqapp/{app_id}/{openid}/640` 真图，失败/`app_id` 未配置吞段 + warn，无 `qq` 按字面。残余：① `app_id` 未配置时 Go 发坏 URL 换 1500、Rust 吞段；② idmap 仅一维（Go Pro 二维）；③ 头像图追加在 images 末尾、多图混排次序不严格同序；④ 无 qq 形态两种输入统一按字面。`music` 仅 `type=qq`+纯数字 id 被消费（与 Go legacy 字符串一致）；Go 正则要求参数顺序/个数，Rust 有序 params 取首个同名键 ⇒ 乱序/多余参数 Rust 会消费 | `crates/gensokyo-protocol/src/outbound.rs` 的 `avatar`/`music` 臂、`crates/gensokyo-runtime/src/deferred.rs` 的 `resolve_avatars`/`avatar_url`；Go `handlers/avatar.go`、`handlers/cqcode.go:38`；登记 parity B4、`docs/rust-m0.md` R4y |
+| ⑱ | `[CQ:member]` / `[CQ:set_group]` / `[CQ:remove]` **已真执行**（P83），不是「仍 1400 占位」 | 三码解析进 `OutboundPlan::admin_ops`，runtime `cq_admin` 在判空/发送**之前**执行（`depth==0` 守门，QR 子请求不双执行）。刻意差异：私聊 `remove` 走 C2C 撤回且不读 `group_id`；`cq_admin_actions=off` 是整条 1400 的逃生阀；私聊 `member`/`set_group` 按字面保留；`whole_ban` 只 WARN 跳过（官方无全员禁言写入字段）。已知残留：`deferred.rs:303` 的 `?` 使管理码失败时整条正文丢弃 | `crates/gensokyo-protocol/src/{outbound.rs,segment.rs}`、`crates/gensokyo-runtime/src/{cq_admin.rs,deferred.rs}`、`crates/gensokyo-actions/src/send.rs`；`release_log/CHANGELOG_v016.md`「出站管理 CQ 码真执行」 |
+| ⑲ | 私聊 keyboard 的 `permission.type` **一律变 2**，群聊不变 | QQ 官方 C2C 只支持 `type=2`（所有人），`type=0/1/3` 点击会被服务端拒绝。`compose_keyboard` 对 `SendTarget::Private` 挂载前归一（缺 `permission` 的按钮跳过，非对象载荷仍 1400），`__USER_ID__` 换成对方 OpenID；群聊保留插件原值、也不解析占位符（与 Go 群侧一致）。markdown 内嵌 keyboard 优先、独立 `[CQ:keyboard]` 兜底 | `crates/gensokyo-runtime/src/deferred.rs`（`compose_keyboard`）；`release_log/CHANGELOG_v016.md`「私聊 keyboard 按钮权限全类型归一化」 |
+| ⑳ | `custom_db_path` 指向网络盘、或改完配置**必须重启** | 网络文件系统（NFS/SMB/挂载盘）的锁语义**无官方保证**：探针能发现明显失效，多进程并发仍会损坏库文件 ⇒ 按单实例使用、用户自担风险。改配置后是**重启项**；目标与本地库同时存在时**冲突并拒绝启动**（按日志手工保留一份再重启） | `crates/gensokyo-storage/src/db_location.rs`；Go 同口径（etcd-io/bbolt issue #257） |
+| ㉑ | SSE / 合并转发回执的 `message_id` 是**双模式**、且带顶层收件人 ID | 默认 numeric 配置下 `send_private_msg_sse` 的 `data.message_id` 与 `send_*_forward_msg` 的 `message_ids` 元素是**数字**，`string_ob11=true` 才是原串；回执多出 `user_id`（SSE）与 `group_id`（转发，**恒数字**——Go 转发 handler 不经 `string_ob11` 分派）。分侧差异：① SSE 的 `message_id` 在 string 模式回原串（Go 无此分支）；② `message_ids`/`failed` 是 Rust 独有增强（Go 转发只回 `message_id: 0`）；③ `send_private_forward_msg` 在 Go 未注册。整次转发无可发 node 时顶层 ID 留空、不伪造 | `crates/gensokyo-runtime/src/dispatcher.rs`、`crates/gensokyo-runtime/tests/deferred.rs`；`release_log/CHANGELOG_v016.md`「SSE / 合并转发回执补齐（P86d-2）」 |
+| ㉒ | `get_group_member_list` 一次回**全量**、响应不带游标 | handler 内部按 `next_cursor` 链拉到末页（`MAX_MEMBER_PAGES = 100`，对齐 Go `groupMemberListMaxPages`），入参 `cursor` 只当起始游标；页间按 `get_g_list_delay` 节流、末页后不等。中途页失败回**已收集成员 + `retcode 0`**（不整表丢弃）；首页失败回退 idmap 本地缓存，无缓存回空数组。**游标原地重复即停**是 Rust 新增的死循环防护（刻意增强，Go 只靠页数上限兜底） | `crates/gensokyo-actions/src/group.rs`；`release_log/CHANGELOG_v016.md`「`get_group_member_list` 内部翻页拉全量」 |
 
 ## 7. 未完成项与下一步
 
@@ -148,7 +156,7 @@
 | ✅ | P81（出站三分界 + 纯码空消息回执） | **已完成（2026-11-15）**：`face`/`node`/`poke`/`group_info`/`json`/未知码与形态不命中的 `markdown`/`keyboard`/`stream`/`input_notify` 按字面保留；`ark`/空 `card` 静默丢弃；`member`/`set_group`/`remove` 由 P83 真执行（见下行）；纯码空消息成功回执、不发送 | —（botstats 多记 1 条仍为 P84 观察项） | `crates/gensokyo-protocol/src/outbound.rs`、`crates/gensokyo-runtime/src/deferred.rs`；提交 `b1c25f5` |
 | ✅ | P83（出站管理 CQ 码真执行） | **已完成（2026-11-17）**：`[CQ:member]`/`[CQ:set_group]`/`[CQ:remove]` 解析进 `OutboundPlan::admin_ops`，runtime `cq_admin` 在判空/发送**之前**执行（`depth==0` 守门，QR 子请求不双执行）；`whole_ban` 仅 WARN 跳过；私聊 `remove` 走 C2C 撤回且不读 `group_id`；`[CQ:member]` L1 缺陷吞码；`cq_admin_actions=off` 整条 1400；wire 往返保留 remove 的字符串路径（`from_wire_segments`） | 刻意差异：私聊 remove 走 C2C、`off` 逃生阀、L2 大声拒绝、私聊 member/set_group 留字面；残留：`deferred.rs:303` 的 `?` 使失败时整条正文丢弃（已记入 CHANGELOG 影响） | `crates/gensokyo-protocol/src/{outbound.rs,segment.rs}`、`crates/gensokyo-runtime/src/{cq_admin.rs,deferred.rs}`、`crates/gensokyo-actions/src/send.rs` |
 | ✅ | P85（构建版本串注入） | **已完成（2026-11-15）**：`cargo xtask build` 注入 `GENSOKYO_BUILD_VERSION`（`git-<7位>` / `dev-…`，env 优先），发布产物 `--version` 与 Go 同形态 | —（PGO/CI 不注入，按设计） | `xtask/src/build.rs`、`crates/gensokyo-bin/src/version.rs`；提交 `38c0b97` |
-| P1 | P86（Action 响应信封） | **P86a–P86d-1 已完成（2026-11-15）**：message_id 双模式 + 空回执数字 0；A/C Full、B 管理 23 条 Compact；游标进 data、mark_msg_as_read 的 msg/wording、encode 兜底。**P86d-2 待做**：SSE/forward 分支；另有登记项：成员列表缺 `message` 且只回一页（Go 内部拉全量）、`mark_msg_as_read` 的 data（Go gjson 转储 vs Rust null）、D 类幽灵 action | P86d-2 + 登记项；随后 P83 | parity §F；`crates/gensokyo-protocol/src/{action.rs,envelope.rs}`、`crates/gensokyo-runtime/src/dispatcher.rs` |
+| P1 | P86（Action 响应信封） | **P86a–P86d-2 全部完成（2026-11-18）**：message_id 双模式 + 空回执数字 0；A/C Full、B 管理 23 条 Compact；游标进 data、mark_msg_as_read 的 msg/wording、encode 兜底；SSE/forward 回执（P86d-2，见 §6 ㉑）。成员列表「只回一页」已由 2026-11-18 内部翻页拉全量收口（§6 ㉒）。仍登记：成员项缺 `message` 字段、`mark_msg_as_read` 的 data（Go gjson 转储 vs Rust null）、D 类幽灵 action | 处理仍登记的三项 | parity §F；`crates/gensokyo-protocol/src/{action.rs,envelope.rs}`、`crates/gensokyo-runtime/src/dispatcher.rs`、`crates/gensokyo-actions/src/group.rs` |
 | — | 迁移/交接 | 换机清单只在 `docs/rust-migrate.md` | 本文**不重复**，按那份执行 | `docs/rust-migrate.md` |
 | 不排期 | 视频抽帧 / 转码 / 压缩 | Go 侧是死代码且函数自身破损（全仓零调用者），**不可移植**；视频发送链本身已覆盖 | 保持关闭，不要当缺口重开 | parity `:49` |
 

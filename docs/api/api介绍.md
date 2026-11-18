@@ -1,5 +1,7 @@
 # Gensokyo API 介绍
 
+> **实现文件列指向 Go 主仓**（`main` 分支 / 兄弟目录 `../Gensokyo-NewQQ`）：本 `Refactor` 分支已无 Go 源码。Rust 侧对应实现见 `crates/gensokyo-actions`（出站 action）、`crates/gensokyo-protocol`（参数与 CQ 码）与 `reports/refactor/17-go-rust-parity.md`。
+
 ## 标准 OneBot V11 API
 
 以下 API 符合 [OneBot V11 标准](https://github.com/botuniverse/onebot-11)。
