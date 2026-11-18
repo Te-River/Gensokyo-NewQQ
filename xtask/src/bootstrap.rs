@@ -126,7 +126,7 @@ pub fn tool_dir(root: &Path, tool: &str, version: &str) -> PathBuf {
 
 /// PATH 探测：命中返回可执行文件所在目录。Windows 用 where.exe（避开 PowerShell 的
 /// curl/where 别名），其余用 which；命令不存在按“未找到”处理。
-fn find_on_path(name: &str) -> Option<PathBuf> {
+pub(crate) fn find_on_path(name: &str) -> Option<PathBuf> {
     let (program, arg) = if OS == "windows" {
         ("where.exe", name)
     } else {

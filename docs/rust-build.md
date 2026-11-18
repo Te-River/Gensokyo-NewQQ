@@ -139,6 +139,9 @@ cargo xtask build --linux-only
 
 - 逐个目标执行；rustup target 缺失时**自动 `rustup target add --toolchain <当前工具链>`**
   （幂等）；补装失败才打印 `[skip] <triple> …` 后继续，**不计失败**。
+- 宿主缺少对应工具链的目标先打印 `[skip] <triple>: <理由>` 并计入跳过、**不计失败**：
+  macOS 目标需 macOS 宿主或专用交叉工具链、windows-msvc 需 `link.exe` 在 PATH、android 需 NDK；
+  linux-gnu 目标由 zig 自动引导，不跳过。
 - linux-gnu×4 目标走自动引导的 `cargo zigbuild`（见上节）：**裸机上 `-All` / `-LinuxOnly`
   的 linux 部分开箱即跑**，无需预装任何交叉工具链；首次运行会下载 zig + cargo-zigbuild
   到 `.tools/`（之后零网络）。

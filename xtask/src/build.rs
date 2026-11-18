@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use clap::Args;
 
-use crate::bootstrap::{bootstrap_linux_tools, path_with_tools};
+use crate::bootstrap::{bootstrap_linux_tools, find_on_path, path_with_tools};
 use crate::find_lockfile;
 
 /// 发布目标矩阵（`--all` 使用），对齐 `.github/workflows/cross_compile.yml` 的 Go 矩阵。
@@ -369,6 +369,30 @@ fn uses_zigbuild(target: &Target) -> bool {
     })
 }
 
+/// 工具链可用性闸门（纯函数，便于单测）：`--all` 只尝试宿主真正能构建的目标，
+/// 其余打印 `[skip]` 理由、计入跳过而非失败（见 `BuildArgs::all` 的注释）。
+///
+/// linux-gnu 不在这里拦：它由 zig + cargo-zigbuild 自动引导（见 `uses_zigbuild`）；
+/// 宿主自身（`triple` 为 `None`）交给 cargo 选目标，永远不跳过。
+fn target_skip_reason(
+    host_os: &str,
+    triple: Option<&str>,
+    has_msvc_linker: bool,
+) -> Option<&'static str> {
+    let triple = triple?;
+    let (os, _) = split_triple(triple).ok()?;
+    if os == "darwin" && !matches!(host_os, "macos" | "darwin") {
+        return Some("macOS 目标需要 macOS 宿主或专用交叉工具链");
+    }
+    if os == "windows" && triple.ends_with("-msvc") && !has_msvc_linker {
+        return Some("需要 MSVC 工具链（link.exe 不在 PATH）");
+    }
+    if os == "android" {
+        return Some("需要 Android NDK");
+    }
+    None
+}
+
 /// cargo 调用构造：zigbuild 目标换子命令，其余参数（--release --locked -p …）不变。
 fn cargo_invocation(target: &Target, no_webui: bool) -> (&'static str, Vec<String>) {
     let subcommand = if uses_zigbuild(target) {
@@ -595,6 +619,8 @@ pub fn run(args: BuildArgs) -> Result<()> {
     // target 查询与补装都要指明工具链，否则会落在 rust-toolchain.toml 的默认工具链上。
     let toolchain = active_toolchain(&root);
     let installed = installed_targets(toolchain.as_deref());
+    // MSVC 目标需要 link.exe；只在矩阵模式下探测（单目标模式不拦，交给 cargo 真实尝试）。
+    let has_msvc_linker = matrix_mode && find_on_path("link.exe").is_some();
     let mut outputs = Vec::new();
     let mut skipped = Vec::new();
     let mut failures = Vec::new();
@@ -604,6 +630,16 @@ pub fn run(args: BuildArgs) -> Result<()> {
             for &no_webui in flavors {
                 failures.push(format!("{}/{no_webui}", target.label()));
             }
+            continue;
+        }
+        // 工具链闸门先于 target 补装：darwin / MSVC / android 缺工具链时没必要下载 rust-std
+        // 再在 C 代码里撞 gcc 的 `-arch` 报错。
+        if matrix_mode
+            && let Some(reason) = target_skip_reason(OS, target.triple.as_deref(), has_msvc_linker)
+        {
+            let reason = format!("{}: {reason}", target.label());
+            println!("[skip] {reason}");
+            skipped.push(reason);
             continue;
         }
         if let Some(triple) = &target.triple
@@ -679,7 +715,8 @@ pub fn run(args: BuildArgs) -> Result<()> {
 mod tests {
     use super::{
         BuildArgs, Target, artifact_name, build_version, built_binary, cargo_invocation,
-        ensure_webui_dist, flavors, git_short_commit, plan, split_triple, uses_zigbuild,
+        ensure_webui_dist, flavors, git_short_commit, plan, split_triple, target_skip_reason,
+        uses_zigbuild,
     };
     use std::time::{Duration, SystemTime};
 
@@ -839,6 +876,60 @@ mod tests {
             assert!(!uses_zigbuild(&target), "{triple} 不应走 zigbuild");
         }
         assert!(!uses_zigbuild(&Target::host()), "宿主构建不走 zigbuild");
+    }
+
+    #[test]
+    fn skips_matrix_targets_whose_toolchain_the_host_lacks() {
+        // windows-gnu 宿主：darwin 需 macOS，MSVC 需 link.exe，android 需 NDK。
+        assert_eq!(
+            target_skip_reason("windows", Some("x86_64-apple-darwin"), false),
+            Some("macOS 目标需要 macOS 宿主或专用交叉工具链")
+        );
+        assert_eq!(
+            target_skip_reason("windows", Some("aarch64-apple-darwin"), false),
+            Some("macOS 目标需要 macOS 宿主或专用交叉工具链")
+        );
+        assert_eq!(
+            target_skip_reason("windows", Some("x86_64-pc-windows-msvc"), false),
+            Some("需要 MSVC 工具链（link.exe 不在 PATH）")
+        );
+        assert_eq!(
+            target_skip_reason("windows", Some("i686-pc-windows-msvc"), false),
+            Some("需要 MSVC 工具链（link.exe 不在 PATH）")
+        );
+        assert_eq!(
+            target_skip_reason("windows", Some("aarch64-linux-android"), false),
+            Some("需要 Android NDK")
+        );
+    }
+
+    #[test]
+    fn keeps_targets_the_host_can_build() {
+        // linux-gnu 由 zigbuild 自动引导，不拦；宿主自身（无 triple）永远构建。
+        for triple in [
+            "x86_64-unknown-linux-gnu",
+            "i686-unknown-linux-gnu",
+            "armv7-unknown-linux-gnueabihf",
+            "aarch64-unknown-linux-gnu",
+        ] {
+            assert_eq!(target_skip_reason("windows", Some(triple), false), None);
+        }
+        assert_eq!(target_skip_reason("windows", None, false), None);
+        assert_eq!(target_skip_reason("linux", None, false), None);
+        // macOS 宿主可直接构建 darwin 目标；宿主上有 link.exe 时 MSVC 也不拦。
+        assert_eq!(
+            target_skip_reason("macos", Some("aarch64-apple-darwin"), false),
+            None
+        );
+        assert_eq!(
+            target_skip_reason("windows", Some("x86_64-pc-windows-msvc"), true),
+            None
+        );
+        // 宿主平台自身的 gnu 目标（windows-gnu）本来就能构建。
+        assert_eq!(
+            target_skip_reason("windows", Some("x86_64-pc-windows-gnu"), false),
+            None
+        );
     }
 
     #[test]
