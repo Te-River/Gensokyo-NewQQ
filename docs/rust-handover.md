@@ -19,7 +19,7 @@
 > **本仓只有一条 Rust 链，没有 `arch_mode` 三态切换。** `arch_mode` 在本仓只是配置兼容字段：解析点 `crates/gensokyo-config/src/accessors.rs:707`，唯一消费者是 WebUI 配置投影 `crates/gensokyo-config/src/config_api.rs:61`。「切回 Go」的开关在主仓，不在本仓。
 
 > [!IMPORTANT]
-> **本分支已是纯 Rust 工程**（提交 `63cd9b0`，2026-11-18）：Go 源码树（`handlers/`、`Processor/`、`adapter/`、`botgo/`、`go-silk/`、`build.ps1` 等）整棵移除，代码只有 `crates/` 与 `xtask/`。需要读 Go 实现取证时请去 `main` 分支或兄弟目录 `../Gensokyo-NewQQ`——本仓 grep 不到 `.go` 属正常，不是文档缺失。本文所有指向 Go 文件的行号，均以**移除前快照**为准。
+> **本分支已是纯 Rust 工程**（提交 `63cd9b0`，2026-11-18）：Go 源码树（`handlers/`、`Processor/`、`adapter/`、`botgo/`、`go-silk/` 等）整棵移除，代码只有 `crates/` 与 `xtask/`；`build.ps1` 保留为 xtask 薄包装（只翻译参数与选工具链，不含任何 Go 调用）。需要读 Go 实现取证时请去 `main` 分支或兄弟目录 `../Gensokyo-NewQQ`——本仓 grep 不到 `.go` 属正常，不是文档缺失。本文所有指向 Go 文件的行号，均以**移除前快照**为准。
 
 两仓共用同一份**配置语义**（`config.yml` 字段名不变），但**数据文件不共用**：Go 是 bbolt `gensokyo.db`，本仓是 redb（`openid-map.redb` / `short-urls.redb` / `cookie.redb`）。idmap 与 echo 靠 G1 `legacy-export` 的 JSONL 导入，短链没有导入器（`docs/rust-build.md:232-233`、parity `:130`）。
 

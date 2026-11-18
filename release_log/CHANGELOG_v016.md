@@ -170,6 +170,14 @@ Windows-gnu 宿主上，矩阵中的 macOS / MSVC / Android 目标此前会先 `
 - **影响**：`--all` 输出 `N 个产物 / M 个跳过 / 0 个失败`；显式 `--target <triple>` 不受闸门影响（仍会真实尝试）
 - **测试**：xtask 32 条单测全绿（含两条新增闸门判定用例）
 
+### `--all` 的 MSVC 误判与 zig 引导失败连带失败（2026-11-18）
+
+Windows-gnu 宿主（PATH 带 `C:\msys64\usr\bin`）上 `cargo xtask build --all` 把 MSVC 目标当成可构建目标硬编失败（ring 0.17.14 的 `error occurred in cc-rs: failed to find tool "cl.exe"`）；zig 引导失败（本机实测 4 个镜像源均不可达）时 4 个 linux 目标被记 `[fail]`，整条 `--all` 非零退出：
+
+- **修改**：MSVC 闸门判据由 `link.exe` 改为 `cl.exe`——MSYS2 coreutils 在 `usr/bin/link.exe` 提供同名 Unix `link`（硬链接工具），按 `link.exe` 探测会误判「MSVC 可用」，而 `cl.exe` 不在 PATH 才正确反映无 MSVC（`xtask/src/build.rs` 的 `target_skip_reason`）；同时 zig/cargo-zigbuild 引导失败降级为跳过：打印一条 `[warn]`（保留完整错误链）、linux 目标全部 `[skip]`，退出码只取决于真实构建失败
+- **影响**：裸机（无 MSVC、无网络）上 9 个交叉目标全部 `[skip]`，命令以非零退出码结束并给出「没有产出任何产物」的明确指引——不再有 cc-rs 找不到 `cl.exe` 的崩溃噪音，0 产物也不被当成成功；有 MSVC 工具链的机器上两个 windows 目标照常构建并退出 0（本机无 MSVC，未实测）；引导成功后某个 zig 目标真正编译失败仍记 `[fail]`，不被吞
+- **测试**：`cargo test -p xtask` 全绿（闸门两条用例改按 `cl.exe` 口径）；`cargo clippy -p xtask --all-targets -- -D warnings`、`cargo fmt --all -- --check` 零告警；`GENSOKYO_ZIG_VERSION=0.0.0-does-not-exist cargo xtask build --all` → 9 个目标全 `[skip]`（msvc 理由为 `cl.exe` 不在 PATH）、`0 个产物 / 9 个跳过 / 0 个失败`、非零退出码
+
 ### 私聊 keyboard 按钮权限全类型归一化（`permission.type` 非 2 一律转 2）
 
 QQ 官方 C2C 单聊只支持按钮 `permission.type=2`（所有人）：`type=0`（指定用户）/ `1`（仅管理者）/ `3`（指定身份组）下点击都会被服务端拒绝并提示"无权限操作"。此前只有「`type=0` 且带非空 `specify_user_ids`」的内嵌键盘路径被改写，私聊其余类型与空名单仍原样下发。
@@ -378,6 +386,14 @@ P86 审计遗留的两条回执路径（`send_private_msg_sse` 与 `send_*_forwa
 ## 📝 工程与文档变更
 
 
+
+### 恢复 `build.ps1` 为 xtask 薄包装（2026-11-18）
+
+纯 Rust 化清理（`63cd9b0`）把 `build.ps1` 误当 Go 遗留删除；该文件自 `9d9e254` 起已是 Rust 入口——只做 Go 命名参数 → Rust 三元组翻译与 Windows 工具链自动选择（缺 MSVC 回退 GNU），构建逻辑全在 xtask，UPX 默认 7。
+
+- **修改**：按 `9d9e254` 后的版本恢复 `build.ps1`（内容零改动，行尾 `i/lf`）；`docs/rust-build.md` 撤回「本分支没有 `build.ps1`」的失效口径，命令对照表改为「Go 版 `build.ps1`（`main`）/ 本分支 `build.ps1`」双列；`docs/rust-handover.md`、`docs/rust-migrate.md`、`docs/本版新增功能.md`、`readme.md`、`AGENTS.md` 同步补回该入口
+- **影响**：Windows 上 `.\build.ps1` / `.\build.ps1 -All` 与 `cargo xtask build` / `--all` 等价，不再需要手敲参数翻译；薄包装不参与构建逻辑，与 xtask 行为严格一致
+- **测试**：`.\build.ps1 -NoUPX` 宿主构建成功（`release/gensokyo-windows-amd64.exe`，12.5 MB，退出码 0）；`.\build.ps1 -All` 在假 zig 版本下正确透传 `--all`，输出 9 个 `[skip]` 后按「无产物」非零退出
 
 ### 文档同步（群管理三接口 + 入站新字段）
 

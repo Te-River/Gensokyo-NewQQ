@@ -374,18 +374,21 @@ fn uses_zigbuild(target: &Target) -> bool {
 ///
 /// linux-gnu 不在这里拦：它由 zig + cargo-zigbuild 自动引导（见 `uses_zigbuild`）；
 /// 宿主自身（`triple` 为 `None`）交给 cargo 选目标，永远不跳过。
+///
+/// MSVC 的判据是 `cl.exe` 而不是 `link.exe`：MSYS2 coreutils 在 `usr/bin/link.exe`
+/// 提供一个 Unix `link`（硬链接工具），按 `link.exe` 探测会在无 MSVC 的机器上误判可用。
 fn target_skip_reason(
     host_os: &str,
     triple: Option<&str>,
-    has_msvc_linker: bool,
+    has_msvc_cl: bool,
 ) -> Option<&'static str> {
     let triple = triple?;
     let (os, _) = split_triple(triple).ok()?;
     if os == "darwin" && !matches!(host_os, "macos" | "darwin") {
         return Some("macOS 目标需要 macOS 宿主或专用交叉工具链");
     }
-    if os == "windows" && triple.ends_with("-msvc") && !has_msvc_linker {
-        return Some("需要 MSVC 工具链（link.exe 不在 PATH）");
+    if os == "windows" && triple.ends_with("-msvc") && !has_msvc_cl {
+        return Some("需要 MSVC 工具链（cl.exe 不在 PATH）");
     }
     if os == "android" {
         return Some("需要 Android NDK");
@@ -571,8 +574,9 @@ fn compress(path: &Path, level: u8) -> Result<()> {
 /// `xtask build` 入口：解析目标 → 引导交叉工具链 → 构建 → 复制 → 可选 UPX → 汇总。
 ///
 /// linux-gnu 目标先自动引导 zig + cargo-zigbuild（见 bootstrap.rs），缺失的 rustup
-/// target 自动补装；补装失败的目标在矩阵模式下打印跳过原因并继续，真正编译失败的
-/// 目标记入失败清单，其余目标继续构建，最终以非零退出码汇总。
+/// target 自动补装；补装失败的目标在矩阵模式下打印跳过原因并继续，引导失败的 linux
+/// 目标同样跳过（`[warn]` + `[skip]`），真正编译失败的目标记入失败清单，其余目标继续
+/// 构建，最终以非零退出码汇总。
 pub fn run(args: BuildArgs) -> Result<()> {
     let root = workspace_root()?;
     let targets = plan(&args)?;
@@ -603,13 +607,17 @@ pub fn run(args: BuildArgs) -> Result<()> {
     // 引导 linux-gnu 交叉工具链（zig + cargo-zigbuild）；全部命中 PATH/.tools 缓存时零网络。
     let needs_zigbuild = targets.iter().any(uses_zigbuild);
     let mut tool_path: Option<std::ffi::OsString> = None;
+    // 引导失败只意味着「linux 目标跳过」，不是构建失败：既可能是网络（镜像不可达），
+    // 也可能是校验/解包缺陷。环境缺失不该让宿主目标连带失败；某个 zig 目标真正编译
+    // 失败时仍走下面的 [fail] 分支，不会被吞。
     let mut bootstrap_failed = false;
     if needs_zigbuild {
         match bootstrap_linux_tools(&root) {
             Ok(dirs) => tool_path = Some(path_with_tools(&dirs)?),
             Err(err) if matrix_mode => {
-                // 不静默回退 plain cargo build（必败）：linux 目标记失败，其余平台继续。
-                eprintln!("[fail] Linux 交叉工具链引导失败: {err:#}");
+                eprintln!(
+                    "[warn] Linux 交叉工具链不可用（zig/cargo-zigbuild 引导失败），linux 目标将跳过：{err:#}"
+                );
                 bootstrap_failed = true;
             }
             Err(err) => return Err(err),
@@ -619,23 +627,27 @@ pub fn run(args: BuildArgs) -> Result<()> {
     // target 查询与补装都要指明工具链，否则会落在 rust-toolchain.toml 的默认工具链上。
     let toolchain = active_toolchain(&root);
     let installed = installed_targets(toolchain.as_deref());
-    // MSVC 目标需要 link.exe；只在矩阵模式下探测（单目标模式不拦，交给 cargo 真实尝试）。
-    let has_msvc_linker = matrix_mode && find_on_path("link.exe").is_some();
+    // MSVC 目标需要 cl.exe（不是 link.exe：MSYS2 coreutils 有个同名 link.exe 会误判）；
+    // 只在矩阵模式下探测（单目标模式不拦，交给 cargo 真实尝试）。
+    let has_msvc_cl = matrix_mode && find_on_path("cl.exe").is_some();
     let mut outputs = Vec::new();
     let mut skipped = Vec::new();
     let mut failures = Vec::new();
 
     for target in &targets {
         if bootstrap_failed && uses_zigbuild(target) {
-            for &no_webui in flavors {
-                failures.push(format!("{}/{no_webui}", target.label()));
-            }
+            let reason = format!(
+                "{}: Linux 交叉工具链不可用（zig/cargo-zigbuild 引导失败）",
+                target.label()
+            );
+            println!("[skip] {reason}");
+            skipped.push(reason);
             continue;
         }
         // 工具链闸门先于 target 补装：darwin / MSVC / android 缺工具链时没必要下载 rust-std
         // 再在 C 代码里撞 gcc 的 `-arch` 报错。
         if matrix_mode
-            && let Some(reason) = target_skip_reason(OS, target.triple.as_deref(), has_msvc_linker)
+            && let Some(reason) = target_skip_reason(OS, target.triple.as_deref(), has_msvc_cl)
         {
             let reason = format!("{}: {reason}", target.label());
             println!("[skip] {reason}");
@@ -700,8 +712,10 @@ pub fn run(args: BuildArgs) -> Result<()> {
         bail!("{} 个构建失败: {}", failures.len(), failures.join(", "));
     }
     if outputs.is_empty() {
+        // 全部目标都被跳过 = 环境缺失（缺 MSVC / NDK / zig 引导失败），不是构建缺陷；
+        // 但 release 入口不能以 0 退出码交付空产物，这里以非零 + 指引收尾。
         bail!(
-            "没有产出任何产物（跳过 {} 个目标）\n\
+            "没有产出任何产物（跳过 {} 个目标）：这是环境缺失而非构建缺陷\n\
              本平台构建：.\\build.ps1（即 cargo xtask build），不需要安装任何 target\n\
              Linux 目标会自动引导 zig/cargo-zigbuild 并补装 rustup target；\n\
              darwin / MSVC / android 仍需各自的工具链（见 docs/rust-build.md）",
@@ -880,7 +894,7 @@ mod tests {
 
     #[test]
     fn skips_matrix_targets_whose_toolchain_the_host_lacks() {
-        // windows-gnu 宿主：darwin 需 macOS，MSVC 需 link.exe，android 需 NDK。
+        // windows-gnu 宿主：darwin 需 macOS，MSVC 需 cl.exe，android 需 NDK。
         assert_eq!(
             target_skip_reason("windows", Some("x86_64-apple-darwin"), false),
             Some("macOS 目标需要 macOS 宿主或专用交叉工具链")
@@ -891,11 +905,11 @@ mod tests {
         );
         assert_eq!(
             target_skip_reason("windows", Some("x86_64-pc-windows-msvc"), false),
-            Some("需要 MSVC 工具链（link.exe 不在 PATH）")
+            Some("需要 MSVC 工具链（cl.exe 不在 PATH）")
         );
         assert_eq!(
             target_skip_reason("windows", Some("i686-pc-windows-msvc"), false),
-            Some("需要 MSVC 工具链（link.exe 不在 PATH）")
+            Some("需要 MSVC 工具链（cl.exe 不在 PATH）")
         );
         assert_eq!(
             target_skip_reason("windows", Some("aarch64-linux-android"), false),
@@ -916,7 +930,7 @@ mod tests {
         }
         assert_eq!(target_skip_reason("windows", None, false), None);
         assert_eq!(target_skip_reason("linux", None, false), None);
-        // macOS 宿主可直接构建 darwin 目标；宿主上有 link.exe 时 MSVC 也不拦。
+        // macOS 宿主可直接构建 darwin 目标；宿主上有 cl.exe（真 MSVC 工具链）时 MSVC 也不拦。
         assert_eq!(
             target_skip_reason("macos", Some("aarch64-apple-darwin"), false),
             None

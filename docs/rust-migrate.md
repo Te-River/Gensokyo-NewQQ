@@ -84,6 +84,8 @@ git ls-files --others --exclude-standard
 | Node / 前端 | 可选 | — | `cd frontend && npm run build`；不构建也行，xtask 自动写 `webui/dist` 占位文件 |
 | UPX | 可选 | `upx --version` | PATH 里没有只提示并跳过，不是构建失败 |
 
+> 构建入口：`cargo xtask build`（矩阵参数见 `--help`）；Windows 上也可直接用仓内 `build.ps1` 薄包装（把 Go 命名参数翻成 xtask 参数并自动选工具链，无需额外安装）。
+
 ### 2.1 Windows 侧链接器（最容易踩的一条）
 
 旧机实测：`gcc.exe` **只存在于** `C:\msys64\mingw64\bin\`，`C:\msys64\usr\bin` 下**没有** gcc。

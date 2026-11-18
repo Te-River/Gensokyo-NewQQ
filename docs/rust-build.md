@@ -1,9 +1,9 @@
 # Rust 构建链（`cargo xtask build`）
 
 构建入口只有一个：`cargo xtask build`（等价于 `cargo run -p xtask -- build`，别名来自 `.cargo/config.toml`）。
-本分支**没有 `build.ps1`**——Go 源码树随提交 `63cd9b0`（2026-11-18）移出，脚本留在 `main` 分支，只作口径参照。
+本分支的 `build.ps1` 是 `cargo xtask build` 的**薄包装**：只做 Go 命名参数 → Rust 三元组翻译与 Windows 工具链自动选择（缺 MSVC 回退 GNU），构建逻辑全在 xtask（Go 版脚本留在 `main` 分支，只作口径参照）。
 
-对应实现：`xtask/src/build.rs`；Go 版口径参考 `main` 分支的 `build.ps1` 与 `.github/workflows/cross_compile.yml`。
+对应实现：`xtask/src/build.rs`（`build.ps1` 只转发参数，不参与构建逻辑）；Go 版口径参考 `main` 分支的 `build.ps1` 与 `.github/workflows/cross_compile.yml`。
 
 ## 前置条件
 
@@ -38,8 +38,8 @@ zig cc 充当交叉 C 编译器，ring 等含 C 代码的依赖不再需要各�
    随后 `cargo zigbuild --release --locked -p gensokyo-bin --bin gensokyo --target <triple>`。
 
 `.tools/` 齐全时**零网络**；下载/校验失败直接报错（给出 URL 与原因），
-**不静默回退到必败的 plain `cargo build`**。`--all` 矩阵模式下引导失败只把 linux 目标记入
-失败清单，darwin/windows/android 目标照常继续。
+**不静默回退到必败的 plain `cargo build`**。`--all` 矩阵模式下引导失败只打印一条 `[warn]`
+并把 linux 目标记为 `[skip]`，darwin / windows / android 目标照常继续。
 
 ### 钉死版本与官方 URL（勿换源/勿加代理）
 
@@ -107,9 +107,9 @@ cargo xtask build --all
 cargo xtask build --linux-only
 ```
 
-从 Go `build.ps1` 迁过来的命令对照（`build.ps1` 已随 Go 树移出本分支，等价用法一律用 xtask）：
+两条入口的参数一一对应（本分支 `build.ps1` 是 `cargo xtask build` 的薄包装，两列等价）：
 
-| 旧 `build.ps1`（`main` 分支） | 本分支等价 |
+| Go 版 `build.ps1`（`main`）/ 本分支 `build.ps1` | `cargo xtask build` 等价 |
 |------|------|
 | `.\build.ps1`（宿主完整版） | `cargo xtask build` |
 | `.\build.ps1 linux amd64` | `cargo xtask build --target x86_64-unknown-linux-gnu` |
@@ -139,13 +139,19 @@ cargo xtask build --linux-only
 - 逐个目标执行；rustup target 缺失时**自动 `rustup target add --toolchain <当前工具链>`**
   （幂等）；补装失败才打印 `[skip] <triple> …` 后继续，**不计失败**。
 - 宿主缺少对应工具链的目标先打印 `[skip] <triple>: <理由>` 并计入跳过、**不计失败**：
-  macOS 目标需 macOS 宿主或专用交叉工具链、windows-msvc 需 `link.exe` 在 PATH、android 需 NDK；
-  linux-gnu 目标由 zig 自动引导，不跳过。
+  macOS 目标需 macOS 宿主或专用交叉工具链、windows-msvc 需 `cl.exe` 在 PATH
+  （判据不是 `link.exe`——MSYS2 coreutils 在 `usr/bin/link.exe` 提供同名 Unix `link`，会误判可用）、
+  android 需 NDK；linux-gnu 目标由 zig 自动引导，不跳过。
+- zig / cargo-zigbuild 引导失败（断网、镜像不可达、校验或解包失败）时打印一条 `[warn]`，
+  4 个 linux 目标一律 `[skip]`、**不阻塞其余目标**；引导成功后某个 zig 目标真正编译失败仍记失败。
+  离线兜底：把 zig 解压到 `<repo>\.tools\zig-<版本>\`（cargo-zigbuild 同理）即可零网络构建，
+  引导的探测顺序是 PATH → `.tools/` → 官方下载。
 - linux-gnu×4 目标走自动引导的 `cargo zigbuild`（见上节）：**裸机上 `-All` / `-LinuxOnly`
   的 linux 部分开箱即跑**，无需预装任何交叉工具链；首次运行会下载 zig + cargo-zigbuild
   到 `.tools/`（之后零网络）。
 - 已安装但编译失败的目标记入失败清单并继续跑其余目标，结束时以非零退出码汇总
-  （真编译错误不会被当成"环境缺失"吞掉）。
+  （真编译错误不会被当成"环境缺失"吞掉）；全部目标都被跳过（0 个产物）时同样以非零
+  退出码报错，并列出因缺工具链跳过的目标——只构建宿主平台请用默认模式 `cargo xtask build`。
 - 宿主不在矩阵里时不会自动补进来；单独构建宿主用不带 `--all` 的命令。
 - 机器上没有 `rustup`（系统包管理器安装的 cargo）时无法预检/补装，`--all` 会真实尝试每个目标，
   缺失的目标表现为构建失败。
@@ -207,6 +213,8 @@ darwin / MSVC / android 目标仍需各自工具链。
 | UPX 不存在 | 0（打印安装提示） |
 
 ## 与 Go 版 `build.ps1` 的差异
+
+本分支的 `build.ps1` 只做参数翻译与工具链选择，不参与构建逻辑；下表对比的是 Go 版脚本与本仓 xtask 的实现差异。
 
 | 项 | Go 版 | Rust 版 |
 |----|-------|---------|

@@ -18,8 +18,8 @@
 
 | 目的 | 命令 |
 |------|------|
-| 构建（宿主） | `cargo xtask build` |
-| 构建全矩阵 | `cargo xtask build --all` |
+| 构建（宿主） | `cargo xtask build`（Windows 便捷入口：`.\build.ps1`） |
+| 构建全矩阵 | `cargo xtask build --all`（`.\build.ps1 -All`） |
 | 只构建 Linux×4 | `cargo xtask build --linux-only` |
 | 精简版（不嵌 WebUI） | `cargo xtask build --no-webui` |
 | UPX 压缩档 | `cargo xtask build --upx-level 7`（1..9，默认 7） |

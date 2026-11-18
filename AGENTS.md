@@ -214,6 +214,7 @@ bin → runtime → actions → {qq, storage, media, webui} → protocol → con
 | 仅 Linux×4 | `cargo xtask build --linux-only` |
 | 无 WebUI 精简版 | `cargo xtask build --no-webui` |
 | 跳过 UPX / 指定压缩档 | `cargo xtask build --no-upx` / `--upx-level <1..9>` |
+| Windows 便捷入口（`build.ps1` 薄包装） | `.\build.ps1 [-All\|-LinuxOnly\|-NoWebUI\|-NoUPX\|-UPXLevel <1..9>]`（等价对应 `cargo xtask build` 参数） |
 | TLS 依赖下限断言 | `cargo xtask check-tls-floors` |
 
 ### 门禁基线
@@ -225,7 +226,7 @@ bin → runtime → actions → {qq, storage, media, webui} → protocol → con
 ### 构建注意事项
 
 - **产物**输出到 `release/`，命名对齐 Go `build.ps1`：`gensokyo-{os}-{arch}[-noWebui][.exe]`
-- `--all` 矩阵：linux×4 走 zig 自动引导（`.tools/`，官方源 + sha256）；**缺工具链的 darwin / msvc / android 目标输出 `[skip]`，不算失败**
+- `--all` 矩阵：linux×4 走 zig 自动引导（`.tools/`，官方源 + sha256）；**缺工具链的 darwin / msvc / android 目标输出 `[skip]`，不算失败；MSVC 判据是 `cl.exe`（`link.exe` 有 MSYS2 同名干扰）；zig/cargo-zigbuild 引导失败时 linux 目标同样 `[skip]` 并打印 `[warn]`，不阻塞其余目标——但若最终一个产物都没有，命令仍以非零退出码报错（`--all` 不含宿主，只构建宿主请用默认模式）**
 - **`rust-embed` 要求**：`webui/dist` 目录必须存在，否则编译失败；xtask 在缺失时自动写占位文件
 - **工具链**：`rust-toolchain.toml` 钉 1.99.1（含 `rustfmt`/`clippy`，profile=minimal）；workspace MSRV 1.90
 - **纯文档更新**（README、docs/、CHANGELOG、AGENTS.md 等）：无需构建测试
