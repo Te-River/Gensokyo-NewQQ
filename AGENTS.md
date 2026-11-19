@@ -308,13 +308,13 @@ Handler 签名：`func(client callapi.Client, api openapi.OpenAPI, apiv2 openapi
 | 构建指定平台 | `.\build.ps1 linux amd64` |
 | 构建所有平台（双版本） | `.\build.ps1 -All` |
 | 仅 Linux 平台 | `.\build.ps1 -LinuxOnly` |
-| 无 WebUI 精简版 | `.\build.ps1 -NoWebUI`（使用 `-tags=small`） |
+| 精简版 | `.\build.ps1 -NoWebUI`（使用 `-tags=small`；去 gRPC/QR/OSS，**WebUI 仍保留**） |
 | 跳过 UPX 压缩 | `.\build.ps1 -NoUPX` |
 
 ### 构建注意事项
 
 - **构建产物**输出到 `release/` 目录，命名格式 `gensokyo-{os}-{arch}[-noWebui][.exe]`
-- **构建标签**：`-tags=small` 会移除 WebUI、gRPC、QR 码、OSS 后端（阿里云/百度云/腾讯云），通过 `//go:build !small` 控制
+- **构建标签**：`-tags=small` 会移除 gRPC 远程模式、QR 码生成、OSS 后端（阿里云/百度云/腾讯云）与 silk mp3 转码（`silk/mp3_stub.go`），通过 `//go:build !small` 控制；**WebUI 本体不删**——`webui/api.go` 的 `//go:embed dist/*` 与 `/webui/*` 路由没有 build tag，small 只是把 `handleSysInfo` 换成全 0 假数据并去掉 gopsutil（`webui/monitor_stub.go:1`、`webui/monitor_real.go:1`）
 - **`go:embed` 要求**：`webui/dist/` 目录必须存在（含占位文件），否则 `go build` 因 `go:embed` 失败。`build.ps1` 的 `Ensure-WebUIDist` 会自动创建占位文件；手动 `go build` 前需确保该目录存在
 - **CGO**：`CGO_ENABLED=0`（交叉编译）
 - **循环依赖**：注意 `imagehosting` 依赖 `config`，`images` 依赖两者，不要引入新循环
