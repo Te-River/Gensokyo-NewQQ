@@ -385,7 +385,14 @@ P86 审计遗留的两条回执路径（`send_private_msg_sse` 与 `send_*_forwa
 
 ## 📝 工程与文档变更
 
+### 矩阵对齐 Go 五平台 + 产物改名 gensokyo-rust-*（2026-11-19）
 
+`--all` 的平台集合改回 Go 主仓 `build.ps1` 的 5 个平台（linux×3 + windows×2），产物统一加 `rust` 标识；`--workers 2` 的缓存从 3 份压回 2 份。
+
+- **修改**（`xtask/src/build.rs`）：`MATRIX` 改为 `x86_64/i686/aarch64-unknown-linux-gnu` + `x86_64/i686-pc-windows-gnu`（顺序照 Go），双版本共 10 个产物；darwin / msvc / android / armv7 移出矩阵，仍可 `--target <triple>` 显式构建，对应 `[skip]` 判定原样保留；`artifact_name` 改为 `gensokyo-rust-{os}-{arch}[-noWebui][.exe]`；新增 `windows_gnu_toolchain` / `target_env_overrides`（纯映射 `windows_gnu_env` 便于单测）：`*-pc-windows-gnu` 按位宽探测 mingw gcc（x86_64：`x86_64-w64-mingw32-gcc` → `C:\msys64\mingw64\bin\gcc.exe` → PATH 的 `gcc`；i686：`i686-w64-mingw32-gcc` → `C:\msys64\mingw32\bin\gcc.exe`），命中后给 cargo 子进程注入 `CARGO_TARGET_<TRIPLE>_LINKER`、`CC_<target>`（连字符 / 下划线两种拼写）并把该 gcc 的 `bin` 目录前置到 PATH——实测只设 `CC`/linker 时，`C:\msys64\mingw32\bin` 不在 PATH 会让 32 位 gcc 的子进程加载不到同目录 DLL，`gcc -E` 静默退出码 1（`ring` 编译器家族探测失败），前置 PATH 后 i686 构建通过；矩阵模式下找不到 mingw 则 `[skip] <triple>: 需要 mingw-w64 工具链（<arch> gcc 不在 PATH）`、不计失败；`worker_target_dir` 改为 worker 1 用 `<base>` 本体、i≥2 才派生 `-w<i>`
+- **影响**：`--all` 与 Go `-All` 产物一一对应（10 个）；windows 产物由 msvc 换成 gnu（链接器与 C 编译器都是 mingw gcc，不再需要 `cl.exe`）；`--workers 2` 只占 `base` + `base-w2` 两份缓存；新文件名与旧 `gensokyo-*` 并存时不会互相覆盖，旧产物需手工清理
+- **文档**：`docs/rust-build.md`（矩阵表、产物命名、并行缓存预算、windows-gnu 的 mingw 说明与 `[skip]` 语义、`--linux-only` = 3 目标）、`AGENTS.md`（产物命名 / `--all` 矩阵 / 缓存预算）、`readme.md` 同步；启动横幅 `TITLE` 与欢迎语改为 `Gensokyo-NewQQ-Rust`（`crates/gensokyo-bin/src/banner.rs`，`LOGO` 与其它文案未动）
+- **测试**：`cargo test -p xtask` 40 passed / 0 failed（新增 `all_plans_the_go_matrix_in_order`、`first_worker_reuses_the_base_cache`、`windows_gnu_gcc_names_follow_the_architecture`、`windows_gnu_env_sets_linker_and_cc`、`target_env_overrides_only_covers_windows_gnu`）；`cargo clippy -p xtask --all-targets -- -D warnings` 零告警；`cargo fmt --all -- --check` 退出码 0
 
 ### `--all` 多目标并行构建（2026-11-19）
 

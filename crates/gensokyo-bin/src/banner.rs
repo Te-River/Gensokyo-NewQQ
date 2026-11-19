@@ -16,7 +16,7 @@ use std::net::SocketAddr;
 use gensokyo_config::Settings;
 
 /// 程序标题（Go `settings.title` 的等价物；Rust 无控制台标题 API，打印成横幅首行）。
-pub const TITLE: &str = "Gensokyo-NewQQ - Te-River";
+pub const TITLE: &str = "Gensokyo-NewQQ-Rust - Te-River";
 
 /// 东方群像字符画，逐字节取自 Go `template/config_template.go` 的 `const Logo`：首行空行、
 /// 每行 `'` 前缀、行尾填充空格与各行宽度（前十行 108 列、末行 127 列）都原样保留（LF 换行）。
@@ -42,7 +42,7 @@ pub fn welcome(console_url: Option<&str>, public_url: Option<&str>) {
     emit(TITLE, cyan);
     emit(
         &format!(
-            "欢迎来到Gensokyo-NewQQ, 控制台地址: {}",
+            "欢迎来到Gensokyo-NewQQ-Rust, 控制台地址: {}",
             console_url.unwrap_or(WEBUI_OFF)
         ),
         cyan,
@@ -51,7 +51,7 @@ pub fn welcome(console_url: Option<&str>, public_url: Option<&str>) {
     emit(LOGO, cyan);
     emit(
         &format!(
-            "欢迎来到Gensokyo-NewQQ, 公网控制台地址(需开放端口): {}",
+            "欢迎来到Gensokyo-NewQQ-Rust, 公网控制台地址(需开放端口): {}",
             public_url.unwrap_or(NO_SERVER_DIR)
         ),
         cyan,
@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn title_names_the_project() {
-        assert!(TITLE.contains("Gensokyo-NewQQ"));
+        assert!(TITLE.contains("Gensokyo-NewQQ-Rust"));
     }
 
     /// 本地地址取真实 listener：未指定地址落到回环，WebUI 挂在 `/`。

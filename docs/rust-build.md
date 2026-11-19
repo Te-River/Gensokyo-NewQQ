@@ -79,8 +79,10 @@ macOS / 32 位宿主没有官方预编译源：引导会报错并提示手动安
 ### 不自动引导的目标（维持现状）
 
 darwin×2 仍需 macOS + Xcode CLT；windows-msvc×2 仍需 VS Build Tools；
-android 仍需 NDK（实验性）。这些目标缺工具链时按原口径报错/跳过，不自动下载。
+windows-gnu×2 需对应位宽的 mingw-w64 gcc（xtask 只探测与注入，不下载）；
+android 仍需 NDK。这些目标缺工具链时按原口径报错/跳过，不自动下载。
 linux-musl 也不在引导范围（cargo-zigbuild 只路由 linux-gnu；musl 需自备工具链）。
+以上目标除 windows-gnu×2 外都不在 `--all` 矩阵里，需 `--target <triple>` 显式构建。
 
 ## 迁移到新机器（整仓搬运）
 
@@ -96,8 +98,8 @@ linux-musl 也不在引导范围（cargo-zigbuild 只路由 linux-gnu；musl 需
   不在系统盘）。它是纯缓存，可随时整目录删除换取空间，代价是下次冷编译一次。新机自定义位置时
   记住两件事：`protoc` 构建脚本对跨盘路径敏感（同一分区最稳），且别在 Go 主仓目录里跑 cargo
   （历史上曾在此留下 68 GB 的 `target/`）。
-- 宿主构建直接可用；Linux×4 交叉由自动引导补齐；darwin / MSVC / android 仍需各自
-  工具链或 CI（见目标矩阵备注）。
+- 宿主构建直接可用；Linux×3 交叉由自动引导补齐；windows-gnu 需对应位宽的 mingw-w64 gcc；
+  darwin / MSVC / android 仍需各自工具链或 CI（见目标矩阵备注）。
 - 前端产物可选：`cd frontend && npm run build`；不构建时 xtask 自动写 `webui/dist` 占位文件。
 
 ## 本地构建
@@ -130,19 +132,22 @@ cargo xtask build --linux-only
 
 ## 目标矩阵（`--all`）
 
-对齐 CI 的 Go 矩阵；`os`/`arch` 是 Go 命名，用于产物文件名。
+与 Go `build.ps1:164-171` 的 5 个平台逐字一致（顺序也照 Go）；`os`/`arch` 是 Go 命名，用于产物
+文件名，产物统一带 `rust` 标识：`gensokyo-rust-{os}-{arch}[-noWebui][.exe]`。
 
 | 三元组 | os | arch | 产物 | 备注 |
 |--------|----|------|------|------|
-| `x86_64-unknown-linux-gnu` | linux | amd64 | `gensokyo-linux-amd64` | `cargo zigbuild`，工具链自动引导 |
-| `i686-unknown-linux-gnu` | linux | 386 | `gensokyo-linux-386` | 同上 |
-| `armv7-unknown-linux-gnueabihf` | linux | arm | `gensokyo-linux-arm` | 同上 |
-| `aarch64-unknown-linux-gnu` | linux | arm64 | `gensokyo-linux-arm64` | 同上 |
-| `x86_64-apple-darwin` | darwin | amd64 | `gensokyo-darwin-amd64` | 需 macOS + Xcode CLT（不自动引导） |
-| `aarch64-apple-darwin` | darwin | arm64 | `gensokyo-darwin-arm64` | 同上 |
-| `x86_64-pc-windows-msvc` | windows | amd64 | `gensokyo-windows-amd64.exe` | 需 VS Build Tools（不自动引导） |
-| `i686-pc-windows-msvc` | windows | 386 | `gensokyo-windows-386.exe` | 同上 |
-| `aarch64-linux-android` | android | arm64 | `gensokyo-android-arm64` | **实验性**（M0 裁决 2：失败不阻塞合入）；需 NDK（不自动引导） |
+| `x86_64-unknown-linux-gnu` | linux | amd64 | `gensokyo-rust-linux-amd64` | `cargo zigbuild`，工具链自动引导 |
+| `i686-unknown-linux-gnu` | linux | 386 | `gensokyo-rust-linux-386` | 同上 |
+| `aarch64-unknown-linux-gnu` | linux | arm64 | `gensokyo-rust-linux-arm64` | 同上 |
+| `x86_64-pc-windows-gnu` | windows | amd64 | `gensokyo-rust-windows-amd64.exe` | 需 64 位 mingw gcc（`x86_64-w64-mingw32-gcc`，或 `C:\msys64\mingw64\bin\gcc.exe`） |
+| `i686-pc-windows-gnu` | windows | 386 | `gensokyo-rust-windows-386.exe` | 需 32 位 mingw gcc（`i686-w64-mingw32-gcc`，或 `C:\msys64\mingw32\bin\gcc.exe`） |
+
+`--all` = 5 个平台 × 2 个版本（完整 + `-noWebui`）= **10 个产物**；`--linux-only` 只保留前三个
+linux 目标 = **6 个产物**。
+
+darwin（`*-apple-darwin` ×2）、windows-msvc（`*-pc-windows-msvc` ×2）、armv7、android 不在矩阵里，
+仍可用 `--target <triple>` 显式构建；下面这些 `[skip]` 判定保留给那条路径与未来扩展。
 
 `--all` 与 `--linux-only` 的语义：
 
@@ -150,14 +155,23 @@ cargo xtask build --linux-only
   自动 `rustup target add --toolchain <当前工具链>`（幂等，并发补装会撞 rustup 的
   `could not rename … .partial (os error 2)`）；补装失败才打印 `[skip] <triple> …` 后继续，**不计失败**。
 - 宿主缺少对应工具链的目标先打印 `[skip] <triple>: <理由>` 并计入跳过、**不计失败**：
-  macOS 目标需 macOS 宿主或专用交叉工具链、windows-msvc 需 `cl.exe` 在 PATH
-  （判据不是 `link.exe`——MSYS2 coreutils 在 `usr/bin/link.exe` 提供同名 Unix `link`，会误判可用）、
-  android 需 NDK；linux-gnu 目标由 zig 自动引导，不跳过。
+  windows-gnu 需对应位宽的 mingw-w64 gcc（同时充当 linker 与 C 编译器，`ring` 等 C 依赖都要它）——
+  `x86_64` 找 `x86_64-w64-mingw32-gcc` / `C:\msys64\mingw64\bin\gcc.exe` / PATH 里的 `gcc`，
+  `i686` 找 `i686-w64-mingw32-gcc` / `C:\msys64\mingw32\bin\gcc.exe`，找不到即为
+  `[skip] <triple>: 需要 mingw-w64 工具链（<arch> gcc 不在 PATH）`；macOS 目标需 macOS 宿主或
+  专用交叉工具链、windows-msvc 需 `cl.exe` 在 PATH（判据不是 `link.exe`——MSYS2 coreutils 在
+  `usr/bin/link.exe` 提供同名 Unix `link`，会误判可用）、android 需 NDK；linux-gnu 目标由 zig
+  自动引导，不跳过。
+- windows-gnu 目标找到 gcc 后，cargo 子进程会带上 `CARGO_TARGET_<TRIPLE>_LINKER` 与
+  `CC_<target>`（连字符 / 下划线两种拼写都设，cc crate 版本不同认法不同），**并把该 gcc 的
+  `bin` 目录前置到 PATH**：gcc 的子进程（`cc1` / `as` / `ld`）要加载同目录 DLL，只设
+  `CC` / linker 不够——MSYS2 两个环境并存时 `mingw64\bin` 排在前面，32 位 gcc 连 `gcc -E`
+  都会以退出码 1 静默失败（`ring` 的编译器家族探测即如此）。
 - zig / cargo-zigbuild 引导失败（断网、镜像不可达、校验或解包失败）时打印一条 `[warn]`，
-  4 个 linux 目标一律 `[skip]`、**不阻塞其余目标**；引导成功后某个 zig 目标真正编译失败仍记失败。
+  3 个 linux 目标一律 `[skip]`、**不阻塞其余目标**；引导成功后某个 zig 目标真正编译失败仍记失败。
   离线兜底：把 zig 解压到 `<repo>\.tools\zig-<版本>\`（cargo-zigbuild 同理）即可零网络构建，
   引导的探测顺序是 PATH → `.tools/` → 官方下载。
-- linux-gnu×4 目标走自动引导的 `cargo zigbuild`（见上节）：**裸机上 `-All` / `-LinuxOnly`
+- linux-gnu×3 目标走自动引导的 `cargo zigbuild`（见上节）：**裸机上 `-All` / `-LinuxOnly`
   的 linux 部分开箱即跑**，无需预装任何交叉工具链；首次运行会下载 zig + cargo-zigbuild
   到 `.tools/`（之后零网络）。
 - 已安装但编译失败的目标记入失败清单并继续跑其余目标，结束时以非零退出码汇总
@@ -176,10 +190,10 @@ cargo xtask build --linux-only
 | 项 | 说明 |
 |----|------|
 | worker 数 | `--workers <1..=4>` 或环境变量 `GENSOKYO_BUILD_WORKERS`，命令行优先；默认矩阵模式 **2**、单目标 **1**；非法值（非 1~4 的整数）打印 `[warn]` 后回退默认；实际上限还受待构建的 (target, 版本) 数量约束 |
-| 缓存目录 | worker 用派生的 `<CARGO_TARGET_DIR 或 cargo 默认 target>/…-w1`、`-w2`…；**`--workers 1` 仍用 `<base>` 本体**，与旧行为完全一致（既有缓存照常命中，不多一份目录） |
+| 缓存目录 | worker 1 直接用 `<CARGO_TARGET_DIR 或 cargo 默认 target>` **本体**，worker i≥2 用派生的 `<base>-w<i>`；默认 2 worker = `base` + `base-w2`，正好 **2 份缓存**，单目标 / 既有缓存照常复用；`--workers 1` 同样只用 `<base>` |
 | 为什么必须分目录 | cargo 对整个 target 目录加独占文件锁，两个 cargo 进程共用同一目录只会排队（`Blocking waiting for file lock on build directory`） |
 | 每个 worker 的并发度 | 总 job 数按 worker 摊开：`CARGO_BUILD_JOBS`（缺省按 CPU 数）÷ worker 数，下限 1；例：`CARGO_BUILD_JOBS=6` + 2 worker ⇒ 每个 cargo `--jobs 3` |
-| 成本 | 并行模式会多 1~3 份缓存目录（缓存预算默认 **2 份**，上限 4 份）；**首次运行要在新目录里重新编译一遍依赖，比串行更慢**，第二次起吃到缓存才快 |
+| 成本 | 缓存预算默认 **2 份**、上限 4 份（worker 1 复用 base，只有 i≥2 才新增目录）；**首次运行要在新目录里重新编译一遍依赖，比串行更慢**，第二次起吃到缓存才快 |
 | 日志顺序 | 各 worker 的 cargo 输出先收集，全部结束后按矩阵顺序回放：`[build]` / `[skip]` / `[fail]` 行顺序稳定、不交错；单 worker 模式仍是实时输出 |
 | UPX | 压缩同样按 worker 数并行，日志按产物顺序回放（`[upx] …` 行顺序稳定） |
 | 失败与崩溃 | 各 worker 的失败仍只记 `[fail]` 不中断其余目标；worker 线程 panic 转成该 job 的 `[fail]`（xtask 是 dev profile，`panic=unwind`） |
@@ -209,7 +223,7 @@ Go 版用 `-tags=small` 裁剪 WebUI/OSS/gRPC/二维码。**Rust 侧目前没有
 ## 产物与目录
 
 - 产物目录：`<workspace>/release/`（`.gitignore` 忽略），文件名
-  `gensokyo-{os}-{arch}[-noWebui][.exe]`，与 Go 版逐字一致。
+  `gensokyo-rust-{os}-{arch}[-noWebui][.exe]`（`rust` 标识区分 Go 主线的同名产物）。
 - cargo 原始产物位置从 `cargo metadata` 的 `target_directory` 推导，尊重 `CARGO_TARGET_DIR` 与
   `.cargo/config.toml`；交叉目标多一层 `<triple>/`。
 - 只构建 bin 包：`cargo build --release --locked -p gensokyo-bin --bin gensokyo`
@@ -235,7 +249,7 @@ dev/test 仍是 unwind：`dispatcher.rs` 的 `catch_unwind` handler 隔离只在
 `--locked` 落在 `cargo run` 上（同 `check-tls-floors` job 的理由：防止 cargo 在校验前改写 `Cargo.lock`）。
 linux-gnu 交叉目标无需预装链接器 / `cross` 容器：xtask 自动引导 zig + cargo-zigbuild 并补装
 rustup target（runner 需能访问 ziglang.org 与 github.com；缓存 `.tools/` 可跨 job 复用）。
-darwin / MSVC / android 目标仍需各自工具链。
+darwin / MSVC / android 目标仍需各自工具链（且需 `--target` 显式指定，不在 `--all` 矩阵内）。
 
 ## 退出码
 
@@ -256,7 +270,7 @@ darwin / MSVC / android 目标仍需各自工具链。
 | 项 | Go 版 | Rust 版 |
 |----|-------|---------|
 | 工具链依赖 | `go`、`GOPROXY` | 仅 `cargo`（+ 可选 `upx`） |
-| `-All` 目标数 | 5（linux×3 + windows×2） | 9（对齐 CI 矩阵：linux×4、darwin×2、windows×2、android×1） |
+| `-All` 目标数 | 5（linux×3 + windows×2），双版本 10 个产物 | 5（linux×3 + windows×2），双版本 10 个产物；文件名带 `rust` 标识（`gensokyo-rust-*`） |
 | 版本信息 | `-ldflags -X buildinfo.BuildType/BuildSpec` 注入 `git-<short>`（无 git 时 `dev-<epoch>.<ms>`） | `cargo xtask build` 给 cargo 子进程设 `GENSOKYO_BUILD_VERSION`（同一规则：git 时 `git-<7位短 hash>`、否则 `dev-<epoch>.<ms>`；同名环境变量优先，发布流水线可覆盖）；直接 `cargo build` 不注入、走运行时 `dev-…` 回退 |
 | WebUI 占位 | 脚本内 `Ensure-WebUIDist` | xtask 内 `ensure_webui_dist`（同一组占位文件） |
 | `-NoWebUI` | `-tags=small`，真实裁剪 | `--no-default-features`，当前 no-op（见上节） |

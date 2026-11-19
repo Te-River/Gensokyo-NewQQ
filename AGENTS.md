@@ -211,7 +211,7 @@ bin → runtime → actions → {qq, storage, media, webui} → protocol → con
 | 格式检查 | `cargo fmt --all -- --check` |
 | 构建当前平台 + 产物入 `release/` | `cargo xtask build` |
 | 构建所有平台矩阵 | `cargo xtask build --all` |
-| 仅 Linux×4 | `cargo xtask build --linux-only` |
+| 仅 Linux×3 | `cargo xtask build --linux-only` |
 | 无 WebUI 精简版 | `cargo xtask build --no-webui` |
 | 跳过 UPX / 指定压缩档 | `cargo xtask build --no-upx` / `--upx-level <1..9>` |
 | Windows 便捷入口（`build.ps1` 薄包装） | `.\build.ps1 [-All\|-LinuxOnly\|-NoWebUI\|-NoUPX\|-UPXLevel <1..9>]`（等价对应 `cargo xtask build` 参数） |
@@ -225,10 +225,10 @@ bin → runtime → actions → {qq, storage, media, webui} → protocol → con
 
 ### 构建注意事项
 
-- **产物**输出到 `release/`，命名对齐 Go `build.ps1`：`gensokyo-{os}-{arch}[-noWebui][.exe]`
-- `--all` 矩阵：linux×4 走 zig 自动引导（`.tools/`，官方源 + sha256）；**缺工具链的 darwin / msvc / android 目标输出 `[skip]`，不算失败；MSVC 判据是 `cl.exe`（`link.exe` 有 MSYS2 同名干扰）；zig/cargo-zigbuild 引导失败时 linux 目标同样 `[skip]` 并打印 `[warn]`，不阻塞其余目标——但若最终一个产物都没有，命令仍以非零退出码报错（`--all` 不含宿主，只构建宿主请用默认模式）**
+- **产物**输出到 `release/`，命名对齐 Go `build.ps1` 的平台集合，加 `rust` 标识：`gensokyo-rust-{os}-{arch}[-noWebui][.exe]`
+- `--all` 矩阵 = Go `build.ps1` 的 5 个平台（linux×3 + windows×2）× 双版本 = **10 个产物**；linux 走 zig 自动引导（`.tools/`，官方源 + sha256）；**windows-gnu 需对应位宽的 mingw-w64 gcc（`x86_64-w64-mingw32-gcc` / `C:\msys64\mingw64\bin\gcc.exe`、`i686-w64-mingw32-gcc` / `C:\msys64\mingw32\bin\gcc.exe`，找到后 xtask 把它的 `bin` 前置到该目标的 PATH），缺了输出 `[skip]` 不算失败；darwin / msvc / android 不在矩阵内，需 `--target <triple>` 显式构建（缺工具链同样 `[skip]`，MSVC 判据是 `cl.exe`，`link.exe` 有 MSYS2 同名干扰）；zig/cargo-zigbuild 引导失败时 linux 目标同样 `[skip]` 并打印 `[warn]`，不阻塞其余目标——但若最终一个产物都没有，命令仍以非零退出码报错（`--all` 不含宿主，只构建宿主请用默认模式）**
 - **`rust-embed` 要求**：`webui/dist` 目录必须存在，否则编译失败；xtask 在缺失时自动写占位文件
-- **并行构建**：`--all` / `--linux-only` 默认 2 个 worker 并行（`--workers <1..=4>` / `GENSOKYO_BUILD_WORKERS`，非法值 `[warn]` 回退默认），每个 worker 用独立的 `<CARGO_TARGET_DIR>-wN` 缓存目录（cargo 的 target 目录锁是独占的，同目录只能串行）；**缓存预算 2 份**（上限 4），首跑更慢、二跑吃到缓存；`--workers 1` 仍用 `<base>` 本体 = 旧行为；rustup target 补装仍是串行前置，日志按矩阵顺序回放，`[skip]` 语义与退出码不变（详见 `docs/rust-build.md`）
+- **并行构建**：`--all` / `--linux-only` 默认 2 个 worker 并行（`--workers <1..=4>` / `GENSOKYO_BUILD_WORKERS`，非法值 `[warn]` 回退默认）；worker 1 用 `<CARGO_TARGET_DIR>` **本体**、worker i≥2 用 `<CARGO_TARGET_DIR>-w<i>`（cargo 的 target 目录锁是独占的，同目录只能串行）；**缓存预算 2 份**（默认 2 worker = base + `-w2`，上限 4），首跑更慢、二跑吃到缓存；rustup target 补装仍是串行前置，日志按矩阵顺序回放，`[skip]` 语义与退出码不变（详见 `docs/rust-build.md`）
 - **工具链**：`rust-toolchain.toml` 钉 1.99.1（含 `rustfmt`/`clippy`，profile=minimal）；workspace MSRV 1.90
 - **纯文档更新**（README、docs/、CHANGELOG、AGENTS.md 等）：无需构建测试
 - **清理**：临时脚本/探针放 OS temp 并删除，保持仓库干净

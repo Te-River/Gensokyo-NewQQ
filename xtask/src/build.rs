@@ -1,7 +1,8 @@
 //! `xtask build`：release 构建 + 产物复制到 `release/`。
 //!
-//! 与 Go 版 `build.ps1` 对齐：产物命名 `gensokyo-{os}-{arch}[-noWebui][.exe]`、
-//! `-All` 双版本、UPX 压缩。差异与取舍见 `docs/rust-build.md`。
+//! 与 Go 版 `build.ps1` 对齐：平台集合（linux×3 + windows×2）与 `-All` 双版本一致，
+//! 产物命名加 `rust` 标识：`gensokyo-rust-{os}-{arch}[-noWebui][.exe]`；UPX 压缩同 Go。
+//! 差异与取舍见 `docs/rust-build.md`。
 
 use std::env::consts::{ARCH, OS};
 use std::fs;
@@ -17,17 +18,16 @@ use clap::Args;
 use crate::bootstrap::{bootstrap_linux_tools, find_on_path, path_with_tools};
 use crate::find_lockfile;
 
-/// 发布目标矩阵（`--all` 使用），对齐 `.github/workflows/cross_compile.yml` 的 Go 矩阵。
+/// 发布目标矩阵（`--all` 使用）：与 Go `build.ps1:164-171` 的 5 个平台逐字一致，顺序也照 Go。
+///
+/// darwin / msvc / android / armv7 不再进矩阵，仍可用 `--target <triple>` 显式构建；
+/// 对应的 `[skip]` 判定（[`target_skip_reason`]）保留给那两条路径。
 const MATRIX: &[&str] = &[
     "x86_64-unknown-linux-gnu",
     "i686-unknown-linux-gnu",
-    "armv7-unknown-linux-gnueabihf",
     "aarch64-unknown-linux-gnu",
-    "x86_64-apple-darwin",
-    "aarch64-apple-darwin",
-    "x86_64-pc-windows-msvc",
-    "i686-pc-windows-msvc",
-    "aarch64-linux-android",
+    "x86_64-pc-windows-gnu",
+    "i686-pc-windows-gnu",
 ];
 
 /// 三元组里可能出现操作系统名的段。位置不固定：`x86_64-unknown-linux-gnu` 的 OS 在中间，
@@ -155,11 +155,14 @@ fn split_triple(triple: &str) -> Result<(String, String)> {
     Ok((os.to_owned(), go_arch_name(arch).to_owned()))
 }
 
-/// 产物文件名：与 Go 版 `build.ps1` / CI 完全一致。
+/// 产物文件名：`gensokyo-rust-{os}-{arch}[-noWebui][.exe]`。
+///
+/// `rust` 标识把重构版产物与 Go 主线的 `gensokyo-{os}-{arch}` 区分开，其余部分（Go 命名、
+/// 版本顺序、扩展名）与 `build.ps1` 一致。
 fn artifact_name(os: &str, arch: &str, no_webui: bool) -> String {
     let flavor = if no_webui { "-noWebui" } else { "" };
     let ext = if os == "windows" { ".exe" } else { "" };
-    format!("gensokyo-{os}-{arch}{flavor}{ext}")
+    format!("gensokyo-rust-{os}-{arch}{flavor}{ext}")
 }
 
 /// 目标清单：`--all`/`--linux-only` 走矩阵，否则显式三元组或宿主。
@@ -378,6 +381,85 @@ fn uses_zigbuild(target: &Target) -> bool {
     })
 }
 
+/// MSYS2 常见安装根：`<root>\mingw64\bin\gcc.exe`（64 位）/ `<root>\mingw32\bin\gcc.exe`（32 位）。
+const MSYS2_ROOTS: &[&str] = &[r"C:\msys64", r"C:\msys2"];
+
+/// windows-gnu 三元组 → (MSYS2 mingw 子目录, PATH 上探测的 gcc 名)。
+///
+/// i686 不回落裸 `gcc`：64 位宿主上的裸 gcc 位宽不对，链接 32 位目标会失败。
+fn windows_gnu_gcc_names(triple: &str) -> Option<(&'static str, &'static [&'static str])> {
+    match triple.split('-').next()? {
+        "x86_64" => Some(("mingw64", &["x86_64-w64-mingw32-gcc", "gcc"])),
+        "i686" => Some(("mingw32", &["i686-w64-mingw32-gcc"])),
+        _ => None,
+    }
+}
+
+/// `*-pc-windows-gnu` 目标的 mingw-w64 gcc 绝对路径：它同时充当 linker 与 C 编译器
+/// （`ring` 等 C 依赖）。探测顺序：PATH 上带位宽前缀的 gcc → MSYS2 常见安装目录 →
+/// PATH 上的裸 `gcc`（仅 x86_64）。找不到返回 `None`，矩阵模式下该目标 `[skip]`。
+fn windows_gnu_toolchain(triple: &str) -> Option<PathBuf> {
+    if !triple.ends_with("-pc-windows-gnu") {
+        return None;
+    }
+    let (mingw_dir, names) = windows_gnu_gcc_names(triple)?;
+    for name in names {
+        let exe = format!("{name}.exe");
+        if let Some(candidate) = find_on_path(&exe).map(|dir| dir.join(&exe))
+            && candidate.is_file()
+        {
+            return Some(candidate);
+        }
+    }
+    for root in MSYS2_ROOTS {
+        let candidate = Path::new(root).join(mingw_dir).join("bin").join("gcc.exe");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Windows GNU 目标的环境变量对（纯映射，便于单测）：`CARGO_TARGET_<TRIPLE>_LINKER` 加上
+/// cc crate 认的 `CC_<target>`——连字符与下划线两种拼写都设（不同版本/不同 crate 各认一种）；
+/// 再加一条 `PATH`：gcc 靠 PATH 找自己的 `cc1` / `as` / `ld`，MSYS2 两个环境并存时
+/// `mingw64\bin` 常排在前面，32 位 gcc 会调到 64 位工具链而静默失败（`ring` 的编译器家族
+/// 探测就是这么挂的），所以 gcc 自己的目录必须领先。`base_path` 是拼 PATH 的底（`None` 取
+/// 进程 PATH），便于单测不依赖本机安装。
+fn windows_gnu_env(
+    gcc: &Path,
+    triple: &str,
+    base_path: Option<&std::ffi::OsStr>,
+) -> Vec<(String, String)> {
+    let value = gcc.display().to_string();
+    let upper = triple.to_uppercase().replace('-', "_");
+    let mut env = vec![
+        (format!("CARGO_TARGET_{upper}_LINKER"), value.clone()),
+        (format!("CC_{triple}"), value.clone()),
+        (format!("CC_{}", triple.replace('-', "_")), value),
+    ];
+    if let Some(bin) = gcc.parent() {
+        let base = base_path
+            .map(std::ffi::OsStr::to_os_string)
+            .or_else(|| std::env::var_os("PATH"))
+            .unwrap_or_default();
+        let mut path = bin.display().to_string();
+        for entry in std::env::split_paths(&base).filter(|entry| !entry.as_os_str().is_empty()) {
+            path.push(if cfg!(windows) { ';' } else { ':' });
+            path.push_str(&entry.to_string_lossy());
+        }
+        env.push(("PATH".to_owned(), path));
+    }
+    env
+}
+
+/// 该三元组要让 cargo 子进程多带的环境变量；非 windows-gnu 或缺 mingw 时为空。
+fn target_env_overrides(triple: &str) -> Vec<(String, String)> {
+    windows_gnu_toolchain(triple)
+        .map(|gcc| windows_gnu_env(&gcc, triple, None))
+        .unwrap_or_default()
+}
+
 /// 工具链可用性闸门（纯函数，便于单测）：`--all` 只尝试宿主真正能构建的目标，
 /// 其余打印 `[skip]` 理由、计入跳过而非失败（见 `BuildArgs::all` 的注释）。
 ///
@@ -525,6 +607,11 @@ fn cargo_build(
     if let Some(path) = ctx.tool_path {
         command.env("PATH", path);
     }
+    if let Some(triple) = &target.triple {
+        // windows-gnu 的 PATH 覆盖必须排在 `ctx.tool_path` 之后：env 同名键后写者生效，
+        // 而这两类目标不走 zigbuild，不需要 zig 目录。
+        command.envs(target_env_overrides(triple));
+    }
     if !capture {
         println!("{header}");
         let status = command
@@ -631,9 +718,13 @@ fn shard(len: usize, workers: usize) -> Vec<Vec<usize>> {
     shards
 }
 
-/// worker 的缓存目录 `<base>-w<index>`：cargo 对整个 target 目录加独占文件锁，共用同一目录的
-/// 两个 cargo 进程会排队成串行。`--workers 1` 不走这里，直接用 `<base>` 本体（沿用既有缓存）。
+/// worker 的缓存目录：worker 1 直接用 `<base>` 本体（单目标/热缓存可复用），worker i≥2
+/// 用 `<base>-w<i>`。cargo 对整个 target 目录加独占文件锁，共用同一目录的两个 cargo 进程
+/// 会排队成串行；这样默认 2 worker = base + `-w2`，正好 2 份缓存（预算）。
 fn worker_target_dir(base: &Path, index: usize) -> PathBuf {
+    if index <= 1 {
+        return base.to_path_buf();
+    }
     let mut name = base.as_os_str().to_os_string();
     name.push(format!("-w{index}"));
     PathBuf::from(name)
@@ -745,8 +836,8 @@ fn report_job(
 /// 构建，最终以非零退出码汇总。
 ///
 /// 矩阵模式默认起 2 个 worker 并行构建（`--workers` / `GENSOKYO_BUILD_WORKERS` 覆盖）：
-/// rustup target 补装仍串行前置，每个 worker 用独立的 `<base>-wN` 缓存目录，日志按矩阵
-/// 顺序回放，对外的产物命名、`[skip]` 语义、汇总行与退出码不变。
+/// rustup target 补装仍串行前置，缓存目录用 `<base>`（worker 1）与 `<base>-w<i>`（i≥2），
+/// 日志按矩阵顺序回放，对外的产物命名、`[skip]` 语义、汇总行与退出码不变。
 pub fn run(args: BuildArgs) -> Result<()> {
     let root = workspace_root()?;
     let targets = plan(&args)?;
@@ -822,6 +913,19 @@ pub fn run(args: BuildArgs) -> Result<()> {
             verdicts.push(Some(format!("{}: {reason}", target.label())));
             continue;
         }
+        // windows-gnu 的 linker 与 C 编译器都是 mingw-w64 gcc；缺了必然在链接/C 代码里失败，
+        // 提前判掉（矩阵模式下 `[skip]`，不算失败）。单目标模式照旧交给 cargo 真实尝试。
+        if matrix_mode
+            && let Some(triple) = target.triple.as_deref()
+            && triple.ends_with("-pc-windows-gnu")
+            && windows_gnu_toolchain(triple).is_none()
+        {
+            let arch = triple.split('-').next().unwrap_or(triple);
+            verdicts.push(Some(format!(
+                "{triple}: 需要 mingw-w64 工具链（{arch} gcc 不在 PATH）"
+            )));
+            continue;
+        }
         if let Some(triple) = &target.triple
             && !ensure_target_installed(triple, installed.as_ref(), toolchain.as_deref())
             && matrix_mode
@@ -860,9 +964,16 @@ pub fn run(args: BuildArgs) -> Result<()> {
         jobs: cargo_jobs,
     };
     if workers > 1 {
+        let dirs = (1..=workers)
+            .map(|worker| {
+                worker_target_dir(&base_target_dir, worker)
+                    .display()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         println!(
-            "workers   : {workers} 个并行 worker（每个 cargo --jobs {cargo_jobs}；缓存目录 {}-w1…-w{workers}）",
-            base_target_dir.display()
+            "workers   : {workers} 个并行 worker（每个 cargo --jobs {cargo_jobs}；缓存目录 {dirs}）"
         );
     }
 
@@ -968,6 +1079,7 @@ pub fn run(args: BuildArgs) -> Result<()> {
             "没有产出任何产物（跳过 {} 个目标）：这是环境缺失而非构建缺陷\n\
              本平台构建：.\\build.ps1（即 cargo xtask build），不需要安装任何 target\n\
              Linux 目标会自动引导 zig/cargo-zigbuild 并补装 rustup target；\n\
+             windows-gnu 目标需要对应位宽的 mingw-w64 gcc；\n\
              darwin / MSVC / android 仍需各自的工具链（见 docs/rust-build.md）",
             skipped.len()
         );
@@ -980,7 +1092,8 @@ mod tests {
     use super::{
         BuildArgs, Target, artifact_name, build_version, built_binary, cargo_invocation,
         ensure_webui_dist, flavors, git_short_commit, plan, shard, split_triple,
-        target_skip_reason, uses_zigbuild,
+        target_env_overrides, target_skip_reason, uses_zigbuild, windows_gnu_env,
+        windows_gnu_gcc_names, windows_gnu_toolchain, worker_target_dir,
     };
     use std::time::{Duration, SystemTime};
 
@@ -1024,23 +1137,24 @@ mod tests {
         assert!(split_triple("").is_err());
     }
 
+    /// 平台集合对齐 Go，文件名带 `rust` 标识：`gensokyo-rust-{os}-{arch}{flavor}{ext}`。
     #[test]
-    fn artifact_names_match_go_build_ps1() {
+    fn artifact_names_carry_the_rust_marker() {
         assert_eq!(
             artifact_name("windows", "amd64", false),
-            "gensokyo-windows-amd64.exe"
+            "gensokyo-rust-windows-amd64.exe"
         );
         assert_eq!(
             artifact_name("windows", "386", true),
-            "gensokyo-windows-386-noWebui.exe"
+            "gensokyo-rust-windows-386-noWebui.exe"
         );
         assert_eq!(
             artifact_name("linux", "arm64", false),
-            "gensokyo-linux-arm64"
+            "gensokyo-rust-linux-arm64"
         );
         assert_eq!(
-            artifact_name("darwin", "amd64", true),
-            "gensokyo-darwin-amd64-noWebui"
+            artifact_name("linux", "amd64", true),
+            "gensokyo-rust-linux-amd64-noWebui"
         );
     }
 
@@ -1088,19 +1202,157 @@ mod tests {
         }
     }
 
+    /// `--all` 的 5 个平台与 Go `build.ps1` 的矩阵逐字一致，顺序也照 Go。
+    #[test]
+    fn all_plans_the_go_matrix_in_order() {
+        let targets = plan(&args(&[], true, false, false)).expect("矩阵解析失败");
+        let triples: Vec<Option<&str>> = targets
+            .iter()
+            .map(|target| target.triple.as_deref())
+            .collect();
+        assert_eq!(
+            triples,
+            [
+                Some("x86_64-unknown-linux-gnu"),
+                Some("i686-unknown-linux-gnu"),
+                Some("aarch64-unknown-linux-gnu"),
+                Some("x86_64-pc-windows-gnu"),
+                Some("i686-pc-windows-gnu"),
+            ]
+        );
+    }
+
+    /// 缓存预算 2 份：worker 1 复用 `<base>`，worker i≥2 才派生 `-w<i>`。
+    #[test]
+    fn first_worker_reuses_the_base_cache() {
+        let base = std::path::Path::new("target");
+        assert_eq!(worker_target_dir(base, 1), std::path::Path::new("target"));
+        assert_eq!(
+            worker_target_dir(base, 2),
+            std::path::Path::new("target-w2")
+        );
+        assert_eq!(
+            worker_target_dir(base, 3),
+            std::path::Path::new("target-w3")
+        );
+    }
+
+    /// windows-gnu 的 gcc 名按位宽区分；i686 不回落裸 `gcc`（位宽不对会链接失败）。
+    #[test]
+    fn windows_gnu_gcc_names_follow_the_architecture() {
+        let (mingw_dir, names) =
+            windows_gnu_gcc_names("x86_64-pc-windows-gnu").expect("x86_64 映射");
+        assert_eq!(mingw_dir, "mingw64");
+        assert_eq!(names, &["x86_64-w64-mingw32-gcc", "gcc"][..]);
+        let (mingw_dir, names) = windows_gnu_gcc_names("i686-pc-windows-gnu").expect("i686 映射");
+        assert_eq!(mingw_dir, "mingw32");
+        assert_eq!(names, &["i686-w64-mingw32-gcc"][..]);
+        assert!(windows_gnu_gcc_names("aarch64-pc-windows-gnu").is_none());
+    }
+
+    /// 注入变量：`CARGO_TARGET_<TRIPLE>_LINKER` + cc crate 认的两种 `CC_` 拼写 + 前置 PATH。
+    #[test]
+    fn windows_gnu_env_sets_linker_cc_and_path() {
+        let gcc = std::path::Path::new(r"C:\msys64\mingw64\bin\gcc.exe");
+        let env = windows_gnu_env(gcc, "x86_64-pc-windows-gnu", Some(std::ffi::OsStr::new("")));
+        let pairs: Vec<(&str, &str)> = env
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                (
+                    "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER",
+                    r"C:\msys64\mingw64\bin\gcc.exe"
+                ),
+                ("CC_x86_64-pc-windows-gnu", r"C:\msys64\mingw64\bin\gcc.exe"),
+                ("CC_x86_64_pc_windows_gnu", r"C:\msys64\mingw64\bin\gcc.exe"),
+                ("PATH", r"C:\msys64\mingw64\bin"),
+            ]
+        );
+    }
+
+    /// gcc 自己的 bin 必须领先 PATH：32 位 gcc 混在 `mingw64\bin` 后面的 PATH 里会静默失败
+    /// （`gcc -E` 退出码 1、无输出，`ring` 的编译器家族探测就是这么挂的）。
+    #[test]
+    fn windows_gnu_path_leads_with_the_toolchain_bin() {
+        let base = std::ffi::OsStr::new(r"C:\Windows\system32");
+        let sep = if cfg!(windows) { ';' } else { ':' };
+        for (triple, gcc, bin) in [
+            (
+                "x86_64-pc-windows-gnu",
+                r"C:\msys64\mingw64\bin\gcc.exe",
+                r"C:\msys64\mingw64\bin",
+            ),
+            (
+                "i686-pc-windows-gnu",
+                r"C:\msys64\mingw32\bin\gcc.exe",
+                r"C:\msys64\mingw32\bin",
+            ),
+        ] {
+            let env = windows_gnu_env(std::path::Path::new(gcc), triple, Some(base));
+            let path = env
+                .iter()
+                .find(|(key, _)| key == "PATH")
+                .map(|(_, value)| value.as_str())
+                .expect("缺少 PATH");
+            assert_eq!(path, format!("{bin}{sep}C:\\Windows\\system32"));
+        }
+        // 非 windows-gnu 目标不注入 PATH
+        assert!(
+            !target_env_overrides("x86_64-unknown-linux-gnu")
+                .iter()
+                .any(|(key, _)| key == "PATH")
+        );
+    }
+
+    /// 本机装了 mingw 时，PATH 指向对应位宽的 mingw bin（没装则不做断言，环境缺失不算失败）。
+    #[test]
+    fn target_env_overrides_follow_the_installed_mingw() {
+        for (triple, mingw_dir) in [
+            ("x86_64-pc-windows-gnu", "mingw64"),
+            ("i686-pc-windows-gnu", "mingw32"),
+        ] {
+            let Some(gcc) = windows_gnu_toolchain(triple) else {
+                continue;
+            };
+            let dir = gcc.parent().expect("gcc 无父目录").display().to_string();
+            assert!(
+                dir.to_lowercase().contains(mingw_dir),
+                "{triple} 应命中 {mingw_dir}: {dir}"
+            );
+            let env = target_env_overrides(triple);
+            let path = env
+                .iter()
+                .find(|(key, _)| key == "PATH")
+                .map(|(_, value)| value.as_str())
+                .expect("缺少 PATH");
+            assert!(path.starts_with(&dir), "{triple}: {path}");
+        }
+    }
+
+    /// 非 windows-gnu 目标不注入任何环境变量（linux 走 zig，宿主交给 cargo）。
+    #[test]
+    fn target_env_overrides_only_covers_windows_gnu() {
+        assert!(target_env_overrides("x86_64-unknown-linux-gnu").is_empty());
+        assert!(target_env_overrides("x86_64-pc-windows-msvc").is_empty());
+    }
+
     #[test]
     fn linux_only_filters_the_matrix() {
         let targets = plan(&args(&[], false, true, false)).expect("矩阵解析失败");
-        assert!(targets.len() >= 3, "Linux 目标至少 3 个: {targets:?}");
-        assert!(
-            targets.iter().all(|target| target.os == "linux"),
-            "linux-only 不能带出非 Linux 目标: {targets:?}"
-        );
-        assert!(
-            targets
-                .iter()
-                .any(|target| target.arch == "arm64" && target.os == "linux"),
-            "缺少 linux/arm64: {targets:?}"
+        let triples: Vec<Option<&str>> = targets
+            .iter()
+            .map(|target| target.triple.as_deref())
+            .collect();
+        assert_eq!(
+            triples,
+            [
+                Some("x86_64-unknown-linux-gnu"),
+                Some("i686-unknown-linux-gnu"),
+                Some("aarch64-unknown-linux-gnu"),
+            ]
         );
     }
 
