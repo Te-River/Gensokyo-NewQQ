@@ -5,9 +5,11 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde_json::Value;
 
 use crate::dto::{
     ApprovalJoinRequest, BatchRemoveMembersRequest, BatchRemoveMembersResponse, BotUser,
@@ -33,6 +35,22 @@ pub const SANDBOX_BASE_URL: &str = "https://api.bot.qq.com";
 const TRACE_ID_HEADER: &str = "X-Tps-trace-ID";
 /// 鉴权 scheme（botgo `OnBeforeRequest` 硬编码为 `QQBot`）。
 const AUTH_SCHEME: &str = "QQBot";
+/// 请求日志的 target：短模块推导后控制台显示 `[openapi]`。
+const OPENAPI_LOG_TARGET: &str = "gensokyo_qq::openapi";
+/// 日志里 body 段的上限。Go 不截断，但本仓日志会进 WebUI 的 500 条环形缓冲，
+/// 一条大响应能把它整段冲掉，所以这里刻意截断。
+const LOG_BODY_LIMIT: usize = 4096;
+/// 需要在日志里打码的 JSON key（token / 鉴权 / 应用凭据）。
+const REDACT_KEYS: [&str; 8] = [
+    "authorization",
+    "token",
+    "access_token",
+    "refresh_token",
+    "secret",
+    "client_secret",
+    "app_secret",
+    "app_id",
+];
 
 /// QQ OpenAPI v2 客户端。
 pub struct OpenApiClient<T: HttpTransport> {
@@ -472,6 +490,9 @@ impl<T: HttpTransport> OpenApiClient<T> {
     }
 
     /// 注入 token 与通用请求头，并把非 2xx 响应映射为 [`ApiError`]。
+    ///
+    /// 所有 OpenAPI 调用都经过这里，因此请求日志也在这里打一条（botgo 的等价物是
+    /// `openapi/v2/openapi.go:124-137` 的响应中间件）。
     async fn authorized(
         &self,
         method: HttpMethod,
@@ -479,7 +500,14 @@ impl<T: HttpTransport> OpenApiClient<T> {
         body: Option<Vec<u8>>,
     ) -> Result<HttpResponse> {
         let token = self.tokens.token().await?;
-        let mut request = HttpRequest::new(method, format!("{}{path}", self.base_url))
+        let url = format!("{}{path}", self.base_url);
+        // `req:` 段在发送前算好（发送会把 body 移进请求）：没有体就是 Go 的 `null`。
+        let logging = tracing::enabled!(target: OPENAPI_LOG_TARGET, tracing::Level::INFO);
+        let req_log = match (&body, logging) {
+            (Some(body), true) => body_for_log(body),
+            _ => "null".to_owned(),
+        };
+        let mut request = HttpRequest::new(method, url.clone())
             .with_header("Authorization", format!("{AUTH_SCHEME} {token}"))
             .with_header("X-Union-Appid", self.tokens.config().app_id())
             .with_header("Accept", "application/json")
@@ -494,7 +522,25 @@ impl<T: HttpTransport> OpenApiClient<T> {
             request = request.with_body(body);
         }
 
-        let response = self.transport.request(request).await?;
+        let started = Instant::now();
+        let response = self.transport.request(request).await;
+        let elapsed = started.elapsed();
+        let response = response?;
+        if logging {
+            tracing::info!(
+                target: OPENAPI_LOG_TARGET,
+                "{}",
+                openapi_log_line(
+                    method.as_str(),
+                    &url,
+                    response.header(TRACE_ID_HEADER),
+                    response.status,
+                    elapsed,
+                    &req_log,
+                    &response.body,
+                )
+            );
+        }
         if !(200..300).contains(&response.status) {
             // token 失效时丢弃缓存，下一次调用会重新获取；本次仍把上游错误原样上抛。
             if response.status == 401 {
@@ -518,6 +564,93 @@ fn decode_json<R: DeserializeOwned>(response: &HttpResponse) -> Result<R> {
     })
 }
 
+/// 拼一条 OpenAPI 请求日志，字段与顺序照 botgo `openapi/v2/openapi.go:124-137`：
+/// `GET https://…, traceID:xx, status:200 OK, elapsed:569.8ms req: null, resp: {…}`。
+///
+/// `req` 是已渲染好的请求体段（无体为 `null`）；`resp_body` 在这里脱敏并按
+/// [`LOG_BODY_LIMIT`] 截断。
+fn openapi_log_line(
+    method: &str,
+    url: &str,
+    trace_id: Option<&str>,
+    status: u16,
+    elapsed: Duration,
+    req: &str,
+    resp_body: &[u8],
+) -> String {
+    let reason = reqwest::StatusCode::from_u16(status)
+        .ok()
+        .and_then(|code| code.canonical_reason())
+        .unwrap_or_default();
+    let status_text = match reason {
+        "" => status.to_string(),
+        reason => format!("{status} {reason}"),
+    };
+    format!(
+        "{method} {url}, traceID:{}, status:{status_text}, elapsed:{:.1}ms req: {req}, resp: {}",
+        trace_id.unwrap_or_default(),
+        elapsed.as_secs_f64() * 1000.0,
+        body_for_log(resp_body),
+    )
+}
+
+/// 请求 / 响应体 → 日志里的一段：JSON 先按 key 脱敏再压成一行，其余按 UTF-8 lossy 文本，
+/// 最后统一截断。脱敏只发生在日志里，真实请求不受影响。
+fn body_for_log(body: &[u8]) -> String {
+    let rendered = match serde_json::from_slice::<Value>(body) {
+        Ok(mut value) => {
+            redact(&mut value);
+            serde_json::to_string(&value)
+                .unwrap_or_else(|_| String::from_utf8_lossy(body).into_owned())
+        }
+        Err(_) => String::from_utf8_lossy(body).into_owned(),
+    };
+    truncate(rendered)
+}
+
+/// 递归把敏感 key 的值换成 `前4位****`（Go 日志里的 `eHNQ****` 形态）。
+fn redact(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for (key, value) in map.iter_mut() {
+                if REDACT_KEYS
+                    .iter()
+                    .any(|name| key.eq_ignore_ascii_case(name))
+                {
+                    *value = Value::String(mask(value));
+                } else {
+                    redact(value);
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(redact),
+        _ => {}
+    }
+}
+
+/// 字符串取前 4 个字符；非字符串按 JSON 字面量取前 4 个字符（数字型 `app_id` 走这里）。
+fn mask(value: &Value) -> String {
+    let raw = match value {
+        Value::String(text) => text.clone(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    };
+    let prefix: String = raw.chars().take(4).collect();
+    format!("{prefix}****")
+}
+
+/// 按字节上限截断到字符边界，并标记 `…(truncated)`。
+fn truncate(text: String) -> String {
+    if text.len() <= LOG_BODY_LIMIT {
+        return text;
+    }
+    let mut end = LOG_BODY_LIMIT;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…(truncated)", &text[..end])
+}
+
 /// 分片上传端点：群 / C2C 二选一，`suffix` 取 `upload_prepare` / `upload_part_finish` / `files`。
 fn file_upload_path(id: &str, is_group: bool, suffix: &str) -> String {
     let scope = if is_group { "groups" } else { "users" };
@@ -539,4 +672,46 @@ fn query_path(path: &str, params: &[(&str, Option<&str>)]) -> String {
         url.push_str(&encode_path_segment(value));
     }
     url
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{LOG_BODY_LIMIT, body_for_log, openapi_log_line};
+
+    #[test]
+    fn log_line_matches_botgo_fields() {
+        let line = openapi_log_line(
+            "GET",
+            "https://api.bot.qq.com/users/@me",
+            Some("db5ba4cb"),
+            200,
+            Duration::from_micros(569_819),
+            "null",
+            br#"{"id":"1428"}"#,
+        );
+        assert_eq!(
+            line,
+            "GET https://api.bot.qq.com/users/@me, traceID:db5ba4cb, status:200 OK, \
+             elapsed:569.8ms req: null, resp: {\"id\":\"1428\"}"
+        );
+    }
+
+    #[test]
+    fn log_bodies_redact_tokens_and_truncate() {
+        let body = body_for_log(br#"{"access_token":"eHNQabcdef","app_id":10001,"content":"hi"}"#);
+        assert!(body.contains(r#""access_token":"eHNQ****""#), "{body}");
+        assert!(!body.contains("abcdef"), "{body}");
+        assert!(body.contains(r#""app_id":"1000****""#), "{body}");
+
+        let big = format!(r#"{{"data":"{}"}}"#, "x".repeat(5000));
+        let out = body_for_log(big.as_bytes());
+        assert!(out.ends_with("…(truncated)"), "{}", out.len());
+        assert!(
+            out.len() <= LOG_BODY_LIMIT + "…(truncated)".len(),
+            "{}",
+            out.len()
+        );
+    }
 }

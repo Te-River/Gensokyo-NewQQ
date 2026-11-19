@@ -41,6 +41,11 @@ tracing.workspace = true
 # WebUI 日志中枢（`/api/logs` 环形缓冲 + 广播）：采集层往里投递，webui crate 负责推送
 gensokyo-webui.workspace = true
 
+# Windows 控制台开启 ANSI（VT）的安全封装：workspace 禁止 unsafe，自己调 SetConsoleMode 不可行。
+# 该 crate 已经经 clap → anstream 进树（Cargo.lock 1.1.5），这里只是把它提为 Windows 侧的直依赖。
+[target.'cfg(windows)'.dependencies]
+anstyle-query = "1.1.5"
+
 [dev-dependencies]
 tempfile = "3.27.0"
 tokio = { workspace = true, features = [

@@ -420,8 +420,12 @@ fn auto_import_idmap(config: &ConfigManager) {
 /// 配置、绑定或信号注册失败时返回 [`StartupError`]；此时不会留下监听端口。
 pub async fn serve(faststart: bool, auto_import: bool) -> Result<(), StartupError> {
     let loaded = load_config(CONFIG_FILE)?;
-    // 日志级别来自 config.yml，所以要在配置加载之后初始化；`RUST_LOG` 优先。
-    logging::init(loaded.config.snapshot().get_log_level());
+    // 日志级别与颜色开关都来自 config.yml，所以要在配置加载之后初始化；`RUST_LOG` 优先。
+    let log_settings = loaded.config.snapshot();
+    logging::init(
+        log_settings.get_log_level(),
+        log_settings.get_log_color_enabled(),
+    );
     // Go `main.go:167-169`：配置加载后、任何数据库打开前（启动期最早打开库的是下面的
     // 自动导入），先完成自定义数据库位置的解析 / 探测 / 迁移裁决。
     apply_db_location(&loaded.config.snapshot())?;

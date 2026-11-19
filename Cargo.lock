@@ -693,6 +693,7 @@ dependencies = [
 name = "gensokyo-bin"
 version = "0.1.0"
 dependencies = [
+ "anstyle-query",
  "clap",
  "gensokyo-actions",
  "gensokyo-config",
