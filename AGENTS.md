@@ -228,6 +228,7 @@ bin → runtime → actions → {qq, storage, media, webui} → protocol → con
 - **产物**输出到 `release/`，命名对齐 Go `build.ps1`：`gensokyo-{os}-{arch}[-noWebui][.exe]`
 - `--all` 矩阵：linux×4 走 zig 自动引导（`.tools/`，官方源 + sha256）；**缺工具链的 darwin / msvc / android 目标输出 `[skip]`，不算失败；MSVC 判据是 `cl.exe`（`link.exe` 有 MSYS2 同名干扰）；zig/cargo-zigbuild 引导失败时 linux 目标同样 `[skip]` 并打印 `[warn]`，不阻塞其余目标——但若最终一个产物都没有，命令仍以非零退出码报错（`--all` 不含宿主，只构建宿主请用默认模式）**
 - **`rust-embed` 要求**：`webui/dist` 目录必须存在，否则编译失败；xtask 在缺失时自动写占位文件
+- **并行构建**：`--all` / `--linux-only` 默认 2 个 worker 并行（`--workers <1..=4>` / `GENSOKYO_BUILD_WORKERS`，非法值 `[warn]` 回退默认），每个 worker 用独立的 `<CARGO_TARGET_DIR>-wN` 缓存目录（cargo 的 target 目录锁是独占的，同目录只能串行）；**缓存预算 2 份**（上限 4），首跑更慢、二跑吃到缓存；`--workers 1` 仍用 `<base>` 本体 = 旧行为；rustup target 补装仍是串行前置，日志按矩阵顺序回放，`[skip]` 语义与退出码不变（详见 `docs/rust-build.md`）
 - **工具链**：`rust-toolchain.toml` 钉 1.99.1（含 `rustfmt`/`clippy`，profile=minimal）；workspace MSRV 1.90
 - **纯文档更新**（README、docs/、CHANGELOG、AGENTS.md 等）：无需构建测试
 - **清理**：临时脚本/探针放 OS temp 并删除，保持仓库干净

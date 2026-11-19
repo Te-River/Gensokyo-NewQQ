@@ -387,6 +387,14 @@ P86 审计遗留的两条回执路径（`send_private_msg_sse` 与 `send_*_forwa
 
 
 
+### `--all` 多目标并行构建（2026-11-19）
+
+`cargo xtask build --all` / `--linux-only` 从逐目标串行改为多 worker 并行；产物命名、`[skip]` 语义、汇总行与退出码零变化。
+
+- **修改**（`xtask/src/build.rs`）：矩阵模式默认 2 个 worker，`--workers <1..=4>` 与 `GENSOKYO_BUILD_WORKERS` 双入口（命令行优先，非法值打印 `[warn]` 回退默认，上限 4，且不超过实际 job 数）；每个 worker 用派生的 `<CARGO_TARGET_DIR>-wN` 缓存目录（cargo 对整个 target 目录加独占文件锁，共用目录只会 `Blocking waiting for file lock` 排队），`--workers 1` 仍用 `<base>` 本体；`rustup target add` 补装改为并行前**串行**装齐（并发补装会撞 rustup 的 `could not rename … .partial (os error 2)`）；每个 worker 的 cargo job 数 = 总 job 数（`CARGO_BUILD_JOBS`，缺省按 CPU 数）÷ worker 数、下限 1；各 worker 的 cargo 输出先捕获，全部结束后按矩阵顺序回放（单 worker 仍是实时输出）；UPX 压缩同样按 worker 数并行；worker 线程 panic 转成该 job 的 `[fail]`、不中断进程；新增纯函数 `shard`（连续切分）与单测
+- **影响**：矩阵构建的墙上时间缩短——release 为 `lto="fat"` + `codegen-units=1`，单个目标的最后 LTO + 链接是单线程，跨目标并行才吃得满 CPU；代价是并行模式多 1 份缓存目录（缓存预算 2 份，上限 4），**首次在新目录里要重编依赖、比串行更慢**，第二次起吃到缓存才快；单目标构建（`--target` / 宿主）默认仍 1 worker、缓存目录与输出行为不变
+- **测试**：`cargo test -p xtask`、`cargo clippy -p xtask --all-targets -- -D warnings`、`cargo fmt --all -- --check` 全绿（含 `shard` 新用例：`len=0/1/9`、`workers=1/2/3/4`、`workers>len`）
+
 ### 恢复 `build.ps1` 为 xtask 薄包装（2026-11-18）
 
 纯 Rust 化清理（`63cd9b0`）把 `build.ps1` 误当 Go 遗留删除；该文件自 `9d9e254` 起已是 Rust 入口——只做 Go 命名参数 → Rust 三元组翻译与 Windows 工具链自动选择（缺 MSVC 回退 GNU），构建逻辑全在 xtask，UPX 默认 7。

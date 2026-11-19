@@ -146,8 +146,9 @@ cargo xtask build --linux-only
 
 `--all` 与 `--linux-only` 的语义：
 
-- 逐个目标执行；rustup target 缺失时**自动 `rustup target add --toolchain <当前工具链>`**
-  （幂等）；补装失败才打印 `[skip] <triple> …` 后继续，**不计失败**。
+- 矩阵内目标**并行构建**（默认 2 个 worker，见下文「并行构建」）；rustup target 缺失时仍**串行**
+  自动 `rustup target add --toolchain <当前工具链>`（幂等，并发补装会撞 rustup 的
+  `could not rename … .partial (os error 2)`）；补装失败才打印 `[skip] <triple> …` 后继续，**不计失败**。
 - 宿主缺少对应工具链的目标先打印 `[skip] <triple>: <理由>` 并计入跳过、**不计失败**：
   macOS 目标需 macOS 宿主或专用交叉工具链、windows-msvc 需 `cl.exe` 在 PATH
   （判据不是 `link.exe`——MSYS2 coreutils 在 `usr/bin/link.exe` 提供同名 Unix `link`，会误判可用）、
@@ -165,6 +166,32 @@ cargo xtask build --linux-only
 - 宿主不在矩阵里时不会自动补进来；单独构建宿主用不带 `--all` 的命令。
 - 机器上没有 `rustup`（系统包管理器安装的 cargo）时无法预检/补装，`--all` 会真实尝试每个目标，
   缺失的目标表现为构建失败。
+
+### 并行构建（`--workers`）
+
+`--all` / `--linux-only` 默认起 **2 个 worker** 并行构建多个目标；产物命名、`[skip]` 语义、
+汇总行与退出码都不变。跨目标并行是唯一吃得满 CPU 的办法：release 是 `lto="fat"` +
+`codegen-units=1`，单个目标的最后 LTO + 链接是单线程，其余线程全程空闲。
+
+| 项 | 说明 |
+|----|------|
+| worker 数 | `--workers <1..=4>` 或环境变量 `GENSOKYO_BUILD_WORKERS`，命令行优先；默认矩阵模式 **2**、单目标 **1**；非法值（非 1~4 的整数）打印 `[warn]` 后回退默认；实际上限还受待构建的 (target, 版本) 数量约束 |
+| 缓存目录 | worker 用派生的 `<CARGO_TARGET_DIR 或 cargo 默认 target>/…-w1`、`-w2`…；**`--workers 1` 仍用 `<base>` 本体**，与旧行为完全一致（既有缓存照常命中，不多一份目录） |
+| 为什么必须分目录 | cargo 对整个 target 目录加独占文件锁，两个 cargo 进程共用同一目录只会排队（`Blocking waiting for file lock on build directory`） |
+| 每个 worker 的并发度 | 总 job 数按 worker 摊开：`CARGO_BUILD_JOBS`（缺省按 CPU 数）÷ worker 数，下限 1；例：`CARGO_BUILD_JOBS=6` + 2 worker ⇒ 每个 cargo `--jobs 3` |
+| 成本 | 并行模式会多 1~3 份缓存目录（缓存预算默认 **2 份**，上限 4 份）；**首次运行要在新目录里重新编译一遍依赖，比串行更慢**，第二次起吃到缓存才快 |
+| 日志顺序 | 各 worker 的 cargo 输出先收集，全部结束后按矩阵顺序回放：`[build]` / `[skip]` / `[fail]` 行顺序稳定、不交错；单 worker 模式仍是实时输出 |
+| UPX | 压缩同样按 worker 数并行，日志按产物顺序回放（`[upx] …` 行顺序稳定） |
+| 失败与崩溃 | 各 worker 的失败仍只记 `[fail]` 不中断其余目标；worker 线程 panic 转成该 job 的 `[fail]`（xtask 是 dev profile，`panic=unwind`） |
+
+```powershell
+# 默认 2 worker
+cargo xtask build --all
+# 强制单 worker（= 旧行为，只用 <base> 缓存）
+cargo xtask build --all --workers 1
+# 环境变量同样生效（命令行优先）
+$env:GENSOKYO_BUILD_WORKERS = '3'; cargo xtask build --linux-only
+```
 
 ## `--no-webui` 的当前状态（重要）
 

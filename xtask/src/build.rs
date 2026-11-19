@@ -8,9 +8,10 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
 
 use crate::bootstrap::{bootstrap_linux_tools, find_on_path, path_with_tools};
@@ -73,7 +74,15 @@ pub struct BuildArgs {
     /// UPX 压缩级别 1~9（与 build.ps1 的默认值 7 一致）。
     #[arg(long = "upx-level", default_value_t = 7, value_parser = clap::value_parser!(u8).range(1..=9))]
     upx_level: u8,
+
+    /// 并行 worker 数 1~4（默认矩阵模式 2、单目标 1；非法值告警后回退默认）。
+    #[arg(long, value_name = "N")]
+    workers: Option<u8>,
 }
+
+/// 并行 worker 数的默认值与上限（每多一个 worker 就多一份构建缓存目录）。
+const DEFAULT_WORKERS: usize = 2;
+const MAX_WORKERS: usize = 4;
 
 /// 一个待构建目标。宿主构建时 `triple` 为 `None`，交给 cargo 自己选目标。
 #[derive(Debug, Clone)]
@@ -468,43 +477,83 @@ fn resolve_build_version(root: &Path) -> String {
     )
 }
 
+/// 构建阶段各 worker 共享的上下文（`jobs` 是分摊给单个 worker 的 cargo job 数）。
+struct BuildContext<'a> {
+    root: &'a Path,
+    release_dir: &'a Path,
+    tool_path: Option<&'a std::ffi::OsStr>,
+    jobs: usize,
+}
+
+/// 一个 (target, flavor) 的构建产出：`log` 是捕获的 cargo 输出（串行模式实时继承终端，为空串）。
+struct JobOutput {
+    path: PathBuf,
+    log: String,
+}
+
 /// `cargo build|zigbuild --release --locked`：交叉时加 `--target`，精简版加 `--no-default-features`。
 ///
 /// 只构建 bin 包——工作区还有 10 个库 crate 与 xtask 自身，全量构建没有意义。
 /// `tool_path` 非空时注入引导好的 PATH（zig / cargo-zigbuild 所在目录前置）。
 /// 每次调用都把版本串经 `GENSOKYO_BUILD_VERSION` 传给 cargo 子进程，供
 /// `gensokyo-bin` 的 `option_env!` 收进 `--version`（Go 侧 ldflags 的等价物）。
+/// `CARGO_TARGET_DIR` 显式下发：并行时每个 worker 用自己的缓存目录（cargo 对整个 target
+/// 目录加独占文件锁，共用目录会退化成 `Blocking waiting for file lock` 的串行）；
+/// `CARGO_BUILD_JOBS` 按 worker 摊开，避免两个 cargo 各自吃满 CPU。
+/// `capture` 为真时捕获输出并返回（并行模式下由主线程按矩阵顺序回放），否则直接继承终端。
 fn cargo_build(
-    root: &Path,
+    ctx: &BuildContext<'_>,
+    target_dir: &Path,
     target: &Target,
     no_webui: bool,
-    tool_path: Option<&std::ffi::OsStr>,
-) -> Result<()> {
+    capture: bool,
+) -> Result<String> {
     let (subcommand, args) = cargo_invocation(target, no_webui);
-    let version = resolve_build_version(root);
-    println!(
+    let version = resolve_build_version(ctx.root);
+    let header = format!(
         "  $ cargo {subcommand} {} (GENSOKYO_BUILD_VERSION={version})",
         args.join(" ")
     );
     let mut command = Command::new(cargo());
     command
-        .current_dir(root)
+        .current_dir(ctx.root)
         .arg(subcommand)
         .args(&args)
-        .env("GENSOKYO_BUILD_VERSION", &version);
-    if let Some(path) = tool_path {
+        .env("GENSOKYO_BUILD_VERSION", &version)
+        .env("CARGO_TARGET_DIR", target_dir)
+        .env("CARGO_BUILD_JOBS", ctx.jobs.to_string());
+    if let Some(path) = ctx.tool_path {
         command.env("PATH", path);
     }
-    let status = command
-        .status()
+    if !capture {
+        println!("{header}");
+        let status = command
+            .status()
+            .with_context(|| format!("执行 cargo {subcommand} 失败"))?;
+        if !status.success() {
+            bail!(
+                "cargo {subcommand} 失败（退出码 {status}）: {}",
+                target.label()
+            );
+        }
+        return Ok(String::new());
+    }
+    let output = command
+        .output()
         .with_context(|| format!("执行 cargo {subcommand} 失败"))?;
-    if !status.success() {
+    let mut log = header;
+    log.push('\n');
+    log.push_str(&String::from_utf8_lossy(&output.stdout));
+    log.push_str(&String::from_utf8_lossy(&output.stderr));
+    if !output.status.success() {
+        // 并行模式下没人实时看 cargo 的输出，失败原因必须随错误一起抛出去。
         bail!(
-            "cargo {subcommand} 失败（退出码 {status}）: {}",
+            "cargo {subcommand} 失败（退出码 {}）: {}\n{log}",
+            output.status,
             target.label()
         );
     }
-    Ok(())
+    Ok(log)
 }
 
 /// cargo 的产物位置：`<target_dir>/<triple>/release/gensokyo[.exe]`，宿主构建无 triple 层。
@@ -522,28 +571,25 @@ fn built_binary(target_dir: &Path, target: &Target) -> PathBuf {
     path
 }
 
-/// 构建一个目标的某一个版本，复制到 `release/` 并返回产物路径。
+/// 构建一个目标的某一个版本，复制到 `release/` 并返回产物路径与捕获的日志。
 fn build_one(
-    root: &Path,
+    ctx: &BuildContext<'_>,
     target_dir: &Path,
-    release_dir: &Path,
     target: &Target,
     no_webui: bool,
-    tool_path: Option<&std::ffi::OsStr>,
-) -> Result<PathBuf> {
+    capture: bool,
+) -> Result<JobOutput> {
     let name = artifact_name(&target.os, &target.arch, no_webui);
-    println!("[build] {} → release/{name}", target.label());
-    cargo_build(root, target, no_webui, tool_path)?;
+    let log = cargo_build(ctx, target_dir, target, no_webui, capture)?;
 
     let built = built_binary(target_dir, target);
     if !built.is_file() {
         bail!("cargo 报告成功，但未找到产物 {}", built.display());
     }
-    let dest = release_dir.join(&name);
+    let dest = ctx.release_dir.join(&name);
     fs::copy(&built, &dest)
         .with_context(|| format!("复制 {} → {} 失败", built.display(), dest.display()))?;
-    println!("  OK: {} ({:.1} MB)", dest.display(), megabytes(&dest));
-    Ok(dest)
+    Ok(JobOutput { path: dest, log })
 }
 
 /// 文件大小（MB）；读不到时返回 0（刚复制完的文件不该读不到，这里不额外报错）。
@@ -551,24 +597,144 @@ fn megabytes(path: &Path) -> f64 {
     fs::metadata(path).map_or(0, |meta| meta.len()) as f64 / (1024.0 * 1024.0)
 }
 
-/// UPX 压缩；PATH 里没有 upx 只提示并跳过（不是构建失败）。
-fn compress(path: &Path, level: u8) -> Result<()> {
-    println!("[upx] 压缩 {} ...", path.display());
+/// UPX 压缩；PATH 里没有 upx 只提示并跳过（不是构建失败），返回是否真的压缩了。
+fn compress(path: &Path, level: u8) -> Result<bool> {
     match Command::new("upx")
         .arg(format!("-{level}"))
         .arg(path)
         .status()
     {
-        Ok(status) if status.success() => Ok(()),
+        Ok(status) if status.success() => Ok(true),
         Ok(status) => bail!("UPX 压缩失败（退出码 {status}）: {}", path.display()),
-        Err(err) if err.kind() == ErrorKind::NotFound => {
-            println!(
-                "  UPX 未在 PATH 中找到，跳过压缩（安装：winget install upx；或加 --no-upx 静默）"
-            );
-            Ok(())
-        }
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
         Err(err) => Err(err).with_context(|| format!("执行 upx 失败: {}", path.display())),
     }
+}
+
+/// 把 `len` 个 job 连续切给 `workers` 个 worker（选连续切分而非轮转：同一 worker 的 job 相邻，
+/// 打印与实际执行的顺序一致，也便于把同目标的两个版本放在同一个缓存目录里连续构建）。
+/// 空 plan 返回空 vec；`workers > len` 时不生成空 shard。
+fn shard(len: usize, workers: usize) -> Vec<Vec<usize>> {
+    if len == 0 {
+        return Vec::new();
+    }
+    let workers = workers.max(1).min(len);
+    let base = len / workers;
+    let extra = len % workers;
+    let mut shards = Vec::with_capacity(workers);
+    let mut start = 0;
+    for worker in 0..workers {
+        let size = base + usize::from(worker < extra);
+        shards.push((start..start + size).collect());
+        start += size;
+    }
+    shards
+}
+
+/// worker 的缓存目录 `<base>-w<index>`：cargo 对整个 target 目录加独占文件锁，共用同一目录的
+/// 两个 cargo 进程会排队成串行。`--workers 1` 不走这里，直接用 `<base>` 本体（沿用既有缓存）。
+fn worker_target_dir(base: &Path, index: usize) -> PathBuf {
+    let mut name = base.as_os_str().to_os_string();
+    name.push(format!("-w{index}"));
+    PathBuf::from(name)
+}
+
+/// worker 数：`--workers` > `GENSOKYO_BUILD_WORKERS` > 默认（矩阵 2 / 单目标 1）；
+/// 非法值告警后回退默认，上限 [`MAX_WORKERS`]，且不超过待构建的 (target, flavor) 数量。
+fn resolve_workers(cli: Option<u8>, default: usize, job_count: usize) -> usize {
+    let env_value = std::env::var("GENSOKYO_BUILD_WORKERS").ok();
+    let requested = match (cli, env_value.as_deref()) {
+        (Some(value), _) => Some((value.to_string(), "--workers")),
+        (None, Some(text)) => Some((text.trim().to_owned(), "GENSOKYO_BUILD_WORKERS")),
+        (None, None) => None,
+    };
+    let mut workers = default;
+    if let Some((text, source)) = requested {
+        match text.parse::<usize>() {
+            Ok(value) if (1..=MAX_WORKERS).contains(&value) => workers = value,
+            _ => eprintln!(
+                "[warn] {source}=`{text}` 非法（期望 1..={MAX_WORKERS}），回退默认 {default} 个 worker"
+            ),
+        }
+    }
+    workers.clamp(1, MAX_WORKERS).min(job_count.max(1))
+}
+
+/// 总 job 数：`CARGO_BUILD_JOBS` 优先（与 cargo 同一开关），否则按可用 CPU 数，下限 1。
+fn total_jobs() -> usize {
+    std::env::var("CARGO_BUILD_JOBS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&jobs| jobs > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |cpus| cpus.get()))
+}
+
+/// 每个 worker 的 cargo job 数：总 job 数按 worker 数摊开，下限 1。
+fn jobs_per_worker(total: usize, workers: usize) -> usize {
+    (total / workers.max(1)).max(1)
+}
+
+/// 并发执行 `jobs` 个作业：按 `shards` 切分，结果按 job 下标写回原位（`None` = 该 job panic）。
+/// xtask 是 dev profile（`panic=unwind`），单个 job panic 只记失败，不影响同 worker 的后续 job。
+fn run_sharded<T, F>(jobs: usize, shards: &[Vec<usize>], f: F) -> Vec<Option<T>>
+where
+    T: Send,
+    F: Fn(usize, usize) -> T + Sync,
+{
+    let slots: Mutex<Vec<Option<T>>> = Mutex::new((0..jobs).map(|_| None).collect());
+    std::thread::scope(|scope| {
+        for (worker, indices) in shards.iter().enumerate() {
+            let slots = &slots;
+            let f = &f;
+            let _ = scope.spawn(move || {
+                for &job in indices {
+                    if let Ok(value) =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(worker, job)))
+                    {
+                        slots.lock().unwrap_or_else(PoisonError::into_inner)[job] = Some(value);
+                    }
+                }
+            });
+        }
+    });
+    slots.into_inner().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// `[build]` 行：串行路径在构建前实时打印，并行路径在回放阶段打印（保证矩阵顺序）。
+fn print_job_header(target: &Target, no_webui: bool) {
+    println!(
+        "[build] {} → release/{}",
+        target.label(),
+        artifact_name(&target.os, &target.arch, no_webui)
+    );
+}
+
+/// 打印一个 job 的日志并记账：矩阵模式记失败后继续，单目标模式直接上抛（保持原退出语义）。
+fn report_job(
+    target: &Target,
+    no_webui: bool,
+    result: Result<JobOutput>,
+    matrix_mode: bool,
+    outputs: &mut Vec<PathBuf>,
+    failures: &mut Vec<String>,
+) -> Result<()> {
+    match result {
+        Ok(output) => {
+            print!("{}", output.log);
+            println!(
+                "  OK: {} ({:.1} MB)",
+                output.path.display(),
+                megabytes(&output.path)
+            );
+            outputs.push(output.path);
+        }
+        Err(err) if matrix_mode => {
+            eprintln!("[fail] {err:#}");
+            failures.push(format!("{}/{no_webui}", target.label()));
+        }
+        Err(err) => return Err(err),
+    }
+    Ok(())
 }
 
 /// `xtask build` 入口：解析目标 → 引导交叉工具链 → 构建 → 复制 → 可选 UPX → 汇总。
@@ -577,6 +743,10 @@ fn compress(path: &Path, level: u8) -> Result<()> {
 /// target 自动补装；补装失败的目标在矩阵模式下打印跳过原因并继续，引导失败的 linux
 /// 目标同样跳过（`[warn]` + `[skip]`），真正编译失败的目标记入失败清单，其余目标继续
 /// 构建，最终以非零退出码汇总。
+///
+/// 矩阵模式默认起 2 个 worker 并行构建（`--workers` / `GENSOKYO_BUILD_WORKERS` 覆盖）：
+/// rustup target 补装仍串行前置，每个 worker 用独立的 `<base>-wN` 缓存目录，日志按矩阵
+/// 顺序回放，对外的产物命名、`[skip]` 语义、汇总行与退出码不变。
 pub fn run(args: BuildArgs) -> Result<()> {
     let root = workspace_root()?;
     let targets = plan(&args)?;
@@ -584,7 +754,7 @@ pub fn run(args: BuildArgs) -> Result<()> {
     let matrix_mode = args.all || args.linux_only;
 
     ensure_webui_dist(&root)?;
-    let target_dir = target_directory(&root)?;
+    let base_target_dir = target_directory(&root)?;
     let release_dir = root.join("release");
     fs::create_dir_all(&release_dir)
         .with_context(|| format!("创建 {} 失败", release_dir.display()))?;
@@ -632,18 +802,16 @@ pub fn run(args: BuildArgs) -> Result<()> {
     // MSVC 目标需要 cl.exe（不是 link.exe：MSYS2 coreutils 有个同名 link.exe 会误判）；
     // 只在矩阵模式下探测（单目标模式不拦，交给 cargo 真实尝试）。
     let has_msvc_cl = matrix_mode && find_on_path("cl.exe").is_some();
-    let mut outputs = Vec::new();
-    let mut skipped = Vec::new();
-    let mut failures = Vec::new();
 
+    // 串行前置：按矩阵顺序定下每个目标的跳过原因，并把缺失的 rustup target 全部装好。
+    // 补装必须串行——并发的 `rustup target add` 会撞 `could not rename … .partial (os error 2)`。
+    let mut verdicts: Vec<Option<String>> = Vec::with_capacity(targets.len());
     for target in &targets {
         if bootstrap_failed && uses_zigbuild(target) {
-            let reason = format!(
+            verdicts.push(Some(format!(
                 "{}: Linux 交叉工具链不可用（zig/cargo-zigbuild 引导失败）",
                 target.label()
-            );
-            println!("[skip] {reason}");
-            skipped.push(reason);
+            )));
             continue;
         }
         // 工具链闸门先于 target 补装：darwin / MSVC / android 缺工具链时没必要下载 rust-std
@@ -651,43 +819,108 @@ pub fn run(args: BuildArgs) -> Result<()> {
         if matrix_mode
             && let Some(reason) = target_skip_reason(OS, target.triple.as_deref(), has_msvc_cl)
         {
-            let reason = format!("{}: {reason}", target.label());
-            println!("[skip] {reason}");
-            skipped.push(reason);
+            verdicts.push(Some(format!("{}: {reason}", target.label())));
             continue;
         }
         if let Some(triple) = &target.triple
             && !ensure_target_installed(triple, installed.as_ref(), toolchain.as_deref())
             && matrix_mode
         {
-            let reason = match toolchain.as_deref() {
+            verdicts.push(Some(match toolchain.as_deref() {
                 Some(toolchain) => format!(
                     "{triple} 自动补装失败 → 手动执行 rustup target add --toolchain {toolchain} {triple}"
                 ),
                 None => format!(
                     "{triple} 自动补装失败 → 手动执行 rustup target add {triple}（请确认加到当前使用的工具链）"
                 ),
-            };
-            println!("[skip] {reason}");
-            skipped.push(reason);
+            }));
             continue;
         }
         // 单目标模式补装失败不跳过：交给 cargo 真实尝试（rustup 缺失时 target 可能已就位）。
-        for &no_webui in flavors {
-            match build_one(
-                &root,
-                &target_dir,
-                &release_dir,
-                target,
-                no_webui,
-                tool_path.as_deref(),
-            ) {
-                Ok(path) => outputs.push(path),
-                Err(err) if matrix_mode => {
-                    eprintln!("[fail] {err:#}");
-                    failures.push(format!("{}/{no_webui}", target.label()));
-                }
-                Err(err) => return Err(err),
+        verdicts.push(None);
+    }
+
+    // 待构建的 (target 下标, noWebui)，按矩阵顺序展开；并行阶段只填结果，打印留到回放。
+    let jobs: Vec<(usize, bool)> = targets
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| verdicts[*index].is_none())
+        .flat_map(|(index, _)| flavors.iter().map(move |&no_webui| (index, no_webui)))
+        .collect();
+    let workers = resolve_workers(
+        args.workers,
+        if matrix_mode { DEFAULT_WORKERS } else { 1 },
+        jobs.len(),
+    );
+    let cargo_jobs = jobs_per_worker(total_jobs(), workers);
+    let ctx = BuildContext {
+        root: &root,
+        release_dir: &release_dir,
+        tool_path: tool_path.as_deref(),
+        jobs: cargo_jobs,
+    };
+    if workers > 1 {
+        println!(
+            "workers   : {workers} 个并行 worker（每个 cargo --jobs {cargo_jobs}；缓存目录 {}-w1…-w{workers}）",
+            base_target_dir.display()
+        );
+    }
+
+    let mut outputs = Vec::new();
+    let mut skipped = Vec::new();
+    let mut failures = Vec::new();
+
+    if workers == 1 {
+        // 单 worker：沿用旧行为——用 `<base>` 本体缓存，cargo 输出实时继承终端。
+        for (index, target) in targets.iter().enumerate() {
+            if let Some(reason) = &verdicts[index] {
+                println!("[skip] {reason}");
+                skipped.push(reason.clone());
+                continue;
+            }
+            for &no_webui in flavors {
+                print_job_header(target, no_webui);
+                let output = build_one(&ctx, &base_target_dir, target, no_webui, false);
+                report_job(
+                    target,
+                    no_webui,
+                    output,
+                    matrix_mode,
+                    &mut outputs,
+                    &mut failures,
+                )?;
+            }
+        }
+    } else {
+        let shards = shard(jobs.len(), workers);
+        let worker_dirs: Vec<PathBuf> = (1..=shards.len())
+            .map(|worker| worker_target_dir(&base_target_dir, worker))
+            .collect();
+        let mut records = run_sharded(jobs.len(), &shards, |worker, job| {
+            let (index, no_webui) = jobs[job];
+            build_one(&ctx, &worker_dirs[worker], &targets[index], no_webui, true)
+        });
+        let mut next = 0;
+        for (index, target) in targets.iter().enumerate() {
+            if let Some(reason) = &verdicts[index] {
+                println!("[skip] {reason}");
+                skipped.push(reason.clone());
+                continue;
+            }
+            for &no_webui in flavors {
+                let record = records[next].take().unwrap_or_else(|| {
+                    Err(anyhow!("构建线程 panic，未回报结果: {}", target.label()))
+                });
+                next += 1;
+                print_job_header(target, no_webui);
+                report_job(
+                    target,
+                    no_webui,
+                    record,
+                    matrix_mode,
+                    &mut outputs,
+                    &mut failures,
+                )?;
             }
         }
     }
@@ -695,8 +928,23 @@ pub fn run(args: BuildArgs) -> Result<()> {
     if args.no_upx {
         println!("UPX 已禁用（--no-upx）");
     } else {
+        // UPX 一样按 worker 数并行；日志按产物顺序回放，避免多线程交错。
+        let level = args.upx_level;
+        let shards = shard(outputs.len(), workers);
+        let mut compressed = run_sharded(outputs.len(), &shards, |_, index| {
+            compress(&outputs[index], level)
+        })
+        .into_iter();
         for path in &outputs {
-            compress(path, args.upx_level)?;
+            println!("[upx] 压缩 {} ...", path.display());
+            match compressed.next().flatten() {
+                Some(Ok(true)) => {}
+                Some(Ok(false)) => println!(
+                    "  UPX 未在 PATH 中找到，跳过压缩（安装：winget install upx；或加 --no-upx 静默）"
+                ),
+                Some(Err(err)) => return Err(err),
+                None => bail!("UPX 压缩未回报结果（线程 panic）: {}", path.display()),
+            }
         }
     }
 
@@ -731,8 +979,8 @@ pub fn run(args: BuildArgs) -> Result<()> {
 mod tests {
     use super::{
         BuildArgs, Target, artifact_name, build_version, built_binary, cargo_invocation,
-        ensure_webui_dist, flavors, git_short_commit, plan, split_triple, target_skip_reason,
-        uses_zigbuild,
+        ensure_webui_dist, flavors, git_short_commit, plan, shard, split_triple,
+        target_skip_reason, uses_zigbuild,
     };
     use std::time::{Duration, SystemTime};
 
@@ -745,6 +993,7 @@ mod tests {
             no_webui,
             no_upx: true,
             upx_level: 7,
+            workers: None,
         }
     }
 
@@ -802,6 +1051,41 @@ mod tests {
         // -All 双版本；显式 --no-webui 时只出精简版
         assert_eq!(flavors(&args(&[], true, false, false)), &[false, true]);
         assert_eq!(flavors(&args(&[], true, false, true)), &[true]);
+    }
+
+    #[test]
+    fn shard_splits_jobs_into_contiguous_ranges() {
+        // 空 plan：不起 worker
+        assert!(shard(0, 1).is_empty());
+        assert!(shard(0, 4).is_empty());
+        // 1 个 job：无论多少 worker 都只切出一段
+        assert_eq!(shard(1, 1), vec![vec![0]]);
+        assert_eq!(shard(1, 4), vec![vec![0]]);
+        // 9 个 job：连续切分，余数落在前几段
+        assert_eq!(shard(9, 1), vec![(0..9).collect::<Vec<_>>()]);
+        assert_eq!(shard(9, 2), vec![vec![0, 1, 2, 3, 4], vec![5, 6, 7, 8]]);
+        assert_eq!(
+            shard(9, 3),
+            vec![vec![0, 1, 2], vec![3, 4, 5], vec![6, 7, 8]]
+        );
+        assert_eq!(
+            shard(9, 4),
+            vec![vec![0, 1, 2], vec![3, 4], vec![5, 6], vec![7, 8]]
+        );
+        // 不变式：每个 job 恰好出现一次、顺序不变，且不产生空 shard
+        for (len, workers) in [(1, 2), (2, 4), (7, 5), (8, 2), (9, 4)] {
+            let shards = shard(len, workers);
+            assert!(shards.len() <= workers, "len={len} workers={workers}");
+            assert!(
+                shards.iter().all(|indices| !indices.is_empty()),
+                "len={len} workers={workers}"
+            );
+            assert_eq!(
+                shards.concat(),
+                (0..len).collect::<Vec<_>>(),
+                "len={len} workers={workers}"
+            );
+        }
     }
 
     #[test]
