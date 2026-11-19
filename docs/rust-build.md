@@ -45,6 +45,8 @@ zig cc 充当交叉 C 编译器，ring 等含 C 代码的依赖不再需要各�
 不会一等几十分钟。Windows 下下载走 schannel 的**软吊销策略**（`--ssl-revoke-best-effort`）：
 CRL/OCSP 服务器不可达时仍做证书链校验、只是吊销检查软失败，不会再出现
 `curl: (35) CRYPT_E_NO_REVOCATION_CHECK (0x80092012)` 直接中止（`--insecure` 不会被使用）。
+该开关按 `curl --version` 探测、**≥ 7.70 才加**；更老的 Windows 自带 curl（1803~1909 的 7.55.x）
+退回不带开关的老行为——此时若仍报吊销错误，请升级 curl，或按下面的方式把工具离线放进 `.tools\`。
 离线兜底仍然可用：手工把工具解压到 `.tools\zig-0.16.0\` 与 `.tools\cargo-zigbuild-0.24.1\`
 （与自动引导同一布局：可执行文件在目录根部）后重试即零网络（探测顺序 PATH → `.tools/` → 官方下载）。
 

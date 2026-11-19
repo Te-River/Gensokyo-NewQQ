@@ -10,6 +10,7 @@ use std::env::consts::{ARCH, OS};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
 
@@ -223,6 +224,49 @@ fn file_sha256(path: &Path) -> Result<String> {
         .with_context(|| format!("无法从校验工具输出解析 sha256: {}", path.display()))
 }
 
+/// `curl --version` 首行是否表明支持 `--ssl-revoke-best-effort`（ curl ≥ 7.70）。
+///
+/// 为什么要探测而不是无条件加：未知开关会让 curl 直接以退出码 2 结束，整条下载彻底
+/// 失败——Win10 1803~1909 自带的 `C:\Windows\System32\curl.exe` 是 7.55.x 且不随系统
+/// 更新升级，无条件加比不加更糟。解析不了（空行、非数字、只有两段、`7.70.0-DEV`
+/// 之类）一律按「不支持」处理，退回老行为。
+fn curl_supports_revoke_best_effort(version_line: &str) -> bool {
+    let Some(version) = version_line.split_whitespace().nth(1) else {
+        return false;
+    };
+    let mut parts = version.split('.');
+    let parsed = (
+        parts.next().and_then(|part| part.parse::<u32>().ok()),
+        parts.next().and_then(|part| part.parse::<u32>().ok()),
+        parts.next().and_then(|part| part.parse::<u32>().ok()),
+    );
+    let (Some(major), Some(minor), Some(patch)) = parsed else {
+        return false;
+    };
+    (major, minor, patch) >= (7, 70, 0)
+}
+
+/// 进程内的探测结果缓存：下载可能连续发生多次（工具本体 + `.sha256`），只探一次。
+fn curl_revoke_best_effort_supported() -> bool {
+    static SUPPORTED: OnceLock<bool> = OnceLock::new();
+    *SUPPORTED.get_or_init(|| {
+        let program = curl_program();
+        let output = Command::new(program).arg("--version").output();
+        match output {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                curl_supports_revoke_best_effort(stdout.lines().next().unwrap_or_default())
+            }
+            _ => false,
+        }
+    })
+}
+
+/// curl 可执行名：Windows 显式 `curl.exe`（避开 PowerShell 的 Invoke-WebRequest 别名）。
+fn curl_program() -> &'static str {
+    if OS == "windows" { "curl.exe" } else { "curl" }
+}
+
 /// curl 下载（系统自带；Windows 显式 curl.exe，避开 PowerShell 的 Invoke-WebRequest 别名）。
 ///
 /// 失败必须是**有界的**：断网或镜像停摆时，`--max-time` × 重试次数会累加成 45 分钟干等
@@ -233,8 +277,9 @@ fn file_sha256(path: &Path) -> Result<String> {
 ///
 /// Windows 另加 `--ssl-revoke-best-effort`：schannel 在访问不到 CRL/OCSP 时把吊销检查
 /// 当硬失败（`CRYPT_E_NO_REVOCATION_CHECK`，0x80092012 → `curl: (35)`），这是 curl 官方
-/// 给出的软失败开关（≥ 7.70，Win10/11 自带 curl 8.x 均支持）——仍做吊销检查，只是吊销
-/// 服务器不可达时不中止；证书链校验不受影响。openssl/gnutls 后端没有该开关，故仅 Windows。
+/// 给出的软失败开关（≥ 7.70）——仍做吊销检查，只是吊销服务器不可达时不中止；证书链
+/// 校验不受影响。openssl/gnutls 后端没有该开关，故仅 Windows，且须先探测 curl 版本
+/// （见 [`curl_supports_revoke_best_effort`]）。
 fn download(url: &str, dest: &Path) -> Result<()> {
     const DEFAULT_MAX_TIME: u64 = 600;
     let max_time = match std::env::var("GENSOKYO_DOWNLOAD_MAX_TIME") {
@@ -249,7 +294,7 @@ fn download(url: &str, dest: &Path) -> Result<()> {
         },
         Err(_) => DEFAULT_MAX_TIME,
     };
-    let program = if OS == "windows" { "curl.exe" } else { "curl" };
+    let program = curl_program();
     println!("  [bootstrap] 下载 {url}（单次上限 {max_time}s）");
     let mut command = Command::new(program);
     command.args([
@@ -260,7 +305,7 @@ fn download(url: &str, dest: &Path) -> Result<()> {
         "--connect-timeout",
         "30",
     ]);
-    if OS == "windows" {
+    if OS == "windows" && curl_revoke_best_effort_supported() {
         command.arg("--ssl-revoke-best-effort");
     }
     let status = command
@@ -456,9 +501,41 @@ pub fn bootstrap_linux_tools(root: &Path) -> Result<Vec<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CARGO_ZIGBUILD_VERSION, HostPlatform, ZIG_VERSION, archive_name, locate_cached,
-        locate_tool, parse_sha256, resolve_version, tool_dir, zig_url, zigbuild_url,
+        CARGO_ZIGBUILD_VERSION, HostPlatform, ZIG_VERSION, archive_name,
+        curl_supports_revoke_best_effort, locate_cached, locate_tool, parse_sha256,
+        resolve_version, tool_dir, zig_url, zigbuild_url,
     };
+
+    #[test]
+    fn revoke_best_effort_needs_curl_at_least_7_70() {
+        // Win10 1803~1909 自带的 curl 7.55 不认识该开关 → 必须按「不支持」处理。
+        assert!(!curl_supports_revoke_best_effort(
+            "curl 7.55.1 (Windows) libcurl/7.55.1 WinSSL"
+        ));
+        // 引入该开关的最低版本。
+        assert!(curl_supports_revoke_best_effort(
+            "curl 7.70.0 (Windows) libcurl/7.70.0 Schannel"
+        ));
+        // 本机实测版本（curl 8.22.0 Schannel）。
+        assert!(curl_supports_revoke_best_effort(
+            "curl 8.22.0 (Windows) libcurl/8.22.0 Schannel zlib/1.3.2 WinIDN WinLDAP"
+        ));
+        assert!(curl_supports_revoke_best_effort("curl 9.0.0"));
+        assert!(!curl_supports_revoke_best_effort("curl 7.69.9 (Windows)"));
+    }
+
+    #[test]
+    fn revoke_best_effort_parsing_is_conservative() {
+        // 空串 / 只有命令名 / 非数字 / 两段式 / 带 `-DEV` 后缀：一律「不支持」，退回老行为
+        // （两段式即使 major 够大也不认：缺 patch 段无法可靠比较）。
+        assert!(!curl_supports_revoke_best_effort(""));
+        assert!(!curl_supports_revoke_best_effort("curl"));
+        assert!(!curl_supports_revoke_best_effort("garbage"));
+        assert!(!curl_supports_revoke_best_effort("curl 7.70"));
+        assert!(!curl_supports_revoke_best_effort(
+            "curl 7.70.0-DEV (Windows) libcurl/7.70.0-DEV"
+        ));
+    }
 
     #[test]
     fn host_detection_covers_the_four_official_platforms() {
