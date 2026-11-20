@@ -182,7 +182,7 @@ where
     match transport.request(request).await {
         // Go 不看状态码：拿到响应就记成功。
         Ok(response) => {
-            tracing::debug!(url, status = response.status, "post_url 上报完成");
+            tracing::trace!(url, status = response.status, "post_url 上报完成");
         }
         Err(err) => tracing::warn!(url, error = %err, "post_url 上报失败"),
     }

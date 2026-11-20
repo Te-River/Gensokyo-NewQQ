@@ -77,7 +77,7 @@ impl Acnode {
         if text.chars().count() > MAX_CHARS {
             // Go 对超长的 base64 图片 CQ 码原样放行（`acnode.go:332-336`）。
             if text.contains("[CQ:image,file=base64://") {
-                tracing::debug!("敏感词入站过滤：超长 base64 图片原样返回");
+                tracing::trace!("敏感词入站过滤：超长 base64 图片原样返回");
                 return text.to_owned();
             }
             tracing::warn!("敏感词入站过滤：字符数超过 {MAX_CHARS}");

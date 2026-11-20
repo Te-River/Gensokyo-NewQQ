@@ -14,7 +14,7 @@ use notify::{Event, RecursiveMode, Watcher};
 use thiserror::Error;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::mpsc::error::TrySendError;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::manager::{ConfigManager, ReloadOutcome};
 
@@ -116,7 +116,8 @@ fn run(
         match rx.recv_timeout(IDLE_POLL) {
             Ok(Ok(event)) => {
                 if !touch_target(&event, target) {
-                    debug!(kind = ?event.kind, paths = ?event.paths, "忽略非目标文件事件");
+                    // 库文件写入也在被监听目录内，这条每次落盘都会出现，只留给排障深挖
+                    trace!(kind = ?event.kind, paths = ?event.paths, "忽略非目标文件事件");
                     continue;
                 }
                 // 去抖：等写盘落定，并吞掉同一批事件的其余部分

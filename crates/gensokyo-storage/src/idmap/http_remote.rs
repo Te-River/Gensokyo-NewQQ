@@ -693,7 +693,7 @@ mod tests {
     }
 
     impl Stub {
-        fn spawn(responder: impl Fn(&str) -> (u16, String) + Send + 'static) -> Self {
+        fn spawn(responder: impl Fn(&str) -> (u16, String) + Send + Sync + 'static) -> Self {
             let listener = bind_test_listener();
             let addr = listener.local_addr().unwrap();
             listener.set_nonblocking(true).unwrap();
@@ -701,10 +701,18 @@ mod tests {
             let stop = Arc::new(AtomicBool::new(false));
             let recorded = Arc::clone(&requests);
             let stopped = Arc::clone(&stop);
+            // responder 要分发到各连接线程，跨线程共享只读引用：Arc 包裹（Fn 本身无状态）。
+            let responder = Arc::new(responder);
             let handle = std::thread::spawn(move || {
                 while !stopped.load(Ordering::Relaxed) {
                     match listener.accept() {
-                        Ok((stream, _)) => handle_conn(stream, &recorded, &responder),
+                        // 每连接一个线程：keep-alive 连接会被 handle_conn 长期占用（读到 EOF
+                        // 或 5s 读超时才返回），若在 accept 线程里同步处理，后续连接会排队超时。
+                        Ok((stream, _)) => {
+                            let recorded = Arc::clone(&recorded);
+                            let responder = Arc::clone(&responder);
+                            std::thread::spawn(move || handle_conn(stream, &recorded, &*responder));
+                        }
                         Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                             std::thread::sleep(Duration::from_millis(5));
                         }
@@ -747,6 +755,11 @@ mod tests {
         requests: &Mutex<Vec<String>>,
         responder: &impl Fn(&str) -> (u16, String),
     ) {
+        // accept 返回的 socket 继承 listener 的 non-blocking 标志（Winsock 同口径）：
+        // 请求头跨多个 TCP 段到达时，补读会立刻 WouldBlock，被判成断连而半途关连接
+        // （reqwest 侧报 failed to send request）。恢复阻塞模式，靠读超时收尾。
+        stream.set_nonblocking(false).ok();
+        // 读超时兼作连接线程的终止条件：keep-alive 空闲超过该值即退出，线程不泄漏。
         stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
         // keep-alive：同一连接顺序处理多个请求（Go net/http 默认同口径）。
         // 每请求新建连接会在本机触发火绒网络过滤的间歇性连接中止（10053），

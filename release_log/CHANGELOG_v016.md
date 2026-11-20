@@ -162,6 +162,32 @@ Go 在每条 C2C 私信末尾把好友写进 idmap 的 `UserInfo` 桶（`Process
 
 ## 🐛 修复
 
+### 日志噪声：每条群消息 6 行 DEBUG，Go 只有 3 行 INFO（2026-11-20）
+
+真机 `log_level: 0`（debug）下每条群消息固定多出 6 行 DEBUG——idmap 身份命中 ×2、消息 ID 已分配 ×1、
+`watcher` 忽略非目标文件事件 ×3——而 Go 同一时刻每条消息只打 3 行 INFO，排障信息被噪声淹没。
+
+- **修改**：① 热路径 `debug!` 逐条降到 `trace!`——`idmap/batch.rs`（身份命中/已分配、消息 ID 已分配/命中）、
+  `config/watcher.rs` 的非目标文件事件、`gateway.rs`/`webhook.rs` 的事件已发布、`reporter.rs` 的上报完成、
+  `echo/mod.rs` 的 SSM 入队、`inbound.rs` 的 `user_info` 重复键、`acnode.rs` 的超长 base64 放行；
+  生命周期级 `debug!`（启动、连接、重载、注册表就绪、清理线程）全部保留
+- **修改**：`inbound.rs` 补 Go 的两行 INFO（`target: "gensokyo_runtime::message"` → 控制台 `[message]`）：
+  群消息 `group id mapped: raw_group=… vGroup=… raw_user=… vUser=…` + `group msg_id mapped: raw_msg=… vMsg=…`，
+  C2C 对应 `c2c id mapped: …` + `c2c msg_id mapped: …`（对齐 Go `ProcessGroupNormalMessage.go:87/165`、
+  `ProcessC2CMessage.go:74/96`，同样只在 `string_ob11` 关闭时打印）
+- **影响**：`log_level: 0` 下每条群消息从 6 行 DEBUG + 0 行 INFO 变为 0 行 DEBUG + 2 行 INFO（Go 为 3 行，差的
+  一行是 handler 侧「收到群消息」，本仓无对应打印）；逐条明细仍可用 `trace` 档位看；`logging.rs` 的格式与过滤未动
+- **测试**：`cargo test -p gensokyo-config -p gensokyo-storage -p gensokyo-runtime --lib` 全绿；
+  计数探针实测一条群消息 5 条 tracing 事件（2 INFO + 3 TRACE）、C2C 4 条（2 INFO + 2 TRACE），debug 档位只剩 2 行
+
+### 数组消息段不再把未知段与 `remove` 发成字面量（2026-11-20）
+
+插件用**数组形态** `message` 发 `{"type":"face"}` / `{"type":"remove"}` 时，Rust 把段原样拼成 `[CQ:face,id=14]` 这类字面随正文发进群——QQ 官方 api-v2 的群 / 单聊消息只认 text / markdown / ark / embed / media / keyboard，`face` 等并不在其中；Go 的段分发表同样没有这些 `case`，落 `default:` 只 `mylog.Printf("Unhandled segment type: %s")`、不追加正文（`handlers/message_parser.go:1252-1254`），数组形 `remove` 也命中该 `default`（`grep '"remove"' handlers/message_parser.go` 零命中）。
+
+- **修改**：`OutboundPlan::from_segments`（`crates/gensokyo-protocol/src/outbound.rs`）——数组段路径（段无 `raw` 原文切片）的未知段类型改为 `warn!` + 丢弃；数组形 `remove` 不执行撤回、也不发字面量（同样 `warn!`）。**字符串 CQ 路径不变**（Go legacy 仍按 `tok.Raw` 留字面）；markdown / keyboard / card / stream 等**已知类型但载荷不合法**仍按字面保留（既有刻意选择，已登记）
+- **影响**：数组段里的 `face` / `node` / `poke` / `group_info` / `json` / 未知码不再出现在群 / 单聊正文；字符串 `[CQ:remove,…]` 撤回照旧真执行；混合数组只丢未知段、已消费段照常（`hi` + `face` → `hi`）
+- **测试**：新增 `array_segment_unknown_type_is_dropped`、`array_remove_segment_is_dropped`、`array_unknown_segment_between_text_is_dropped`；既有 `from_segments_keeps_reply_and_media_order` / `admin_segment_forms` 的断言按 Go `handlers/message_parser.go:1252-1254` 改为「丢弃」
+
 ### `send_msg` 缺 `message_type` 与 markdown 双层包装载荷（2026-11-20）
 
 插件（nonebot/qbind）发 `send_msg` 时既**不带 `message_type`**，markdown 段又是 go-cqhttp 的双层包装

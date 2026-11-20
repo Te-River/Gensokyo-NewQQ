@@ -24,7 +24,7 @@ use std::fmt;
 use std::time::Duration;
 
 use redb::WriteTransaction;
-use tracing::debug;
+use tracing::trace;
 
 use super::{IdMapStore, LookupKey, encoding::normalize_identity, rb};
 use crate::StorageError;
@@ -85,9 +85,9 @@ impl<'a> IdMapWriteBatch<'a> {
             self.dirty.push(LookupKey::Vuin(vuin));
         }
         if created {
-            debug!(identity = %normalized.raw, vuin, "idmap 身份已分配");
+            trace!(identity = %normalized.raw, vuin, "idmap 身份已分配");
         } else {
-            debug!(identity = %normalized.raw, vuin, "idmap 身份命中");
+            trace!(identity = %normalized.raw, vuin, "idmap 身份命中");
         }
         Ok((normalized.raw, vuin))
     }
@@ -121,9 +121,9 @@ impl<'a> IdMapWriteBatch<'a> {
         let txn = self.msg_txn()?;
         let (virtual_id, created) = store.store_cache_tx(txn, msg_id, ttl)?;
         if created {
-            debug!(msg_id = %msg_id, virtual_id, "idmap 消息 ID 已分配");
+            trace!(msg_id = %msg_id, virtual_id, "idmap 消息 ID 已分配");
         } else {
-            debug!(msg_id = %msg_id, virtual_id, "idmap 消息 ID 命中");
+            trace!(msg_id = %msg_id, virtual_id, "idmap 消息 ID 命中");
         }
         Ok(virtual_id)
     }

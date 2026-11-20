@@ -152,7 +152,7 @@ async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Bytes) 
                 crate::gateway::apply_op_userid_type(&mut event, settings.get_op_userid_type());
                 state.downtime().publish(event);
             }
-            tracing::debug!(published, "webhook 事件已发布");
+            tracing::trace!(published, "webhook 事件已发布");
             (
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, "application/json")],

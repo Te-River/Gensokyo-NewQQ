@@ -734,7 +734,7 @@ impl<T: HttpTransport + 'static> GatewayClient<T> {
                     apply_op_userid_type(&mut event, &mode);
                     self.downtime.publish(event);
                 }
-                tracing::debug!(kind, published, "QQ 网关事件已发布");
+                tracing::trace!(kind, published, "QQ 网关事件已发布");
             }
             Err(err) => tracing::warn!(%err, kind, "QQ 网关事件解析失败，已忽略"),
         }

@@ -75,7 +75,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime};
 
 use md5::{Digest, Md5};
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 use crate::StorageError;
 
@@ -586,7 +586,7 @@ impl EchoStore {
         stack.push(pair);
         let len = stack.len();
         drop(stack);
-        debug!(
+        trace!(
             target: "gensokyo_storage::echo",
             correlation_id = %correlation_id,
             group = %group,

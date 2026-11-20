@@ -781,7 +781,7 @@ impl Inbound {
         if let Err(err) = store.store_user_info(raw_user, &row) {
             match err {
                 StorageError::DuplicateKey(_) => {
-                    tracing::debug!(user = raw_user, error = %err, "user_info 行已存在，跳过重复写入");
+                    tracing::trace!(user = raw_user, error = %err, "user_info 行已存在，跳过重复写入");
                 }
                 err => {
                     tracing::warn!(
@@ -1012,6 +1012,19 @@ impl Inbound {
             &payload.id,
             true,
         );
+        // Go `ProcessGroupNormalMessage.go:87` / `:165`：string_ob11 关闭时每条消息各一行 INFO
+        // （Go 即 INFO 级），排障不必再开 debug。
+        if !settings.get_string_ob11() {
+            let (raw_group, raw_msg) = (payload.group_id.as_str(), payload.id.as_str());
+            tracing::info!(
+                target: "gensokyo_runtime::message",
+                "group id mapped: raw_group={raw_group} vGroup={group_id} raw_user={user_raw} vUser={user_id}"
+            );
+            tracing::info!(
+                target: "gensokyo_runtime::message",
+                "group msg_id mapped: raw_msg={raw_msg} vMsg={message_id}"
+            );
+        }
 
         let sender = Sender {
             // Go M1-B：string 形态不做 idmap 转换，`sender.user_id` 恒为 0（见 `derive_message_ids`）。
@@ -1111,6 +1124,18 @@ impl Inbound {
             message_id,
             ..
         } = self.derive_message_ids(settings, user_raw, None, &payload.id, false);
+        // Go `ProcessC2CMessage.go:74` / `:96`：同群消息，string_ob11 关闭时各一行 INFO。
+        if !settings.get_string_ob11() {
+            let raw_msg = payload.id.as_str();
+            tracing::info!(
+                target: "gensokyo_runtime::message",
+                "c2c id mapped: raw_user={user_raw} vUser={user_id}"
+            );
+            tracing::info!(
+                target: "gensokyo_runtime::message",
+                "c2c msg_id mapped: raw_msg={raw_msg} vMsg={message_id}"
+            );
+        }
 
         // Go `ProcessC2CMessage.go:231-241`：私信顺手把好友写进 `user_info`（`get_friend_list`
         // 的数据源，纯 Rust 部署此前没有任何写入口）。Go 在 `dispatchInbound` 之后写，这里放在
