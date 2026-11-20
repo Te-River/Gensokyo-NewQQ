@@ -9,7 +9,7 @@
     "raw_message": "hello",
     "self_id": 12345,
     "sender": {
-      "nickname": "",
+      "nickname": "tester",
       "tiny_id": "",
       "user_id": "USER_OPENID_1"
     },

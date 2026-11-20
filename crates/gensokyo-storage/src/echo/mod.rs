@@ -75,6 +75,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime};
 
 use md5::{Digest, Md5};
+use serde::Deserialize;
 use tracing::{debug, trace, warn};
 
 use crate::StorageError;
@@ -109,7 +110,8 @@ pub type Clock = Arc<dyn Fn() -> SystemTime + Send + Sync>;
 /// 入站消息的 `message_scene`（Go `dto.MessageScene` 的最小投影）。
 ///
 /// M1e 只关心 `ext[]` 里的 `msg_idx=REFIDX_*`，其余字段由协议层自己持有。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
 pub struct MessageScene {
     /// `ext` 元素形如 `msg_idx=REFIDX_xxx` / `ref_msg_idx=TMP_xxx` / `auth_token=xxx`。
     pub ext: Vec<String>,

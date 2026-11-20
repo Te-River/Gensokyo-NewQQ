@@ -171,6 +171,14 @@ QQ 官方 2026-11-16 起群消息事件的 `author` 新增 `member_nickname`（�
 
 ## 🐛 修复
 
+### `[CQ:reply]` 引用块全丢：入站未存 REFIDX、出站从不填 `message_reference`（2026-11-20）
+
+QQ 群 / 单聊消息事件的 `message_scene.ext[]` 带 `msg_idx=REFIDX_*`（引用索引）。Go 入站按**真实**消息 ID 把它存进 echo（`Processor/ProcessGroupMessage.go:51`、`ProcessGroupNormalMessage.go:42`、`ProcessC2CMessage.go:36` → `echo/echo.go:443` 的 `StoreRefIdxFromScene`），被动回复时 `handlers/reply_helpers.go:21-26` 的 `ResolveReplyRefID` 反查，命中则写进 `MessageReference.MessageID`（`send_group_msg.go:415-419`）。Rust 两条链都断：入站事件模型没有 `message_scene`（serde 静默丢弃），`EchoStore` 的 `store_ref_idx` / `store_ref_idx_from_scene` / `get_ref_idx` 全仓零调用者，`MessageToCreate.message_reference` 从未被填充 ⇒ `[CQ:reply]` 只带 `msg_id`，QQ v2 引用非机器人消息不认普通 ID，**引用块不显示**。
+
+- **修改**：`crates/gensokyo-runtime/src/inbound.rs` 的 `QqMessage` 增 `message_scene`（复用 `gensokyo-storage` 的 `MessageScene`，该类型补 `Deserialize`，`crates/gensokyo-storage/src/echo/mod.rs`），`feed_group_echo` / `feed_private_echo` 调 `echo.store_ref_idx_from_scene(&payload.id, scene)`——键是真实 `data.ID`，与 Go 逐字段一致（不是虚拟消息号，也不是「群 × 用户」二元组，因此不参与 idmap 锁序）；`crates/gensokyo-runtime/src/deferred.rs` 的 `compose` 在 `resolve_reply` 得到真实 ID 后查 `get_ref_idx`，命中填 `message_reference = { message_id: REFIDX, ignore_get_message_error: false }`，`msg_id` 仍保留真实消息 ID
+- **影响**：被动回复的引用块恢复；未登记 REFIDX 的消息（机器人自己发的、老消息）回退真实消息 ID，与 Go 同口径，零回归。事件上报不含 `message_scene`（Go `Processor` 也不上报），客户端可见字段与金样零变化
+- **测试**：`inbound::tests::message_scene_stores_ref_idx_for_group_and_c2c`（群 + 私聊各喂一条带 `message_scene.ext` 的事件 → 断言 `get_ref_idx`）与 `deferred::tests::reply_uses_ref_idx_in_message_reference`（`[CQ:reply,id=<虚拟 msgid>]` → 序列化请求体断言 `message_reference.message_id`）
+
 ### `[CQ:remove]` 不带 `msg_id` 恒失败：入站补写「群 × 用户」最新消息（2026-11-20）
 
 `[CQ:remove,group_id=…,user_id=…]` 省略 `msg_id` 时应撤回该用户在该群的最后一条消息，但 Rust 入站**从不写**「群 × 用户 最新 msg_id」，读端 `cq_admin`（`get_latest_msg_id`）永远查不到 ⇒ 恒回「没有可撤回的最新消息，请带 msg_id 重试」。Go 在 `Processor/ProcessGroupMessage.go:179` / `ProcessGroupNormalMessage.go:168` 每条群消息都落这条记录（键 `<group_openid>:<user_openid>`，`idmap/map_service.go:702`）。

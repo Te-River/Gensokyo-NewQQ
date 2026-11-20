@@ -115,7 +115,7 @@ use gensokyo_protocol::event::{
 use gensokyo_protocol::{Event, Extra, MessageContent, Segment};
 use gensokyo_qq::dto::interaction::Interaction;
 use gensokyo_storage::{
-    BotStatsStore, EchoStore, IdMapStore, StorageError, UnionCache, UserInfoRow,
+    BotStatsStore, EchoStore, IdMapStore, MessageScene, StorageError, UnionCache, UserInfoRow,
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
@@ -167,6 +167,11 @@ struct QqMessage {
     message_type: i64,
     #[serde(default, deserialize_with = "null_as_default")]
     msg_elements: Vec<Option<QqMsgElement>>,
+    /// 事件场景（`botgo/dto/message.go` 的 `MessageScene`）：只取 `ext[]` 里的
+    /// `msg_idx=REFIDX_*`，Go 三个 `Process*Message.go` 都只把它交给
+    /// `echo.StoreRefIdxFromScene`，不上报给 OneBot 客户端。
+    #[serde(default)]
+    message_scene: Option<MessageScene>,
 }
 
 /// 消息附件（`attachments[]`，`botgo/dto/message.go:169-180`）。
@@ -900,6 +905,12 @@ impl Inbound {
         let app_id = settings.get_app_id().to_string();
         let now = SystemTime::now();
 
+        // Go `ProcessGroupMessage.go:51` / `ProcessGroupNormalMessage.go:42`：REFIDX 映射的键是
+        // **真实** `data.ID`（不是虚拟消息号），出站 `[CQ:reply]` 反查出真实 ID 后再查它。
+        if let Some(scene) = &payload.message_scene {
+            echo.store_ref_idx_from_scene(&payload.id, scene);
+        }
+
         // 懒 message_id 池：群维度 + 群 × 用户维度（被动回复复用同一 msg_id）。
         let group_key = group_id.to_string();
         echo.add_lazy_message_id(&group_key, &payload.id, now);
@@ -942,6 +953,11 @@ impl Inbound {
             .as_ref()
             .map_or("", |author| author.id.as_str());
         let numeric = user_id.as_i64();
+
+        // Go `ProcessC2CMessage.go:36`：与群消息同口径，键是真实 `data.ID`。
+        if let Some(scene) = &payload.message_scene {
+            echo.store_ref_idx_from_scene(&payload.id, scene);
+        }
 
         echo.add_lazy_message_id(&user_id.to_string(), &payload.id, SystemTime::now());
         if let Some(s) = message_id.as_i64() {
@@ -3134,6 +3150,35 @@ mod tests {
             .as_i64()
             .expect("有 idmap 时应为数字形态");
         assert_eq!(echo.get_msg_id_by_key(&echo_key(&app_id, msg_num)), "m-1");
+    }
+
+    /// Go `ProcessGroupMessage.go:51` / `ProcessGroupNormalMessage.go:42` /
+    /// `ProcessC2CMessage.go:36`：`message_scene.ext[]` 里的 `msg_idx=REFIDX_*` 按**真实**
+    /// `data.ID` 存进 echo，供出站被动回复反查（引用非机器人消息必须用 REFIDX）。
+    #[test]
+    fn message_scene_stores_ref_idx_for_group_and_c2c() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nsettings: {}\n").expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let store = test_store(dir.path());
+        let echo = Arc::new(EchoStore::new());
+        let inbound = Inbound::new(Arc::clone(&manager), Some(Arc::clone(&store)))
+            .with_echo(Arc::clone(&echo));
+
+        let mut group = group_at_payload();
+        group["message_scene"] = json!({"ext": ["msg_idx=REFIDX_1"]});
+        inbound
+            .convert("GROUP_AT_MESSAGE_CREATE", Some(&group), None)
+            .expect("群消息应可转换");
+        assert_eq!(echo.get_ref_idx("m-1"), "REFIDX_1", "群消息的 REFIDX");
+
+        let mut c2c = c2c_payload();
+        c2c["message_scene"] = json!({"ext": ["ref_msg_idx=TMP_x", "msg_idx=REFIDX_2"]});
+        inbound
+            .convert("C2C_MESSAGE_CREATE", Some(&c2c), None)
+            .expect("私聊消息应可转换");
+        assert_eq!(echo.get_ref_idx("m-c2c"), "REFIDX_2", "C2C 消息的 REFIDX");
     }
 
     /// C2C 入站只喂 v1 槽（Go `ProcessC2CMessage.go:171` 无 v2 维度），键为虚拟用户号。

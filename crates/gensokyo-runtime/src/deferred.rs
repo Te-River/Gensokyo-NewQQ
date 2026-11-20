@@ -196,7 +196,8 @@ use gensokyo_protocol::{Event, MediaRef, MessageContent, OutboundPlan};
 use gensokyo_qq::dto::message::{MessageCard, MessageCardContent};
 use gensokyo_qq::dto::{
     FileUpload, FileUploadMergeRequest, FileUploadPartFinishRequest, FileUploadPrepareRequest,
-    InputNotify, Markdown, Media, MessageResponse, MessageToCreate, StreamSse, file_type, msg_type,
+    InputNotify, Markdown, Media, MessageReference, MessageResponse, MessageToCreate, StreamSse,
+    file_type, msg_type,
 };
 use gensokyo_storage::echo::{DEFAULT_MESSAGE_ID, MessageGroupPair};
 use gensokyo_storage::{EchoStore, UnionCache};
@@ -1108,7 +1109,22 @@ pub async fn compose(
     let mut out = MessageToCreate::default();
     // Go：`[CQ:reply]` → `msg_id`（被动回复）。事件 ID 不在计划里，不必与 `event_id` 互斥。
     if let Some(reply) = &message.plan.reply_msg_id {
-        out.msg_id = Some(resolve_reply(context, deps.echo, reply)?);
+        let ref_id = resolve_reply(context, deps.echo, reply)?;
+        // Go `handlers/reply_helpers.go:21-26` + `send_group_msg.go:415-419`：被引用消息登记过
+        // REFIDX 时 `message_reference.message_id` 用它（引用非机器人消息只认它），`msg_id`
+        // 始终是真实消息 ID；查不到 REFIDX 时回退真实 ID。
+        let ref_idx = deps
+            .echo
+            .map_or_else(String::new, |echo| echo.get_ref_idx(&ref_id));
+        out.message_reference = Some(MessageReference {
+            message_id: if ref_idx.is_empty() {
+                ref_id.clone()
+            } else {
+                ref_idx
+            },
+            ignore_get_message_error: false,
+        });
+        out.msg_id = Some(ref_id);
     }
 
     // 单聊专属段独占整条消息：msg_type=6 / 流式都带不了正文与媒体
@@ -3868,6 +3884,41 @@ mod tests {
             .expect("echo 能反查时应发送成功");
 
         assert_eq!(api.sent()[0].msg_id.as_deref(), Some("REAL-MSG-ID"));
+    }
+
+    /// Go `handlers/reply_helpers.go:21-26` + `send_group_msg.go:415-419`：被引用消息登记过
+    /// REFIDX 时 `message_reference.message_id` 取 REFIDX（引用非机器人消息的唯一合法值），
+    /// `msg_id` 仍是真实消息 ID。
+    #[tokio::test]
+    async fn reply_uses_ref_idx_in_message_reference() {
+        let api = Arc::new(FakeQqApi::with_upload("FILE-INFO").with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = MediaRuntime::with_transport(Arc::new(FakeTransport::new(b"x")));
+        let echo = EchoStore::new();
+        let row = echo
+            .store_cache_in_memory("REAL-MSG-ID")
+            .expect("登记虚拟号");
+        echo.store_ref_idx("REAL-MSG-ID", "REFIDX_9");
+        let content = format!("[CQ:reply,id={row}]hi");
+        let mut plan = group_request(OutboundPlan::default());
+        plan.message = MessageOut::from_content(&MessageContent::from(content.as_str()), false);
+
+        execute(&context, &plan, &deps(&media, Some(&echo)))
+            .await
+            .expect("REFIDX 应在被动回复里生效");
+
+        let sent = api.sent();
+        assert_eq!(
+            sent[0].msg_id.as_deref(),
+            Some("REAL-MSG-ID"),
+            "msg_id 恒为真实消息 ID"
+        );
+        let value = serde_json::to_value(&sent[0]).expect("序列化失败");
+        assert_eq!(
+            value.get("message_reference"),
+            Some(&json!({"message_id": "REFIDX_9"})),
+            "请求体应带 message_reference: {value}"
+        );
     }
 
     #[tokio::test]
