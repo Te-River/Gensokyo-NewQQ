@@ -7,6 +7,16 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# 四能力：与 `gensokyo-bin` 的 feature 一一对应（bin 只做转发）。`--no-default-features`
+# 等于四能力全关，配置里的 `disable_webui` / `lotus_grpc` / `url_to_qrimage` / `oss_type`
+# 在启动或运行期按"能力未编入"warn 后降级（见 `boot` 与 `deferred`）。
+default = ["webui", "grpc", "qr", "oss"]
+webui = ["dep:gensokyo-webui"]
+grpc = ["gensokyo-storage/grpc", "dep:tonic"]
+qr = ["gensokyo-media/qr"]
+oss = ["gensokyo-media/oss"]
+
 [dependencies]
 gensokyo-core.workspace = true
 gensokyo-config.workspace = true
@@ -17,8 +27,9 @@ gensokyo-qq.workspace = true
 gensokyo-actions.workspace = true
 # deferred 媒体链路：`Fetcher` 取字节（URL / base64 / 本地），再交给 `QqApi` 上传
 gensokyo-media.workspace = true
-# WebUI 静态页与 `/api` 登录路由（M3）；`disable_webui=false` 时挂进 listener
-gensokyo-webui.workspace = true
+# WebUI 静态页与 `/api` 登录路由（M3）；`disable_webui=false` 时挂进 listener。
+# `webui` 特性关闭时连 crate 都不在依赖图里，路由表回到 M1h-a 原样。
+gensokyo-webui = { workspace = true, optional = true }
 # 正向 WS / HTTP API 服务端；`ws` 提供 WebSocket 升级，`multipart` 解析 `/uploadpic` 的
 # `multipart/form-data`（Go `PostForm` 同时支持 urlencoded 与 multipart）
 axum = { workspace = true, features = ["ws", "multipart"] }
@@ -39,7 +50,7 @@ rustls.workspace = true
 # idmap gRPC 装配（`!lotus && lotus_grpc` 起服务端，`lotus` 时挂客户端桥）：服务端与
 # 17 个 RPC 实现都在 gensokyo-storage 的 `idmap::grpc`，这里只需要 tonic 的
 # `transport::Server` / `Endpoint` 装配与关闭信号
-tonic.workspace = true
+tonic = { workspace = true, optional = true }
 # 反向 WS 客户端：`SinkExt` / `StreamExt` 拆读写两半
 futures.workspace = true
 serde.workspace = true

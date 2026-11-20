@@ -7,6 +7,14 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# 四能力之二、之三。`qr` 关掉时 `qrcode` 整个不编译（`pub mod qr` 也不在）；
+# `oss` 关掉时三个内置云 OSS 后端的类型仍在（`OssKind`/`OssConfig`），只有
+# `oss::upload` 直接返回 `Error::HostingConfig`——调用点签名与分支不变。
+default = ["qr", "oss"]
+qr = ["dep:qrcode"]
+oss = []
+
 [dependencies]
 # IP 判定的单一事实源（redirect.rs 的 SSRF 守卫复用 core::net）
 gensokyo-core.workspace = true
@@ -32,7 +40,7 @@ image.workspace = true
 # qrcode：P56-T2 QR 生成（EcLevel::H + quiet_zone(false)）。
 # workspace 行只带 pic（空 feature）；render::<image::Luma> 需要隐式 image feature，
 # 在 crate 级补上（qrcode 对 image 是 default-features=false 的 0.25，与 workspace 单版本统一）。
-qrcode = { workspace = true, features = ["image"] }
+qrcode = { workspace = true, features = ["image"], optional = true }
 # sha2：百度云 BOS 的 bce-auth-v1 签名要 HMAC-SHA256；workspace 已有（gensokyo-storage 同用）
 sha2.workspace = true
 # time：内置云 OSS 的 Date / x-bce-date 头格式化（RFC 1123 / ISO 8601 UTC）

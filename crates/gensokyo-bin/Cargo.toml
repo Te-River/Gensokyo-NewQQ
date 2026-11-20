@@ -11,6 +11,15 @@ publish.workspace = true
 name = "gensokyo"
 path = "src/main.rs"
 
+[features]
+# 四能力开关；`--no-default-features` 就是「四能力全关」（`cargo xtask build --no-webui`
+# 传的正是它）。每个 feature 只转发到 runtime，实现在下层的 storage / media / webui。
+default = ["webui", "grpc", "qr", "oss"]
+webui = ["dep:gensokyo-webui", "gensokyo-runtime/webui"]
+grpc = ["gensokyo-runtime/grpc"]
+qr = ["gensokyo-runtime/qr"]
+oss = ["gensokyo-runtime/oss"]
+
 [dependencies]
 gensokyo-actions.workspace = true
 gensokyo-config.workspace = true
@@ -39,7 +48,7 @@ mimalloc.workspace = true
 time = { workspace = true, features = ["local-offset"] }
 tracing.workspace = true
 # WebUI 日志中枢（`/api/logs` 环形缓冲 + 广播）：采集层往里投递，webui crate 负责推送
-gensokyo-webui.workspace = true
+gensokyo-webui = { workspace = true, optional = true }
 
 # Windows 控制台开启 ANSI（VT）的安全封装：workspace 禁止 unsafe，自己调 SetConsoleMode 不可行。
 # 该 crate 已经经 clap → anstream 进树（Cargo.lock 1.1.5），这里只是把它提为 Windows 侧的直依赖。

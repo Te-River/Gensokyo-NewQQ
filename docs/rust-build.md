@@ -207,18 +207,34 @@ cargo xtask build --all --workers 1
 $env:GENSOKYO_BUILD_WORKERS = '3'; cargo xtask build --linux-only
 ```
 
-## `--no-webui` 的当前状态（重要）
+## 四能力 feature（`--no-webui` 的真实语义）
 
-Go 版用 `-tags=small` 裁剪 WebUI/OSS/gRPC/二维码。**Rust 侧目前没有任何 crate 定义 feature**，
-`gensokyo-runtime` 无条件依赖 `gensokyo-webui`，因此 `--no-webui` 目前翻译为：
+`gensokyo-bin` / `gensokyo-runtime` / `gensokyo-media` / `gensokyo-storage` 各带一组能力 feature，
+`default = ["webui","grpc","qr","oss"]`，bin 只做转发（`bin → runtime → storage/media`）：
 
-```
---no-default-features
-```
+| feature | 归属 crate | 打开时 | 关闭时（`--no-default-features`） |
+|---|---|---|---|
+| `webui` | bin / runtime | 依赖 `gensokyo-webui`；`disable_webui=false` 时挂静态页 + `/api` 登录路由 + `/api/logs` 日志流 | crate 不在依赖图里（`rust-embed` / `mime_guess` 随之消失）；`/api/**` 回到「`POST` 即 action」，`/api/logs` 不存在；横幅给「本构建未编入 WebUI」，`disable_webui=false` 只 warn |
+| `grpc` | bin / runtime / storage | `gensokyo-storage` 的 `idmap::grpc`（17 个 RPC 服务端）+ `idmap::remote`（`RemoteBridge` 客户端桥）+ `tonic` | 两者都不编译、`tonic` 不进依赖图；`!lotus && lotus_grpc`（服务端）与 `lotus && lotus_grpc`（客户端）各 warn 一次后走本地，`/getid` 保持挂载 |
+| `qr` | bin / runtime / media | `gensokyo_media::qr`（`qrcode` crate）；`url_to_qrimage=true` 把 URL 换成二维码图片 | `qrcode` 不进依赖图；URL **原样保留**（不删、也不换短链）+ 命中时 warn 一次 |
+| `oss` | bin / runtime / media | `oss_type` 1~3 的腾讯云 COS / 百度云 BOS / 阿里云 OSS 直传 | `OssKind` / `OssConfig` 类型保留，`oss::upload` 直接回 `Error::HostingConfig`；调用方告警一次并保留原引用 |
 
-在 `gensokyo-bin` 上它**当前是 no-op**：产物名带 `-noWebui`，但内容与完整版一致（WebUI 仍被嵌入）。
-等 `small`/`webui` 特性落地后，只需改 `xtask/src/build.rs::cargo_build` 里的这一行，产物命名与参数
-已经就位。
+`cargo xtask build --no-webui` 传给 cargo 的就是 `--no-default-features`，所以 **`-noWebui`
+产物 = 四能力全关**（名字只提 WebUI 是沿用 Go `-NoWebUI` / `build.ps1` 的既有命名）。
+xtask 不需要为此改动；`--all` 的 `-noWebui` 一列同样适用。
+
+默认构建（`cargo build` / `cargo test` / `cargo clippy --workspace`）与引入 feature 之前完全一致；
+no-feature 分支由 CI 的 `cargo clippy --workspace --no-default-features --all-targets -- -D warnings`
+兜底（默认 clippy 覆盖不到只在关闭时才编译的 `#[cfg]` 分支）。
+
+> 与 Go `-tags=small` 的差别：Go 的 small **并不删 WebUI**（`webui/api.go:20-25` 的 `go:embed dist/*`
+> 与 `/webui/*` 路由无 build tag，只把 `handleSysInfo` 换成全 0 假数据），gRPC 服务端也只桩掉初始化。
+> 三处刻意差异登记在 `reports/refactor/17-go-rust-parity.md` §F 与 `docs/rust-handover.md` §6。
+
+体积口径（不承诺大幅瘦身）：省掉的只有 `webui/dist` 内嵌资源、`qrcode`、`tonic`（连带
+`tonic-prost` / `prost`）。`image` / `sha2` / `redb` 仍被压缩、图床与存储链拉住；proto 的**构建期**
+依赖（`tonic-prost-build` / `protoc-bin-vendored`）是 Cargo 的 build-dependencies，不支持 optional，
+`--no-default-features` 下仍会编译（只是不生成桩、无人 `include!`），所以也别指望小构建摆脱 protoc。
 
 ## 产物与目录
 
@@ -273,7 +289,7 @@ darwin / MSVC / android 目标仍需各自工具链（且需 `--target` 显式�
 | `-All` 目标数 | 5（linux×3 + windows×2），双版本 10 个产物 | 5（linux×3 + windows×2），双版本 10 个产物；文件名带 `rust` 标识（`gensokyo-rust-*`） |
 | 版本信息 | `-ldflags -X buildinfo.BuildType/BuildSpec` 注入 `git-<short>`（无 git 时 `dev-<epoch>.<ms>`） | `cargo xtask build` 给 cargo 子进程设 `GENSOKYO_BUILD_VERSION`（同一规则：git 时 `git-<7位短 hash>`、否则 `dev-<epoch>.<ms>`；同名环境变量优先，发布流水线可覆盖）；直接 `cargo build` 不注入、走运行时 `dev-…` 回退 |
 | WebUI 占位 | 脚本内 `Ensure-WebUIDist` | xtask 内 `ensure_webui_dist`（同一组占位文件） |
-| `-NoWebUI` | `-tags=small`，真实裁剪 | `--no-default-features`，当前 no-op（见上节） |
+| `-NoWebUI` | `-tags=small`（实际不删 WebUI：embed 与路由保留，只桩掉 `handleSysInfo`） | `--no-default-features` = **四能力全关**（webui/grpc/qr/oss，见上节），产物与完整版 SHA256 不同 |
 | 交叉编译 | Go 自带 | linux-gnu×4 自动引导 zig + cargo-zigbuild；其余目标需 `rustup target add` + 各自工具链 |
 
 版本串口径补充：`GENSOKYO_BUILD_VERSION` 是构建版本串的覆盖开关（不受上文 zig 版本号的数字约束）喵~

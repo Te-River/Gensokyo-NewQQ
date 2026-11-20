@@ -419,39 +419,6 @@ impl RemoteBridge {
     }
 }
 
-/// idmap 远程模式（设计 §3.1）：只由三个配置开关决定；gRPC 服务端的启动是 boot 的事，
-/// 不在本判定内。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IdMapRemoteMode {
-    /// 全本地：lotus 关闭，或 lotus+HTTP 且 `without_idmaps`。
-    Local,
-    /// gRPC 客户端：可远程方法经 [`RemoteBridge`] 走远端。
-    GrpcClient,
-    /// HTTP 远端 `/getid`（`lotus && !lotus_grpc && !without_idmaps`）。
-    HttpRemote,
-}
-
-/// 按配置开关判定 idmap 远程模式（Go `idmap/service.go` 各 v2 函数的分支判定顺序）。
-///
-/// **Go 怪癖，照抄**：gRPC 分支不检查 `without_idmaps`——`lotus && lotus_grpc` 时即使
-/// `without_idmaps=true` 仍返回 [`IdMapRemoteMode::GrpcClient`]（Go `service.go:676`
-/// 只看 `GetLotusGrpc() && GetLotusValue()`）；`without_idmaps` 只挡 HTTP 分支。
-/// 该组合的 warn 日志留给 boot 装配处。
-#[must_use]
-pub fn idmap_remote_mode(lotus: bool, lotus_grpc: bool, without_idmaps: bool) -> IdMapRemoteMode {
-    if !lotus {
-        return IdMapRemoteMode::Local;
-    }
-    if lotus_grpc {
-        return IdMapRemoteMode::GrpcClient;
-    }
-    if without_idmaps {
-        IdMapRemoteMode::Local
-    } else {
-        IdMapRemoteMode::HttpRemote
-    }
-}
-
 /// 桥循环：std mpsc 的阻塞 recv 放到 blocking 池，current_thread runtime 空闲时
 /// 仍能驱动 tonic 连接（重连/keepalive）；Job 到达后独占 `&mut client` 逐个 await。
 fn bridge_loop(
@@ -674,11 +641,12 @@ mod tests {
     use tokio_stream::wrappers::TcpListenerStream;
     use tonic::transport::{Endpoint, Server};
 
-    use super::{IdMapRemoteMode, Job, RemoteBridge, idmap_remote_mode};
+    use super::{Job, RemoteBridge};
     use crate::error::StorageError;
     use crate::idmap::grpc::tests::{Harness, harness};
     use crate::idmap::grpc::{IdMapService, pb};
     use crate::idmap::{IdMapOptions, IdMapStore};
+    use crate::idmap::{IdMapRemoteMode, idmap_remote_mode};
 
     /// 起真服务端（复用 grpc.rs 的 Harness）+ 建桥。
     async fn bridge_harness() -> Result<(Harness, RemoteBridge), Box<dyn Error>> {

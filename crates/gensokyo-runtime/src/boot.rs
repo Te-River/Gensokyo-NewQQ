@@ -75,17 +75,24 @@ use gensokyo_config::{ConfigWatcher, ReloadOutcome, Settings, WatcherHandle};
 use gensokyo_core::{Error, Result};
 use gensokyo_qq::{ReqwestTransport, TokenConfig, TokenManager};
 use gensokyo_storage::db_location;
+#[cfg(feature = "grpc")]
 use gensokyo_storage::idmap::grpc::{IdMapService, pb};
 use gensokyo_storage::idmap::http_remote::HttpRemoteBridge;
-use gensokyo_storage::idmap::remote::{IdMapRemoteMode, RemoteBridge, idmap_remote_mode};
-use gensokyo_storage::idmap::{DEFAULT_IDENTITY_PATH, DEFAULT_MSG_PATH, IdMapOptions, IdMapStore};
+#[cfg(feature = "grpc")]
+use gensokyo_storage::idmap::remote::RemoteBridge;
+use gensokyo_storage::idmap::{
+    DEFAULT_IDENTITY_PATH, DEFAULT_MSG_PATH, IdMapOptions, IdMapRemoteMode, IdMapStore,
+    idmap_remote_mode,
+};
 use gensokyo_storage::short_url::{DEFAULT_SHORT_URL_PATH, ShortUrlStore};
 use gensokyo_storage::{BotStatsStore, DEFAULT_BOTSTATS_PATH, EchoStore};
+#[cfg(feature = "webui")]
 use gensokyo_webui::{WebUi, WebUiState};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
 use tokio::task::{AbortHandle, JoinHandle};
+#[cfg(feature = "grpc")]
 use tonic::transport::Endpoint;
 
 use crate::event_hub::EventHub;
@@ -98,6 +105,7 @@ use crate::ws_client::{WsClient, WsClientHandle};
 pub const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// WebUI 会话清理间隔：会话 TTL 是 24h，10 分钟扫一次足够，且每次只短暂持写锁。
+#[cfg(feature = "webui")]
 const WEBUI_CLEANUP_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 /// 配置重载结果的通道容量：单次事件只产出一条结果，8 足够吸收连续保存。
@@ -391,6 +399,7 @@ impl Runtime {
         // Go `main.go:507`：`lotus_grpc` 打开时不注册本地 `/getid`。Rust 按实际状态判定：
         // gRPC 服务端真起来**或**远程客户端（gRPC/HTTP）真挂上才隐藏；任一失败降级时保留
         // 本地路由（Go 服务端监听失败 `Fatalf`、客户端建连失败 `panic`，差异已登记）。
+        #[cfg(feature = "grpc")]
         let idmap_grpc = match idmap_grpc_bind(&settings) {
             Ok(Some(bind)) => start_idmap_grpc(&state, &bind).await,
             Ok(None) => None,
@@ -398,6 +407,16 @@ impl Runtime {
                 tracing::warn!(reason, "gRPC idmap 服务端不启动，/getid 保持挂载");
                 None
             }
+        };
+        // 未编入 gRPC：配置要服务端时只 warn，`/getid` 照常挂载（四能力全关的语义）。
+        #[cfg(not(feature = "grpc"))]
+        let idmap_grpc: Option<ServerHandle> = {
+            if !settings.get_lotus() && settings.get_lotus_grpc() {
+                tracing::warn!(
+                    "本构建未编入 gRPC（feature grpc 关闭）：lotus_grpc=true 被忽略，/getid 保持挂载"
+                );
+            }
+            None
         };
 
         // 注册表在 `AppState` 装配时创建（内置 3 个 + `gensokyo_actions::register_all`）；
@@ -448,12 +467,7 @@ impl Runtime {
         };
 
         // WebUI 在绑定前建好：路由表要它，会话清理任务也要它（两处共享同一个 `Arc`）。
-        let webui = if state.webui_enabled() {
-            Some(Arc::new(WebUiState::new(state.config_arc())))
-        } else {
-            tracing::info!("disable_webui=true，WebUI 未挂载");
-            None
-        };
+        let webui = boot_webui(&state);
 
         // `/uploadpic*` 与 `/getid`：Go 挂在主服务器 `r`，这里挂主 listener；HTTP 端口只在
         // 主 listener 不存在时兜底（见下方 `http` 分支）。
@@ -532,7 +546,10 @@ impl Runtime {
         };
 
         // 会话清理任务只在 WebUI 挂载时存在；句柄未 `shutdown` 就 drop 时由 `Drop` 中止。
+        #[cfg(feature = "webui")]
         let webui_cleanup = webui.as_ref().map(spawn_session_cleanup);
+        #[cfg(not(feature = "webui"))]
+        let webui_cleanup: Option<JoinHandle<()>> = None;
 
         // 配置热重载：监听失败只 warn（运行期不该因配置文件监听挂掉整个进程），
         // 成功的句柄随 `RuntimeHandle` 一起关闭。
@@ -660,6 +677,35 @@ fn upload_falls_back_to_http(ws_listener: bool, http_listener: bool) -> bool {
     !ws_listener && http_listener
 }
 
+/// WebUI 挂载槽：`webui` 特性关闭时退化成 `Option<()>`（恒 `None`），下面三个胶水函数各给
+/// 一份对应签名的实现，`Runtime::start` 的调用点因此不随 feature 变形。
+#[cfg(feature = "webui")]
+type WebUiSlot = Option<Arc<WebUiState>>;
+#[cfg(not(feature = "webui"))]
+type WebUiSlot = Option<()>;
+
+/// 按配置建 WebUI 状态（`disable_webui=false` 时挂载）。
+#[cfg(feature = "webui")]
+fn boot_webui(state: &AppState) -> WebUiSlot {
+    if state.webui_enabled() {
+        Some(Arc::new(WebUiState::new(state.config_arc())))
+    } else {
+        tracing::info!("disable_webui=true，WebUI 未挂载");
+        None
+    }
+}
+
+/// 未编入 WebUI：配置要挂载时 warn 一次（静默忽略配置比 warn 更难排查）。
+#[cfg(not(feature = "webui"))]
+fn boot_webui(state: &AppState) -> WebUiSlot {
+    if state.webui_enabled() {
+        tracing::warn!(
+            "本构建未编入 WebUI（feature webui 关闭）：disable_webui=false 被忽略，/api 全部走 action"
+        );
+    }
+    None
+}
+
 /// 把 WebUI 路由并进 WS listener；未挂载时原样返回。
 ///
 /// 这里不加 action 门：WS 端口没有 action 路由，未匹配的非 GET 请求由 WebUI 的静态回退
@@ -668,7 +714,8 @@ fn upload_falls_back_to_http(ws_listener: bool, http_listener: bool) -> bool {
 /// `/health` 一并挂上：WebUI 的静态回退把 `/health` 当成 SPA 路由回首页，探活就再也拿不到
 /// 文本。模板默认 `disable_webui=false` 且 `http_address` 为空，主 listener 正是这个 WS
 /// 端口，所以这条健康路由不能只在 HTTP API 端口存在。
-fn merge_webui(app: Router, webui: &Option<Arc<WebUiState>>) -> Router {
+#[cfg(feature = "webui")]
+fn merge_webui(app: Router, webui: &WebUiSlot) -> Router {
     match webui {
         Some(webui) => app
             .merge(WebUi::router(Arc::clone(webui)))
@@ -677,12 +724,19 @@ fn merge_webui(app: Router, webui: &Option<Arc<WebUiState>>) -> Router {
     }
 }
 
+/// 未编入 WebUI：槽位恒 `None`，原样返回。
+#[cfg(not(feature = "webui"))]
+fn merge_webui(app: Router, _webui: &WebUiSlot) -> Router {
+    app
+}
+
 /// HTTP API 端口的路由表：挂 WebUI 时 action 退居「`POST` 且非 `/api`」的门后。
 ///
 /// 两个分支互斥的关键在 axum：`Router::merge` 不允许两边都带自定义回退，而 action 本身就是
 /// 回退，所以挂了 WebUI 就不能再 merge [`crate::http_api::router`]，改由
 /// [`crate::http_api::with_webui_router`] 组装（优先级说明见该函数）。
-fn http_app(state: &AppState, webui: &Option<Arc<WebUiState>>, webhook: &Option<Router>) -> Router {
+#[cfg(feature = "webui")]
+fn http_app(state: &AppState, webui: &WebUiSlot, webhook: &Option<Router>) -> Router {
     let app = match webui {
         Some(webui) => {
             crate::http_api::with_webui_router(WebUi::router(Arc::clone(webui)), state.clone())
@@ -692,7 +746,14 @@ fn http_app(state: &AppState, webui: &Option<Arc<WebUiState>>, webhook: &Option<
     merge_webhook(app, webhook)
 }
 
+/// 未编入 WebUI：只剩 M1h-a 的路由表（`POST` 任意路径走 action，`/api/**` 也在其中）。
+#[cfg(not(feature = "webui"))]
+fn http_app(state: &AppState, _webui: &WebUiSlot, webhook: &Option<Router>) -> Router {
+    merge_webhook(crate::http_api::router(state.clone()), webhook)
+}
+
 /// 后台清理过期 WebUI 会话；任务句柄存进 [`RuntimeHandle`]，随句柄停止。
+#[cfg(feature = "webui")]
 fn spawn_session_cleanup(webui: &Arc<WebUiState>) -> JoinHandle<()> {
     let webui = Arc::clone(webui);
     tokio::spawn(async move {
@@ -1080,6 +1141,7 @@ impl Drop for RuntimeHandle {
 /// （连 `server_dir:lotus_grpc_port` 的父进程，`main_grpc.go:24-35`），Rust 由
 /// [`attach_idmap_remote`] 对齐。端口非法时返回原因字符串——调用方 `warn` 后继续挂载
 /// `/getid`，不让可选服务把启动路径拖住。
+#[cfg(feature = "grpc")]
 fn idmap_grpc_bind(settings: &Settings) -> Result<Option<String>, String> {
     if settings.get_lotus() || !settings.get_lotus_grpc() {
         return Ok(None);
@@ -1102,6 +1164,7 @@ fn idmap_grpc_bind(settings: &Settings) -> Result<Option<String>, String> {
 ///
 /// Go 的 `grpcServer.Serve` 阻塞主 goroutine（服务端实例是专职进程，gin 路由不再启动）；
 /// Rust 作为任务与两个 listener 共存，不阻塞启动（已登记差异）。
+#[cfg(feature = "grpc")]
 async fn start_idmap_grpc(state: &AppState, bind: &str) -> Option<ServerHandle> {
     let Some(store) = state.idmap_arc() else {
         tracing::warn!("idmap 未装配，gRPC idmap 服务端不启动（/getid 保持挂载）");
@@ -1203,52 +1266,7 @@ fn attach_idmap_remote(store: IdMapStore, settings: &Settings) -> (IdMapStore, b
         settings.get_lotus_without_idmaps(),
     ) {
         IdMapRemoteMode::Local => (store, false),
-        IdMapRemoteMode::GrpcClient => {
-            if settings.get_lotus_without_idmaps() {
-                tracing::warn!(
-                    "lotus_without_idmaps=true 但 lotus_grpc=true：gRPC 分支不查该开关（Go 怪癖），idmap 仍走远端"
-                );
-            }
-            let port = settings.get_lotus_grpc_port();
-            let endpoint = u16::try_from(port)
-                .map_err(|_| format!("lotus_grpc_port={port} 不是合法端口（0~65535）"))
-                .and_then(|port| {
-                    Endpoint::from_shared(format!(
-                        "http://{}:{port}",
-                        settings.get_server_dir().trim()
-                    ))
-                    .map_err(|err| format!("gRPC 远端地址非法: {err}"))
-                });
-            let endpoint = match endpoint {
-                // Go grpc.NewClient 是惰性建连；Rust 启动期真建连，加 5s 建连上限
-                // 避免不可达主机拖住启动（有意差异）。
-                Ok(endpoint) => endpoint.connect_timeout(Duration::from_secs(5)),
-                Err(reason) => {
-                    tracing::warn!(
-                        reason,
-                        "idmap gRPC 客户端不挂载，降级本地（/getid 保持挂载）"
-                    );
-                    return (store, false);
-                }
-            };
-            match RemoteBridge::spawn(endpoint, Duration::from_secs(30)) {
-                Ok(bridge) => {
-                    tracing::info!(
-                        server_dir = settings.get_server_dir().trim(),
-                        port,
-                        "idmap gRPC 客户端已连接远端"
-                    );
-                    (store.with_remote(bridge), true)
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        error = %err,
-                        "idmap gRPC 远端建连失败，降级本地（/getid 保持挂载）"
-                    );
-                    (store, false)
-                }
-            }
-        }
+        IdMapRemoteMode::GrpcClient => attach_grpc_remote(store, settings),
         IdMapRemoteMode::HttpRemote => {
             // HTTP 不预建连（Go http.Client 同）：不可达在首次请求才报错；
             // 远端端口用 port 配置（Go GetPortValue），协议判定在桥内照抄 Go。
@@ -1275,6 +1293,67 @@ fn attach_idmap_remote(store: IdMapStore, settings: &Settings) -> (IdMapStore, b
             }
         }
     }
+}
+
+/// gRPC 客户端桥（`lotus && lotus_grpc`）：建连失败降级本地。
+///
+/// `lotus_without_idmaps=true` 仍走 gRPC 是 Go 怪癖（gRPC 分支不查该开关），照抄并提示。
+#[cfg(feature = "grpc")]
+fn attach_grpc_remote(store: IdMapStore, settings: &Settings) -> (IdMapStore, bool) {
+    if settings.get_lotus_without_idmaps() {
+        tracing::warn!(
+            "lotus_without_idmaps=true 但 lotus_grpc=true：gRPC 分支不查该开关（Go 怪癖），idmap 仍走远端"
+        );
+    }
+    let port = settings.get_lotus_grpc_port();
+    let endpoint = u16::try_from(port)
+        .map_err(|_| format!("lotus_grpc_port={port} 不是合法端口（0~65535）"))
+        .and_then(|port| {
+            Endpoint::from_shared(format!(
+                "http://{}:{port}",
+                settings.get_server_dir().trim()
+            ))
+            .map_err(|err| format!("gRPC 远端地址非法: {err}"))
+        });
+    let endpoint = match endpoint {
+        // Go grpc.NewClient 是惰性建连；Rust 启动期真建连，加 5s 建连上限
+        // 避免不可达主机拖住启动（有意差异）。
+        Ok(endpoint) => endpoint.connect_timeout(Duration::from_secs(5)),
+        Err(reason) => {
+            tracing::warn!(
+                reason,
+                "idmap gRPC 客户端不挂载，降级本地（/getid 保持挂载）"
+            );
+            return (store, false);
+        }
+    };
+    match RemoteBridge::spawn(endpoint, Duration::from_secs(30)) {
+        Ok(bridge) => {
+            tracing::info!(
+                server_dir = settings.get_server_dir().trim(),
+                port,
+                "idmap gRPC 客户端已连接远端"
+            );
+            (store.with_remote(bridge), true)
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "idmap gRPC 远端建连失败，降级本地（/getid 保持挂载）"
+            );
+            (store, false)
+        }
+    }
+}
+
+/// 未编入 gRPC：`lotus_grpc=true` 只 warn 一次后走本地（Go 是建连/起服务，差异已登记）。
+#[cfg(not(feature = "grpc"))]
+fn attach_grpc_remote(store: IdMapStore, settings: &Settings) -> (IdMapStore, bool) {
+    tracing::warn!(
+        server_dir = settings.get_server_dir().trim(),
+        "本构建未编入 gRPC（feature grpc 关闭）：lotus_grpc=true 被忽略，idmap 走本地（/getid 保持挂载）"
+    );
+    (store, false)
 }
 
 /// 主 listener 端口（Go `main.go:488-494`）：`lotus=true` 用 `backup_port`，否则 `port`。
@@ -1311,20 +1390,28 @@ fn normalize_bind(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "grpc")]
     use std::sync::Arc;
+    #[cfg(feature = "grpc")]
     use std::time::Duration;
 
-    use gensokyo_config::{ConfigManager, ReloadOutcome};
+    #[cfg(feature = "grpc")]
+    use gensokyo_config::ConfigManager;
+    use gensokyo_config::ReloadOutcome;
+    #[cfg(feature = "grpc")]
     use gensokyo_storage::idmap::grpc::IdMapClient;
+    #[cfg(feature = "grpc")]
     use gensokyo_storage::idmap::{IdMapOptions, IdMapStore};
+    #[cfg(feature = "grpc")]
     use tempfile::TempDir;
+    #[cfg(feature = "grpc")]
     use tonic::transport::Endpoint;
 
-    use super::{
-        AppState, ReloadLevel, idmap_grpc_bind, normalize_bind, reload_log_entries,
-        start_idmap_grpc, upload_falls_back_to_http,
-    };
+    #[cfg(feature = "grpc")]
+    use super::{AppState, idmap_grpc_bind, start_idmap_grpc};
+    use super::{ReloadLevel, normalize_bind, reload_log_entries, upload_falls_back_to_http};
 
+    #[cfg(feature = "grpc")]
     fn settings(directory: &TempDir, yaml: &str) -> Arc<gensokyo_config::Settings> {
         let path = directory.path().join("config.yml");
         std::fs::write(&path, format!("version: 1\nsettings:\n{yaml}")).expect("写配置");
@@ -1352,6 +1439,7 @@ mod tests {
 
     /// 方向矩阵（Go `main_grpc.go:24-50`）：只有 `!lotus && lotus_grpc` 起服务端；
     /// `lotus=true` 是客户端方向，由 [`super::attach_idmap_remote`] 接管。
+    #[cfg(feature = "grpc")]
     #[test]
     fn idmap_grpc_bind_follows_lotus_grpc_switch() {
         let directory = TempDir::new().expect("临时目录");
@@ -1395,6 +1483,7 @@ mod tests {
     }
 
     /// 起服务 + 一个 RPC 往返：`StoreIDV2` 分配、`RetrieveRowByIDV2` 反查，且与本地 store 同库。
+    #[cfg(feature = "grpc")]
     #[tokio::test(flavor = "multi_thread")]
     async fn idmap_grpc_serves_rpc_round_trip() {
         let directory = TempDir::new().expect("临时目录");

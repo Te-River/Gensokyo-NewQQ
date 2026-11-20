@@ -446,6 +446,19 @@ P86 审计遗留的两条回执路径（`send_private_msg_sse` 与 `send_*_forwa
 
 ## 📝 工程与文档变更
 
+### 四能力 feature：`--no-webui` 变成真实裁剪（2026-11-20）
+
+Rust 侧第一次有 crate 级 feature：`webui` / `grpc` / `qr` / `oss`，`default` 全开；`--no-default-features` 等于四能力全关，`cargo xtask build --no-webui` 传的正是它。此前 `-noWebui` 产物与完整版 **SHA256 完全相同**（4 架构实测），本轮消除该同构。
+
+- **修改**（`Cargo.toml`、`crates/gensokyo-{bin,runtime,media,storage}/Cargo.toml`）：workspace 的 `gensokyo-storage/media/runtime/webui` 四个 path 依赖加 `default-features = false`（成员不能覆写该字段，switch 只能上提）；`gensokyo-bin` 的四个 feature 只做转发（`grpc = ["gensokyo-runtime/grpc"]`），`gensokyo-runtime` 转发到 `gensokyo-storage/grpc`、`gensokyo-media/{qr,oss}`、`dep:gensokyo-webui`；`tonic`/`tonic-prost`/`prost`/`qrcode`/`gensokyo-webui` 改为 optional
+- **关掉后的行为**：`webui` → `gensokyo-webui` 不在依赖图，`/` 回健康文本、`/api/**` 全部走 action、`/api/logs` 不存在、横幅给「本构建未编入 WebUI」；`grpc` → `idmap::grpc` 与 `RemoteBridge` 不编译，`lotus_grpc` 配了也 warn 一次后走本地（`/getid` 保持挂载）；`qr` → `qrcode` 不进树，`url_to_qrimage` 的 URL 原样保留 + warn；`oss` → `OssKind`/`OssConfig` 类型保留，`oss::upload` 直接回 `Error::HostingConfig`（调用点签名不变，告警一次后保留原引用）
+- **实现要点**：`IdMapRemoteMode` / `idmap_remote_mode` 从 `idmap/remote.rs` 移到 `idmap/mod.rs`（无 gRPC 时仍可用，用于 warn 降级）；`RemoteBackend` 的 `Grpc` 变体与 11 个分派分支按 feature 裁剪；`storage/build.rs` 在 `CARGO_FEATURE_GRPC` 缺失时早返回，不生成 proto 桩
+- **CI**（`.github/workflows/rust.yml`）：clippy job 增一条 `cargo clippy --workspace --no-default-features --all-targets --locked -- -D warnings`——no-feature 分支只在关掉时才编译，默认 clippy 覆盖不到，没有这条门禁等于没门
+- **取舍**：省掉的只有 `webui/dist` 内嵌资源 + `qrcode` + `tonic`（连带 `tonic-prost`/`prost`）；`image`/`sha2`/`redb` 仍被压缩、图床与存储链拉住；proto 的 build-dependencies 不支持 optional，小构建**也会编译** `tonic-prost-build`/`protoc-bin-vendored`（只是不生成桩），不要指望摆脱 protoc
+- **与 Go 的差异**：Go `-tags=small` 实际**不删 WebUI**（只桩掉 `handleSysInfo`），也不删 gRPC 服务端注册；三处刻意差异（真删 WebUI / QR 保留 URL / grpc+oss warn 而非静默）登记在 `reports/refactor/17-go-rust-parity.md` §F D16–D18 与 `docs/rust-handover.md` §6 ㉖–㉘
+- **文档**：`docs/rust-build.md`（新增「四能力 feature」表与 `-NoWebUI` 对比行）、`AGENTS.md`（精简版条目、`rust-embed` 与门禁说明）、parity §F、handover §6
+- **测试**：`cargo check --workspace --all-targets` / `cargo check -p gensokyo-bin --no-default-features --all-targets` 零警告；`cargo clippy --workspace --all-targets -- -D warnings` 与 `cargo clippy --workspace --no-default-features --all-targets -- -D warnings` 均 0；`cargo test --workspace` 全绿；`cargo fmt --all -- --check` 退出码 0；`cargo tree -p gensokyo-bin --no-default-features` 不含 `qrcode`/`tonic`/`rust-embed`，默认特性下三者都在；`cargo xtask build --no-webui --no-upx` 与 `cargo xtask build --no-upx` 的 SHA256 不同
+
 ### 矩阵对齐 Go 五平台 + 产物改名 gensokyo-rust-*（2026-11-19）
 
 `--all` 的平台集合改回 Go 主仓 `build.ps1` 的 5 个平台（linux×3 + windows×2），产物统一加 `rust` 标识；`--workers 2` 的缓存从 3 份压回 2 份。

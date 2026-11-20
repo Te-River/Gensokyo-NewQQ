@@ -3,8 +3,10 @@
 //! 表的定义、key 构造与 value 编码逐条对齐 Go `idmap/map_service.go`，差异见 crate 文档。
 
 pub(crate) mod encoding;
+#[cfg(feature = "grpc")]
 pub mod grpc;
 pub mod http_remote;
+#[cfg(feature = "grpc")]
 pub mod remote;
 
 mod batch;
@@ -29,6 +31,7 @@ use crate::echo::generate_row_id;
 use encoding::{decode_i64, encode_i64, normalize_identity, vuin_identity_key, vuin_prefix};
 use http_remote::HttpRemoteBridge;
 use lookup_cache::{LookupCache, LookupKey, LookupValue};
+#[cfg(feature = "grpc")]
 use remote::RemoteBridge;
 
 /// 身份库默认文件名（Go `openid-map.db` 的 redb 等价物）。
@@ -271,13 +274,18 @@ pub struct IdMapStore {
 /// /getid JSON（type 表见 `idmap/http_remote.rs`）。
 #[derive(Debug)]
 enum RemoteBackend {
+    #[cfg(feature = "grpc")]
     Grpc(RemoteBridge),
     Http(HttpRemoteBridge),
 }
 
+/// `grpc` 特性关闭时枚举只剩 `Http` 一个变体，每个分派点的 `match` 退化成单臂——
+/// 形状保持不变（调用点与 11 个分支点都不动），这里只让那条 lint 闭嘴。
+#[cfg_attr(not(feature = "grpc"), allow(clippy::match_single_binding))]
 impl RemoteBackend {
     fn store_idv2(&self, id: &str) -> Result<i64, StorageError> {
         match self {
+            #[cfg(feature = "grpc")]
             Self::Grpc(bridge) => Ok(bridge.store_idv2(id)?.row),
             Self::Http(bridge) => bridge.store_idv2(id),
         }
@@ -285,6 +293,7 @@ impl RemoteBackend {
 
     fn retrieve_row_by_idv2(&self, rowid: &str) -> Result<String, StorageError> {
         match self {
+            #[cfg(feature = "grpc")]
             Self::Grpc(bridge) => Ok(bridge.retrieve_row_by_idv2(rowid)?.id),
             Self::Http(bridge) => bridge.retrieve_row_by_idv2(rowid),
         }
@@ -292,6 +301,7 @@ impl RemoteBackend {
 
     fn retrieve_virtual_value_v2(&self, real_value: &str) -> Result<String, StorageError> {
         match self {
+            #[cfg(feature = "grpc")]
             Self::Grpc(bridge) => Ok(bridge.retrieve_virtual_value_v2(real_value)?.r#virtual),
             Self::Http(bridge) => Ok(bridge.retrieve_virtual_value_v2(real_value)?.1),
         }
@@ -299,6 +309,7 @@ impl RemoteBackend {
 
     fn update_virtual_value_v2(&self, old_vuin: i64, new_vuin: i64) -> Result<(), StorageError> {
         match self {
+            #[cfg(feature = "grpc")]
             Self::Grpc(bridge) => {
                 bridge.update_virtual_value_v2(old_vuin, new_vuin)?;
                 Ok(())
@@ -315,6 +326,7 @@ impl RemoteBackend {
         new_virtual_value_2: i64,
     ) -> Result<(), StorageError> {
         match self {
+            #[cfg(feature = "grpc")]
             Self::Grpc(bridge) => {
                 bridge.update_virtual_value_v2_pro(
                     old_virtual_value_1,
@@ -335,6 +347,7 @@ impl RemoteBackend {
 
     fn find_sub_keys_by_id_pro(&self, id: &str) -> Result<Vec<String>, StorageError> {
         match self {
+            #[cfg(feature = "grpc")]
             Self::Grpc(bridge) => Ok(bridge.find_sub_keys_by_id_pro(id)?.keys),
             Self::Http(bridge) => bridge.find_sub_keys_by_id_pro(id),
         }
@@ -347,6 +360,7 @@ impl RemoteBackend {
         value: &str,
     ) -> Result<(), StorageError> {
         match self {
+            #[cfg(feature = "grpc")]
             Self::Grpc(bridge) => {
                 bridge.write_config_v2(section, subtype, value)?;
                 Ok(())
@@ -357,6 +371,7 @@ impl RemoteBackend {
 
     fn read_config_v2(&self, section: &str, subtype: &str) -> Result<String, StorageError> {
         match self {
+            #[cfg(feature = "grpc")]
             Self::Grpc(bridge) => Ok(bridge.read_config_v2(section, subtype)?.value),
             Self::Http(bridge) => bridge.read_config_v2(section, subtype),
         }
@@ -364,6 +379,7 @@ impl RemoteBackend {
 
     fn delete_config_v2(&self, section: &str, subtype: &str) -> Result<(), StorageError> {
         match self {
+            #[cfg(feature = "grpc")]
             Self::Grpc(bridge) => {
                 bridge.delete_config_v2(section, subtype)?;
                 Ok(())
@@ -374,6 +390,7 @@ impl RemoteBackend {
 
     fn store_cache_v2(&self, id: &str) -> Result<i64, StorageError> {
         match self {
+            #[cfg(feature = "grpc")]
             Self::Grpc(bridge) => Ok(bridge.store_cache_v2(id)?.row),
             Self::Http(bridge) => bridge.store_cache_v2(id),
         }
@@ -381,9 +398,46 @@ impl RemoteBackend {
 
     fn retrieve_row_by_cache_v2(&self, rowid: &str) -> Result<String, StorageError> {
         match self {
+            #[cfg(feature = "grpc")]
             Self::Grpc(bridge) => Ok(bridge.retrieve_row_by_cache_v2(rowid)?.id),
             Self::Http(bridge) => bridge.retrieve_row_by_cache_v2(rowid),
         }
+    }
+}
+
+/// idmap 远程模式（设计 §3.1）：只由三个配置开关决定；gRPC 服务端的启动是 boot 的事，
+/// 不在本判定内。
+///
+/// 定义在这里而不是 `idmap/remote.rs`：`grpc` 特性关闭时判定函数仍要可用，runtime 据此
+/// 把 `lotus_grpc=true` 降级成 warn + 本地，而不是静默忽略配置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdMapRemoteMode {
+    /// 全本地：lotus 关闭，或 lotus+HTTP 且 `without_idmaps`。
+    Local,
+    /// gRPC 客户端：可远程方法经 [`RemoteBridge`] 走远端。
+    GrpcClient,
+    /// HTTP 远端 `/getid`（`lotus && !lotus_grpc && !without_idmaps`）。
+    HttpRemote,
+}
+
+/// 按配置开关判定 idmap 远程模式（Go `idmap/service.go` 各 v2 函数的分支判定顺序）。
+///
+/// **Go 怪癖，照抄**：gRPC 分支不检查 `without_idmaps`——`lotus && lotus_grpc` 时即使
+/// `without_idmaps=true` 仍返回 [`IdMapRemoteMode::GrpcClient`]（Go `service.go:676`
+/// 只看 `GetLotusGrpc() && GetLotusValue()`）；`without_idmaps` 只挡 HTTP 分支。
+/// 该组合的 warn 日志留给 boot 装配处。
+#[must_use]
+pub fn idmap_remote_mode(lotus: bool, lotus_grpc: bool, without_idmaps: bool) -> IdMapRemoteMode {
+    if !lotus {
+        return IdMapRemoteMode::Local;
+    }
+    if lotus_grpc {
+        return IdMapRemoteMode::GrpcClient;
+    }
+    if without_idmaps {
+        IdMapRemoteMode::Local
+    } else {
+        IdMapRemoteMode::HttpRemote
     }
 }
 
@@ -445,6 +499,7 @@ impl IdMapStore {
     /// 远程命中不写本地 redb；远程错误直接上抛 [`StorageError::Remote`]，不做运行时
     /// 本地回退（避免双写分裂）。批量 API（[`IdMapWriteBatch`]）与本地-only 方法
     /// （名称缓存、最新消息、`list_identities` 等）不受影响。
+    #[cfg(feature = "grpc")]
     #[must_use]
     pub fn with_remote(mut self, bridge: RemoteBridge) -> Self {
         self.remote = Some(RemoteBackend::Grpc(bridge));
@@ -452,7 +507,7 @@ impl IdMapStore {
     }
 
     /// 挂 HTTP 回退桥（`lotus && !lotus_grpc && !without_idmaps`，设计 §2.3/§3.1）：
-    /// 与 [`IdMapStore::with_remote`] 同一批分支点改走远端 `/getid`，语义相同
+    /// 与 `with_remote`（gRPC）同一批分支点改走远端 `/getid`，语义相同
     /// （远程命中不写本地、Err 直抛不回退）。
     #[must_use]
     pub fn with_http_remote(mut self, bridge: HttpRemoteBridge) -> Self {

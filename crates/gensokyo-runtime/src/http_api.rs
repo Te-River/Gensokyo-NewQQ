@@ -34,6 +34,7 @@ use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Form, FromRequest, Multipart, Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
+#[cfg(feature = "webui")]
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -49,6 +50,7 @@ use crate::state::AppState;
 /// action 请求体上限，与 `Bytes` 提取器（axum `DEFAULT_LIMIT`）的 2 MiB 对齐。
 ///
 /// action 门自己要读 body，不再经过提取器，故显式带上同一上限。
+#[cfg(feature = "webui")]
 const MAX_ACTION_BODY: usize = 2 * 1024 * 1024;
 
 /// 健康检查正文；`/health` 与未挂 WebUI 时的 `/` 共用。
@@ -308,6 +310,7 @@ pub(crate) fn router(state: AppState) -> Router {
 /// 中间件包住路由与回退（axum 的 `Router::layer` 同时作用于两者），所以门能拦住本该由
 /// WebUI 静态回退处理的 `POST`——那是 action 的唯一去处。后 merge 进来的 webhook 路由不会
 /// 被这层包住，`POST webhook_path` 仍是回调（见 [`crate::boot`]）。
+#[cfg(feature = "webui")]
 pub(crate) fn with_webui_router(webui: Router, state: AppState) -> Router {
     webui
         .merge(health_router())
@@ -380,6 +383,7 @@ fn auth_failed() -> Response {
 }
 
 /// 优先级判据：`POST` 且不落在 WebUI 的 `/api` 前缀下才是 action。
+#[cfg(feature = "webui")]
 async fn action_gate(State(state): State<AppState>, request: Request, next: Next) -> Response {
     if request.method() != Method::POST || is_webui_path(request.uri().path()) {
         return next.run(request).await;
@@ -406,6 +410,7 @@ async fn action_gate(State(state): State<AppState>, request: Request, next: Next
 }
 
 /// `/api` 与 `/api/**` 归 WebUI（登录、登出、配置查询）。
+#[cfg(feature = "webui")]
 fn is_webui_path(path: &str) -> bool {
     path == "/api" || path.starts_with("/api/")
 }
@@ -420,14 +425,18 @@ mod tests {
     use axum::http::StatusCode;
     use gensokyo_config::ConfigManager;
     use gensokyo_storage::ShortUrlStore;
+    #[cfg(feature = "webui")]
     use gensokyo_webui::{WebUi, WebUiState};
     use serde_json::Value;
     use tempfile::TempDir;
     use tower::ServiceExt;
 
-    use super::{hex_lower, is_valid_token, is_webui_path, short_url_router};
+    #[cfg(feature = "webui")]
+    use super::is_webui_path;
+    use super::{hex_lower, is_valid_token, short_url_router};
     use crate::state::AppState;
 
+    #[cfg(feature = "webui")]
     #[test]
     fn api_prefix_belongs_to_webui_only_as_a_path_segment() {
         assert!(is_webui_path("/api"));
@@ -687,6 +696,7 @@ mod tests {
 
     /// 生产装配（`boot.rs::http_app`）：WebUI 路由先包上 `action_gate`，`/url` 再 merge 进来。
     /// 门只作用于被它包住的路由，短链因此既不被 action 吞掉、也不落 WebUI 的 SPA 回退。
+    #[cfg(feature = "webui")]
     #[tokio::test]
     async fn url_routes_merged_after_the_action_gate_are_not_wrapped_by_it() {
         let (dir, config) = config("");

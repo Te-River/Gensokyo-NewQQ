@@ -191,6 +191,7 @@ pub mod fetch;
 pub mod hosting;
 pub mod image;
 pub mod oss;
+#[cfg(feature = "qr")]
 pub mod qr;
 pub mod redirect;
 pub mod silk;
@@ -217,6 +218,7 @@ pub use image::image_size;
 pub use oss::{
     AliyunOssConfig, BaiduBosConfig, OssConfig, OssKind, TencentCosConfig, upload as oss_upload,
 };
+#[cfg(feature = "qr")]
 pub use qr::qr_png_base64;
 pub use redirect::{
     LazyHttpProbe, ProbeResponse, RedirectProbe, is_short_lived_image_url, resolve_redirect,

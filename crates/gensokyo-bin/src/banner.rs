@@ -29,8 +29,12 @@ const CYAN: &str = "\x1b[36m";
 /// 复位（ANSI SGR 0）。
 const RESET: &str = "\x1b[0m";
 
-/// WebUI 未启用时的控制台地址占位。
+/// WebUI 未启用时的控制台地址占位（`disable_webui=true`）。
+#[cfg(feature = "webui")]
 const WEBUI_OFF: &str = "（WebUI 未启用，disable_webui=true）";
+/// 本构建未编入 WebUI（`--no-default-features`）时的控制台地址占位。
+#[cfg(not(feature = "webui"))]
+const WEBUI_OFF: &str = "（本构建未编入 WebUI，无控制台）";
 /// `server_dir` 未配置（或仍是模板占位符）时的公网地址占位。
 const NO_SERVER_DIR: &str = "（未配置 server_dir，仅本机可访问）";
 

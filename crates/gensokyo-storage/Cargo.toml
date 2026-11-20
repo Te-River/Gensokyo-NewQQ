@@ -7,6 +7,13 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# 四能力之一：idmap 的 IDMapService gRPC（tonic）。关闭后 `idmap::grpc` 与
+# `idmap::remote`（远端桥）不编译，`idmap_remote_mode` 仍留在 `idmap` 里，
+# runtime 据此把 `lotus_grpc=true` 降级成 warn + 本地。
+default = ["grpc"]
+grpc = ["dep:tonic", "dep:tonic-prost", "dep:prost"]
+
 [dependencies]
 gensokyo-core.workspace = true
 redb.workspace = true
@@ -20,9 +27,9 @@ thiserror.workspace = true
 tracing.workspace = true
 # 迁移备份名的时间戳（Go `time.Now().Format("20060102-150405")`）；已在 workspace 依赖图
 time = { workspace = true, features = ["local-offset"] }
-tonic.workspace = true
-tonic-prost.workspace = true
-prost.workspace = true
+tonic = { workspace = true, optional = true }
+tonic-prost = { workspace = true, optional = true }
+prost = { workspace = true, optional = true }
 # lotus gRPC 客户端 RemoteBridge 专职桥线程（P55-P1）：独立 current_thread runtime + 超时
 tokio = { workspace = true, features = ["rt", "net", "time"] }
 # lotus HTTP 回退桥（P55-P3）：blocking 客户端在专职桥线程构造。TLS 沿用仓库惯例

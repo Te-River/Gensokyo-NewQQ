@@ -24,6 +24,7 @@ use std::fmt;
 use std::io::{IsTerminal as _, Write as _};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(feature = "webui")]
 use gensokyo_webui::logs::{self, LogEntry};
 use tracing::field::{Field, Visit};
 use tracing::level_filters::LevelFilter;
@@ -288,6 +289,7 @@ impl Subscriber for StderrSubscriber {
         let time = log_time();
 
         // WebUI 日志流：与 stderr 同一份过滤结果，等价 Go `mylog.emitLog` → `logChannel`。
+        #[cfg(feature = "webui")]
         logs::hub().push(LogEntry {
             time: time.clone(),
             level: metadata.level().to_string(),

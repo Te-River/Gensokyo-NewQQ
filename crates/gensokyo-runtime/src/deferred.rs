@@ -187,12 +187,14 @@ use gensokyo_core::{Error, Ob11Id, Result};
 use gensokyo_media::source::FILE_PREFIX;
 use gensokyo_media::{HostingKind, ImageKind, MediaSource, OssKind, sniff_image};
 
+#[cfg(feature = "qr")]
+use gensokyo_protocol::MessageContent;
 use gensokyo_protocol::cqcode;
 use gensokyo_protocol::event::NoticeEvent;
 use gensokyo_protocol::outbound::{
     InputNotifyPayload, MarkdownPayload, StreamKind, StreamPayload, markdown_content,
 };
-use gensokyo_protocol::{Event, MediaRef, MessageContent, OutboundPlan};
+use gensokyo_protocol::{Event, MediaRef, OutboundPlan};
 use gensokyo_qq::dto::message::{MessageCard, MessageCardContent};
 use gensokyo_qq::dto::{
     FileUpload, FileUploadMergeRequest, FileUploadPartFinishRequest, FileUploadPrepareRequest,
@@ -423,6 +425,10 @@ async fn url_transform_stage(
     openid: &str,
     depth: usize,
 ) -> Option<SendRequest> {
+    // `qr` 关闭时没有二维码子发送，`openid` 只服务它的 wakeup notice。
+    #[cfg(not(feature = "qr"))]
+    let _ = openid;
+
     if depth > 0 {
         return None;
     }
@@ -434,6 +440,9 @@ async fn url_transform_stage(
     }
     let transformed =
         crate::url_pipeline::transform(&plan.message.text, &settings, deps.url_mint).await;
+    // Go `message_parser.go:1749-1793` 的 QR 阶段（`qr` 特性关闭时 `transform` 已保留
+    // 原 URL，`qr_urls` 恒空，这里不编译）。
+    #[cfg(feature = "qr")]
     for url in &transformed.qr_urls {
         match gensokyo_media::qr::qr_png_base64(url, settings.get_qr_size()) {
             Ok(base64_png) => {

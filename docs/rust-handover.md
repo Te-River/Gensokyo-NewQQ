@@ -110,7 +110,7 @@
 
 ## 6. 已知缺口与有意差异（「不要当成 bug」清单）
 
-下面 25 条都是**已裁决 / 已登记**的差异：看到时先查证据列，不要直接按「和 Go 不一样」开修。真正待办的只在 §7。
+下面 28 条都是**已裁决 / 已登记**的差异：看到时先查证据列，不要直接按「和 Go 不一样」开修。真正待办的只在 §7。
 
 | # | 项 | 说明 | 证据 |
 |---|----|------|------|
@@ -140,6 +140,9 @@
 | ㉔ | 入站 `sender.nickname` / `sender.card` 取 `member_nickname` | 群聊 `nickname` 与 `card` 都按 `card_and_nick` 配置（非空，覆盖两者）> `member_nickname` > `username`（`username` 只写 nickname、不写 card）；私聊 `member_nickname > username`、不设 card。与 Go `e6c7e32` 同口径。**唯一分侧**：`author` 缺席且配置非空时 Go 先判配置仍回配置值（`Processor/nickname.go:12-14`），Rust 先判 `author` → `("", None)`——畸形事件本来就没有发送者 | `crates/gensokyo-runtime/src/inbound.rs`（`resolve_nickname_and_card` 与群/私聊两个调用点）；Go `Processor/nickname.go`、`Processor/ProcessC2CMessage.go:132-146`；登记 parity §F D13 |
 
 | ㉕ | 敏感词过滤**不覆盖** `member_nickname` | 入站过滤只改写 `author.username`，而 `sender.nickname`/`card` 现在优先取 `member_nickname` ⇒ 含敏感词的群名片会原样上报。Go 侧同样只过滤 `Username`（`main.go:772-773`、`:1131-1132`），属两侧同现状；若要补需两仓同步 | `crates/gensokyo-runtime/src/inbound.rs`（过滤点与合成点）；Go `main.go:772-773`、`:1131-1132` |
+| ㉖ | 精简构建**真删 WebUI**（Go small 不删） | Go `-tags=small` 只把 `handleSysInfo` 换成全 0 假数据，`go:embed dist/*` 与 `/webui/*` 路由保留（`webui/monitor_stub.go:11-35`）；Rust `--no-default-features`（即 `cargo xtask build --no-webui`）让 `gensokyo-webui` 整个不在依赖图里：`/` 回健康文本、`/api/**` 全部走 action、`/api/logs` 不存在、横幅给「本构建未编入 WebUI」。配置 `disable_webui=false` 时启动 warn 一次。**看到精简版没有管理页不是 bug** | `crates/gensokyo-bin/src/banner.rs`、`crates/gensokyo-runtime/src/{boot.rs,http_api.rs}`、`crates/gensokyo-bin/src/logging.rs`；parity §F D16 |
+| ㉗ | 精简构建的 QR **保留 URL** | Go small 返回 "QR code generation disabled in small build" 且调用点删掉原 URL（`handlers/qrcode_stub.go:8-10`、`message_parser.go:1766-1775`）；Rust `qr` feature 关闭时 URL 原样保留（不删、不换短链）+ warn 一次——丢 URL 等于静默丢用户内容 | `crates/gensokyo-runtime/src/url_pipeline.rs`、`crates/gensokyo-media/src/lib.rs`；parity §F D17 |
+| ㉘ | 精简构建的 gRPC / OSS 是 **warn 降级**、不是静默 | Go small：gRPC 服务端与客户端都不起（`main_grpc_stub.go:6-8`）、上传函数 `return "", nil`、`CheckText` 恒 true。Rust：`lotus_grpc` 与 `oss_type` 1~3 各 warn 一次后降级（idmap 走本地、`/getid` 保持挂载；内置 OSS 回 `Error::HostingConfig` 并保留原引用）。**看到这两条 warn 不是配置写错** | `crates/gensokyo-runtime/src/boot.rs`、`crates/gensokyo-media/src/oss/mod.rs`；parity §F D18 |
 
 ## 7. 未完成项与下一步
 

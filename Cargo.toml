@@ -31,11 +31,14 @@ gensokyo-core = { path = "crates/gensokyo-core", version = "0.1.0" }
 gensokyo-config = { path = "crates/gensokyo-config", version = "0.1.0" }
 gensokyo-protocol = { path = "crates/gensokyo-protocol", version = "0.1.0" }
 gensokyo-qq = { path = "crates/gensokyo-qq", version = "0.1.0" }
-gensokyo-storage = { path = "crates/gensokyo-storage", version = "0.1.0" }
-gensokyo-media = { path = "crates/gensokyo-media", version = "0.1.0" }
+# `default-features = false` 与 reqwest 同理必须上提：四个能力的开关由 bin 的 feature
+# 逐层转发（bin → runtime → storage/media），成员不能覆写该字段。默认特性仍在各 crate 里
+# 各自声明，`cargo build` 行为不变。
+gensokyo-storage = { path = "crates/gensokyo-storage", version = "0.1.0", default-features = false }
+gensokyo-media = { path = "crates/gensokyo-media", version = "0.1.0", default-features = false }
 gensokyo-actions = { path = "crates/gensokyo-actions", version = "0.1.0" }
-gensokyo-runtime = { path = "crates/gensokyo-runtime", version = "0.1.0" }
-gensokyo-webui = { path = "crates/gensokyo-webui", version = "0.1.0" }
+gensokyo-runtime = { path = "crates/gensokyo-runtime", version = "0.1.0", default-features = false }
+gensokyo-webui = { path = "crates/gensokyo-webui", version = "0.1.0", default-features = false }
 
 # 异步运行时 / 网络
 tokio = "1.54.1"

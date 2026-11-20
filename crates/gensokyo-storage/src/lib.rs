@@ -102,8 +102,12 @@ pub mod union_cache;
 pub use botstats::{BotStats, BotStatsStore, DEFAULT_BOTSTATS_PATH};
 pub use echo::{Clock, EchoStore, MessageGroupPair, MessageScene};
 pub use error::StorageError;
+#[cfg(feature = "grpc")]
 pub use idmap::grpc::{IdMapClient, IdMapService};
-pub use idmap::{IdMapOptions, IdMapStore, USER_NAME_SWEEP_THRESHOLD, UserInfoRow};
+pub use idmap::{
+    IdMapOptions, IdMapRemoteMode, IdMapStore, USER_NAME_SWEEP_THRESHOLD, UserInfoRow,
+    idmap_remote_mode,
+};
 pub use importer::{ImportError, ImportOptions, ImportReport, OnVuinConflict};
 pub use short_url::{
     DEFAULT_SHORT_URL_PATH, ShortUrlStore, UrlRejection, is_malicious, redirect_target,

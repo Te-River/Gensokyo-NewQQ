@@ -449,7 +449,8 @@ pub async fn serve(faststart: bool, auto_import: bool) -> Result<(), StartupErro
 
     // 横幅要用的配置：`start_with_config` 会取走 `Arc<ConfigManager>`，先留一份快照。
     let settings = loaded.config.snapshot();
-    let webui_enabled = !settings.get_disable_webui();
+    // 本构建没编 WebUI 时，`disable_webui=false` 也给不出控制台地址（占位文案见 `banner`）。
+    let webui_enabled = cfg!(feature = "webui") && !settings.get_disable_webui();
     let started = start_with_config(loaded.config, RuntimeOptions::default()).await?;
     println!(
         "已注册 action: {} 个（{}）",

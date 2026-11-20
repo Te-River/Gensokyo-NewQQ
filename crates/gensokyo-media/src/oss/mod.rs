@@ -109,16 +109,29 @@ pub struct OssConfig {
 /// 按 `oss_type` 上传一份图片字节，返回可公开访问的 URL。
 ///
 /// **单次尝试**（Go `oss` 包无重试）：失败原样返回 [`Error`]，由调用方决定保留原引用。
+///
+/// `oss` 特性关闭时（`--no-default-features`）不编译三个后端的实现，这里直接回
+/// [`Error::HostingConfig`]：类型与调用点签名都不变，调用方照旧"告警一次 + 保留原引用"。
 pub async fn upload(
     kind: OssKind,
     transport: Arc<dyn HostingTransport>,
     config: &OssConfig,
     data: &[u8],
 ) -> Result<String> {
-    match kind {
-        OssKind::TencentCos => tencent::upload(transport, &config.tencent, data).await,
-        OssKind::BaiduBos => baidu::upload(transport, &config.baidu, data).await,
-        OssKind::AliyunOss => aliyun::upload(transport, &config.aliyun, data).await,
+    #[cfg(feature = "oss")]
+    {
+        match kind {
+            OssKind::TencentCos => tencent::upload(transport, &config.tencent, data).await,
+            OssKind::BaiduBos => baidu::upload(transport, &config.baidu, data).await,
+            OssKind::AliyunOss => aliyun::upload(transport, &config.aliyun, data).await,
+        }
+    }
+    #[cfg(not(feature = "oss"))]
+    {
+        let _ = (kind, transport, config, data);
+        Err(Error::HostingConfig(
+            "本构建未编入内置云 OSS（feature oss 关闭）：oss_type 1~3 无法上传".to_owned(),
+        ))
     }
 }
 

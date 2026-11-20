@@ -12,6 +12,13 @@
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // `grpc` 特性关闭时不生成桩：`tonic` 不在依赖图里，`idmap::grpc` 也不编译。
+    // 构建依赖（tonic-prost-build / protoc-bin-vendored）仍是编译期依赖——Cargo 的
+    // build-dependencies 不支持 optional，它们会被编出来但没有产物消费者。
+    if std::env::var_os("CARGO_FEATURE_GRPC").is_none() {
+        return Ok(());
+    }
+
     let proto_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("proto");
     let proto = proto_dir.join("idmap.proto");
     println!("cargo:rerun-if-changed={}", proto.display());

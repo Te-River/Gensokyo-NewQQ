@@ -284,17 +284,32 @@ pub async fn transform(text: &str, cfg: &Settings, mint: Option<&UrlMint>) -> Ur
     let to_qr = cfg.get_url_to_qrimage();
 
     let mut out = String::with_capacity(text.len());
+    #[cfg(feature = "qr")]
     let mut qr_urls = Vec::new();
+    #[cfg(not(feature = "qr"))]
+    let qr_urls: Vec<String> = Vec::new();
     let mut cursor = 0usize;
     let mut mint_missing = 0usize;
+    // `qr` 特性关闭时 `url_to_qrimage` 的 URL 原样保留（不删、也不换短链），只计数、
+    // 循环外告警一次——Go small 构建是删 URL 并回一句文案，属刻意差异（parity §F）。
+    #[cfg(not(feature = "qr"))]
+    let mut qr_unavailable = 0usize;
     for span in gensokyo_protocol::xurls::find_urls(text) {
         out.push_str(&text[cursor..span.start]);
         let url = &text[span.start..span.end];
         let replacement = if hide_ip {
             String::new()
         } else if to_qr {
-            qr_urls.push(url.to_owned());
-            String::new()
+            #[cfg(feature = "qr")]
+            {
+                qr_urls.push(url.to_owned());
+                String::new()
+            }
+            #[cfg(not(feature = "qr"))]
+            {
+                qr_unavailable += 1;
+                url.to_owned()
+            }
         } else {
             match mint {
                 Some(mint) => mint.mint(url, cfg).await,
@@ -313,6 +328,13 @@ pub async fn transform(text: &str, cfg: &Settings, mint: Option<&UrlMint>) -> Ur
     out.push_str(&text[cursor..]);
     if mint_missing > 0 {
         tracing::warn!(count = mint_missing, "短链 mint 未装配，URL 原文保留不改写");
+    }
+    #[cfg(not(feature = "qr"))]
+    if qr_unavailable > 0 {
+        tracing::warn!(
+            count = qr_unavailable,
+            "本构建未编入 QR（feature qr 关闭）：url_to_qrimage 的 URL 原样保留，未转成二维码"
+        );
     }
     UrlTransform { text: out, qr_urls }
 }
