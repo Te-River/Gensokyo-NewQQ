@@ -168,6 +168,8 @@ P81 收口空消息回执时发现响应形态疑点，专项审计（黑板 `p8
 
 | D11 | 分页游标位置（P86d-1） | 游标在 `data` 内：join request list `handlers/get_group_join_request_list.go:47-52`、panel list `get_panel_list.go:39-47`、blacklist `:29`；member list **无游标**（`get_group_member_list.go:228-257`） | 顶层 `next_cursor` 扩展已删除；分页 action 游标在 `data` 内；member list 不输出 | **已修（P86d-1）**：另登记 `mark_msg_as_read` 的 data（Go gjson 零值转储 vs Rust null）与成员列表只回一页 | High |
 
-> 结论：D1–D4、D6、D9 是正常路径的**硬性外部 JSON 差异**，已修（P86a→P86b）；D5/D7/D8 为 Go 的错误路径怪癖，Rust 保留更安全行为并登记为刻意分侧；D10 已由 P86c 收口；D11 已由 P86d-1 收口。剩余 P86d-2（SSE/forward）与登记项（成员列表缺 `message`/只回一页、mark read 的 data、D 类幽灵 action）。
+| D12 | 数组段路径的未知类型与数组形 `remove`（2026-11-20） | 段分发表没有 `face` / `node` / `poke` / `group_info` / `json` / `remove` 等 `case` ⇒ 落 `default:` 只 `mylog.Printf("Unhandled segment type: %s")`、不追加正文（`handlers/message_parser.go:1252-1254`；`grep '"remove"' handlers/message_parser.go` 零命中 ⇒ 数组形 `remove` 同样落 default） | 两者此前都按字面拼进正文（`[CQ:face,id=14]` / `[CQ:remove,user_id=1]` 发进群，官方 api-v2 并不认） | **已修（2026-11-20）**：数组段路径（段无 `raw` 原文切片）丢弃 + `tracing::warn!`（`outbound.rs` 的 `_` 臂与 `member`/`set_group`/`remove` 臂）；字符串 CQ 路径维持 B4 的 `tok.Raw` 字面口径不变 |
+
+> 结论：D1–D4、D6、D9 是正常路径的**硬性外部 JSON 差异**，已修（P86a→P86b）；D5/D7/D8 为 Go 的错误路径怪癖，Rust 保留更安全行为并登记为刻意分侧；D10 已由 P86c 收口；D11 已由 P86d-1 收口；D12 为出站数组段的未知段 / `remove` 口径对齐。剩余 P86d-2（SSE/forward）与登记项（成员列表缺 `message`/只回一页、mark read 的 data、D 类幽灵 action）。
 
 （本文由三分域审计汇总；A/B/C/D 表与 §E 状态已按 R4k 波次回写，时点见 `docs/rust-m0.md`。）

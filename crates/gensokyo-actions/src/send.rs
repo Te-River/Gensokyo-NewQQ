@@ -278,7 +278,7 @@ impl<'de> Deserialize<'de> for MessageOut {
 
         let wire = Wire::deserialize(deserializer)?;
         // 线上形态的段不带 `raw`，管理码（remove）按字符串路径补回——否则私聊撤回会退化成
-        // 字面发出（P83 F1）。用户段形态的 remove 走 `from_parts`（严格留字面），不受影响。
+        // 字面发出（P83 F1）。用户数组形态的 remove 在 `from_segments` 里已丢弃，不受影响。
         Ok(Self::with_plan(
             wire.text,
             OutboundPlan::from_wire_segments(&wire.plan),

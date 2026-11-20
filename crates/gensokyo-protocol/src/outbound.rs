@@ -20,7 +20,8 @@
 //!
 //! 没有 `foundItems` key 的段与**形态不命中**的段按 Go legacy（默认 `cq_parse_mode`）分三类：
 //!
-//! 1. **字面保留**：写回 [`OutboundPlan::text`]，跟着正文一起发出去。
+//! 1. **字面保留**（仅**字符串 CQ 路径**——段由 [`crate::cqcode::parse`] 产出、带原文切片）：
+//!    写回 [`OutboundPlan::text`]，跟着正文一起发出去。
 //!    - 无消费点的码：`face` / `node` / `poke` / `group_info` / `json` / 未知码——Go 的 `cqparse`
 //!      没有 handler 时回填 `tok.Raw`（`handlers/cqparse/walk.go:61-72`，金样
 //!      `cq_legacy_semantics_test.go:173-174`）；
@@ -33,13 +34,16 @@
 //!    `literal_segments_round_trip_byte_for_byte`）。
 //! 2. **静默丢弃**：`ark`（Go 在 `parseMessageContent` 之后由 `ProcessCQInboundOnlyCodes`
 //!    整段剥掉，`handlers/cqcode.go:198-205`、`handlers/cqcode_pipeline.go:57-59`）与空 `card`
-//!    （`handlers/cqcode_pipeline.go:124-130`：cardData 为空时不入 `foundItems`、正文也不留）。
+//!    （`handlers/cqcode_pipeline.go:124-130`：cardData 为空时不入 `foundItems`、正文也不留）；
+//!    **数组段路径**（段来自 JSON、无原文切片）的未知段类型与数组形 `remove` 同样丢弃——Go 的
+//!    消息段分发没有对应 `case`，落 `default:` 只打一条日志、不追加正文
+//!    （`handlers/message_parser.go:1252-1254`），Rust 另打 `warn!` 留痕。
 //! 3. **进 [`OutboundPlan::admin_ops`]**：`member` / `set_group` / `remove`——Go 是**真执行**
 //!    管理动作（`handlers/message_parser.go:1166-1173`、`:1175-1181`、`:1611-1617` 还原
 //!    CQ → `handlers/cqcode.go:235-240` 踢人 / 禁言 / 撤回），P83 起同样解析成 [`AdminOp`]
-//!    交 runtime 执行；L1 解析期缺陷（缺必填 / 未知 action / 段形态 remove）仍按 Go 口径
-//!    字面留在正文（`member` 例外：Go `cqcode.go:331` 对它无条件吞码，见 [`OutboundPlan::from_segments`]），
-//!    `extra` 只留作下游未知段的防御桶。
+//!    交 runtime 执行；L1 解析期缺陷（缺必填 / 未知 action）仍按 Go 口径字面留在正文
+//!    （仅字符串路径，数组形 `remove` 见上条丢弃；`member` 例外：Go `cqcode.go:331` 对它
+//!    无条件吞码，见 [`OutboundPlan::from_segments`]），`extra` 只留作下游未知段的防御桶。
 //!
 //! `avatar` 走 Go「段路径 / `cqparse`」口径：带 `qq` 的段进 [`OutboundPlan::avatars`]，由 runtime
 //! 反查 openid 后拼接 `q.qlogo.cn` 地址发真图（`handlers/message_parser.go:991-1016`、
@@ -853,8 +857,10 @@ impl OutboundPlan {
     /// - `text` 段按原样拼接进 [`Self::text`]；`at` 段也写回 `text`（保留 CQ 字面量），
     ///   与 Go 的 `messageText` 一致。
     /// - `reply` 段取第一个，落到 [`Self::reply_msg_id`]。
-    /// - 无消费点 / 形态不命中的段按字面写回 `text`，`ark` 与空 `card` 静默丢弃，
-    ///   `member` / `set_group` / `remove` 进 [`Self::admin_ops`]（三类分界见模块文档）。
+    /// - 无消费点 / 形态不命中的段：字符串路径按字面写回 `text`、**数组路径丢弃**
+    ///   （Go 的段分发落 `default:`，`message_parser.go:1252-1254`）；`ark` 与空 `card`
+    ///   两侧都静默丢弃；`member` / `set_group` / `remove` 进 [`Self::admin_ops`]
+    ///   （三类分界见模块文档）。
     #[must_use]
     pub fn from_segments(segments: &[Segment]) -> Self {
         let mut plan = Self::default();
@@ -977,10 +983,11 @@ impl OutboundPlan {
                 // member / set_group / remove：P83 起解析成类型化 AdminOp，运行期由
                 // gensokyo_runtime::cq_admin 执行（Go message_parser.go:1166-1181、:1611-1617
                 // 还原 CQ 文本 → cqcode.go:235-240 分派真执行）。L1 解析期缺陷（缺必填 /
-                // 未知 action / type 非法 / user_ids 空 / 段形态 remove）按 Go 的 return
-                // match 原样留字面；`member` 例外——Go cqcode.go:331 对它无条件 `return ""`，
-                // 缺 type / type 非法同样吞码（m3，P83）。数值非法（duration / enable /
-                // approve）以 raw_* 形态带到运行期按 L2 大声拒绝（设计 §5）。
+                // 未知 action / type 非法 / user_ids 空）按 Go 的 return match 原样留字面；
+                // `member` 例外——Go cqcode.go:331 对它无条件 `return ""`，缺 type / type
+                // 非法同样吞码（m3，P83）；数组形 `remove` 见下（Go 无 case，丢弃）。
+                // 数值非法（duration / enable / approve）以 raw_* 形态带到运行期按 L2 大声
+                // 拒绝（设计 §5）。
                 "member" | "set_group" | "remove" => match admin_op_from_segment(segment) {
                     Some(op) => plan.admin_ops.push(op),
                     None if segment.kind == "member" => {
@@ -988,6 +995,14 @@ impl OutboundPlan {
                             kind = %segment.kind,
                             raw_cq = %segment.raw_or_cq(),
                             "[CQ 管理码] member L1 缺陷，按 Go 口径吞码（不进正文）"
+                        );
+                    }
+                    // 数组形 remove（无原文切片）：Go 的消息段分发没有 `case "remove"`，
+                    // 落 `default:` 只打日志（message_parser.go:1252-1254）⇒ 不执行也不留正文
+                    None if segment.kind == "remove" && segment.raw.is_none() => {
+                        tracing::warn!(
+                            kind = %segment.kind,
+                            "[CQ 管理码] 数组形 remove 段不支持，已丢弃（对齐 Go）"
                         );
                     }
                     None => {
@@ -1000,10 +1015,20 @@ impl OutboundPlan {
                         push_literal(&mut plan, segment);
                     }
                 },
-                // face / node / poke / group_info / json / 未知码：Go 的 cqparse 没有消费点时
+                // face / node / poke / group_info / json / 未知码：字符串路径按 Go 的 cqparse
                 // 回填 `tok.Raw`（cqparse/walk.go:61-72；金样 cq_legacy_semantics_test.go:173-174）
-                // ⇒ 逐字节留在正文
-                _ => push_literal(&mut plan, segment),
+                // ⇒ 逐字节留在正文；数组路径没有可回填的原文，Go 的段分发也落 `default:` 只打
+                // 日志（message_parser.go:1252-1254）⇒ 丢弃，不把官方 API 不认的字面发进群。
+                _ => {
+                    if segment.raw.is_some() {
+                        push_literal(&mut plan, segment);
+                    } else {
+                        tracing::warn!(
+                            segment_type = %segment.kind,
+                            "未支持的 OneBot 消息段，已丢弃（对齐 Go）"
+                        );
+                    }
+                }
             }
         }
 
@@ -1015,8 +1040,8 @@ impl OutboundPlan {
     ///
     /// [`Segment`] 的线上形态只写 `data` / `type`，解析期挂上的 `raw` 不落地（`segment.rs`）；
     /// 而 `remove` 的「只认字符串路径」判定（[`admin_op_from_segment`]）依赖 `raw`。计划里的
-    /// `remove` 段只可能由 [`AdminOp::to_segment`] 产生——用户段形态的 remove 在
-    /// [`Self::from_segments`] 里已写成正文——所以这里统一按字符串路径补回 `raw`，
+    /// `remove` 段只可能由 [`AdminOp::to_segment`] 产生——用户数组形态的 remove 在
+    /// [`Self::from_segments`] 里已丢弃——所以这里统一按字符串路径补回 `raw`，
     /// 否则私聊 `[CQ:remove]` 会退化成字面发出（P83 F1）。
     #[must_use]
     pub fn from_wire_segments(segments: &[Segment]) -> Self {
@@ -1176,7 +1201,7 @@ fn merged_user_ids(segment: &Segment, action: &str) -> Vec<String> {
 /// `None` = L1 解析期缺陷（缺必填 / 未知 action / `type` 非法 / `user_ids` 空），
 /// `set_group` / `remove` 按 Go 口径原样留字面（`member` 由调用方吞码，见
 /// [`OutboundPlan::from_segments`]）。remove 只认**字符串路径**（`raw` 存在）：Go 的消息段
-/// 分发没有 `case "remove"`（`message_parser.go:1630-1631` 落 default），段形态不执行。
+/// 分发没有 `case "remove"`（`message_parser.go:1630-1631` 落 default），段形态一律不执行。
 fn admin_op_from_segment(segment: &Segment) -> Option<AdminOp> {
     let group_id = |segment: &Segment| admin_param(segment, "group_id").map(ToOwned::to_owned);
     match segment.kind.as_str() {
@@ -1608,9 +1633,9 @@ mod tests {
         MediaRef, MemberDirective, MemberKind, OutboundPlan, RemoveOp, SetGroupOp, StreamKind,
         StreamPayload,
     };
+    use crate::MessageContent;
     use crate::cqcode;
     use crate::segment::Segment;
-    use crate::MessageContent;
 
     fn found(pairs: &[(&str, &[&str])]) -> FoundItems {
         pairs
@@ -1759,11 +1784,13 @@ mod tests {
             Segment::image(&MediaRef::Url("https://x.com/a.png".to_owned())),
             Segment::image(&MediaRef::Url("https://x.com/b.png".to_owned())),
             Segment::record(&MediaRef::Base64("QUJD".to_owned())),
+            // 数组路径的未知段（face 不在官方消息类型里）：Go 的段分发落 `default:`
+            // 只打日志、不追加正文（`handlers/message_parser.go:1252-1254`）
             Segment::new("face").param("id", "14"),
         ];
         let plan = OutboundPlan::from_segments(&segments);
         assert_eq!(plan.reply_msg_id, Some(Ob11Id::Num(1)));
-        assert_eq!(plan.text, "看图[CQ:face,id=14]", "face 按字面写回正文");
+        assert_eq!(plan.text, "看图", "face 段丢弃后正文只剩 text 段");
         assert_eq!(
             plan.images,
             vec![
@@ -1772,7 +1799,31 @@ mod tests {
             ]
         );
         assert_eq!(plan.records, vec![MediaRef::Base64("QUJD".to_owned())]);
-        assert!(plan.extra.is_empty(), "face 不再进 extra（P81 字面保留）");
+        assert!(plan.extra.is_empty(), "丢弃的未知段也不进 extra");
+    }
+
+    /// 数组路径的未知段类型：官方 api-v2 只认 text / markdown / ark / embed / media /
+    /// keyboard（`face` 不在其中），Go 的段分发落 `default:` 只 `Printf` 一条日志、不追加
+    /// 正文（`handlers/message_parser.go:1252-1254`）⇒ 丢弃，不把字面发进群。
+    #[test]
+    fn array_segment_unknown_type_is_dropped() {
+        let segments: Vec<Segment> =
+            serde_json::from_str(r#"[{"type":"face","data":{"id":"14"}}]"#).expect("段数组");
+        let plan = OutboundPlan::from_segments(&segments);
+        assert_eq!(plan.text, "", "未知段不进正文");
+        assert!(plan.extra.is_empty(), "也不进 extra");
+        assert!(plan.is_empty(), "整条计划视为空");
+    }
+
+    /// 数组路径的未知段与已消费段混排：只丢未知段，正文保留其余部分。
+    #[test]
+    fn array_unknown_segment_between_text_is_dropped() {
+        let segments: Vec<Segment> = serde_json::from_str(
+            r#"[{"type":"text","data":{"text":"hi"}},{"type":"face","data":{}}]"#,
+        )
+        .expect("段数组");
+        let plan = OutboundPlan::from_segments(&segments);
+        assert_eq!(plan.text, "hi");
     }
 
     #[test]
@@ -2851,7 +2902,7 @@ mod tests {
     }
 
     /// 段路径（数组形态）：member / set_group 进 `admin_ops`；remove 按 Go 无
-    /// `case "remove"`（lead 裁决 5）不执行、按字面回写正文。
+    /// `case "remove"`（lead 裁决 5）不执行、也不留正文（丢弃 + WARN）。
     #[test]
     fn admin_segment_forms() {
         let member = Segment::new("member")
@@ -2888,9 +2939,21 @@ mod tests {
             "段形态 remove 不执行（Go message_parser.go:1630-1631 落 default）"
         );
         assert_eq!(
-            plan.text, "[CQ:remove,user_id=1,msg_id=2]",
-            "按字面回写正文，不静默丢弃"
+            plan.text, "",
+            "也不留字面（数组路径 Go 落 default 只打日志，message_parser.go:1252-1254）"
         );
+    }
+
+    /// 数组形 `remove`（JSON 段）：不执行撤回、不发字面量——Go 的段分发没有
+    /// `case "remove"`，落 `default:` 只 `Printf` 日志（`handlers/message_parser.go:1252-1254`）。
+    #[test]
+    fn array_remove_segment_is_dropped() {
+        let segments: Vec<Segment> =
+            serde_json::from_str(r#"[{"type":"remove","data":{"user_id":"1"}}]"#).expect("段数组");
+        let plan = OutboundPlan::from_segments(&segments);
+        assert!(plan.admin_ops.is_empty(), "不执行撤回");
+        assert_eq!(plan.text, "", "不发字面量");
+        assert!(plan.is_empty(), "整条计划视为空");
     }
 
     /// §3.3-1：`admin_ops` 不参与 `is_empty`——纯动作消息由 runtime 在判空之前执行、
