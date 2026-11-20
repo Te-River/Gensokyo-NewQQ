@@ -244,6 +244,9 @@ struct QqAuthor {
     union_openid: String,
     #[serde(default)]
     username: String,
+    /// 群内昵称 / 群名片（QQ 官方 2026-11-16 起随群消息事件下发；C2C 事件带发送者昵称）。
+    #[serde(default)]
+    member_nickname: Option<String>,
     #[serde(default)]
     member_role: Option<String>,
 }
@@ -1026,14 +1029,13 @@ impl Inbound {
             );
         }
 
+        // Go `e6c7e32`：群聊昵称/名片取 `member_nickname`，`card_nick` 配置非空时两者都覆盖。
+        let (nickname, card) = resolve_nickname_and_card(author, settings.get_card_and_nick());
         let sender = Sender {
             // Go M1-B：string 形态不做 idmap 转换，`sender.user_id` 恒为 0（见 `derive_message_ids`）。
             user_id: Some(sender_user_id),
-            nickname: Some(
-                author
-                    .map_or("", |author| author.username.as_str())
-                    .to_owned(),
-            ),
+            nickname: Some(nickname),
+            card,
             role: Some(
                 author
                     .and_then(|author| author.member_role.clone())
@@ -1143,10 +1145,12 @@ impl Inbound {
         // `get_friend_list` 开始出数据。
         self.record_user_info(user_raw, &user_id);
 
+        // 私聊无 card：同一函数传 `""` 只取昵称（`member_nickname > username`）。
+        let (nickname, _) = resolve_nickname_and_card(author, "");
         let sender = Sender {
             user_id: Some(sender_user_id),
-            // Go `PrivateSenderS`：nickname / tiny_id 非 omitempty，恒上报（空串）。
-            nickname: Some(String::new()),
+            // Go `PrivateSenderS`：nickname / tiny_id 非 omitempty，恒上报（昵称缺失时为空串）。
+            nickname: Some(nickname),
             tiny_id: Some(String::new()),
             ..Sender::default()
         };
@@ -2091,6 +2095,32 @@ fn non_empty(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
 }
 
+/// 入站 `sender.nickname` / `sender.card` 的取值口径（与 Go `e6c7e32` 同口径）：
+///
+/// ```text
+/// 群聊 nickname: card_and_nick 配置（非空） > member_nickname > username
+/// 群聊 card:     card_and_nick 配置（非空） > member_nickname > 不设置
+/// 私聊 nickname: member_nickname > username          （私聊无 card）
+/// ```
+///
+/// 私聊复用同一函数、`card_and_nick` 传 `""`，只取昵称、忽略第二个返回值。
+fn resolve_nickname_and_card(
+    author: Option<&QqAuthor>,
+    card_and_nick: &str,
+) -> (String, Option<String>) {
+    let Some(author) = author else {
+        return (String::new(), None);
+    };
+    let member_nickname = author.member_nickname.as_deref().unwrap_or_default();
+    if !card_and_nick.is_empty() {
+        return (card_and_nick.to_owned(), Some(card_and_nick.to_owned()));
+    }
+    if !member_nickname.is_empty() {
+        return (member_nickname.to_owned(), Some(member_nickname.to_owned()));
+    }
+    (author.username.clone(), None)
+}
+
 fn timestamp_of(value: Option<&Value>) -> i64 {
     match value {
         Some(Value::String(raw)) => raw.trim().parse().unwrap_or_else(|_| now_unix()),
@@ -2208,8 +2238,8 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        at_placeholder, auto_approved_pair, expand_at_placeholders, parse_rfc3339, scan_mentions,
-        strip_extension, timestamp_of, verify_comment,
+        QqAuthor, at_placeholder, auto_approved_pair, expand_at_placeholders, parse_rfc3339,
+        resolve_nickname_and_card, scan_mentions, strip_extension, timestamp_of, verify_comment,
     };
     use gensokyo_protocol::Segment;
     use serde_json::json;
@@ -2866,6 +2896,143 @@ mod tests {
             "content": "hi",
             "author": {"id": "u0123456789abcdef0123456789abcdef"}
         })
+    }
+
+    fn test_author(username: &str, member_nickname: Option<&str>) -> QqAuthor {
+        QqAuthor {
+            id: "u0123456789abcdef0123456789abcdef".to_owned(),
+            union_openid: String::new(),
+            username: username.to_owned(),
+            member_nickname: member_nickname.map(str::to_owned),
+            member_role: None,
+        }
+    }
+
+    /// 昵称与名片口径（Go `e6c7e32`）：群聊 `card_nick` 配置 > `member_nickname` > `username`，
+    /// 名片同序但无值时**不设置**；私聊把配置传空串、只取昵称。
+    #[test]
+    fn resolve_nickname_and_card_matches_go_precedence() {
+        let group_cases = [
+            (
+                "配置非空覆盖两者",
+                test_author("昵称B", Some("群名片A")),
+                "配置昵称",
+                "配置昵称",
+                Some("配置昵称".to_owned()),
+            ),
+            (
+                "member_nickname 优先于 username",
+                test_author("昵称B", Some("群名片A")),
+                "",
+                "群名片A",
+                Some("群名片A".to_owned()),
+            ),
+            (
+                "member_nickname 为空回落 username，名片不设置",
+                test_author("昵称B", Some("")),
+                "",
+                "昵称B",
+                None,
+            ),
+            ("两者皆空", test_author("", None), "", "", None),
+        ];
+        for (label, author, config, nickname, card) in group_cases {
+            assert_eq!(
+                resolve_nickname_and_card(Some(&author), config),
+                (nickname.to_owned(), card),
+                "{label}"
+            );
+        }
+
+        let private_cases = [
+            (
+                "私聊取 member_nickname",
+                test_author("昵称B", Some("私聊X")),
+                "私聊X",
+            ),
+            (
+                "私聊 member_nickname 为空回落 username",
+                test_author("昵称B", None),
+                "昵称B",
+            ),
+        ];
+        for (label, author, nickname) in private_cases {
+            // 私聊没有 card：第二个返回值被调用点丢弃，这里只断言昵称。
+            let (resolved, _) = resolve_nickname_and_card(Some(&author), "");
+            assert_eq!(resolved, nickname, "{label}");
+        }
+
+        assert_eq!(
+            resolve_nickname_and_card(None, "配置昵称"),
+            (String::new(), None),
+            "缺 author 时昵称空串、名片不设置"
+        );
+    }
+
+    /// 事件级：`GROUP_MESSAGE_CREATE` 的 `member_nickname` 进上报的 `sender.nickname`/`card`，
+    /// `card_nick` 非空时两者都被配置覆盖（Go `e6c7e32`）。
+    #[test]
+    fn group_message_maps_member_nickname_to_sender() {
+        use gensokyo_protocol::Event;
+
+        for (config, nickname, card) in [
+            ("", "群名片A", Some("群名片A")),
+            ("配置昵称", "配置昵称", Some("配置昵称")),
+        ] {
+            let dir = tempfile::tempdir().expect("临时目录");
+            let path = dir.path().join("config.yml");
+            std::fs::write(
+                &path,
+                format!("version: 1\nsettings:\n  card_nick: {config}\n"),
+            )
+            .expect("写测试配置失败");
+            let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+            let inbound = Inbound::new(manager, Some(test_store(dir.path())));
+
+            let mut payload = group_at_payload();
+            payload["author"]["username"] = json!("昵称B");
+            payload["author"]["member_nickname"] = json!("群名片A");
+            let events = inbound
+                .convert("GROUP_MESSAGE_CREATE", Some(&payload), None)
+                .expect("全量群消息应可转换");
+            let Event::Message(message) = &events[0] else {
+                panic!("GROUP_MESSAGE_CREATE 应转成群消息");
+            };
+            let sender = message.sender.as_ref().expect("群消息应带 sender");
+            assert_eq!(
+                sender.nickname.as_deref(),
+                Some(nickname),
+                "config={config:?}"
+            );
+            assert_eq!(sender.card.as_deref(), card, "config={config:?}");
+        }
+    }
+
+    /// 事件级：`C2C_MESSAGE_CREATE` 的 `member_nickname` 进 `sender.nickname`；
+    /// 私聊不吃 `card_nick` 配置、也不上报 `card`（Go `e6c7e32`）。
+    #[test]
+    fn c2c_message_maps_member_nickname_to_sender() {
+        use gensokyo_protocol::Event;
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nsettings:\n  card_nick: 配置昵称\n")
+            .expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let inbound = Inbound::new(manager, Some(test_store(dir.path())));
+
+        let mut payload = c2c_payload();
+        payload["author"]["username"] = json!("昵称B");
+        payload["author"]["member_nickname"] = json!("私聊X");
+        let events = inbound
+            .convert("C2C_MESSAGE_CREATE", Some(&payload), None)
+            .expect("私聊消息应可转换");
+        let Event::Message(message) = &events[0] else {
+            panic!("C2C_MESSAGE_CREATE 应转成私聊消息");
+        };
+        let sender = message.sender.as_ref().expect("私聊消息应带 sender");
+        assert_eq!(sender.nickname.as_deref(), Some("私聊X"));
+        assert_eq!(sender.card, None, "私聊不设置 card");
     }
 
     /// 群消息入站喂 echo：懒池两个维度 + msg_id / msg_type 映射（Go 群消息路径）。

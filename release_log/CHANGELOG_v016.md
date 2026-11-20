@@ -158,6 +158,15 @@ Go 在每条 C2C 私信末尾把好友写进 idmap 的 `UserInfo` 桶（`Process
 - **影响**：一次 `get_group_member_list` 返回自 `cursor` 起的剩余全量（默认单页 30、至多 100 页），大群首次调用耗时随成员数上升，页与页之间有 `get_g_list_delay` 间隔
 - **测试**：`crates/gensokyo-actions/src/group.rs` 的替身改为多页脚本（`VecDeque<Result<..>>`），用例覆盖两页游标链与末页即停、入参游标作起点、中途页失败保留首页成员、首页失败回退空列表、100 页上限截断、游标不推进即停、`delay = 0` 不等待 / 正延迟只在页间等一次；并持续断言响应不含 `next_cursor`
 
+### 入站 `sender` 昵称/群名片接入 `member_nickname`（官方 2026-11-16 字段，2026-11-20）
+
+QQ 官方 2026-11-16 起群消息事件的 `author` 新增 `member_nickname`（群内昵称/群名片），单聊事件也带发送者昵称；Rust 侧 `QqAuthor` 没有该字段，解析时被 serde 直接丢弃——群聊 `sender.nickname` 只认 `username` 且从不设置 `card`，私聊则恒为空串。与 Go 侧提交 `e6c7e32` 同步口径：
+
+- **修改**：`crates/gensokyo-runtime/src/inbound.rs` 的 `QqAuthor` 新增 `member_nickname`（`#[serde(default)]`，群消息与 C2C 共用同一结构）；新增纯函数 `resolve_nickname_and_card(author, card_and_nick)` 统一取值——群消息调用点传入 `settings.get_card_and_nick()` 并同时设置 `sender.nickname` / `sender.card`，私聊调用点传 `""` 只取昵称、`card` 仍不设置
+- **优先级**：群聊 `nickname` 与 `card` 均为 `card_and_nick` 配置（非空，同时覆盖两者）> `member_nickname` > `username`（`username` 只写 `nickname`，不写 `card`；空串即不上报 `card`）；私聊为 `member_nickname > username`，不套用 `card_nick` 配置
+- **影响**：配置了 `card_nick` 的部署行为不变；未配置时群内 `sender.nickname` / `sender.card` 改用群名片，私聊 `sender.nickname` 由恒定空串变为发送者昵称
+- **测试**：`resolve_nickname_and_card_matches_go_precedence`（7 例表驱动：配置覆盖两者 / 群名片优先于 `username` / 空群名片回落 `username` 且不设 `card` / 两者皆空 / 私聊两例 / 无 `author`）+ 事件级 `group_message_maps_member_nickname_to_sender`、`c2c_message_maps_member_nickname_to_sender`
+
 ---
 
 ## 🐛 修复

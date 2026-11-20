@@ -110,7 +110,7 @@
 
 ## 6. 已知缺口与有意差异（「不要当成 bug」清单）
 
-下面 23 条都是**已裁决 / 已登记**的差异：看到时先查证据列，不要直接按「和 Go 不一样」开修。真正待办的只在 §7。
+下面 25 条都是**已裁决 / 已登记**的差异：看到时先查证据列，不要直接按「和 Go 不一样」开修。真正待办的只在 §7。
 
 | # | 项 | 说明 | 证据 |
 |---|----|------|------|
@@ -137,6 +137,9 @@
 | ㉑ | SSE / 合并转发回执的 `message_id` 是**双模式**、且带顶层收件人 ID | 默认 numeric 配置下 `send_private_msg_sse` 的 `data.message_id` 与 `send_*_forward_msg` 的 `message_ids` 元素是**数字**，`string_ob11=true` 才是原串；回执多出 `user_id`（SSE）与 `group_id`（转发，**恒数字**——Go 转发 handler 不经 `string_ob11` 分派）。分侧差异：① SSE 的 `message_id` 在 string 模式回原串（Go 无此分支）；② `message_ids`/`failed` 是 Rust 独有增强（Go 转发只回 `message_id: 0`）；③ `send_private_forward_msg` 在 Go 未注册。整次转发无可发 node 时顶层 ID 留空、不伪造 | `crates/gensokyo-runtime/src/dispatcher.rs`、`crates/gensokyo-runtime/tests/deferred.rs`；`release_log/CHANGELOG_v016.md`「SSE / 合并转发回执补齐（P86d-2）」 |
 | ㉒ | `get_group_member_list` 一次回**全量**、响应不带游标 | handler 内部按 `next_cursor` 链拉到末页（`MAX_MEMBER_PAGES = 100`，对齐 Go `groupMemberListMaxPages`），入参 `cursor` 只当起始游标；页间按 `get_g_list_delay` 节流、末页后不等。中途页失败回**已收集成员 + `retcode 0`**（不整表丢弃）；首页失败回退 idmap 本地缓存，无缓存回空数组。**游标原地重复即停**是 Rust 新增的死循环防护（刻意增强，Go 只靠页数上限兜底） | `crates/gensokyo-actions/src/group.rs`；`release_log/CHANGELOG_v016.md`「`get_group_member_list` 内部翻页拉全量」 |
 | ㉓ | **数组段路径**的未知段类型与数组形 `remove` 丢弃，字符串 CQ 路径仍留字面 | 段来自 `message` 数组（无 `raw` 原文切片）时，`face` / `node` / `poke` / `group_info` / `json` / 未知码与数组形 `remove` 一律丢弃 + `warn!`——Go 的段分发表没有这些 `case`，落 `default:` 只打日志、不追加正文（同口径，Rust 多一条 `warn`）。字符串路径仍按 Go legacy 保留 `tok.Raw` 字面：**两条路径不同是刻意的**，不要「统一」成一种 | `crates/gensokyo-protocol/src/outbound.rs`（`OutboundPlan::from_segments` 的 `_` 臂与 `member`/`set_group`/`remove` 臂）；Go `handlers/message_parser.go:1252-1254` |
+| ㉔ | 入站 `sender.nickname` / `sender.card` 取 `member_nickname` | 群聊 `nickname` 与 `card` 都按 `card_and_nick` 配置（非空，覆盖两者）> `member_nickname` > `username`（`username` 只写 nickname、不写 card）；私聊 `member_nickname > username`、不设 card。与 Go `e6c7e32` 同口径。**唯一分侧**：`author` 缺席且配置非空时 Go 先判配置仍回配置值（`Processor/nickname.go:12-14`），Rust 先判 `author` → `("", None)`——畸形事件本来就没有发送者 | `crates/gensokyo-runtime/src/inbound.rs`（`resolve_nickname_and_card` 与群/私聊两个调用点）；Go `Processor/nickname.go`、`Processor/ProcessC2CMessage.go:132-146`；登记 parity §F D13 |
+
+| ㉕ | 敏感词过滤**不覆盖** `member_nickname` | 入站过滤只改写 `author.username`，而 `sender.nickname`/`card` 现在优先取 `member_nickname` ⇒ 含敏感词的群名片会原样上报。Go 侧同样只过滤 `Username`（`main.go:772-773`、`:1131-1132`），属两侧同现状；若要补需两仓同步 | `crates/gensokyo-runtime/src/inbound.rs`（过滤点与合成点）；Go `main.go:772-773`、`:1131-1132` |
 
 ## 7. 未完成项与下一步
 
