@@ -171,6 +171,14 @@ QQ 官方 2026-11-16 起群消息事件的 `author` 新增 `member_nickname`（�
 
 ## 🐛 修复
 
+### `[CQ:remove]` 不带 `msg_id` 恒失败：入站补写「群 × 用户」最新消息（2026-11-20）
+
+`[CQ:remove,group_id=…,user_id=…]` 省略 `msg_id` 时应撤回该用户在该群的最后一条消息，但 Rust 入站**从不写**「群 × 用户 最新 msg_id」，读端 `cq_admin`（`get_latest_msg_id`）永远查不到 ⇒ 恒回「没有可撤回的最新消息，请带 msg_id 重试」。Go 在 `Processor/ProcessGroupMessage.go:179` / `ProcessGroupNormalMessage.go:168` 每条群消息都落这条记录（键 `<group_openid>:<user_openid>`，`idmap/map_service.go:702`）。
+
+- **修改**：`Inbound::derive_message_ids`（`crates/gensokyo-runtime/src/inbound.rs`）在既有的单个 idmap 写事务里补 `batch.store_latest_msg_id(group, user, msg_id)`——取**原始** OpenID（union 切换后的 `author.id`，与 Go 传参同源），排在群注册之后以维持批次内「先身份库后消息库」的锁序；`GROUP_AT_MESSAGE_CREATE` / `GROUP_MESSAGE_CREATE` 与 `string_ob11` 开/关两形态共用同一条路径；C2C 不写（无群撤回语义，与 Go 一致）
+- **影响**：不带 `msg_id` 的群撤回从恒失败变为真实调用 `/v2/groups/{group_openid}/messages/{message_id}/recall`；记录有效期沿用 `msg_id_ttl`（与 Go 的 `GetMsgIDTTLSeconds` 同口径），过期后仍回原本的「没有可撤回的最新消息」提示；`outbound.rs` / `deferred.rs` 发送主链零改动
+- **测试**：新增 `inbound::tests::group_message_records_latest_msg_id_for_cq_remove`（两种群事件 × `string_ob11` 两形态）与 `tests/cq_admin.rs::group_remove_without_msg_id_uses_the_latest_inbound_message`（入站落库 → `[CQ:remove]` 无 `msg_id` → 断言上游 `delete_msg` 入参）；`cargo test -p gensokyo-runtime -p gensokyo-storage -p gensokyo-actions --lib` 全绿
+
 ### 日志噪声：每条群消息 6 行 DEBUG，Go 只有 3 行 INFO（2026-11-20）
 
 真机 `log_level: 0`（debug）下每条群消息固定多出 6 行 DEBUG——idmap 身份命中 ×2、消息 ID 已分配 ×1、

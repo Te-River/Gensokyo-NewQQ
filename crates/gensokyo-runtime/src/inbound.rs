@@ -4,7 +4,8 @@
 //! [`gensokyo_protocol::Event`]，不碰框架指令、黑白名单、被动转主动等
 //! [`Processor`](https://github.com/hoshinonyaruko/gensokyo) 里的业务逻辑。
 //!
-//! 除把群注册进 idmap 外，副作用有三个：喂 echo（[`Inbound::with_echo`]）——消息事件写懒
+//! 除把群注册、群消息的「群 × 用户」最新 msg_id（`[CQ:remove]` 缺 `msg_id` 时的反查源）
+//! 写进 idmap 外，副作用有三个：喂 echo（[`Inbound::with_echo`]）——消息事件写懒
 //! message_id 池与 msg_id / msg_type 映射，入群类事件写 event_id，供出站解析被动回复凭据；
 //! 收发统计（`Inbound::record_message_received`）——三个消息事件各记一次当日接收数
 //! （Go `botstats.RecordMessageReceived`）；C2C 私信把好友写进 idmap 的 `user_info` 表
@@ -797,7 +798,8 @@ impl Inbound {
         }
     }
 
-    /// 一条消息事件要落的 idmap 写入（群/用户身份、message_id、群注册）合并成一次批量提交。
+    /// 一条消息事件要落的 idmap 写入（群/用户身份、message_id、群注册、最新消息）合并成一次
+    /// 批量提交。
     ///
     /// 与逐条提交（每个字段一次写事务）相比只有提交次数不同：成功路径逐项结果一致（同一批内
     /// 重复解析同一身份命中本批已写入的行，不会重号）。身份库与消息库是两个 redb 文件，
@@ -843,10 +845,20 @@ impl Inbound {
             } else {
                 Ob11Id::Num(batch.store_cache(message_raw)?)
             };
+            // Go `ProcessGroupMessage.go:179` / `ProcessGroupNormalMessage.go:168`：记录
+            // 「群 × 用户」最新真实 msg_id，供出站 `[CQ:remove]` 缺 msg_id 时反查
+            // （`cq_admin.rs` 的 `get_latest_msg_id`）。键是**原始** OpenID——Go 传的是
+            // `data.GroupID` 与 union 切换后的 `data.Author.ID`，与本函数入参同源；C2C 没有
+            // 群撤回语义，`group_raw` 为 `None` 时不写。空串由 store 自行忽略。
+            // 必须排在 `write_config` 之后：string 形态不碰身份库，先开消息库会踩
+            // [`IdMapWriteBatch`] 的「先身份后消息」锁序断言。
             // 群注册（Go `WriteConfigv2(group, "type", "group")`）：section 取上报形态本身
             let section = group_id.to_string();
             if !section.is_empty() {
                 batch.write_config(&section, "type", "group")?;
+            }
+            if let Some(group_raw) = group_raw {
+                batch.store_latest_msg_id(group_raw, user_raw, message_raw)?;
             }
             Ok(DerivedIds {
                 sender_user_id,
@@ -2536,6 +2548,38 @@ mod tests {
                 .expect("群应已注册"),
             "group"
         );
+    }
+
+    /// 群消息写入「群 × 用户」最新真实 msg_id（Go `ProcessGroupMessage.go:179` /
+    /// `ProcessGroupNormalMessage.go:168`），`GROUP_AT_MESSAGE_CREATE` / `GROUP_MESSAGE_CREATE`
+    /// 与 `string_ob11` 开关两形态都写；键是原始 OpenID，与出站 `[CQ:remove]` 的读法一致。
+    #[test]
+    fn group_message_records_latest_msg_id_for_cq_remove() {
+        const RAW_GROUP: &str = "g0123456789abcdef0123456789abcdef";
+        const RAW_USER: &str = "u0123456789abcdef0123456789abcdef";
+
+        for settings in ["settings: {}\n", "settings:\n  string_ob11: true\n"] {
+            for event_name in ["GROUP_AT_MESSAGE_CREATE", "GROUP_MESSAGE_CREATE"] {
+                let dir = tempfile::tempdir().expect("临时目录");
+                let path = dir.path().join("config.yml");
+                std::fs::write(&path, format!("version: 1\n{settings}")).expect("写测试配置失败");
+                let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+                let store = test_store(dir.path());
+                let inbound = Inbound::new(manager, Some(Arc::clone(&store)));
+
+                inbound
+                    .convert(event_name, Some(&group_at_payload()), None)
+                    .unwrap_or_else(|_| panic!("{event_name} 应可转换"));
+                assert_eq!(
+                    store
+                        .get_latest_msg_id(RAW_GROUP, RAW_USER)
+                        .unwrap_or_else(|err| panic!(
+                            "{event_name} {settings:?} 未写最新消息: {err}"
+                        )),
+                    "m-1"
+                );
+            }
+        }
     }
 
     /// 群消息作者带 `union_openid` 时建 `id ↔ union` 映射（Go `ProcessGroupMessage.go:55` /

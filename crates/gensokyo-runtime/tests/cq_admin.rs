@@ -24,9 +24,9 @@ use gensokyo_qq::dto::{
     ApprovalJoinRequest, BotInGroupState, GroupInfo, GroupMember, GroupMemberList, JoinRequestList,
     MemberBlacklistRequest, MemberBlacklistResponse, MessageResponse, MessageToCreate,
 };
-use gensokyo_runtime::{AppState, RETCODE_INTERNAL};
-use gensokyo_storage::EchoStore;
+use gensokyo_runtime::{AppState, Inbound, RETCODE_INTERNAL};
 use gensokyo_storage::echo::echo_key_event_id_v2;
+use gensokyo_storage::{EchoStore, IdMapOptions, IdMapStore};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -496,6 +496,79 @@ async fn private_remove_retracts_through_c2c() {
             "m-real-1".to_owned()
         )],
         "私聊 remove 必须以 user_openid 走 C2C 撤回"
+    );
+}
+
+/// ⑫-c 群聊 `remove` 不带 `msg_id`：反查该用户在该群的最新消息（Go `cqcode.go:350-369`）。
+///
+/// 键由入站写入（Go `ProcessGroupMessage.go:179` / `ProcessGroupNormalMessage.go:168`），
+/// 所以本用例先把一条 `GROUP_AT_MESSAGE_CREATE` 喂给入站、再发 `[CQ:remove]`：写入缺失时
+/// 会落在「没有可撤回的最新消息」，撤回不进上游。
+#[tokio::test]
+async fn group_remove_without_msg_id_uses_the_latest_inbound_message() {
+    const RAW_MSG_ID: &str = "m-real-latest";
+    let (manager, dir) = config("  app_id: 12345\n");
+    let idmap = Arc::new(
+        IdMapStore::open(
+            IdMapOptions::new(
+                dir.path().join("openid-map.redb"),
+                dir.path().join("msgid-map.redb"),
+            )
+            .with_app_id("12345"),
+        )
+        .expect("打开临时 idmap 失败"),
+    );
+    let api = Arc::new(FakeQqApi::default());
+    let qq: Arc<dyn QqApi> = api.clone();
+    let context =
+        Arc::new(ActionContext::new(qq, Arc::clone(&manager)).with_idmap(Arc::clone(&idmap)));
+    let state = AppState::with_actions(manager, context).with_idmap(Arc::clone(&idmap));
+
+    Inbound::from_state(&state)
+        .convert(
+            "GROUP_AT_MESSAGE_CREATE",
+            Some(&json!({
+                "id": RAW_MSG_ID,
+                "group_id": GROUP,
+                "content": "hello",
+                "author": {"id": MEMBER_A},
+            })),
+            None,
+        )
+        .expect("群消息应可转换");
+    assert_eq!(
+        idmap
+            .get_latest_msg_id(GROUP, MEMBER_A)
+            .expect("入站应写下「群 × 用户」最新消息"),
+        RAW_MSG_ID
+    );
+
+    api.delete.lock().expect("槽锁").push_back(Ok(()));
+    let response = state
+        .dispatcher()
+        .dispatch(&request(
+            "send_group_msg",
+            json!({
+                "group_id": GROUP,
+                "message": format!("[CQ:remove,group_id={GROUP},user_id={MEMBER_A}]"),
+            }),
+            None,
+        ))
+        .await;
+
+    assert_eq!(
+        response.retcode, 0,
+        "缺 msg_id 应反查到最新消息: {:?}",
+        response.message
+    );
+    assert_eq!(
+        api.calls(),
+        vec![Call::DeleteMsg(
+            Some(GROUP.to_owned()),
+            None,
+            RAW_MSG_ID.to_owned()
+        )],
+        "群撤回必须以最新真实 msg_id 走上游"
     );
 }
 
