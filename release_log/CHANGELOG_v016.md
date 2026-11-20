@@ -162,6 +162,16 @@ Go 在每条 C2C 私信末尾把好友写进 idmap 的 `UserInfo` 桶（`Process
 
 ## 🐛 修复
 
+### `send_msg` 缺 `message_type` 与 markdown 双层包装载荷（2026-11-20）
+
+插件（nonebot/qbind）发 `send_msg` 时既**不带 `message_type`**，markdown 段又是 go-cqhttp 的双层包装
+`{"type":"markdown","data":{"data":{"markdown":{"content":…}}}}`。Rust 先命中「缺少 message_type」的 `1400`；即使手动补上，
+也会因只读顶层 `content` 再 `1400`。Go 侧则用参数形状推断目标、并按 `markdown.content` 解包，发送成功（`retcode:0`）。
+
+- **修改**：`plan_send_msg`（`crates/gensokyo-actions/src/send.rs`）在 `message_type` 缺失/未知时按 Go `handlers/send_msg.go` 口径推断——有非空 `group_id` → 群、否则有非空 `user_id` → 私聊、两者都有 → 群，都推不出才 `1400`；markdown 载荷按 `content` → `markdown.content` → `data.markdown.content` → `data.data.markdown.content` 逐层解包（对齐 Go `parseMDData` + `unwrapNestedMarkdown`，`crates/gensokyo-runtime/src/deferred.rs`）
+- **影响**：go-cqhttp 风格的数组段 markdown 不再 `1400`；缺 `message_type` 的 `send_msg` 与 Go 行为一致；WebUI/日志无变化
+- **测试**：`send_msg_infers_target_without_message_type`、`send_msg_requires_message_type_or_ids`、`field_markdown_object_payload_keeps_content` 及 runtime 端到端用例；`cargo test -p gensokyo-actions` 178 / `-p gensokyo-protocol` 150 / `-p gensokyo-runtime --lib` 350 全绿
+
 ### `cargo xtask build --all` 缺工具链目标改为 `[skip]`（2026-11-18）
 
 Windows-gnu 宿主上，矩阵中的 macOS / MSVC / Android 目标此前会先 `rustup target add`（下载 rust-std）再硬编失败（ring 的 C 代码被 mingw gcc 拒绝 `-arch`），且失败计入整体结果（exit -1）：

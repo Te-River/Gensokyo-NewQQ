@@ -189,7 +189,9 @@ use gensokyo_media::{HostingKind, ImageKind, MediaSource, OssKind, sniff_image};
 
 use gensokyo_protocol::cqcode;
 use gensokyo_protocol::event::NoticeEvent;
-use gensokyo_protocol::outbound::{InputNotifyPayload, MarkdownPayload, StreamKind, StreamPayload};
+use gensokyo_protocol::outbound::{
+    InputNotifyPayload, MarkdownPayload, StreamKind, StreamPayload, markdown_content,
+};
 use gensokyo_protocol::{Event, MediaRef, MessageContent, OutboundPlan};
 use gensokyo_qq::dto::message::{MessageCard, MessageCardContent};
 use gensokyo_qq::dto::{
@@ -1206,6 +1208,9 @@ fn has_media(plan: &OutboundPlan) -> bool {
 /// `template_id` / `custom_template_id` 官方已标注废弃（出站不再构造）；载荷里带了也不读，
 /// 缺 `content` 直接 `1400`。多份 markdown 取第一份（与 card 口径一致）。
 ///
+/// `content` 的层级按 [`markdown_content`] 的顺序找（顶层 → `markdown` → `data.markdown` →
+/// `data.data.markdown`），现场载荷的双层包装才能解出正文。
+///
 /// 组装顺序与 Go 一致：先把文本侧的 @全员 标签迁移进正文（`migrateAtEveryoneToMarkdown`），
 /// 再把 `[CQ:at,qq=数字]` 换成 `qqbot-at-user` 标签（`ResolveMarkdownAtMentions`）。
 fn compose_markdown(
@@ -1217,12 +1222,15 @@ fn compose_markdown(
         return Ok(None);
     };
     let value = payload.decode()?;
-    let Some(content) = value.get("content").and_then(Value::as_str) else {
+    let Some(content) = markdown_content(&value) else {
         return Err(Error::Protocol(
-            "markdown 载荷缺少 content：模板消息已废弃，只支持原生 markdown 内容".to_owned(),
+            "markdown 载荷缺少 content（已尝试 content / markdown.content / \
+             data.markdown.content / data.data.markdown.content）：模板消息已废弃，\
+             只支持原生 markdown 内容"
+                .to_owned(),
         ));
     };
-    let content = migrate_at_everyone(content, rendered_text);
+    let content = migrate_at_everyone(&content, rendered_text);
     // Go `send_group_msg.go:1531-1533`：`union_id` 打开时先把正文里的 union 反查回原始
     // OpenID，**再**走 `ResolveMarkdownAtMentions`——顺序不能反：`[CQ:at]` 生成的就是
     // 原始 OpenID，反查放在它后面等于对刚写好的值再做一次无意义查找。
@@ -7671,5 +7679,74 @@ mod tests {
         assert_eq!(sent.len(), 2, "超时重试一次即成功");
         assert!(sent[0].msg_seq.is_none());
         assert!(sent[1].msg_seq.is_some(), "重试前重取 msg_seq");
+    }
+
+    /// 真没有 content（模板消息形态）：仍然 `1400`，错误里列出已尝试的层级。
+    #[tokio::test]
+    async fn markdown_without_any_content_is_rejected() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-X"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let plan = group_request(OutboundPlan {
+            markdown: vec![
+                MarkdownPayload::from_json(r#"{"template_id":"tpl-1"}"#).expect("编码失败"),
+            ],
+            ..OutboundPlan::default()
+        });
+
+        let err = execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect_err("没有 content 必须 1400");
+        assert!(
+            matches!(&err, Error::Protocol(message)
+                if message.contains("缺少 content")
+                    && message.contains("data.data.markdown.content")),
+            "实际错误: {err}"
+        );
+        assert!(api.sent().is_empty(), "拒绝时零上游调用");
+    }
+
+    /// 现场故障（2026-11-20 18:40，群 389876336）：NoneBot 发 `send_msg`，Rust 侧一条
+    /// QQ API 请求都没有、NoneBot 却收到成功回执。载荷里的 markdown `data` 是对象
+    /// （`data.data.markdown.content`），整条链必须把它发成 markdown 消息。
+    ///
+    /// 唯一的改动是 `group_id` 换成 32 位 OpenID：现场值是虚拟号，需要 idmap 反查，
+    /// 而本用例考察的是 markdown 载荷链（消息体逐字段与现场一致）。
+    #[tokio::test]
+    async fn field_markdown_object_payload_sends_markdown() {
+        // 现场载荷逐字段还原（`send_msg` 的 params）
+        let params = json!({
+            "group_id": OPENID,
+            "message_type": "group",
+            "message": [{
+                "type": "markdown",
+                "data": {"data": {"markdown": {"content": "### AT 检测结果\n> 消息 @ 了机器人"}}}
+            }]
+        });
+        let planned = gensokyo_actions::plan_send_msg(&params).expect("send_msg 规划失败");
+        // handler 响应 `data` → dispatcher 还原：与生产同一条序列化链
+        let wire = serde_json::to_value(&planned).expect("计划序列化失败");
+        let plan: SendRequest = serde_json::from_value(wire).expect("计划反序列化失败");
+
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-MD"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+
+        let id = execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("现场载荷必须发出一条 markdown，不得报错也不得静默成功");
+        assert_eq!(id, "MSG-MD");
+        let sent = api.sent();
+        assert_eq!(sent.len(), 1, "应只有一条 markdown 消息");
+        assert_eq!(sent[0].msg_type, Some(msg_type::MARKDOWN));
+        let content = sent[0]
+            .markdown
+            .as_ref()
+            .and_then(|markdown| markdown.content.as_deref())
+            .expect("markdown.content 不应为空");
+        assert!(
+            content.to_lowercase().contains("at 检测结果"),
+            "markdown 正文丢了: {content}"
+        );
     }
 }

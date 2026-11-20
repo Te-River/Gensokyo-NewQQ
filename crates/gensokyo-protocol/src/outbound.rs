@@ -152,9 +152,12 @@ impl MarkdownPayload {
     }
 
     /// `content` 字段（原生 markdown 文本）。
+    ///
+    /// 层级解包见 [`markdown_content`]：兼容现场载荷的 `data.data.markdown.content` 三层包装
+    /// 与 Go `unwrapNestedMarkdown` 的单层 / 双层包装。
     #[must_use]
     pub fn content(&self) -> Option<String> {
-        self.decode().ok()?.get("content").and_then(json_scalar)
+        markdown_content(&self.decode().ok()?)
     }
 
     /// `custom_template_id` 字段（群模板 id）。
@@ -1527,6 +1530,28 @@ fn json_scalar(value: &Value) -> Option<String> {
     }
 }
 
+/// markdown 载荷里 `content` 的查找层级（命中即返回，全部未命中才是「没有 content」）。
+///
+/// 现场载荷（2026-11-20 18:40）的段是 `{"data":{"data":{"markdown":{"content":…}}}}`：
+/// 段反序列化把最外层 `data` 当成参数名，载荷本体只剩 `{"data":{"markdown":{"content":…}}}`，
+/// 因此 `content` 可能在四个位置之一。对照 Go `handlers/message_parser.go` 的
+/// `parseMDData`（认 `{"markdown":{"content":…}}`）与 `unwrapNestedMarkdown`（逐层剥包装）。
+pub fn markdown_content(value: &Value) -> Option<String> {
+    const PATHS: [&[&str]; 4] = [
+        &["content"],
+        &["markdown", "content"],
+        &["data", "markdown", "content"],
+        &["data", "data", "markdown", "content"],
+    ];
+    PATHS.iter().find_map(|path| {
+        let mut node = value;
+        for key in path.iter() {
+            node = node.get(*key)?;
+        }
+        json_scalar(node)
+    })
+}
+
 fn parse_stream(raw: &str) -> Result<StreamPayload> {
     let value: Value = serde_json::from_str(raw)
         .map_err(|error| Error::Protocol(format!("stream 载荷不是合法 JSON: {error}")))?;
@@ -1585,6 +1610,7 @@ mod tests {
     };
     use crate::cqcode;
     use crate::segment::Segment;
+    use crate::MessageContent;
 
     fn found(pairs: &[(&str, &[&str])]) -> FoundItems {
         pairs
@@ -2371,6 +2397,65 @@ mod tests {
             .decode()
             .is_err()
         );
+    }
+
+    /// 现场载荷（2026-11-20 18:40，群 389876336）的**段级**形态：`data` 是对象，
+    /// 且按 Go `unwrapNestedMarkdown` 的双层包装 `data.data.markdown.content`。
+    #[test]
+    fn field_markdown_object_payload_keeps_content() {
+        let params = serde_json::json!({
+            "group_id": "389876336",
+            "message": [{
+                "type": "markdown",
+                "data": {"data": {"markdown": {"content": "### AT 检测结果\n> 消息 @ 了机器人"}}}
+            }]
+        });
+        let content: MessageContent =
+            serde_json::from_value(params["message"].clone()).expect("消息段数组应能反序列化");
+        let plan = OutboundPlan::from_segments(&content.segments());
+
+        assert!(!plan.is_empty(), "对象型 data 的 markdown 段不能变成空计划");
+        assert_eq!(plan.markdown.len(), 1, "应产出一份 markdown 载荷");
+        let text = plan.markdown[0]
+            .content()
+            .expect("markdown 载荷应能读出 content");
+        assert!(
+            text.to_lowercase().contains("at 检测结果"),
+            "markdown 正文丢了: {text}"
+        );
+    }
+
+    #[test]
+    fn markdown_segment_object_data_unwraps_all_content_levels() {
+        // 段反序列化把最外层 `data` 当参数名（载荷必须挂在 `data` 键下，见 markdown_payload），
+        // 因此每种包装在段里多一层 `data`；四种载荷形态都要能解出正文
+        for (json, expected) in [
+            (
+                r#"{"type":"markdown","data":{"data":{"content":"顶层"}}}"#,
+                "顶层",
+            ),
+            (
+                r#"{"type":"markdown","data":{"data":{"markdown":{"content":"单层"}}}}"#,
+                "单层",
+            ),
+            (
+                r#"{"type":"markdown","data":{"data":{"data":{"markdown":{"content":"双层"}}}}}"#,
+                "双层",
+            ),
+            (
+                r#"{"type":"markdown","data":{"data":{"data":{"data":{"markdown":{"content":"三层"}}}}}}"#,
+                "三层",
+            ),
+        ] {
+            let segment: Segment = serde_json::from_str(json).expect("markdown 段反序列化失败");
+            let plan = OutboundPlan::from_segments(&[segment]);
+            assert_eq!(plan.markdown.len(), 1, "markdown 段应产出载荷: {json}");
+            assert_eq!(
+                plan.markdown[0].content().as_deref(),
+                Some(expected),
+                "载荷层级没解开: {json}"
+            );
+        }
     }
 
     #[test]

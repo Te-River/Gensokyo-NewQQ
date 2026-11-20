@@ -392,19 +392,50 @@ pub fn plan_send_private_msg(params: &Value) -> Result<SendRequest> {
 
 /// `send_msg` 的参数规划：按 `message_type` 分派到群聊 / 私聊。
 ///
+/// `message_type` 缺失 / `null` / 空串时按参数形状推断（Go `handlers/send_msg.go:25-70`：
+/// echo 缓存猜不到就用 `group_id` / `user_id` 判断目标），有 `group_id` 优先群。
+///
 /// # Errors
-/// `message_type` 缺失、非字符串、或不是 `group` / `private` 时返回 [`Error::Protocol`]；
+/// `message_type` 非字符串、或既非 `group` / `private` 又不为空时返回 [`Error::Protocol`]；
+/// 缺失且 `group_id` / `user_id` 都推不出目标时同样报错；
 /// 其余校验同 [`plan_send_group_msg`] / [`plan_send_private_msg`]。
 pub fn plan_send_msg(params: &Value) -> Result<SendRequest> {
     let object = params_object(params)?;
     match object.get("message_type") {
-        None | Some(Value::Null) => Err(Error::Protocol("缺少 message_type".to_owned())),
-        Some(Value::String(kind)) => match kind.as_str() {
-            "group" => plan_send_group_msg(params),
-            "private" => plan_send_private_msg(params),
-            other => Err(Error::Protocol(format!("message_type 非法: {other}"))),
-        },
+        Some(Value::String(kind)) if kind == "group" => plan_send_group_msg(params),
+        Some(Value::String(kind)) if kind == "private" => plan_send_private_msg(params),
+        // 缺失 / null / 空串：交给参数形状推断（现场 NoneBot 的 send_msg 就不带该字段）
+        None | Some(Value::Null) => infer_send_target(params),
+        Some(Value::String(kind)) if kind.is_empty() => infer_send_target(params),
+        Some(Value::String(kind)) => Err(Error::Protocol(format!("message_type 非法: {kind}"))),
         Some(_) => Err(Error::Protocol("message_type 必须是字符串".to_owned())),
+    }
+}
+
+/// `send_msg` 缺 `message_type` 时的目标推断（Go `handlers/send_msg.go:25-70`）。
+///
+/// 顺序与 Go 一致：先看 `group_id`（Go 的 echo 缓存 miss 后按参数判断，已有群号即按群发），
+/// 再看 `user_id`；两者都有时走群。都推不出才报错——错误文案保留 `message_type`
+/// 以便定位，并说明推断也没能确定目标。
+fn infer_send_target(params: &Value) -> Result<SendRequest> {
+    let object = params_object(params)?;
+    if has_id(object.get("group_id")) {
+        return plan_send_group_msg(params);
+    }
+    if has_id(object.get("user_id")) {
+        return plan_send_private_msg(params);
+    }
+    Err(Error::Protocol(
+        "缺少 message_type，且无法由 group_id / user_id 推断".to_owned(),
+    ))
+}
+
+/// ID 字段是否给出了可用值（`null` / 空串视为缺失；类型错误留给各 handler 自己的校验）。
+fn has_id(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => false,
+        Some(Value::String(text)) => !text.is_empty(),
+        Some(_) => true,
     }
 }
 
@@ -1146,10 +1177,42 @@ mod tests {
     }
 
     #[test]
-    fn send_msg_requires_message_type() {
-        let err = plan_send_msg(&json!({"group_id": 1, "message": "x"}))
-            .expect_err("缺 message_type 应报错");
-        assert!(err.to_string().contains("message_type"));
+    fn send_msg_infers_target_without_message_type() {
+        // 现场 NoneBot 的 `send_msg` 不带 `message_type`：Go `handlers/send_msg.go:25-70`
+        // 按参数形状推断目标（有 `group_id` → 群，否则 `user_id` → 私聊）
+        let group = plan_send_msg(&json!({"group_id": 7, "message": "g"}))
+            .expect("缺 message_type + group_id 应推断成群聊");
+        assert_eq!(group.target, SendTarget::Group("7".to_owned()));
+
+        let private = plan_send_msg(&json!({"user_id": 8, "message": "p"}))
+            .expect("缺 message_type + user_id 应推断成私聊");
+        assert_eq!(private.target, SendTarget::Private("8".to_owned()));
+
+        // 两者都有：与 Go 一致优先群（Go 先判 `group_id`）
+        let both = plan_send_msg(&json!({"group_id": 7, "user_id": 8, "message": "x"}))
+            .expect("两者都有应推断成群聊");
+        assert_eq!(both.target, SendTarget::Group("7".to_owned()));
+
+        // 空串 / null 与缺失同口径
+        assert_eq!(
+            plan_send_msg(&json!({"message_type": "", "group_id": 7, "message": "g"}))
+                .expect("空串 message_type 应可推断")
+                .target,
+            SendTarget::Group("7".to_owned())
+        );
+        assert_eq!(
+            plan_send_msg(&json!({"message_type": null, "user_id": 8, "message": "p"}))
+                .expect("null message_type 应可推断")
+                .target,
+            SendTarget::Private("8".to_owned())
+        );
+    }
+
+    #[test]
+    fn send_msg_requires_message_type_or_ids() {
+        let err = plan_send_msg(&json!({"message": "x"}))
+            .expect_err("message_type 与两个 ID 都缺时应报错");
+        assert!(err.to_string().contains("message_type"), "实际错误: {err}");
     }
 
     #[test]
