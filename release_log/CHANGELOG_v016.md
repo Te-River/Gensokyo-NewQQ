@@ -51,6 +51,16 @@
 - **影响**：注册表驱动，`botstats.db`/`cookie.db`/`gensokyo.db` 等后续加一行即接入；本期不涉及
 - **测试**：`dblocation` 表驱动单测 + 补测 + `idmap/dblocation_integration_test.go` 运行时集成用例；黑盒 e2e 六场景（本地有→迁移 / 目标有→直接用 / 两侧都有→拒绝启动 / `smb://` 拒绝 / 两边无 / 关闭零变化）通过；`go build ./...`、`go vet ./...`、`go test ./...` 全绿
 
+### 入站 sender 昵称/群名片接入 `member_nickname`（2026-11-16 官方字段，2026-11-20）
+
+QQ 官方 2026-11-16 起群消息事件的 `author` 新增 `member_nickname`（群内昵称/群名片），单聊事件也带发送者昵称；本仓 `botgo/dto` 的 `User` 无该字段，解析时被直接丢弃，`sender.nickname` 只认 `card_and_nick` 配置与 `username`（私聊则恒为空串）：
+
+- **修改**：`botgo/dto/user.go` 的 `User` 新增 `MemberNickname`（JSON `member_nickname`）；新增纯函数 `resolveNicknameAndCard`（`Processor/nickname.go`），入站事件上报的 sender.nickname/card 统一走它——群聊四条路径（`Processor/ProcessGroupMessage.go`、`Processor/ProcessGroupNormalMessage.go` 各自 int64 / `string_ob11` 两分支）；`GROUP_MSG_RECEIVE` / `GROUP_MSG_REJECT` / `INTERACTION` 三个事件（`Processor/ProcessGroupMsgReceive.go`、`ProcessGroupMsgReject.go`、`ProcessInlineSearch.go`）不携带作者昵称，同样统一走该函数，行为仍只受 `card_and_nick` 配置影响
+- **优先级**：`sender.nickname` 与 `sender.card` 均为 `card_and_nick` 配置（非空，同时覆盖两者） > `member_nickname` > `username`（`username` 只写 `nickname`，不写 `card`）；两者都空时 `nickname` 为空串，且不设置 `card`
+- **私聊**：`sender.nickname` 由恒定空串改为 `member_nickname || username`（`Processor/ProcessC2CMessage.go` 的 int64 / `string_ob11` 两个 sender 与好友列表缓存 `structs.FriendData.Nickname`），私聊不设置 `card`（`PrivateSender` 无该字段）
+- **影响**：群内 `sender.card` 现在可能是群名片而非空；`card_and_nick` 配置的优先级与取值不变，配置为空且事件无 `member_nickname` 时行为与旧版一致
+- **测试**：`Processor/nickname_test.go` 表驱动覆盖群聊三档优先级、私聊回退、双空与 `author` 为 nil
+
 ---
 
 ## 🐛 修复

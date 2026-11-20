@@ -232,13 +232,8 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 		       groupMsg.Avatar, _ = GenerateAvatarURLV2(data.Author.ID)
 		      }
 		      groupMsg.IsFullGroupMessage = true
-		// nick/card
-		if CaN := config.GetCardAndNick(); CaN != "" {
-			groupMsg.Sender.Nickname = CaN
-			groupMsg.Sender.Card = CaN
-		} else if data.Author.Username != "" {
-			groupMsg.Sender.Nickname = data.Author.Username
-		}
+		// nick/card（card_and_nick > member_nickname > username）
+		groupMsg.Sender.Nickname, groupMsg.Sender.Card = resolveNicknameAndCard(data.Author, config.GetCardAndNick())
 		if config.GetTwoWayEcho() {
 			groupMsg.Echo = echostr
 			echo.AddMsgIDv3(AppIDString, echostr, messageText)
@@ -307,12 +302,8 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 		       groupMsgS.Avatar, _ = GenerateAvatarURLV2(data.Author.ID)
 		      }
 		      groupMsgS.IsFullGroupMessage = true
-		if CaN := config.GetCardAndNick(); CaN != "" {
-			groupMsgS.Sender.Nickname = CaN
-			groupMsgS.Sender.Card = CaN
-		} else if data.Author.Username != "" {
-			groupMsgS.Sender.Nickname = data.Author.Username
-		}
+		// nick/card（card_and_nick > member_nickname > username）
+		groupMsgS.Sender.Nickname, groupMsgS.Sender.Card = resolveNicknameAndCard(data.Author, config.GetCardAndNick())
 		if config.GetTwoWayEcho() {
 			groupMsgS.Echo = echostr
 			echo.AddMsgIDv3(AppIDString, echostr, messageText)

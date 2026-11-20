@@ -143,19 +143,23 @@ async def _(bot: Bot, event: Event):
 
 ### Sender.Nickname 自动填充
 
-Gensokyo 在群消息和私聊消息中，当 `card_nick` 配置为空时，会自动从 QQ API 返回的 `data.Author.Username` 中提取用户名填充到 `event.sender.nickname`。
+Gensokyo 在群消息和私聊消息中，当 `card_nick` 配置为空时，会自动从 QQ API 返回的 `data.Author.MemberNickname`（群内昵称，2026-11-16 群消息事件新增字段 `member_nickname`）填充 `event.sender.nickname`；该字段为空时回退 `data.Author.Username`。
 
 ```json
 {
     "sender": {
-        "nickname": "NIKO",   // 自动从 Author.Username 获取
+        "nickname": "NIKO",   // 取自 Author.MemberNickname，缺失时回退 Author.Username
         "user_id": 123456789,
         ...
     }
 }
 ```
 
-优先顺序：`card_nick` 配置 > `Author.Username` > 空
+优先顺序（群聊）：`card_nick` 配置 > `Author.MemberNickname` > `Author.Username` > 空
+
+`sender.card` 与 `nickname` 同源：`card_nick` 配置 > `Author.MemberNickname` > 不设置；`Author.Username` 不写入 `card`。
+
+私聊（C2C）：`sender.nickname` 取 `Author.MemberNickname` > `Author.Username`，不设置 `card`。
 
 ### Sender.Role 身份标识
 

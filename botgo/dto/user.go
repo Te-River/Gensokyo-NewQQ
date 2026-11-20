@@ -4,6 +4,7 @@ package dto
 type User struct {
 	ID               string `json:"id"`
 	Username         string `json:"username"`
+	MemberNickname   string `json:"member_nickname,omitempty"` // 群内昵称（2026-11-16 群消息事件新增）
 	Avatar           string `json:"avatar"`
 	Bot              bool   `json:"bot"`
 	UnionOpenID      string `json:"union_openid"`       // 特殊关联应用的 openid

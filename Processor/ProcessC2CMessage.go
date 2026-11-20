@@ -129,6 +129,8 @@ func (p *Processors) ProcessC2CMessage(data *dto.WSC2CMessageData) error {
 			selfid64 = int64(p.Settings.AppID)
 		}
 
+		// 私聊无群名片概念：nickname 取 member_nickname || username，不上报 card
+		privateNickname, _ := resolveNicknameAndCard(data.Author, "")
 		// 修 H2：按 string_ob11 双分支构造上报结构
 		var privateMsgMap map[string]interface{}
 		if !config.GetStringOb11() {
@@ -141,7 +143,7 @@ func (p *Processors) ProcessC2CMessage(data *dto.WSC2CMessageData) error {
 				SelfID:      selfid64,
 				UserID:      userid64,
 				Sender: PrivateSender{
-					Nickname: "", //这个不支持,但加机器人好友,会收到一个事件,可以对应储存获取,用idmaps可以做到.
+					Nickname: privateNickname, // 2026-11-16 起官方事件带 member_nickname，取 member_nickname || username
 					UserID:   userid64,
 				},
 				SubType: "friend",
@@ -191,7 +193,7 @@ func (p *Processors) ProcessC2CMessage(data *dto.WSC2CMessageData) error {
 				SelfID:      selfid64,
 				UserID:      data.Author.ID,
 				Sender: PrivateSenderS{
-					Nickname: "", //这个不支持,但加机器人好友,会收到一个事件,可以对应储存获取,用idmaps可以做到.
+					Nickname: privateNickname, // 2026-11-16 起官方事件带 member_nickname，取 member_nickname || username
 					UserID:   data.Author.ID,
 				},
 				SubType: "friend",
@@ -233,7 +235,7 @@ func (p *Processors) ProcessC2CMessage(data *dto.WSC2CMessageData) error {
 			struserid = data.Author.ID
 		}
 		userdata := structs.FriendData{
-			Nickname: "",
+			Nickname: privateNickname,
 			Remark:   "",
 			UserID:   struserid,
 		}

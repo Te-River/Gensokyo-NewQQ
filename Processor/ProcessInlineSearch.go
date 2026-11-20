@@ -225,12 +225,8 @@ func (p *Processors) ProcessInlineSearch(data *dto.WSInteractionData) error {
 					groupMsg.RealUserID = data.GroupMemberOpenID
 					groupMsg.Avatar, _ = GenerateAvatarURLV2(data.GroupMemberOpenID)
 				}
-				//根据条件判断是否增加nick和card
-				var CaN = config.GetCardAndNick()
-				if CaN != "" {
-					groupMsg.Sender.Nickname = CaN
-					groupMsg.Sender.Card = CaN
-				}
+				//该事件不携带作者昵称，仅套用card_and_nick配置
+				groupMsg.Sender.Nickname, groupMsg.Sender.Card = resolveNicknameAndCard(nil, config.GetCardAndNick())
 				// 根据条件判断是否添加Echo字段
 				if config.GetTwoWayEcho() {
 					groupMsg.Echo = echostr
@@ -349,12 +345,8 @@ func (p *Processors) ProcessInlineSearch(data *dto.WSInteractionData) error {
 					groupMsg.RealUserID = data.GroupMemberOpenID
 					groupMsg.Avatar, _ = GenerateAvatarURLV2(data.GroupMemberOpenID)
 				}
-				//根据条件判断是否增加nick和card
-				var CaN = config.GetCardAndNick()
-				if CaN != "" {
-					groupMsg.Sender.Nickname = CaN
-					groupMsg.Sender.Card = CaN
-				}
+				//该事件不携带作者昵称，仅套用card_and_nick配置
+				groupMsg.Sender.Nickname, groupMsg.Sender.Card = resolveNicknameAndCard(nil, config.GetCardAndNick())
 				// 根据条件判断是否添加Echo字段
 				if config.GetTwoWayEcho() {
 					groupMsg.Echo = echostr

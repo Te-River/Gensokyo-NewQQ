@@ -245,14 +245,8 @@ func (p *Processors) ProcessGroupMessage(data *dto.WSGroupATMessageData) error {
 		    groupMsg.Avatar, _ = GenerateAvatarURLV2(data.Author.ID)
 		   }
 		   groupMsg.IsFullGroupMessage = false
-		//根据条件判断是否增加nick和card
-		var CaN = config.GetCardAndNick()
-		if CaN != "" {
-			groupMsg.Sender.Nickname = CaN
-			groupMsg.Sender.Card = CaN
-		} else if data.Author.Username != "" {
-			groupMsg.Sender.Nickname = data.Author.Username
-		}
+		//根据条件判断是否增加nick和card（card_and_nick > member_nickname > username）
+		groupMsg.Sender.Nickname, groupMsg.Sender.Card = resolveNicknameAndCard(data.Author, config.GetCardAndNick())
 		// 根据条件判断是否添加Echo字段
 		if config.GetTwoWayEcho() {
 			groupMsg.Echo = echostr
@@ -341,14 +335,8 @@ func (p *Processors) ProcessGroupMessage(data *dto.WSGroupATMessageData) error {
 		    groupMsgS.Avatar, _ = GenerateAvatarURLV2(data.Author.ID)
 		   }
 		   groupMsgS.IsFullGroupMessage = false
-		//根据条件判断是否增加nick和card
-		var CaN = config.GetCardAndNick()
-		if CaN != "" {
-			groupMsgS.Sender.Nickname = CaN
-			groupMsgS.Sender.Card = CaN
-		} else if data.Author.Username != "" {
-			groupMsgS.Sender.Nickname = data.Author.Username
-		}
+		//根据条件判断是否增加nick和card（card_and_nick > member_nickname > username）
+		groupMsgS.Sender.Nickname, groupMsgS.Sender.Card = resolveNicknameAndCard(data.Author, config.GetCardAndNick())
 		// 根据条件判断是否添加Echo字段
 		if config.GetTwoWayEcho() {
 			groupMsgS.Echo = echostr
