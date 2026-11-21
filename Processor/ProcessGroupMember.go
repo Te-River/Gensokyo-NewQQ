@@ -93,6 +93,7 @@ func (p *Processors) ProcessGroupMember(data *dto.GroupMemberEvent, eventType st
 			RealUserID:  data.MemberOpenID,
 			RealGroupID: data.GroupOpenID,
 			EventID:     data.EventID,
+			UnionGroupOpenID: data.UnionGroupOpenID,
 		}
 		outputMap := structToMap(notice)
 		outputMap["event_id"] = data.EventID // 保留 event_id 供 Gsk 内部被动回复
@@ -112,6 +113,7 @@ func (p *Processors) ProcessGroupMember(data *dto.GroupMemberEvent, eventType st
 			Message:     memberCQ,
 			RealUserID:  data.MemberOpenID,
 			RealGroupID: data.GroupOpenID,
+			UnionGroupOpenID: data.UnionGroupOpenID,
 		}
 		outputMap := structToMap(notice)
 		mylog.Printf("群成员离开(notice): group=%s, user=%s", data.GroupOpenID, data.MemberOpenID)

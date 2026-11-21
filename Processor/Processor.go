@@ -87,6 +87,7 @@ type OnebotGroupMessage struct {
 		RealGroupID     string      `json:"real_group_id,omitempty"`      //当前真实gid
 		IsBindedGroupId bool        `json:"is_binded_group_id,omitempty"` //当前群号是否是binded后的
 		   IsBindedUserId  bool        `json:"is_binded_user_id,omitempty"`  //当前用户号号是否是binded后的
+		UnionGroupOpenID string     `json:"union_group_openid,omitempty"`  //跨应用群标识
 		   IsFullGroupMessage bool    `json:"is_full_group_message,omitempty"` //消息是否来自全量（非@）群聊
 		  }
 
@@ -113,6 +114,7 @@ type OnebotGroupMessage struct {
 		IsBindedGroupId bool        `json:"is_binded_group_id,omitempty"` //当前群号是否是binded后的
 		IsBindedUserId  bool        `json:"is_binded_user_id,omitempty"`  //当前用户号号是否是binded后的
 		   Platform        string      `json:"platform"`                     //平台类型
+		UnionGroupOpenID string     `json:"union_group_openid,omitempty"`  //跨应用群标识
 		   IsFullGroupMessage bool    `json:"is_full_group_message,omitempty"` //消息是否来自全量（非@）群聊
 		  }
 

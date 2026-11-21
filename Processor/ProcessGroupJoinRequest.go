@@ -77,6 +77,7 @@ func (p *Processors) ProcessGroupJoinRequest(data *dto.GroupJoinRequestEvent) {
 		request.RealUserID = data.MemberOpenID
 		request.RealGroupID = data.GroupOpenID
 	}
+	request.UnionGroupOpenID = data.UnionGroupOpenID
 
 	outputMap := structToMap(request)
 	// auto_approved 官方为对象（AutoAppproved，仅下行事件携带）：对象透传 + 布尔伴随字段

@@ -28,6 +28,8 @@ type GroupRequestEvent struct {
 	Username    string `json:"username,omitempty"`       // 申请者昵称
 	RealUserID  string `json:"real_user_id,omitempty"`   //当前真实uid
 	RealGroupID string `json:"real_group_id,omitempty"`  //当前真实gid
+	// 跨应用群标识（官方 2026-11-16 群事件新增，非空时才上报）
+	UnionGroupOpenID string `json:"union_group_openid,omitempty"`
 }
 
 // GroupNoticeEvent 表示群通知事件的数据结构
@@ -44,6 +46,8 @@ type GroupNoticeEvent struct {
 	RealUserID  string `json:"real_user_id,omitempty"`  //当前真实uid
 	RealGroupID string `json:"real_group_id,omitempty"` //当前真实gid
 	EventID     string `json:"event_id,omitempty"`      // 原始事件 ID，用于被动回复
+	// 跨应用群标识（官方 2026-11-16 群事件新增，非空时才上报）
+	UnionGroupOpenID string `json:"union_group_openid,omitempty"`
 }
 
 // 定义了一个符合 Client 接口的 SelfIntroduceClient 结构体
@@ -125,6 +129,7 @@ func (p *Processors) ProcessGroupAddBot(data *dto.GroupAddBotEvent) error {
 		Request.RealUserID = data.OpMemberOpenID
 		Request.RealGroupID = data.GroupOpenID
 	}
+	Request.UnionGroupOpenID = data.UnionGroupOpenID
 
 	Notice = GroupNoticeEvent{
 		GroupID:    GroupID64,
@@ -141,6 +146,7 @@ func (p *Processors) ProcessGroupAddBot(data *dto.GroupAddBotEvent) error {
 		Notice.RealUserID = data.OpMemberOpenID
 		Notice.RealGroupID = data.GroupOpenID
 	}
+	Notice.UnionGroupOpenID = data.UnionGroupOpenID
 
 	groupMsgMap := structToMap(Request)
 	//上报信息到onebotv11应用端(正反ws)

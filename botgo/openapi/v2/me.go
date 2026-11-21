@@ -17,3 +17,15 @@ func (o *openAPIv2) Me(ctx context.Context) (*dto.User, error) {
 
 	return resp.Result().(*dto.User), nil
 }
+
+// UserInfo 获取用户基本信息（官方 2026-11-16 新增）
+func (o *openAPIv2) UserInfo(ctx context.Context, userOpenID string) (*dto.UserInfo, error) {
+	resp, err := o.request(ctx).
+		SetResult(dto.UserInfo{}).
+		SetPathParam("user_id", userOpenID).
+		Get(o.getURL(userInfoURI))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Result().(*dto.UserInfo), nil
+}

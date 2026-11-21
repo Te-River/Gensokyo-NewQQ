@@ -10,6 +10,8 @@ type Message struct {
 	GuildID string `json:"guild_id"`
 	// 群ID
 	GroupID string `json:"group_id"`
+	// 跨应用群标识（官方 2026-11-16 群事件新增）
+	UnionGroupOpenID string `json:"union_group_openid,omitempty"`
 
 	// 内容
 	Content string `json:"content"`
@@ -64,6 +66,8 @@ type GroupAddBotEvent struct {
 	GroupOpenID    string      `json:"group_openid"`
 	OpMemberOpenID string      `json:"op_member_openid"`
 	Timestamp      interface{} `json:"timestamp"`
+	// 跨应用群标识（官方 2026-11-16 群事件新增）
+	UnionGroupOpenID string `json:"union_group_openid,omitempty"`
 }
 
 // GroupMemberEvent 表示群成员变动事件的数据结构（GROUP_MEMBER_ADD / GROUP_MEMBER_REMOVE）
@@ -73,6 +77,8 @@ type GroupMemberEvent struct {
 	GroupOpenID  string      `json:"group_openid"`
 	MemberOpenID string      `json:"member_openid"`
 	Timestamp    interface{} `json:"timestamp"`
+	// 跨应用群标识（官方 2026-11-16 群事件新增）
+	UnionGroupOpenID string `json:"union_group_openid,omitempty"`
 }
 
 type GroupMsgRejectEvent struct {

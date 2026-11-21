@@ -232,6 +232,7 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 		       groupMsg.Avatar, _ = GenerateAvatarURLV2(data.Author.ID)
 		      }
 		      groupMsg.IsFullGroupMessage = true
+		groupMsg.UnionGroupOpenID = data.UnionGroupOpenID
 		// nick/card（card_and_nick > member_nickname > username）
 		groupMsg.Sender.Nickname, groupMsg.Sender.Card = resolveNicknameAndCard(data.Author, config.GetCardAndNick())
 		if config.GetTwoWayEcho() {
@@ -302,6 +303,7 @@ func (p *Processors) ProcessGroupNormalMessage(data *dto.WSGroupMessageData) err
 		       groupMsgS.Avatar, _ = GenerateAvatarURLV2(data.Author.ID)
 		      }
 		      groupMsgS.IsFullGroupMessage = true
+		groupMsgS.UnionGroupOpenID = data.UnionGroupOpenID
 		// nick/card（card_and_nick > member_nickname > username）
 		groupMsgS.Sender.Nickname, groupMsgS.Sender.Card = resolveNicknameAndCard(data.Author, config.GetCardAndNick())
 		if config.GetTwoWayEcho() {

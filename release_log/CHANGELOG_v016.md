@@ -70,6 +70,23 @@ QQ 官方 2026-11-16 起群消息事件的 `author` 新增 `member_nickname`（�
 - **影响**：**对外行为变更**。依赖"发送恒成功"的下游（如只判 `retcode` 就认为已发出的插件）在审核中/频控/事件过期等场景会看到 `failed`，需自行决定是否重试；`data.message_id` 语义不变
 - **文档**：`docs/本版新增功能.md` 的 API 段补充该回执约定
 
+### 新增 `get_user_info`：获取用户基本信息（2026-11-16 官方新增接口）
+
+QQ 官方 2026-11-16 新增 `GET /v2/users/{user_openid}/info`，返回用户昵称、是否允许主动推送与头像直链：
+
+- **新增**：`handlers/get_user_info.go` 注册 action `get_user_info`；`botgo` fork 增加 `dto.UserInfo` 与 `openapi.UserAPI.UserInfo`（v2 实现，v1 明确不支持）
+- **入参**：`{"user_id": <string|number>}`——虚拟号走 idmap 反查，32 位原生 openid 直接使用（与 `get_avatar` 同口径）
+- **回执**：成功 `{"retcode":0,"status":"ok","data":{"user_id"(原样回显),"username","allow_proactive_msg","avatar"},"message":""}`；上游失败 `retcode:1500` + `status:"failed"` + `data:null` + 上游错误文本；`user_id` 缺失/非法 `retcode:1400`
+- **测试**：`handlers/get_user_info_test.go` 覆盖缺参 1400 / 上游成功（`data` 四字段）/ 上游失败 1500
+
+### 群类事件透传 `union_group_openid`（2026-11-16 官方新增字段）
+
+群相关事件自 2026-11-16 起新增跨应用群标识 `union_group_openid`：
+
+- **修改**：`botgo/dto` 的群消息事件（`dto.Message`，即 `WSGroupMessageData`/`WSGroupATMessageData`）、`GroupAddBotEvent`、`GroupMemberEvent`、`GroupJoinRequestEvent`、`GroupInfo` 增加 `UnionGroupOpenID`
+- **上报**：`GROUP_MESSAGE_CREATE`、`GROUP_AT_MESSAGE_CREATE`、`GROUP_ADD_ROBOT`、`GROUP_DEL_ROBOT`、`GROUP_MEMBER_ADD`、`GROUP_MEMBER_REMOVE`、`GROUP_JOIN_REQUEST` 的上报 JSON 顶层原样带出 `union_group_openid`，**非空时才出现**（`omitempty`）；不塞进 `group_id`、不改写现有字段
+- **测试**：`Processor/zzzzzz_union_group_openid_test.go` 覆盖带字段→上报含它、不带→不出现（成员变动 / 入群申请 / 群消息三条路径）
+
 ---
 
 ## 🐛 修复

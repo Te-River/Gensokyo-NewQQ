@@ -75,6 +75,7 @@ func (p *Processors) ProcessGroupDelBot(data *dto.GroupAddBotEvent) error {
 		Notice.RealUserID = data.OpMemberOpenID
 		Notice.RealGroupID = data.GroupOpenID
 	}
+	Notice.UnionGroupOpenID = data.UnionGroupOpenID
 	groupMsgMap := structToMap(Notice)
 	//上报信息到onebotv11应用端(正反ws)
 	p.dispatchInbound(data, groupMsgMap, func() { go p.BroadcastMessageToAll(groupMsgMap, p.Apiv2, data) })

@@ -2,6 +2,7 @@ package v1
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/tencent-connect/botgo/dto"
 )
@@ -16,4 +17,9 @@ func (o *openAPI) Me(ctx context.Context) (*dto.User, error) {
 	}
 
 	return resp.Result().(*dto.User), nil
+}
+
+// UserInfo v1 不支持用户基本信息接口（官方仅提供 v2）
+func (o *openAPI) UserInfo(ctx context.Context, userOpenID string) (*dto.UserInfo, error) {
+	return nil, fmt.Errorf("v1 openapi does not support UserInfo")
 }

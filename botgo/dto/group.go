@@ -62,6 +62,8 @@ type GroupInfo struct {
 	GroupClassText  string   `json:"group_class_text"`
 	GroupTags       []string `json:"group_tags"`
 	GroupMemberNum  int      `json:"group_member_num"`
+	// 跨应用群标识（官方 2026-11-16 新增）
+	UnionGroupOpenID string `json:"union_group_openid,omitempty"`
 }
 
 // BotInGroupState 机器人群内状态（GET /v2/groups/{group_openid}/bot_state）
@@ -180,6 +182,8 @@ type GroupJoinRequestEvent struct {
 	Bot           bool              `json:"bot"`
 	VerifyInfo    VerifyInfo        `json:"verify_info"`
 	AutoApproved  *AutoApprovedInfo `json:"auto_approved"` // 仅下行事件携带
+	// 跨应用群标识（官方 2026-11-16 群事件新增）
+	UnionGroupOpenID string `json:"union_group_openid,omitempty"`
 }
 
 // ApprovalJoinRequest 入群申请审批请求体

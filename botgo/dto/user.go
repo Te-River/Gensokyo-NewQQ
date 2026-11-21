@@ -14,3 +14,10 @@ type User struct {
 	UserOpenID       string `json:"user_openid,omitempty"` // 用户 openid
 	MemberOpenID     string `json:"member_openid,omitempty"` // 群成员 openid
 }
+
+// UserInfo 用户基本信息（GET /v2/users/{user_openid}/info，2026-11-16 官方新增）
+type UserInfo struct {
+	Username          string `json:"username"`
+	AllowProactiveMsg bool   `json:"allow_proactive_msg"`
+	Avatar            string `json:"avatar"`
+}

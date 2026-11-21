@@ -83,6 +83,9 @@ const (
 	userMeGuildsURI uri = "/users/@me/guilds"
 	userMeDMURI     uri = "/users/@me/dms"
 
+	// [新增] 用户基本信息（2026-11-16 官方新增）
+	userInfoURI uri = "/v2/users/{user_id}/info"
+
 	gatewayURI    uri = "/gateway" // nolint
 	gatewayBotURI uri = "/gateway/bot"
 

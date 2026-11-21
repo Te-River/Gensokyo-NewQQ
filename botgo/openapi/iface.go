@@ -48,6 +48,8 @@ type WebsocketAPI interface {
 // UserAPI 用户相关接口
 type UserAPI interface {
 	Me(ctx context.Context) (*dto.User, error)
+	// UserInfo 获取用户基本信息（官方 2026-11-16 新增 GET /v2/users/{user_openid}/info）
+	UserInfo(ctx context.Context, userOpenID string) (*dto.UserInfo, error)
 }
 
 // MessageAPI 消息相关接口
