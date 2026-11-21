@@ -148,15 +148,30 @@ impl Runtime {
     ///
     /// 存储只占内存（懒消息池 / seq / SSM 队列 / msg_id 映射），不落盘；已注入时原样返回，
     /// 测试与嵌入场景可复用同一份存储。清理线程启动失败只 warn：过期映射不清理只影响内存。
+    ///
+    /// 建好（或复用）后一并挂进 [`ActionContext`]：`delete_msg` / `[CQ:reply]` 要把发送回执里的
+    /// 虚拟号反查回真实 ID，而 handler 捕获的是注册时的 `Arc<ActionContext>`，只能整份重建再重注册
+    /// （与 [`Runtime::attach_idmap_inner`] 同口径）。
     fn attach_echo(state: AppState) -> AppState {
-        if state.echo().is_some() {
+        let state = if state.echo().is_some() {
+            state
+        } else {
+            let echo = EchoStore::new().with_ramdom_seq(state.config().snapshot().get_ramdom_seq());
+            if let Err(err) = echo.start_cleanup_routine() {
+                tracing::warn!(error = %err, "echo 清理线程启动失败，映射不会定期清理");
+            }
+            state.with_echo(Arc::new(echo))
+        };
+        let Some(echo) = state.echo_arc() else {
             return state;
+        };
+        match state.actions_arc() {
+            Some(actions) => {
+                let actions = Arc::new(actions.as_ref().clone().with_echo(echo));
+                state.with_action_context(actions)
+            }
+            None => state,
         }
-        let echo = EchoStore::new().with_ramdom_seq(state.config().snapshot().get_ramdom_seq());
-        if let Err(err) = echo.start_cleanup_routine() {
-            tracing::warn!(error = %err, "echo 清理线程启动失败，映射不会定期清理");
-        }
-        state.with_echo(Arc::new(echo))
     }
 
     /// 生产装配：未注入 idmap 时按配置打开两个库，并挂进状态与 [`gensokyo_actions::ActionContext`]。
@@ -1613,6 +1628,76 @@ mod tests {
         let state = Runtime::attach_echo(state);
         let kept = state.echo_arc().expect("echo 仍在");
         assert!(Arc::ptr_eq(&injected, &kept), "已注入时不应被替换");
+    }
+
+    /// `attach_echo` 把同一份 echo 挂进 `ActionContext`：`delete_msg` 撤回发送回执虚拟号要它。
+    #[test]
+    fn attach_echo_wires_the_action_context() {
+        use std::sync::Arc;
+
+        use gensokyo_actions::{ActionContext, QqApi};
+        use gensokyo_config::ConfigManager;
+        use gensokyo_qq::{
+            Error as QqError, HttpRequest, HttpResponse, HttpTransport, OpenApiClient,
+            Result as QqResult, TokenConfig, TokenManager,
+        };
+
+        use super::Runtime;
+        use crate::state::AppState;
+
+        #[derive(Debug)]
+        struct OfflineTransport;
+
+        impl HttpTransport for OfflineTransport {
+            fn request(
+                &self,
+                _req: HttpRequest,
+            ) -> impl std::future::Future<Output = QqResult<HttpResponse>> + Send {
+                std::future::ready(Err(QqError::Transport("测试环境不联网".to_owned())))
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nsettings:\n  app_id: 102000001\n")
+            .expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+
+        let transport = Arc::new(OfflineTransport);
+        let tokens = Arc::new(TokenManager::new(
+            Arc::clone(&transport),
+            TokenConfig::new("102000001", "s3cret"),
+        ));
+        let api = Arc::new(OpenApiClient::new(transport, tokens));
+        let context = Arc::new(ActionContext::new(
+            api as Arc<dyn QqApi>,
+            Arc::clone(&manager),
+        ));
+        let state = AppState::with_actions(manager, context);
+        assert!(
+            state
+                .actions()
+                .expect("应有 ActionContext")
+                .echo()
+                .is_none(),
+            "装配前 ActionContext 不应有 echo"
+        );
+
+        let state = Runtime::attach_echo(state);
+        let row = state
+            .echo_arc()
+            .expect("echo 应已装配")
+            .store_cache_in_memory("m-wire")
+            .expect("派生行号");
+        let context = state.actions().expect("ActionContext 应随状态保留");
+        assert_eq!(
+            context
+                .echo()
+                .expect("ActionContext 应拿到 echo")
+                .get_cache_id_from_memory_by_row_id(&row.to_string()),
+            Some("m-wire".to_owned()),
+            "必须是同一份 echo 存储"
+        );
     }
 
     /// 生产启动路径（`Runtime::start_with` 的第二步）按配置装配 idmap，且不覆盖已注入的实例。

@@ -221,6 +221,15 @@ Go 在 `global_group_msg_rre_to_message` / `global_c2c_msg_switch_to_message` / 
 
 ## 🐛 修复
 
+### 撤回自己刚发的消息报「键不存在」：回执虚拟号与 `delete_msg` 反查不在同一张表（2026-11-21）
+
+活体实测：`send_group_msg` 成功回执里的虚拟消息 ID 紧接着用于 `delete_msg` 恒失败——`1400 协议错误: 反查 message_id 失败: 键不存在: 虚拟消息 ID=648848338`，同轮 6 条群消息全部如此。根因是虚拟号两侧的存储对不上：发送回执的虚拟号由 `EchoStore::store_cache_in_memory` 登记在 echo 行号反表（Go `StoreCacheInMemory` → `GetCacheIDFromMemoryByRowID`），而 `delete_msg` 只反查 idmap 消息表（Go `RetrieveRowByCachev2`），echo 反表从未被读过。
+
+- **修改**：`crates/gensokyo-actions/src/messages.rs` 的 `resolve_message_id` 依次查两个来源——先 echo 行号反表（`ActionContext::echo` → `EchoStore::get_cache_id_from_memory_by_row_id`，对应 Go `handlers/delete_msg.go:34-36` 的 `memory_msgid` 分支），未命中再走 idmap；两条都未命中仍回 `1400` +「键不存在」，不把未知虚拟号猜成真实 ID。`get_msg` / `put_interaction` 共用该函数，一并恢复
+- **装配**：`crates/gensokyo-actions/src/qqapi.rs` 的 `ActionContext` 新增 `echo` 字段与 `with_echo` / `echo()`；`crates/gensokyo-runtime/src/boot.rs` 的 `attach_echo` 把同一份 `EchoStore` 同时挂进状态与 `ActionContext`（handler 捕获的是注册时的 `Arc<ActionContext>`，只能整份重建再重注册，与 `attach_idmap` 同口径）
+- **影响**：`string_ob11: false` 下用发送回执的虚拟号撤回群聊 / C2C 消息恢复可用（`send_private_msg` 同一条链）；回执的虚拟号形态、事件帧序列化、`[CQ:active]` 判定均不变
+- **测试**：`gensokyo-actions` 的 `delete_msg_resolves_virtual_id_from_echo_receipt` / `delete_msg_resolves_virtual_id_from_idmap` / `delete_msg_unknown_virtual_id_still_fails_1400`；`gensokyo-runtime` 的 `tests/deferred.rs::group_receipt_message_id_can_be_retracted` / `private_receipt_message_id_can_be_retracted`（发一条 → 用回执虚拟号撤回 → 断言上游拿到真实 ID）与 `delete_msg_unknown_message_id_still_fails_1400`；`boot::tests::attach_echo_wires_the_action_context`
+
 ### 私聊 `sender` 按 `string_ob11` 二选一（2026-11-21）
 
 活体对打：同一 C2C 消息，Go 与 Rust 的事件帧只剩 `sender.tiny_id` 一处差异——Go 的私信 sender 是**结构体二选一**，Rust 原先把 `PrivateSenderS` 的形态无条件套在两种配置下。

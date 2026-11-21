@@ -13,9 +13,10 @@
 //!
 //! # message_id 口径（对齐 Go `DeleteMsg`）
 //!
-//! `string_ob11 = true` 时请求里的 `message_id` 就是真实消息 ID，原样透传；否则它是 idmap 分配的
-//! 虚拟号，需要用 [`gensokyo_storage::IdMapStore::retrieve_row_by_cache`] 还原——未装配 idmap
-//! 或映射不存在时回 `1400`，不做「拿虚拟号直接撤回」的猜测。
+//! `string_ob11 = true` 时请求里的 `message_id` 就是真实消息 ID，原样透传；否则它是虚拟号，
+//! 按两条来源依次反查：本进程发送成功的消息登记在 echo 行号反表（Go `StoreCacheInMemory` →
+//! `GetCacheIDFromMemoryByRowID`），入站消息登记在 idmap（Go `RetrieveRowByCachev2`）。
+//! 两条都查不到回 `1400`，不做「拿虚拟号直接撤回」的猜测。
 //!
 //! # 刻意的差异（相对 Go）
 //!
@@ -193,10 +194,23 @@ impl Handler for GetForwardMsgHandler {
 
 /// 请求里的 `message_id` → 上游真实消息 ID。
 ///
-/// `string_ob11` 为真时原样透传；否则按 idmap 虚拟号还原（Go `RetrieveRowByCachev2` 语义）。
+/// `string_ob11` 为真时原样透传；否则依次查两个虚拟号来源：
+///
+/// 1. echo 行号反表——发送成功的回执虚拟号由 [`gensokyo_storage::EchoStore::store_cache_in_memory`]
+///    登记，撤回 / 引用必须回到同一张反表（Go `delete_msg.go:34-36` 的 `memory_msgid` 分支）；
+/// 2. idmap——入站消息与 `memory_msgid=false` 部署的消息 ID 表（Go `retrieve_row_by_cache`）。
+///
+/// 两条都未命中时沿用 idmap 的「键不存在」错误（`1400`），不把未知虚拟号猜成真实 ID。
 pub(crate) fn resolve_message_id(context: &ActionContext, requested: &str) -> Result<String> {
     if context.string_ob11() {
         return Ok(requested.to_owned());
+    }
+    if let Some(real) = context
+        .echo()
+        .and_then(|echo| echo.get_cache_id_from_memory_by_row_id(requested))
+        && !real.trim().is_empty()
+    {
+        return Ok(real);
     }
     let vuin = requested.parse::<i64>().map_err(|_| {
         Error::Protocol(format!(
@@ -242,14 +256,17 @@ fn retract_target(
 mod tests {
     use serde_json::json;
 
+    use std::sync::Arc;
+
     use super::{DeleteMsgHandler, GetForwardMsgHandler, GetMsgHandler};
     use crate::handler::RETCODE_BAD_REQUEST;
     use crate::qqapi::MsgDetail;
-    use crate::testing::{Call, block_on, context, failed, ok_data, request};
+    use crate::testing::{Call, block_on, context, context_with_idmap, failed, ok_data, request};
     use crate::util::RETCODE_UPSTREAM;
     use gensokyo_core::Error;
     use gensokyo_protocol::Handler;
     use gensokyo_protocol::Status;
+    use gensokyo_storage::{EchoStore, IdMapStore};
 
     const GROUP: &str = "0123456789abcdef0123456789abcdef";
     const MEMBER: &str = "fedcba9876543210fedcba9876543210";
@@ -423,5 +440,101 @@ mod tests {
         assert_eq!(status, Status::Failed);
         assert_eq!(retcode, RETCODE_BAD_REQUEST);
         assert!(api.calls().is_empty());
+    }
+
+    /// 全新 idmap 存储（临时目录唯一后缀；与 `users` 测试同口径）。
+    fn fresh_store(tag: &str) -> Arc<IdMapStore> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "gensokyo-actions-messages-{tag}-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(&dir).expect("创建临时存储目录");
+        let options = gensokyo_storage::IdMapOptions::new(
+            dir.join("openid-map.redb"),
+            dir.join("msgid-map.redb"),
+        )
+        .with_app_id("102001234");
+        Arc::new(IdMapStore::open(options).expect("打开 idmap 存储失败"))
+    }
+
+    /// 回执里的虚拟号来自 echo 行号反表（发送侧只登记在这里）：撤回必须能反查回真实 ID。
+    #[test]
+    fn delete_msg_resolves_virtual_id_from_echo_receipt() {
+        let echo = Arc::new(EchoStore::new());
+        let row = echo
+            .store_cache_in_memory("REAL-MID-ECHO")
+            .expect("派生行号");
+        let (context, api) = context_with_idmap(fresh_store("echo"), false);
+        let context = Arc::new(context.as_ref().clone().with_echo(echo));
+        *api.delete.lock().unwrap() = Some(Ok(()));
+
+        let handler = DeleteMsgHandler::new(context);
+        let response = block_on(handler.handle(&request(
+            "delete_msg",
+            json!({"message_id": row.to_string(), "group_id": GROUP}),
+        )))
+        .expect("handler 不应返回 Err");
+        let _ = ok_data(response);
+
+        assert_eq!(
+            api.calls(),
+            vec![Call::DeleteMsg(
+                Some(GROUP.to_owned()),
+                None,
+                "REAL-MID-ECHO".to_owned()
+            )]
+        );
+    }
+
+    /// 入站消息登记的 idmap 虚拟号仍是有效反查来源（两条来源都不放宽成「直接撤回虚拟号」）。
+    #[test]
+    fn delete_msg_resolves_virtual_id_from_idmap() {
+        let store = fresh_store("idmap");
+        let row = store.store_cache("REAL-MID-IDMAP").expect("登记虚拟号");
+        let (context, api) = context_with_idmap(store, false);
+        *api.delete.lock().unwrap() = Some(Ok(()));
+
+        let handler = DeleteMsgHandler::new(context);
+        let response = block_on(handler.handle(&request(
+            "delete_msg",
+            json!({"message_id": row.to_string(), "group_id": GROUP}),
+        )))
+        .expect("handler 不应返回 Err");
+        let _ = ok_data(response);
+
+        assert_eq!(
+            api.calls(),
+            vec![Call::DeleteMsg(
+                Some(GROUP.to_owned()),
+                None,
+                "REAL-MID-IDMAP".to_owned()
+            )]
+        );
+    }
+
+    /// 从未出现过的虚拟号：两个来源都未命中，仍回 `1400` + 「键不存在」，且不触达上游。
+    #[test]
+    fn delete_msg_unknown_virtual_id_still_fails_1400() {
+        let (context, api) = context_with_idmap(fresh_store("unknown"), false);
+        let handler = DeleteMsgHandler::new(context);
+        let response = block_on(handler.handle(&request(
+            "delete_msg",
+            json!({"message_id": "987654321", "group_id": GROUP}),
+        )))
+        .expect("反查失败也应是 Ok(失败响应)");
+        let message = response.message.clone().expect("失败响应应带 message 文案");
+        let (status, retcode, data) = failed(response);
+        assert_eq!(status, Status::Failed);
+        assert_eq!(retcode, RETCODE_BAD_REQUEST);
+        assert_eq!(data, None);
+        assert!(
+            message.contains("键不存在"),
+            "未知虚拟号必须报键不存在，实际: {message}"
+        );
+        assert!(api.calls().is_empty(), "反查失败不应触达上游");
     }
 }

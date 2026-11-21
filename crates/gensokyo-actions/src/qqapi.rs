@@ -84,7 +84,7 @@ use gensokyo_qq::{
     BotInGroupState, GroupInfo, GroupMember, GroupMemberList, HttpTransport, JoinRequestList,
     OpenApiClient,
 };
-use gensokyo_storage::IdMapStore;
+use gensokyo_storage::{EchoStore, IdMapStore};
 
 use crate::rfc3339;
 use crate::send::SendTarget;
@@ -1138,26 +1138,28 @@ pub(crate) fn restrict_chat_setting(
     }
 }
 
-/// handler 的依赖容器：QQ 上游 + 配置快照 + 可选的 idmap。
+/// handler 的依赖容器：QQ 上游 + 配置快照 + 可选的 idmap / echo。
 ///
-/// `idmap` 是 `Option`：M1 阶段的部署可以只跑查询类 action（直接传 32 位 OpenID），
-/// 只有需要「虚拟号 ⇄ OpenID」互转的请求才要求装配。
+/// `idmap` / `echo` 都是 `Option`：M1 阶段的部署可以只跑查询类 action（直接传 32 位 OpenID），
+/// 只有需要「虚拟号 ⇄ 真实 ID」互转的请求才要求装配。
 #[derive(Debug, Clone)]
 pub struct ActionContext {
     api: Arc<dyn QqApi>,
     config: Arc<ConfigManager>,
     idmap: Option<Arc<IdMapStore>>,
+    echo: Option<Arc<EchoStore>>,
     bot_id: Option<Arc<str>>,
 }
 
 impl ActionContext {
-    /// 构造（无 idmap、无 bot ID）。
+    /// 构造（无 idmap、无 echo、无 bot ID）。
     #[must_use]
     pub fn new(api: Arc<dyn QqApi>, config: Arc<ConfigManager>) -> Self {
         Self {
             api,
             config,
             idmap: None,
+            echo: None,
             bot_id: None,
         }
     }
@@ -1166,6 +1168,13 @@ impl ActionContext {
     #[must_use]
     pub fn with_idmap(mut self, idmap: Arc<IdMapStore>) -> Self {
         self.idmap = Some(idmap);
+        self
+    }
+
+    /// 挂上 echo 行号反表（发送成功回执的虚拟号只登记在这里，撤回 / 引用反查要用）。
+    #[must_use]
+    pub fn with_echo(mut self, echo: Arc<EchoStore>) -> Self {
+        self.echo = Some(echo);
         self
     }
 
@@ -1191,6 +1200,12 @@ impl ActionContext {
     #[must_use]
     pub fn idmap(&self) -> Option<&IdMapStore> {
         self.idmap.as_deref()
+    }
+
+    /// echo 行号反表（未装配时为 `None`）。
+    #[must_use]
+    pub fn echo(&self) -> Option<&EchoStore> {
+        self.echo.as_deref()
     }
 
     /// 挂上机器人真实 ID（`GET /users/@me`，Go `main.go:304` 的 `handlers.BotID`）。

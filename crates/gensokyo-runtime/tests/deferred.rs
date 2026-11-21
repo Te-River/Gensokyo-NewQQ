@@ -7,7 +7,7 @@ mod support;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use gensokyo_actions::{ActionContext, QqApi, QqFuture};
+use gensokyo_actions::{ActionContext, QqApi, QqFuture, RetractRequest};
 use gensokyo_core::Error;
 use gensokyo_protocol::Registry;
 use gensokyo_protocol::action::ActionRequest;
@@ -15,7 +15,7 @@ use gensokyo_qq::dto::{
     BotInGroupState, GroupInfo, GroupMember, GroupMemberList, JoinRequestList, MessageResponse,
     MessageToCreate,
 };
-use gensokyo_runtime::{AppState, RETCODE_INTERNAL};
+use gensokyo_runtime::{AppState, RETCODE_BAD_REQUEST, RETCODE_INTERNAL};
 use gensokyo_storage::{EchoStore, IdMapOptions, IdMapStore};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -49,6 +49,7 @@ enum Outcome {
 #[derive(Debug, Default)]
 struct FakeQqApi {
     sent: Mutex<Vec<Sent>>,
+    deleted: Mutex<Vec<RetractRequest>>,
     group: Mutex<VecDeque<Outcome>>,
     c2c: Mutex<VecDeque<Outcome>>,
 }
@@ -56,6 +57,10 @@ struct FakeQqApi {
 impl FakeQqApi {
     fn sent(&self) -> Vec<Sent> {
         self.sent.lock().expect("发送记录锁未中毒").clone()
+    }
+
+    fn deleted(&self) -> Vec<RetractRequest> {
+        self.deleted.lock().expect("撤回记录锁未中毒").clone()
     }
 
     fn push_group(&self, outcome: Outcome) {
@@ -171,6 +176,13 @@ impl QqApi for FakeQqApi {
             take(&self.c2c)
         })
     }
+
+    fn delete_msg(&self, target: RetractRequest) -> QqFuture<'_, ()> {
+        Box::pin(async move {
+            self.deleted.lock().expect("撤回记录锁未中毒").push(target);
+            Ok(())
+        })
+    }
 }
 
 /// 装配「内置 action + actions 全集」的 `AppState` 与共享替身。
@@ -185,8 +197,10 @@ fn state_with_echo(settings: &str) -> (TempDir, Arc<FakeQqApi>, AppState, Arc<Ec
     let (manager, dir) = config(settings);
     let api = Arc::new(FakeQqApi::default());
     let api_dyn: Arc<dyn QqApi> = api.clone();
-    let context = Arc::new(ActionContext::new(api_dyn, Arc::clone(&manager)));
     let echo = Arc::new(EchoStore::new());
+    // 与生产 `boot::attach_echo` 同口径：echo 同时挂进状态与 `ActionContext`
+    let context =
+        Arc::new(ActionContext::new(api_dyn, Arc::clone(&manager)).with_echo(Arc::clone(&echo)));
     let state = AppState::with_actions(manager, context).with_echo(Arc::clone(&echo));
     (dir, api, state, echo)
 }
@@ -214,9 +228,13 @@ fn state_with_idmap(
         )
         .expect("idmap 应能打开"),
     );
-    let context =
-        Arc::new(ActionContext::new(api_dyn, Arc::clone(&manager)).with_idmap(Arc::clone(&idmap)));
     let echo = Arc::new(EchoStore::new());
+    // 与生产 `boot::attach_echo` 同口径：echo 同时挂进状态与 `ActionContext`，撤回才能反查回执虚拟号
+    let context = Arc::new(
+        ActionContext::new(api_dyn, Arc::clone(&manager))
+            .with_idmap(Arc::clone(&idmap))
+            .with_echo(Arc::clone(&echo)),
+    );
     let state = AppState::with_actions(manager, context).with_echo(Arc::clone(&echo));
     (dir, api, state, echo, idmap)
 }
@@ -1126,4 +1144,117 @@ async fn non_send_actions_keep_the_plain_envelope() {
     );
     assert_eq!(value["message"], json!(""), "成功回执的 message 是空串");
     assert_eq!(value["echo"], json!("e-s"), "echo 原样回传");
+}
+
+// ---- 回执虚拟号闭环：`send_*` 发出的 message_id 必须能被 `delete_msg` 反查回真实 ID ----
+
+/// 群聊：用发送回执里的虚拟号立刻撤回，必须还原成上游真实 ID 并成功。
+///
+/// 回归自活体实测（`delete_msg` 回 `1400 反查 message_id 失败: 键不存在: 虚拟消息 ID=…`）：
+/// 回执虚拟号登记在 echo 行号反表，撤回原来只查 idmap，两条来源对不上。
+#[tokio::test]
+async fn group_receipt_message_id_can_be_retracted() {
+    let (_dir, api, state, _echo, _idmap) = state_with_idmap("app_id: 12345\n");
+    api.push_group(api.ok("REAL-GROUP-MID"));
+
+    let sent = state
+        .dispatcher()
+        .dispatch(&request(
+            "send_group_msg",
+            json!({ "group_id": OPENID, "message": "hi" }),
+            Some(json!("e-send")),
+        ))
+        .await;
+    assert_eq!(sent.retcode, 0);
+    let message_id = sent.data.expect("成功回执应带 data")["message_id"].clone();
+    assert!(
+        message_id.is_i64(),
+        "numeric 模式的回执虚拟号必须是数字: {message_id}"
+    );
+
+    let deleted = state
+        .dispatcher()
+        .dispatch(&request(
+            "delete_msg",
+            json!({ "message_id": message_id, "group_id": OPENID }),
+            Some(json!("e-del")),
+        ))
+        .await;
+    assert_eq!(
+        deleted.retcode, 0,
+        "撤回自己刚发的消息不应失败: {:?}",
+        deleted.message
+    );
+    assert_eq!(
+        api.deleted(),
+        vec![RetractRequest {
+            group_openid: Some(OPENID.to_owned()),
+            user_openid: None,
+            message_id: "REAL-GROUP-MID".to_owned(),
+        }],
+        "撤回必须打到上游真实消息 ID"
+    );
+}
+
+/// 私聊（C2C）：同一条反查链，`user_id` 分支。
+#[tokio::test]
+async fn private_receipt_message_id_can_be_retracted() {
+    let (_dir, api, state, _echo, _idmap) = state_with_idmap("app_id: 12345\n");
+    api.push_c2c(api.ok("REAL-C2C-MID"));
+
+    let sent = state
+        .dispatcher()
+        .dispatch(&request(
+            "send_private_msg",
+            json!({ "user_id": USER_OPENID, "message": "hi" }),
+            Some(json!("e-send")),
+        ))
+        .await;
+    assert_eq!(sent.retcode, 0);
+    let message_id = sent.data.expect("成功回执应带 data")["message_id"].clone();
+
+    let deleted = state
+        .dispatcher()
+        .dispatch(&request(
+            "delete_msg",
+            json!({ "message_id": message_id, "user_id": USER_OPENID }),
+            Some(json!("e-del")),
+        ))
+        .await;
+    assert_eq!(
+        deleted.retcode, 0,
+        "撤回自己刚发的私聊消息不应失败: {:?}",
+        deleted.message
+    );
+    assert_eq!(
+        api.deleted(),
+        vec![RetractRequest {
+            group_openid: None,
+            user_openid: Some(USER_OPENID.to_owned()),
+            message_id: "REAL-C2C-MID".to_owned(),
+        }]
+    );
+}
+
+/// 从未出现过的虚拟号：两个来源都未命中，仍是 `1400` + 「键不存在」，且不触达上游。
+#[tokio::test]
+async fn delete_msg_unknown_message_id_still_fails_1400() {
+    let (_dir, api, state, _echo, _idmap) = state_with_idmap("app_id: 12345\n");
+
+    let deleted = state
+        .dispatcher()
+        .dispatch(&request(
+            "delete_msg",
+            json!({ "message_id": "987654321", "group_id": OPENID }),
+            Some(json!("e-del")),
+        ))
+        .await;
+
+    assert_eq!(deleted.retcode, RETCODE_BAD_REQUEST);
+    let message = deleted.message.unwrap_or_default();
+    assert!(
+        message.contains("键不存在"),
+        "未知虚拟号必须报键不存在，实际: {message}"
+    );
+    assert!(api.deleted().is_empty(), "反查失败不应触达上游");
 }
