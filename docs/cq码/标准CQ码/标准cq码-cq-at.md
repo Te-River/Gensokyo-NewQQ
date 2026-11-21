@@ -52,7 +52,7 @@
 
 ### 群聊（普通文本路径，msg_type=0）
 
-`[CQ:at,qq=虚拟ID]` → 反查 OpenID → 转为 `<@OpenID>` 嵌入消息正文。
+`[CQ:at,qq=虚拟ID]` → 用户名缓存命中则转 `@用户名 `（带尾空格）；缓存未命中时反查 OpenID 转 `<@OpenID> `；两者都拿不到时**整段删除**（与 Go `resolvePlainTextAtMentions` 的三段式同口径）。
 
 ### 群聊（Markdown 路径，msg_type=2）
 
@@ -60,7 +60,7 @@
 
 ### 图文混合（msg_type=7）
 
-同普通文本路径，@ 转为 `<@OpenID>` 嵌入正文。
+同普通文本路径，@ 按同一三段式嵌入正文（`@用户名 ` / `<@OpenID> ` / 删除）。
 
 ### add_at_group 配置
 

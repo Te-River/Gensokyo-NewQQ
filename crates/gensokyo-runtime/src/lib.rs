@@ -61,7 +61,7 @@
 //!   （41 个注册名 + 3 个 Go 兼容别名），并挂上 [`AppState::actions`]（`ActionContext`）。
 //! - [`dispatcher::Dispatcher`]：handler 回 `data.deferred == true` 时执行
 //!   [`deferred::execute`]——反序列化 `SendRequest`、收件人反查 OpenID、`MessageOut` 合成
-//!   `MessageToCreate`（文本 + `[CQ:at]` → `<@openid>` + 单个 media + reply `msg_id`），按
+//!   `MessageToCreate`（文本 + `[CQ:at]` → `@用户名` / `<@openid>` + 单个 media + reply `msg_id`），按
 //!   target 调 `QqApi::send_group_message` / `send_c2c_message`，最终 `data = {"message_id": …}`。
 //! - [`media::MediaRuntime`]：图片 / 语音 / 视频 / 文件的 `url` / 本地 / `base64` 来源先经
 //!   `gensokyo_media::Fetcher` 取字节，再调 `QqApi::upload_group_file` / `upload_c2c_file`

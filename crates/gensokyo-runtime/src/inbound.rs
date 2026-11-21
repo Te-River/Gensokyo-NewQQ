@@ -5,7 +5,8 @@
 //! [`Processor`](https://github.com/hoshinonyaruko/gensokyo) 里的业务逻辑。
 //!
 //! 除把群注册、群消息的「群 × 用户」最新 msg_id（`[CQ:remove]` 缺 `msg_id` 时的反查源）
-//! 写进 idmap 外，副作用有三个：喂 echo（[`Inbound::with_echo`]）——消息事件写懒
+//! 与群消息作者的 `username`（出站文本 `[CQ:at]` 的 `@用户名` 缓存，10 分钟 TTL）写进 idmap 外，
+//! 副作用有三个：喂 echo（[`Inbound::with_echo`]）——消息事件写懒
 //! message_id 池与 msg_id / msg_type 映射，入群类事件写 event_id，供出站解析被动回复凭据；
 //! 收发统计（`Inbound::record_message_received`）——三个消息事件各记一次当日接收数
 //! （Go `botstats.RecordMessageReceived`）；C2C 私信把好友写进 idmap 的 `user_info` 表
@@ -1029,6 +1030,8 @@ impl Inbound {
         let author = payload.author.as_ref();
         let raw_user = author.map_or("", |author| author.id.as_str());
         let union_openid = author.map_or("", |author| author.union_openid.as_str());
+        // Go `StoreUserName(虚号, data.Author.Username)`：昵称取 `username`，不是 `member_nickname`
+        let username = author.map_or("", |author| author.username.as_str());
 
         // Go `ProcessGroupMessage.go:53-56` / `ProcessGroupNormalMessage.go:44-47`：在 ID 切换与
         // idmap 转换**之前**用原始 id 建映射（顺序即语义：反查出来必须是原始 OpenID）。
@@ -1102,6 +1105,15 @@ impl Inbound {
                 target: "gensokyo_runtime::message",
                 "group msg_id mapped: raw_msg={raw_msg} vMsg={message_id}"
             );
+        }
+        // Go `ProcessGroupMessage.go:98-101` / `ProcessGroupNormalMessage.go:82-85`：把
+        // `author.username` 按虚拟用户号缓存 10 分钟，出站 `[CQ:at,qq=虚拟号]` 因此能渲染成
+        // `@用户名`。string 形态没有数字虚拟号（Go 也只在 `!string_ob11` 分支里写）、空用户名
+        // Go 直接跳过；C2C / notice 事件 Go 不写，这里同样只在群消息写。
+        if let (Some(vuin), Some(store)) = (user_id.as_i64(), self.idmap.as_deref())
+            && !username.is_empty()
+        {
+            store.store_user_name(vuin, username);
         }
 
         // Go `e6c7e32`：群聊昵称/名片取 `member_nickname`，`card_nick` 配置非空时两者都覆盖。
@@ -3210,6 +3222,38 @@ mod tests {
             .convert("GROUP_MESSAGE_CREATE", Some(&payload), None)
             .expect("全量群消息应可转换");
         assert_eq!(UnionCache::shared().union(bare), None, "缺 union 不建映射");
+    }
+
+    /// 入站群消息把 `author.username` 按虚拟号缓存（Go `ProcessGroupMessage.go:98-101` /
+    /// `ProcessGroupNormalMessage.go:82-85`）：出站 `[CQ:at,qq=虚号]` 因此能渲染成 `@用户名`。
+    /// 两种群消息都要写；C2C / notice 事件没有这条写入（Go 同样只在群消息写）。
+    #[test]
+    fn group_message_caches_author_username() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nsettings: {}\n").expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let store = test_store(dir.path());
+        let inbound = Inbound::new(manager, Some(Arc::clone(&store)));
+        let (_, vuin) = store
+            .retrieve_virtual_value("u0123456789abcdef0123456789abcdef")
+            .expect("登记身份失败");
+
+        for (event, name) in [
+            ("GROUP_AT_MESSAGE_CREATE", "阿求"),
+            ("GROUP_MESSAGE_CREATE", "阿求二号"),
+        ] {
+            let mut payload = group_at_payload();
+            payload["author"]["username"] = json!(name);
+            inbound
+                .convert(event, Some(&payload), None)
+                .expect("群消息应可转换");
+            assert_eq!(
+                store.get_user_name(vuin).as_deref(),
+                Some(name),
+                "{event} 应把 author.username 写进用户名缓存"
+            );
+        }
     }
 
     /// 缺 `author` / 空 `id` 的群消息：空身份不写进 idmap，ID 原样回退空串。
