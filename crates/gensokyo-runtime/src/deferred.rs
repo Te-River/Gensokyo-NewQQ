@@ -70,7 +70,7 @@
 //! - 单聊出现标签 → `1400`（官方只允许群聊，静默丢弃不可接受）；
 //! - 群聊出现标签 → 先占当天的名额（[`at_everyone::reserve`]，落 idmap config 的
 //!   `at_everyone` section），**发送失败回滚**，超限 `1400`；
-//! - 文本 + markdown 同现时标签迁移进 markdown 正文（否则随 `content` 清空丢失）；
+//! - 文本 + markdown 同现时整段文本前置进 markdown 正文（Go 步骤 2），标签随之保留；
 //! - 卡片与 @全员 同现 → `1400`（`msg_type=8` 会清空正文，标签无处安放）；
 //! - `enable_at_everyone_limit=false` 时既不拦也不计数；未装配 idmap 时只 `warn` 放行
 //!   （没有计数载体，不能把消息卡死在这里）。
@@ -1246,8 +1246,9 @@ fn has_media(plan: &OutboundPlan) -> bool {
 /// `content` 的层级按 [`markdown_content`] 的顺序找（顶层 → `markdown` → `data.markdown` →
 /// `data.data.markdown`），现场载荷的双层包装才能解出正文。
 ///
-/// 组装顺序与 Go 一致：先把文本侧的 @全员 标签迁移进正文（`migrateAtEveryoneToMarkdown`），
-/// 再把 `[CQ:at,qq=数字]` 换成 `qqbot-at-user` 标签（`ResolveMarkdownAtMentions`）。
+/// 组装顺序与 Go 一致：先反查 union、把正文里的 `[CQ:at,qq=数字]` 换成 `qqbot-at-user`
+/// 标签（`ResolveMarkdownAtMentions`），**再**把整段文本前置到正文头部（步骤 2）——文本侧
+/// 已在 [`render_text`] 里各自解析过，两边先解析再拼。
 fn compose_markdown(
     context: &ActionContext,
     plan: &OutboundPlan,
@@ -1265,7 +1266,6 @@ fn compose_markdown(
                 .to_owned(),
         ));
     };
-    let content = migrate_at_everyone(&content, rendered_text);
     // Go `send_group_msg.go:1531-1533`：`union_id` 打开时先把正文里的 union 反查回原始
     // OpenID，**再**走 `ResolveMarkdownAtMentions`——顺序不能反：`[CQ:at]` 生成的就是
     // 原始 OpenID，反查放在它后面等于对刚写好的值再做一次无意义查找。
@@ -1274,7 +1274,18 @@ fn compose_markdown(
     } else {
         content
     };
-    Ok(Some(Markdown::content(render_markdown(context, &content)?)))
+    let content = render_markdown(context, &content)?;
+    // 步骤 2（`send_group_msg.go:557-562`）：整条文本前置到正文头部——官方 md 把整条消息按
+    // md 语法渲染，前缀不并进来就随 `content` 清空一起丢失。文本为空（md-only）时跳过拼接，
+    // 避免产出前导换行（Go :559）。
+    let prefix = strip_markdown_codes(rendered_text);
+    let content = if prefix.is_empty() {
+        content
+    } else {
+        // 前缀与正文可能各带一个 @全员 标签：合并后收敛成一个（Go 会连发两个，本仓契约只留一个）
+        at_everyone::dedupe_tag(&format!("{prefix}\n{content}"))
+    };
+    Ok(Some(Markdown::content(content)))
 }
 
 /// 正文里的 `<qqbot-at-user id="union" />` → 原始 OpenID
@@ -1312,20 +1323,30 @@ fn replace_union_at_user(content: &str) -> String {
     out
 }
 
-/// markdown 抢占正文时，把文本里的 @全员 标签并入 markdown 正文（Go `migrateAtEveryoneToMarkdown`）。
+/// 剔除文本里的 `[CQ:markdown,…]` 标记（Go 步骤 3 的正则 `\[CQ:markdown,[^\]]*\]`，
+/// `send_group_msg.go:563-565`）。
 ///
-/// markdown 胜出时 `content` 会被清空，文本里的标签不迁移就会整条丢失（额度却已经占了）。
-/// 正文为空（模板 markdown 没有 `content`）时不塞标签：官方模板消息塞进正文就是非法载荷；
-/// 正文已有标签则保持原样，避免重复 @。
-fn migrate_at_everyone(content: &str, rendered_text: &str) -> String {
-    if content.is_empty()
-        || at_everyone::contains_tag(content)
-        || !at_everyone::contains_tag(rendered_text)
-    {
-        return content.to_owned();
+/// 命中 markdown 槽位的码在解析期已从正文摘除，这里兜底的是仍留在文本里的残码：前置进
+/// markdown 正文后会被当成字面 CQ 码渲染。未闭合的 `[CQ:markdown,` 不算标记（Go 正则也
+/// 不匹配），原样保留。
+fn strip_markdown_codes(text: &str) -> String {
+    const OPEN: &str = "[CQ:markdown,";
+    if !text.contains(OPEN) {
+        return text.to_owned();
     }
-    // Go：strings.TrimSpace(content + " " + atEveryoneTag)
-    format!("{content} {}", at_everyone::TAG).trim().to_owned()
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(OPEN) {
+        out.push_str(&rest[..start]);
+        let code = &rest[start..];
+        let Some(close) = code.find(']') else {
+            out.push_str(code);
+            return out;
+        };
+        rest = &code[close + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// markdown 正文里的 `[CQ:at,qq=…]` → 官方 `qqbot-at-user` 标签（Go `ResolveMarkdownAtMentions`）。
@@ -5589,7 +5610,11 @@ mod tests {
             1,
             "同一份正文只能有一个 @全员 标签: {content}"
         );
-        assert_eq!(content.trim_end(), "<qqbot-at-everyone /> 议题");
+        assert_eq!(
+            content.trim_end(),
+            "<qqbot-at-everyone /> 开会\n 议题",
+            "整段文本前置进正文后，重复标签只留第一个"
+        );
 
         // 额度只按一条消息计一次：同群同日第二条必须被限流拒绝
         let err = execute(&context, &plan, &deps(&media, None))
@@ -6152,7 +6177,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn text_at_everyone_migrates_into_markdown_content() {
+    async fn text_prefix_and_at_everyone_merge_into_markdown_head() {
         let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
         let (_dir, context) = context(Arc::clone(&api));
         let (_idmap_dir, idmap) = idmap_store();
@@ -6173,8 +6198,8 @@ mod tests {
                 .markdown
                 .as_ref()
                 .and_then(|markdown| markdown.content.as_deref()),
-            Some("# 今天的议题 <qqbot-at-everyone />"),
-            "文本里的 @全员 必须迁移进 markdown 正文"
+            Some("<qqbot-at-everyone /> 开会\n# 今天的议题"),
+            "整段文本前置进 markdown 正文，@全员 标签随之保留"
         );
         assert!(
             idmap.read_config(SECTION, OPENID).is_ok(),
@@ -6182,28 +6207,74 @@ mod tests {
         );
     }
 
-    #[test]
-    fn migrate_at_everyone_matches_go_semantics() {
-        assert_eq!(
-            super::migrate_at_everyone("# 议题", "<qqbot-at-everyone /> 开会"),
-            "# 议题 <qqbot-at-everyone />"
+    /// 现场缺陷：`CQ[markdown]-A [CQ:markdown,…]` 的前缀文本此前被丢弃。
+    #[tokio::test]
+    async fn text_prefix_is_merged_into_markdown_content_head() {
+        const BODY: &str = "# CQ markdown 标题\n\n**粗体** 与 `代码`";
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let payload = json!({ "content": BODY }).to_string();
+        let plan = cq_request(
+            SendTarget::Group(OPENID.to_owned()),
+            &format!("CQ[markdown]-A [CQ:markdown,data={payload}]"),
         );
+
+        execute(&context, &plan, &deps(&no_media(), None))
+            .await
+            .expect("前缀 + markdown 应发送成功");
+
+        assert_eq!(api.sent()[0].msg_type, Some(msg_type::MARKDOWN));
         assert_eq!(
-            super::migrate_at_everyone("# 议题\n", "<qqbot-at-everyone />"),
-            "# 议题\n <qqbot-at-everyone />",
-            "Go 只做首尾 TrimSpace，正文内部换行保留"
+            sent_markdown(&api),
+            format!("CQ[markdown]-A \n{BODY}"),
+            "前缀文本必须前置进 markdown 正文头部（Go `send_group_msg.go:557-562`）"
         );
-        assert_eq!(
-            super::migrate_at_everyone("# 已有 <qqbot-at-everyone />", "<qqbot-at-everyone />"),
-            "# 已有 <qqbot-at-everyone />",
-            "正文已有标签不得重复追加"
+    }
+
+    #[tokio::test]
+    async fn markdown_only_content_has_no_leading_newline() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let plan = request(
+            SendTarget::Group(OPENID.to_owned()),
+            markdown_plan("# 只有正文"),
         );
-        assert_eq!(
-            super::migrate_at_everyone("", "<qqbot-at-everyone />"),
-            "",
-            "模板 markdown 没有正文，塞标签会产出非法载荷"
+
+        execute(&context, &plan, &deps(&no_media(), None))
+            .await
+            .expect("md-only 应发送成功");
+
+        let content = sent_markdown(&api);
+        assert_eq!(content, "# 只有正文", "无前缀时正文原样");
+        assert!(
+            !content.starts_with('\n'),
+            "md-only 不得产出前导换行（Go :559）"
         );
-        assert_eq!(super::migrate_at_everyone("# 议题", "没有标签"), "# 议题");
+    }
+
+    #[tokio::test]
+    async fn keyboard_code_never_leaks_into_markdown_content_in_either_order() {
+        const KEYBOARD: &str = r#"[CQ:keyboard,data={"content":{"rows":[]}}]"#;
+        const MARKDOWN: &str = r##"[CQ:markdown,data={"content":"# 标题"}]"##;
+        for message in [
+            format!("{KEYBOARD}{MARKDOWN}"),
+            format!("{MARKDOWN}{KEYBOARD}"),
+        ] {
+            let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+            let (_dir, context) = context(Arc::clone(&api));
+            let plan = cq_request(SendTarget::Group(OPENID.to_owned()), &message);
+
+            execute(&context, &plan, &deps(&no_media(), None))
+                .await
+                .expect("keyboard + markdown 应发送成功");
+
+            assert_eq!(api.sent()[0].msg_type, Some(msg_type::MARKDOWN));
+            assert_eq!(
+                sent_markdown(&api),
+                "# 标题",
+                "keyboard 标记不得混进 markdown 正文: {message}"
+            );
+        }
     }
 
     #[tokio::test]

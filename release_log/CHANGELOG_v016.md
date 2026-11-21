@@ -221,6 +221,15 @@ Go 在 `global_group_msg_rre_to_message` / `global_c2c_msg_switch_to_message` / 
 
 ## 🐛 修复
 
+### 文本 + `[CQ:markdown]` 同现时前缀文本丢失（2026-11-21）
+
+活体对照：同一条 `CQ[markdown]-A [CQ:markdown,data=base64://…]`，Go 发出的是 `"CQ[markdown]-A \n# CQ markdown 标题\n\n**粗体** 与 \`代码\`"`，Rust 只发了 markdown 载荷自身的正文——前缀文本随 `content` 清空一起丢失。
+
+- **修改**：`crates/gensokyo-runtime/src/deferred.rs` 的 `compose_markdown` 按 Go 步骤 2（`handlers/send_group_msg.go:557-562`）把整条文本前置到 markdown 正文头部：`content = rendered_text + "\n" + content`，文本为空时跳过拼接、不产出前导换行。拼接发生在正文自身解析（union 反查 → `ResolveMarkdownAtMentions`）之后——文本侧在 `render_text` 里已各自解析过，两边先解析再拼，与 Go 同序。文本里残留的 `[CQ:markdown,…]` 先按 Go 步骤 3 的正则剔除（`strip_markdown_codes`）
+- **替代**：原 `migrate_at_everyone`（只把文本里的 @全员 标签追加进正文）被前置拼接取代——整段文本进来后标签自然保留，且跨段只剩一个标签（`at_everyone::dedupe_tag`）。行为口径不变：文本 + markdown 同现时 @全员 依旧落在 markdown 正文里并计入当天额度
+- **影响**：`[CQ:keyboard]` / 独立键盘、卡片、媒体拆条均不受影响；md-only（无前缀）载荷字节不变；Go 新链桥（`handlers/outbound_bridge.go` 的 `applyGroupMarkdownKeyboard` / `applyPrivateMarkdownKeyboard`）本身不拼前缀，本仓单链按 legacy 语义对齐
+- **测试**：`crates/gensokyo-runtime/src/deferred.rs` 的 `text_prefix_is_merged_into_markdown_content_head`（现场形态复现）、`markdown_only_content_has_no_leading_newline`（不得有前导换行）、`keyboard_code_never_leaks_into_markdown_content_in_either_order`（两种顺序）、`text_prefix_and_at_everyone_merge_into_markdown_head`、`duplicate_at_everyone_tags_collapse_to_one`
+
 ### 撤回自己刚发的消息报「键不存在」：回执虚拟号与 `delete_msg` 反查不在同一张表（2026-11-21）
 
 活体实测：`send_group_msg` 成功回执里的虚拟消息 ID 紧接着用于 `delete_msg` 恒失败——`1400 协议错误: 反查 message_id 失败: 键不存在: 虚拟消息 ID=648848338`，同轮 6 条群消息全部如此。根因是虚拟号两侧的存储对不上：发送回执的虚拟号由 `EchoStore::store_cache_in_memory` 登记在 echo 行号反表（Go `StoreCacheInMemory` → `GetCacheIDFromMemoryByRowID`），而 `delete_msg` 只反查 idmap 消息表（Go `RetrieveRowByCachev2`），echo 反表从未被读过。
