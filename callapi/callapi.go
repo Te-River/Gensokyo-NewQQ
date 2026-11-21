@@ -292,14 +292,14 @@ func callAPIFromDictLegacy(client Client, api openapi.OpenAPI, apiv2 openapi.Ope
 	handler, ok := handlers[message.Action]
 	if !ok {
 		mylog.Println("Unsupported action:", message.Action)
-		return ""
+		return actionFailureReceipt(client, message, 1404, "未知 action: "+message.Action, false)
 	}
 
 	jsonString, err := handler(client, api, apiv2, message)
 	if err != nil {
 		// 处理错误
 		mylog.Println("Error handling action:", message.Action, "Error:", err)
-		return ""
+		return actionFailureReceipt(client, message, 1500, err.Error(), false)
 	}
 
 	return jsonString
@@ -333,13 +333,49 @@ func callAPIFromDictNew(client Client, api openapi.OpenAPI, apiv2 openapi.OpenAP
 	if err != nil {
 		if errors.Is(err, action.ErrUnknownAction) {
 			mylog.Println("Unsupported action:", message.Action)
-		} else {
-			mylog.Println("Error handling action:", message.Action, "Error:", err)
+			return actionFailureReceipt(client, message, 1404, "未知 action: "+message.Action, dryRun)
 		}
-		return ""
+		mylog.Println("Error handling action:", message.Action, "Error:", err)
+		return actionFailureReceipt(client, message, 1500, err.Error(), dryRun)
 	}
 	if s, ok := res.(string); ok {
 		return s
 	}
 	return ""
+}
+
+// actionFailureReceipt 构造失败回执并（非 dryRun 时）经 client 下发，返回该 JSON 字符串：
+// 未知 action → 1404，handler 异常 → 1500。字段与 handlers 的 sendActionResult 一致
+// （data 恒为 null、echo 原样），WS 与 HTTP 两种传输的回执形状因此相同。
+// dryRun 为 shadow 的 new 对比执行：只构造不发送，避免与 legacy 双发。
+func actionFailureReceipt(client Client, message ActionMessage, retCode int, errMsg string, dryRun bool) string {
+	response := struct {
+		Data    interface{} `json:"data"`
+		Message string      `json:"message"`
+		RetCode int         `json:"retcode"`
+		Status  string      `json:"status"`
+		Echo    interface{} `json:"echo"`
+	}{
+		Message: errMsg,
+		RetCode: retCode,
+		Status:  "failed",
+		Echo:    message.Echo,
+	}
+	if !dryRun && client != nil {
+		if err := client.SendMessage(map[string]interface{}{
+			"data":    nil,
+			"message": errMsg,
+			"retcode": retCode,
+			"status":  "failed",
+			"echo":    message.Echo,
+		}); err != nil {
+			mylog.Printf("actionFailureReceipt: 发送响应失败: %v", err)
+		}
+	}
+	result, err := MarshalNoEscape(response)
+	if err != nil {
+		mylog.Printf("actionFailureReceipt: 序列化响应失败: %v", err)
+		return ""
+	}
+	return string(result)
 }

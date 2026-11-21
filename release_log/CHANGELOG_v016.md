@@ -112,6 +112,8 @@ QQ 官方 2026-11-16 新增 `GET /v2/users/{user_openid}/info`，返回用户昵
 - **修改**：`delete_msg`（`message_id` 缺失、`user_id` 反查失败）、`put_interaction`（`echo` 非字符串、`post_type` 非法、上游失败）、`get_robot_share_link`（上游失败 1500）、`set_group_ban` / `set_group_whole_ban`（群类型读取失败 / 非群聊场景）改走 `sendActionResult`
 - **修改**：`get_user_info` 反查失败口径由 1500 归一到 1400（参数 / id 反查失败），上游失败仍为 1500；历史 handler 的既有回执（如 `get_group_info` 的 `retcode 100`）按 `set_group_add_request.go` 常量注释保留旧口径
 - **已回执**：`get_status` / `get_login_info` / `get_online_clients` / `get_version_info` / `mark_msg_as_read` / `get_friend_list` / `get_group_info` / `get_group_list` / `get_group_member_info` / `get_group_member_list` / `delete_msg` / `put_interaction` 的序列化失败分支在 `SendMessage` 之后，保留并注明「已回执」
+- **修改**：分发层同病根——`callapi/callapi.go` 的 `callAPIFromDictLegacy` / `callAPIFromDictNew` 在**未知 action** 与 **handler 返回 error** 时此前只记日志 `return ""`（发不存在的 action 时客户端 20 秒超时），现统一经 `actionFailureReceipt` 回执：未知 action `retcode:1404` + `message:"未知 action: <name>"`，handler 异常 `retcode:1500` + `message:"<err>"`，均为 `status:"failed"`、`data:null`、`echo` 原样，返回值仍给出该 JSON 串供 HTTP 传输层使用；`shadow` 的 new 对比执行（dry-run）只构造不发送，避免与 legacy 双发
+- **测试**：`callapi/receipt_test.go` 覆盖 legacy/new 两链的未知 action（1404，mock client 恰收到一次 `SendMessage`）与 handler 异常（1500），并断言 dry-run 不下发
 - **测试**：`handlers/query_action_receipt_test.go` 覆盖未映射 `group_id` 的 `get_group_member_list`（1400）、未映射 `group_id` 的 `get_group_info`（失败回执 + `echo` 原样）、未映射 `user_id` 的 `get_avatar`（1400）
 
 ### action 回执不再转义 `&`，与 Rust 端逐字节对齐
