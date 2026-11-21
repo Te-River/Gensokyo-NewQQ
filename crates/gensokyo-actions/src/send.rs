@@ -481,12 +481,34 @@ pub fn plan_send_group_msg_raw(params: &Value) -> Result<SendRequest> {
 ///
 /// `send_group_msg_raw` 与私聊发送共用同一份实现：官方 2026-11-17 起群消息的 `msg_id`
 /// 可直接用于 `POST /v2/users/{openid}/messages`，两条链读的是同一个参数。
+///
+/// 两条凭据落到同一个出站字段，取值顺序照 Go 的执行顺序（`send_private_msg.go:327-331`
+/// 先写参数、`:360-365` 按 `[CQ:active]` 双清、`:447-449` 最后由 `[CQ:reply]` 后写；
+/// 群聊 `send_group_msg.go:314-316` → `:411-424` / `:662-675` 同构）：
+/// - 计划里已有 `[CQ:reply]`（[`message_out`] 解析产出）⇒ 后写胜出，参数不再覆盖它；
+/// - 计划带 `[CQ:active]` ⇒ 清空之后没有 CQ 侧 reply 可后写，参数的 `message_id` 一并丢弃。
+///
+/// 只有规划阶段能区分这两个来源（落成 `reply_msg_id` 之后二者不可分辨），所以取舍在这里定稿：
+/// 计划里留着的 `reply_msg_id` 恒代表 `[CQ:reply]`，runtime 的 deferred 链不必再判来源。
 fn apply_raw_message_id(planned: &mut SendRequest, object: &Map<String, Value>) -> Result<()> {
-    if let Some(value) = raw_message_id(object)? {
-        let reply = serde_json::from_value(value)
-            .map_err(|err| Error::Protocol(format!("message_id 形态非法: {err}")))?;
-        planned.message.plan.reply_msg_id = Some(reply);
+    if planned.message.plan.reply_msg_id.is_some() {
+        return Ok(());
     }
+    let Some(value) = raw_message_id(object)? else {
+        return Ok(());
+    };
+    if planned
+        .message
+        .plan
+        .active
+        .as_ref()
+        .is_some_and(|active| active.active)
+    {
+        return Ok(());
+    }
+    let reply = serde_json::from_value(value)
+        .map_err(|err| Error::Protocol(format!("message_id 形态非法: {err}")))?;
+    planned.message.plan.reply_msg_id = Some(reply);
     Ok(())
 }
 
@@ -1390,6 +1412,24 @@ mod tests {
             "群消息 msg_id 必须落成私聊的被动凭据"
         );
         assert!(!planned.wakeup, "显式 msg_id 不是互动召回");
+    }
+
+    /// Go 先写 `params.message_id`（`send_private_msg.go:327-331`）、后写 `[CQ:reply]`
+    /// （`:447-449`）⇒ 两者同现（无 `[CQ:active]`）时 reply 胜出。
+    #[test]
+    fn cq_reply_wins_over_explicit_message_id() {
+        let planned = plan_send_private_msg(&json!({
+            "user_id": "789",
+            "message": "[CQ:reply,id=REAL-MSG-ID]hi",
+            "message_id": "ROBOT1.0_PARAM"
+        }))
+        .expect("两条凭据同现应规划成功");
+
+        assert_eq!(
+            planned.message.plan.reply_msg_id,
+            Some(Ob11Id::str("REAL-MSG-ID")),
+            "[CQ:reply] 后写，覆盖 params.message_id"
+        );
     }
 
     /// 同一能力当前可达的规划入口：`send_group_msg_raw` 只带 `user_id` 时按私聊路由，
