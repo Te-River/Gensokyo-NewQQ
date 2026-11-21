@@ -96,6 +96,9 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 	var singleItem = make(map[string][]string)
 	var imageType, imageUrl string
 	imageCount := 0
+	// 是否已发出至少一条召回消息：markdown/keyboard 等键被前置装配消费后，
+	// 末尾不再补发一条空的占位召回。
+	sentAny := false
 
 	// 检查图片并计算数量 (复刻原逻辑)
 	if imageURLs, ok := foundItems["local_image"]; ok && len(imageURLs) == 1 {
@@ -154,19 +157,35 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 		// 发送
 		resp, err := postC2CWakeupMessageWithRetry(apiv2, userID, groupMessage)
 		sendWakeupNotice(client, userID, resp, err, selfID)
+		sentAny = true
 
 		delete(foundItems, imageType)
 		messageText = ""
 	}
 
-	// --- 场景 B: 纯文本消息 ---
-	if messageText != "" {
+	// [CQ:stream] 单聊流式消息：复用 send_private_msg 的流式发送（同一套解析与 stream_msg_id 分片缓存）
+	if ret, present := sendStream(client, &message, "", userID, messageText, foundItems, apiv2); present {
+		return ret, nil
+	}
+
+	// [CQ:card] 图文卡片为群聊专用（msg_type=8，dto.GroupCard 仅群聊可用），私聊召回无对应能力：
+	// 明确丢弃并记 warn，避免静默消失
+	if _, ok := foundItems["card"]; ok {
+		mylog.Printf("[CQ:card] 私聊召回不支持图文卡片(msg_type=8 仅群聊)，已忽略")
+		delete(foundItems, "card")
+	}
+
+	// --- 场景 B: 纯文本 / markdown / 独立 keyboard（与 send_private_msg 同款装配） ---
+	if messageText != "" || len(foundItems["markdown"]) > 0 || len(foundItems["keyboard"]) > 0 {
 		// 转换 [CQ:at] 为 @用户名
 		messageText = resolvePlainTextAtMentions(messageText)
 		// 复用 generatePrivateMessage 获取基础结构 (虽然可以直接构造，但为了保持风格一致)
 		groupReply := generatePrivateMessage("", "", nil, messageText, 0, apiv2, userID)
 
 		if groupMessage, ok := groupReply.(*dto.MessageToCreate); ok {
+			// 复用私聊共用装配：markdown 内嵌 keyboard / 独立 [CQ:keyboard] 一并附加
+			// （含 __USER_ID__ 占位符替换与 C2C 权限归一），并从 foundItems 消费掉
+			applyPrivateMarkdownKeyboard(groupMessage, foundItems, userID, apiv2)
 			// 强制覆盖为召回模式
 			groupMessage.IsWakeup = true
 			groupMessage.MsgID = ""
@@ -174,6 +193,7 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 
 			resp, err := postC2CWakeupMessageWithRetry(apiv2, userID, groupMessage)
 			sendWakeupNotice(client, userID, resp, err, selfID)
+			sentAny = true
 		} else {
 			mylog.Println("Error: Expected MessageToCreate type for text.")
 		}
@@ -225,6 +245,7 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 
 					// 发送通知
 					sendWakeupNotice(client, userID, resp, err, selfID)
+					sentAny = true
 				} else {
 					mylog.Printf("Error: Expected RichMediaMessage type for key %s.", key)
 				}
@@ -273,6 +294,7 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 
 				// 发送通知
 				sendWakeupNotice(client, userID, resp, err, selfID)
+				sentAny = true
 			} else {
 				// 上传都失败了，发一个失败通知
 				sendWakeupNotice(client, userID, nil, fmt.Errorf("media upload failed for %s: %v", key, err), selfID)
@@ -288,7 +310,7 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 			break
 		}
 	}
-	if messageText == "" && !hasRealContent {
+	if messageText == "" && !hasRealContent && !sentAny {
 		groupMessage := &dto.MessageToCreate{
 			Content:  " ",
 			IsWakeup: true,

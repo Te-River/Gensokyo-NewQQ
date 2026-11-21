@@ -19,11 +19,28 @@ func (inboundOnlyHandler) Resolve(_ *ResolveCtx, _ Token) Outcome {
 	return Outcome{Replacement: ""}
 }
 
+// unsupportedHandler 官方出站无对应结构的码（contact/poke/json/forward）：
+// 剥离并 warn，避免码以字面量文本发给群成员（对齐 legacy ProcessCQUnsupportedCodes）。
+type unsupportedHandler struct{ action string }
+
+func (unsupportedHandler) Kind() Kind   { return KindContent }
+func (unsupportedHandler) Scope() Scope { return ScopeGroup | ScopePrivate | ScopeForward }
+
+func (h unsupportedHandler) Resolve(_ *ResolveCtx, _ Token) Outcome {
+	return Outcome{
+		Replacement: "",
+		Warn:        "[CQ:" + h.action + "] 官方出站无对应结构，已剥离，不发送该码",
+	}
+}
+
 func init() {
 	for _, a := range []string{"reply", "active", "wakeup"} {
 		Register(a, controlHandler{action: a})
 	}
 	Register("ark", inboundOnlyHandler{})
+	for _, a := range []string{"contact", "poke", "json", "forward"} {
+		Register(a, unsupportedHandler{action: a})
+	}
 }
 
 func (h controlHandler) Resolve(ctx *ResolveCtx, tok Token) Outcome {

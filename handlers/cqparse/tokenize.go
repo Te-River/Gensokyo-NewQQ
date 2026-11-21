@@ -194,6 +194,10 @@ func kindForAction(action string) Kind {
 		// 入站专用卡片码：出站无消费点，由 inboundOnlyHandler 纯剥离
 		// （对齐 legacy ProcessCQInboundOnlyCodes）
 		return KindContent
+	case "contact", "poke", "json", "forward":
+		// 官方出站无对应结构：由 unsupportedHandler 剥离 + warn
+		// （对齐 legacy ProcessCQUnsupportedCodes）
+		return KindContent
 	case "reply", "active", "wakeup":
 		return KindControl
 	case "member", "remove", "set_group":

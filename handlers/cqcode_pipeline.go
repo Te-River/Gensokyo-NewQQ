@@ -58,6 +58,10 @@ func ProcessCQCodePipeline(text string, foundItems map[string][]string, groupID 
 	// 置于最后，保证前面各步的输入文本与新增剥离逻辑前完全一致
 	text = ProcessCQInboundOnlyCodes(text)
 
+	// 11. 官方出站不支持的码 [CQ:contact/poke/json/forward]：无对应上游结构，剥离 + warn，
+	// 避免以字面量文本发给群成员
+	text = ProcessCQUnsupportedCodes(text)
+
 	return text
 }
 

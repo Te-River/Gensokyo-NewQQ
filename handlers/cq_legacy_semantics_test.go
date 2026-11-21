@@ -169,9 +169,9 @@ func TestLegacyStringPathCQCodes(t *testing.T) {
 			wantKeys: map[string]int{"card": 1},
 		},
 		{
-			name:     "未知码face与json原样保留",
+			name:     "未知码face原样保留与官方不支持码剥离",
 			input:    "[CQ:face,id=1]表情[CQ:json,data=x]",
-			wantText: "[CQ:face,id=1]表情[CQ:json,data=x]",
+			wantText: "[CQ:face,id=1]表情",
 		},
 		{
 			name:     "本地图片file提取",

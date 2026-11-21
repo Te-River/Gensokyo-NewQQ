@@ -299,6 +299,32 @@ C2C 单聊只支持按钮 `permission.type=2`（所有人）：此前的兜底�
 - **影响**：缺失 id 的 action 一律走既有 1400 参数错误路径并带回复执，不再 panic、不再让客户端空等；id 齐全时行为不变
 - **测试**：新增 `handlers/send_params_guard_test.go`——直接构造 `callapi.ActionMessage`（不经 JSON）：`UserID=nil` 调 `HandleSendPrivateMsg`、`GroupID=nil` 调 `HandleSendGroupMsg`、`Params` 零值调两个入口，均断言 `retcode:1400` + `status:"failed"` + 客户端收到同一回执且不 panic；另附 `paramsID` 对 nil/string/int/float64 的取值表
 
+### `send_private_msg_wakeup` 丢 `keyboard` / `card` / `stream`：召回消息上的按钮整体消失（2026-11-21）
+
+`handlers/send_private_msg_wakeup.go` 的 `keyMap` 只覆盖媒体/markdown/music 键，独立 `[CQ:keyboard]`（以及 `[CQ:card]`、`[CQ:stream]`）落入「未命中」分支被静默丢弃；`generatePrivateMessage` 也不消费 `foundItems["keyboard"]`，因此带按钮的召回消息只剩正文：
+
+- **修改**：纯文本场景改为 `send_private_msg` 同款装配——触发条件扩展为「正文非空 或 有 markdown 或 有 keyboard」，消息构造后调用既有 `applyPrivateMarkdownKeyboard`（含 `__USER_ID__` 占位符替换、C2C `permission.type` 归一为 2、按钮本地图片解析），markdown 内嵌 keyboard 与独立 `[CQ:keyboard]` 一并附加并被消费，不再进媒体循环
+- **修改**：`[CQ:stream]` 复用 `send_private_msg` 的 `sendStream`（同一套 `stream_msg_id` 分片缓存），处理完直接返回；`[CQ:card]` 为群聊专用（`msg_type=8`，`dto.GroupCard` 仅群聊可用），私聊召回**明确忽略并记 warn**，不再静默消失
+- **影响**：`is_wakeup=true`、`msg_id`/`event_id` 为空等召回参数不变；新增 `sentAny` 标记——键被前置装配消费后不再补发一条空的占位召回
+- **测试**：`handlers/p3_fix_g3_g6_g7_test.go`——`TestWakeupStandaloneKeyboardAttached`（独立 `[CQ:keyboard]` 出现在上游请求体、权限归一 type=2、唤醒语义保持）、`TestWakeupMarkdownEmbeddedKeyboard`（markdown 内嵌 keyboard 同样下发且 `msg_type=2`）
+
+### `send_group_forward_msg` 丢节点 `data.uin` / `name` 与节点内 keyboard（2026-11-21）
+
+`handlers/send_group_forward_msg.go` 逐节点构造时只取 `content` 并转成纯文本：QQ 官方出站无合并转发接口（`botgo/openapi` 只有单条 `/v2/groups/{id}/messages`，本 handler 一直是逐条降级下发），节点 `uin`/`name` 无字段可落，节点段内的 `[CQ:keyboard]` 也在转成纯文本时丢失：
+
+- **修改**：节点署名 `uin`/`name`（并兼容 OneBot v11 的 `user_id`/`nickname`，数值形态统一转十进制字符串）并入该节点正文前缀，格式 `昵称(uin): 正文`；两者都缺时保持原样
+- **修改**：节点段解析出的 `foundItems["keyboard"]` 还原为等价的 `[CQ:keyboard,data=base64://…]` 随正文重放，由 `send_group_msg` 的既有解析（`parseMDData` → `ResolveKeyboardVirtualIDs`）附加到该节点——不新增第二套解析，`specify_user_ids` 虚拟号照常转 OpenID
+- **影响**：仍为逐条降级下发（官方无合并转发出站结构），节点正文多出署名前缀；`forward_msg_limit`、动作码拦截（M1）语义不变
+- **测试**：`TestForwardNodeUinNameAndKeyboard`——两节点转发，断言上游请求体逐节点保留 `uin`/`name`（字符串与数值两种形态）、节点内 keyboard 存在且 `specify_user_ids` 已转 OpenID、群聊保留原始 `permission.type`、无键盘节点不凭空带键盘
+
+### `[CQ:contact]` / `[CQ:poke]` / `[CQ:json]` / `[CQ:forward]` 无解析分支：CQ 码以字面量文本发给群成员（2026-11-21）
+
+`handlers/cqcode_pipeline.go` 的管道没有这四种码的分支，它们既不被转换也不被剥离，随正文原样下发。经核对官方能力，四者**均无出站结构**（`forward`：官方无合并转发接口；`poke`：官方无拍一拍接口；`contact`：名片仅入站 `ark_data` 可读，出站 ark 需模板 `template_id`+`kv`；`json`：小程序 JSON 原文无模板 id，官方群卡片只有 `[CQ:card]` 的 `msg_type=8` 图文卡片）：
+
+- **修改**：管道新增第 11 步 `ProcessCQUnsupportedCodes`（`handlers/cqcode.go`），按码整段剥离并记 warn（`[CQ:xxx] 官方出站无对应结构，已从正文剥离，不发送该码`）；新解析器同口径——`cqparse` 注册 `unsupportedHandler`（剥离 + `Outcome.Warn`），`kindForAction` 归为内容类
+- **影响**：不再硬造官方不具备的能力，也不再把码当字面量泄漏给群成员；`[CQ:face]`/`[CQ:at]` 等标准码与 `[CQ:reply,id=数字]` 语义不变
+- **测试**：`TestUnsupportedCQCodesStrippedPipeline` / `TestUnsupportedCQCodesStrippedCQParse`（四码×两条解析链，断言剥离、无 `foundItems`/`pending`、日志有 warn）、`TestUnsupportedCQCodesKeepKnownCodes`（相邻标准码不受影响）
+
 ---
 
 ## 📝 工程与文档变更

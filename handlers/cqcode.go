@@ -205,6 +205,38 @@ func ProcessCQInboundOnlyCodes(text string) string {
 	return replyMsgIdxPattern.ReplaceAllString(text, "")
 }
 
+// ---------- 官方出站不支持的 CQ 码（剥离 + warn） ----------
+
+// contact / poke / json / forward 在 QQ Bot API 中没有出站结构，无法转换：
+//   - forward：官方无合并转发接口（botgo/openapi 只有单条 /v2/groups/{id}/messages；
+//     docs/cq码/CQ码汇总.md 亦标注「暂不支持」）
+//   - poke：官方无拍一拍接口（botgo 与 Processor 均无对应能力）
+//   - contact：官方名片仅在入站 ark_data（ark_type=contact_card）可读，出站 ark 需模板 template_id+kv
+//   - json：小程序/JSON 卡片原文无模板 id，官方群出站卡片只有 [CQ:card] 的 msg_type=8 图文卡片
+// 硬造会让 QQ 侧拒绝或把码当字面量发给群成员，故整段剥离并记 warn。
+// 参数值里的 ] 按 CQ 规范转义为 &#93;，故整段匹配到右括号即可（同 arkCQPattern）。
+var unsupportedOutboundCQPatterns = []struct {
+	code    string
+	pattern *regexp.Regexp
+}{
+	{"contact", regexp.MustCompile(`\[CQ:contact[^\]]*\]`)},
+	{"poke", regexp.MustCompile(`\[CQ:poke[^\]]*\]`)},
+	{"json", regexp.MustCompile(`\[CQ:json[^\]]*\]`)},
+	{"forward", regexp.MustCompile(`\[CQ:forward[^\]]*\]`)},
+}
+
+// ProcessCQUnsupportedCodes 剥离官方出站不支持的 CQ 码并记 warn（避免字面量泄漏给用户）。
+func ProcessCQUnsupportedCodes(text string) string {
+	for _, p := range unsupportedOutboundCQPatterns {
+		if !p.pattern.MatchString(text) {
+			continue
+		}
+		mylog.Printf("[CQ:%s] 官方出站无对应结构，已从正文剥离，不发送该码", p.code)
+		text = p.pattern.ReplaceAllString(text, "")
+	}
+	return text
+}
+
 // ---------- 出站动作型 CQ 码（单次扫描 + 类型分发） ----------
 
 // ProcessOutboundCQCodes 统一处理出站动作型 CQ 码。
