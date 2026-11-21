@@ -19,7 +19,7 @@
 //! | 图片 / 语音 / 视频 / 文件 | `media` + `msg_type=7` | 见下节「媒体」 |
 //! | `[CQ:avatar,qq=…]` | `media` + `msg_type=7` | 按 Go 段路径 / `cqparse` 口径发真图：`qq` 经 idmap 反查 openid → `https://q.qlogo.cn/qqapp/{app_id}/{openid}/640` → 走普通图片上传链；反查失败、`qq` 非数字/未绑定、或 `app_id` 未配置时**吞段 + `warn`**，不 `1400`（[`resolve_avatars`]）；无 `qq` 的形态由协议层留字面 |
 //! | `[CQ:reply]` | `msg_id` | 虚拟号先经 idmap / echo 还原成真实消息 ID；还原失败 `1400`，不静默丢 |
-//! | `keyboard` | `keyboard` | markdown 内嵌键盘优先、独立 `[CQ:keyboard]` 兜底，与 text / markdown / card 同发，不改变 `msg_type`（Go `applyGroupMarkdownKeyboard` 口径）；`data` 必须是 JSON 对象，否则 `1400`；C2C 目标额外把 `permission.type` 归一为 2、`__USER_ID__` 换成对方 OpenID（[`compose_keyboard`]） |
+//! | `keyboard` | `keyboard` | markdown 内嵌键盘优先、独立 `[CQ:keyboard]` 兜底，与 text / markdown / card 同发，不改变 `msg_type`（Go `applyGroupMarkdownKeyboard` 口径）；`data` 必须是 JSON 对象，否则 `1400`；`specify_user_ids` 的数字虚拟号先转真实 OpenID（群聊 / C2C 一致，Go `ResolveKeyboardVirtualIDs`），`content.rows` / `keyboard.content.rows` / `keyboard.rows` / 顶层 `rows` 四种形态都覆盖；C2C 目标额外把 `permission.type` 归一为 2、`__USER_ID__` 换成对方 OpenID（[`compose_keyboard`]） |
 //! | `input_notify` | `input_notify` + `msg_type=6` | 仅单聊；不承载正文 / 媒体，与其它内容同条出现 `1400` |
 //! | `stream` | `stream` + `msg_type=2` | 仅单聊；正文进 `markdown.content`，`stream.state` 取 1（start / mid）/ 10（finish），见 [`compose_stream`] |
 //! | `music` / `qqmusic` | `markdown` + `keyboard` + `msg_type=2` | 取第一首：查 QQ 音乐歌曲详情（Go `FetchSongDetail`，走媒体下载 seam）→ 原生 markdown（封面 `T002R180x180M000{album_mid}.jpg` + 曲名 / 歌手）→ 键盘「立刻播放 / 我也要点歌」（第二个按钮的 `data` 是 `music_prefix` + 空格）；查询失败降级成分享文案并 `warn`（Go 直接丢整条消息） |
@@ -1187,7 +1187,7 @@ pub async fn compose(
         out.content = None;
         out.msg_type = Some(msg_type::MARKDOWN);
         out.markdown = Some(markdown);
-        out.keyboard = compose_keyboard(target, openid, &message.plan)?;
+        out.keyboard = compose_keyboard(context, target, openid, &message.plan)?;
         // 其余媒体各一条 msg_type=7：单条消息只有一个 media 槽，只能拆；音乐同样自成一条
         let mut extras: Vec<MessageToCreate> = music.into_iter().collect();
         extras.extend(compose_media_extras(context, target, openid, &message.plan, deps).await?);
@@ -1198,7 +1198,7 @@ pub async fn compose(
         out.content = None;
         out.msg_type = Some(msg_type::CARD);
         out.card = Some(card);
-        out.keyboard = compose_keyboard(target, openid, &message.plan)?;
+        out.keyboard = compose_keyboard(context, target, openid, &message.plan)?;
         // 卡片胜出只改本轮消息体：Go 的 card 分支（`send_group_msg.go:742-783`）之后
         // foundItems 循环照旧把每个媒体段各发一条（`:787-802`）
         let mut extras: Vec<MessageToCreate> = music.into_iter().collect();
@@ -1208,7 +1208,7 @@ pub async fn compose(
     if !rendered.is_empty() {
         out.content = Some(rendered);
     }
-    out.keyboard = compose_keyboard(target, openid, &message.plan)?;
+    out.keyboard = compose_keyboard(context, target, openid, &message.plan)?;
     let mut music_bodies = Vec::new();
     if out.content.is_none() {
         // 只有音乐时它自己就是主消息（Go 的 qqmusic 分支：msg_type=2 + 自带键盘）。独立
@@ -1812,12 +1812,16 @@ const KEYBOARD_PLACEHOLDER_USER_ID: &str = "__USER_ID__";
 /// `base64://` 归一成 JSON），多份只发第一份（与 markdown / card 同口径）。
 /// 非 JSON / 非对象一律 `1400`：Go 那边是静默不挂键盘，Rust 侧不吞用户配置。
 ///
-/// 挂上前先对 **C2C 目标** 归一（Go `NormalizeC2CKeyboardPermission` /
+/// 挂上前先做两件归一：**虚拟号转 OpenID**（群聊 / C2C 都做，Go 在解析阶段
+/// `ResolveKeyboardVirtualIDs` → `idmap.ResolveOriginalID`，见 [`resolve_keyboard_virtual_ids`]），
+/// 再对 **C2C 目标** 归一（Go `NormalizeC2CKeyboardPermission` /
 /// `ResolvePlaceholderUserIDs`）：`__USER_ID__` → 对方 OpenID，`permission.type` 非 2 一律
 /// 置 2（0 指定用户 / 1 仅管理者 / 3 指定身份组在单聊都会被服务端拒绝，单聊只有对话双方，
 /// 权限限制没有意义），`specify_user_ids` 等其余字段原样保留。群聊保留插件原始类型，
-/// 占位符也不解析——与 Go 群侧口径一致（已登记的差异）。
+/// 占位符也不解析——与 Go 群侧口径一致（已登记的差异）。两步与 Go 同序（虚拟号早于占位符与
+/// 类型归一），且互不覆盖：解析结果是 32 位 OpenID，非数字，占位符替换也碰不到它。
 fn compose_keyboard(
+    context: &ActionContext,
     target: &SendTarget,
     openid: &str,
     plan: &OutboundPlan,
@@ -1836,6 +1840,7 @@ fn compose_keyboard(
             value
         }
     };
+    resolve_keyboard_virtual_ids(context, &mut keyboard);
     if matches!(target, SendTarget::Private(_)) {
         replace_user_id_placeholder(&mut keyboard, openid);
         normalize_c2c_permission(&mut keyboard);
@@ -1843,15 +1848,69 @@ fn compose_keyboard(
     Ok(Some(keyboard))
 }
 
-/// 遍历 keyboard 的 `content.rows[].buttons[]`（缺 `action.permission` 的按钮由调用方跳过）。
-fn keyboard_buttons_mut(keyboard: &mut Value) -> impl Iterator<Item = &mut Value> {
-    keyboard
-        .pointer_mut("/content/rows")
-        .and_then(Value::as_array_mut)
-        .into_iter()
-        .flatten()
-        .filter_map(|row| row.get_mut("buttons").and_then(Value::as_array_mut))
-        .flatten()
+/// 遍历 keyboard 里所有能承载按钮的位置：顶层 `content.rows`、`keyboard.content.rows`、
+/// `keyboard.rows`、顶层 `rows`（Go `parseMDData` 的六种形态里除两种纯模板 `id` 形态外的全部）。
+///
+/// 上游请求体保持插件原样，所以这里不把形态改写成 `content.rows`，只把四处按钮都交给 `visit`。
+/// 缺 `action.permission` 的按钮由调用方跳过。
+fn for_each_keyboard_button(keyboard: &mut Value, mut visit: impl FnMut(&mut Value)) {
+    const ROW_PATHS: [&str; 4] = [
+        "/content/rows",
+        "/keyboard/content/rows",
+        "/keyboard/rows",
+        "/rows",
+    ];
+    for path in ROW_PATHS {
+        let Some(rows) = keyboard.pointer_mut(path).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for row in rows.iter_mut() {
+            let Some(buttons) = row.get_mut("buttons").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            for button in buttons.iter_mut() {
+                visit(button);
+            }
+        }
+    }
+}
+
+/// `specify_user_ids` 里的数字虚拟号 → 真实 OpenID（Go `ResolveKeyboardVirtualIDs` →
+/// `idmap.ResolveOriginalID`）。
+///
+/// 逐个值：非数字（含已是 OpenID 的 32 位串、`__USER_ID__` 占位符）原样保留；数字经 idmap
+/// 反查（[`IdMapStore::retrieve_row_by_id`](gensokyo_storage::IdMapStore::retrieve_row_by_id)，
+/// 等价 Go `RetrieveRealValuev2` + identityDB 兜底扫描，两者 Rust 侧已合并在同一实现里）；
+/// 未登记的数字同样原样保留——QQ 侧匹配不上只会拒绝点击，改坏插件的字面值更糟。未装配 idmap
+/// 时整步跳过。覆盖 [`for_each_keyboard_button`] 列出的四种 `rows` 位置（Go 在解析阶段先归一
+/// 形态再统一转换，Rust 不改写形态、直接遍历四处），模板形态（只有 `id`）没有客户端
+/// `specify_user_ids`，与 Go 一致不处理。群聊 `permission.type=0` 要的正是真实 OpenID，所以
+/// 两种目标都做（Go 在解析阶段做，早于任何类型归一）；解析结果非数字，与 `__USER_ID__` 替换 /
+/// 类型归一叠加幂等。
+fn resolve_keyboard_virtual_ids(context: &ActionContext, keyboard: &mut Value) {
+    let Some(idmap) = context.idmap() else {
+        return;
+    };
+    for_each_keyboard_button(keyboard, |button| {
+        let Some(ids) = button
+            .pointer_mut("/action/permission/specify_user_ids")
+            .and_then(Value::as_array_mut)
+        else {
+            return;
+        };
+        for id in ids {
+            let Some(text) = id.as_str() else {
+                continue;
+            };
+            let Ok(vuin) = text.parse::<i64>() else {
+                continue;
+            };
+            match idmap.retrieve_row_by_id(vuin) {
+                Ok(openid) if !openid.is_empty() => *id = Value::String(openid),
+                Ok(_) | Err(_) => {}
+            }
+        }
+    });
 }
 
 /// `specify_user_ids` 里的 `__USER_ID__` → 对话对方的真实 OpenID（Go `ResolvePlaceholderUserIDs`）。
@@ -1859,35 +1918,35 @@ fn replace_user_id_placeholder(keyboard: &mut Value, openid: &str) {
     if openid.is_empty() {
         return;
     }
-    for button in keyboard_buttons_mut(keyboard) {
+    for_each_keyboard_button(keyboard, |button| {
         let Some(ids) = button
             .pointer_mut("/action/permission/specify_user_ids")
             .and_then(Value::as_array_mut)
         else {
-            continue;
+            return;
         };
         for id in ids {
             if id.as_str() == Some(KEYBOARD_PLACEHOLDER_USER_ID) {
                 *id = Value::String(openid.to_owned());
             }
         }
-    }
+    });
 }
 
 /// `permission.type` 非 2 一律置 2，其余字段原样保留（Go `NormalizeC2CKeyboardPermission`）。
 fn normalize_c2c_permission(keyboard: &mut Value) {
-    for button in keyboard_buttons_mut(keyboard) {
+    for_each_keyboard_button(keyboard, |button| {
         let Some(permission) = button
             .pointer_mut("/action/permission")
             .and_then(Value::as_object_mut)
         else {
-            continue;
+            return;
         };
         // Go 的 `Permission.Type` 缺省即 0（指定用户），与显式 0 同样归一
         if permission.get("type").and_then(Value::as_i64) != Some(KEYBOARD_PERMISSION_ALL) {
             permission.insert("type".to_owned(), json!(KEYBOARD_PERMISSION_ALL));
         }
-    }
+    });
 }
 
 /// `[CQ:input_notify]` → `msg_type=6` + `input_notify`（仅单聊）。
@@ -4139,48 +4198,44 @@ mod tests {
         }
     }
 
-    /// 单行单按钮的独立 `[CQ:keyboard]`：`permission.type` 与 `specify_user_ids` 可参数化。
+    /// 单按钮（`render_data` + `action`）：`permission.type` 与 `specify_user_ids` 可参数化。
+    fn action_button(permission_type: i64, user_ids: &[&str]) -> Value {
+        json!({
+            "render_data": {"label": "确认", "visited_label": "确认", "style": 1},
+            "action": {
+                "type": 2,
+                "permission": {"type": permission_type, "specify_user_ids": user_ids},
+                "data": "confirm"
+            }
+        })
+    }
+
+    /// 单行单按钮的独立 `[CQ:keyboard]`（`content.rows` 形态）。
     fn permission_keyboard(permission_type: i64, user_ids: &[&str]) -> OutboundPlan {
         keyboard_plan(
-            &json!({
-            "content": {"rows": [{
-                "buttons": [{
-                    "render_data": {"label": "确认", "visited_label": "确认", "style": 1},
-                    "action": {
-                        "type": 2,
-                        "permission": {"type": permission_type, "specify_user_ids": user_ids},
-                        "data": "confirm"
-                    }
-                }]
-            }]}})
-            .to_string(),
+            &json!({"content": {"rows": [{"buttons": [action_button(permission_type, user_ids)]}]}})
+                .to_string(),
         )
     }
 
-    /// markdown 载荷内嵌 keyboard（qbind 等插件的真实形态）：`content` 与 `keyboard` 同层。
-    fn markdown_with_keyboard(permission_type: i64, user_ids: &[&str]) -> OutboundPlan {
+    /// markdown 载荷内嵌指定形态的 keyboard（`content` 与 `keyboard` 同层）。
+    fn markdown_with_keyboard_shape(keyboard: Value) -> OutboundPlan {
         OutboundPlan {
             markdown: vec![
                 MarkdownPayload::from_json(
-                    &json!({
-                        "content": "### 确认绑定",
-                        "keyboard": {"content": {"rows": [{
-                            "buttons": [{
-                                "render_data": {"label": "确认", "visited_label": "确认", "style": 1},
-                                "action": {
-                                    "type": 2,
-                                    "permission": {"type": permission_type, "specify_user_ids": user_ids},
-                                    "data": "confirm"
-                                }
-                            }]
-                        }]}}
-                    })
-                    .to_string(),
+                    &json!({"content": "### 确认绑定", "keyboard": keyboard}).to_string(),
                 )
                 .expect("markdown 载荷"),
             ],
             ..OutboundPlan::default()
         }
+    }
+
+    /// markdown 载荷内嵌 keyboard（qbind 等插件的真实形态，`keyboard.content.rows`）。
+    fn markdown_with_keyboard(permission_type: i64, user_ids: &[&str]) -> OutboundPlan {
+        markdown_with_keyboard_shape(json!({
+            "content": {"rows": [{"buttons": [action_button(permission_type, user_ids)]}]}
+        }))
     }
 
     /// 取发出去那条消息第一个按钮的 `action.permission`。
@@ -4371,6 +4426,149 @@ mod tests {
                 "群聊不解析占位符"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn keyboard_virtual_user_ids_become_real_openids() {
+        // Go `ResolveKeyboardVirtualIDs`：群里 `permission.type=0` 要的是真实 OpenID，
+        // 虚拟号不转就永远匹配不上（线上表现为点击提示「无权限操作」）
+        let (_idmap_dir, idmap) = idmap_store();
+        let virtual_id = idmap
+            .retrieve_virtual_value(MEMBER_OPENID)
+            .expect("分配虚拟号")
+            .1
+            .to_string();
+        for plan in [
+            permission_keyboard(0, &[virtual_id.as_str()]),
+            markdown_with_keyboard(0, &[virtual_id.as_str()]),
+        ] {
+            let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+            let (_dir, context) = context(Arc::clone(&api));
+            let context = context.with_idmap(Arc::clone(&idmap));
+            let media = no_media();
+            let plan = group_request(plan);
+
+            execute(&context, &plan, &deps(&media, None))
+                .await
+                .expect("群聊键盘应发送成功");
+
+            let permission = sent_permission(&api);
+            assert_eq!(
+                permission["specify_user_ids"],
+                json!([MEMBER_OPENID]),
+                "数字虚拟号应转成真实 OpenID（内嵌 / 独立键盘同口径）"
+            );
+            assert_eq!(permission["type"], json!(0), "群聊不改 permission.type");
+        }
+    }
+
+    #[tokio::test]
+    async fn keyboard_openid_and_unregistered_number_are_kept_verbatim() {
+        // Go `ResolveOriginalID`：非数字原样返回；数字反查不到也原样返回，不改插件的字面值
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let (_idmap_dir, idmap) = idmap_store();
+        let context = context.with_idmap(idmap);
+        let media = no_media();
+        let plan = group_request(permission_keyboard(0, &[MEMBER_OPENID, "99999999999"]));
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("群聊键盘应发送成功");
+
+        assert_eq!(
+            sent_permission(&api)["specify_user_ids"],
+            json!([MEMBER_OPENID, "99999999999"]),
+            "32 位 OpenID 与 idmap 查不到的数字都应原样保留"
+        );
+    }
+
+    #[tokio::test]
+    async fn c2c_keyboard_virtual_user_id_becomes_openid_after_type_normalization() {
+        // C2C 同一条链：先转虚拟号（早于占位符与类型归一），再 `__USER_ID__` → 对方 OpenID，
+        // 最后 type 归一为 2；两步互不覆盖（解析结果非数字）
+        let (_idmap_dir, idmap) = idmap_store();
+        let virtual_id = idmap
+            .retrieve_virtual_value(MEMBER_OPENID)
+            .expect("分配虚拟号")
+            .1
+            .to_string();
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let context = context.with_idmap(Arc::clone(&idmap));
+        let media = no_media();
+        let plan = request(
+            SendTarget::Private(OPENID.to_owned()),
+            permission_keyboard(0, &[virtual_id.as_str(), "__USER_ID__"]),
+        );
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("单聊键盘应发送成功");
+
+        let permission = sent_permission(&api);
+        assert_eq!(
+            permission["specify_user_ids"],
+            json!([MEMBER_OPENID, OPENID]),
+            "虚拟号转 OpenID、占位符换对方 OpenID，各归各"
+        );
+        assert_eq!(permission["type"], json!(2), "C2C 的 type 仍归一为 2");
+    }
+
+    #[tokio::test]
+    async fn top_level_rows_keyboard_resolves_virtual_user_ids() {
+        // 插件简写形态 `{"rows":[…]}`：Go `parseMDData` 的 `len(temp.Rows) > 0` 分支同样转换
+        let (_idmap_dir, idmap) = idmap_store();
+        let virtual_id = idmap
+            .retrieve_virtual_value(MEMBER_OPENID)
+            .expect("分配虚拟号")
+            .1
+            .to_string();
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let context = context.with_idmap(Arc::clone(&idmap));
+        let media = no_media();
+        let plan = group_request(keyboard_plan(
+            &json!({"rows": [{"buttons": [action_button(0, &[virtual_id.as_str()])]}]}).to_string(),
+        ));
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("群聊键盘应发送成功");
+
+        assert_eq!(
+            api.sent()[0].keyboard,
+            Some(json!({"rows": [{"buttons": [action_button(0, &[MEMBER_OPENID])]}]})),
+            "顶层 rows 形态只换 specify_user_ids，形态与其余字段原样"
+        );
+    }
+
+    #[tokio::test]
+    async fn markdown_keyboard_rows_shape_resolves_virtual_user_ids() {
+        // `keyboard:{"rows":[…]}` 写法：Go 的 `len(temp.Keyboard.Rows) > 0` 分支同样转换
+        let (_idmap_dir, idmap) = idmap_store();
+        let virtual_id = idmap
+            .retrieve_virtual_value(MEMBER_OPENID)
+            .expect("分配虚拟号")
+            .1
+            .to_string();
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let context = context.with_idmap(Arc::clone(&idmap));
+        let media = no_media();
+        let plan = group_request(markdown_with_keyboard_shape(json!({
+            "rows": [{"buttons": [action_button(0, &[virtual_id.as_str()])]}]
+        })));
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("markdown + 内嵌键盘应发送成功");
+
+        assert_eq!(
+            api.sent()[0].keyboard,
+            Some(json!({"rows": [{"buttons": [action_button(0, &[MEMBER_OPENID])]}]})),
+            "markdown 内 keyboard.rows 同样只换 specify_user_ids"
+        );
     }
 
     // ---- input_notify ----

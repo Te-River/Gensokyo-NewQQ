@@ -221,6 +221,16 @@ Go 在 `global_group_msg_rre_to_message` / `global_c2c_msg_switch_to_message` / 
 
 ## 🐛 修复
 
+### keyboard `specify_user_ids` 的虚拟号未转 OpenID：群里点按钮恒提示「无权限操作」（2026-11-21）
+
+活体回报：插件给按钮设了 `permission.type=0` + `specify_user_ids`，同一条插件在 Go 版点击正常、Rust 最新 windows-amd64 构建里点击恒提示「无权限操作」。出站体里的 `specify_user_ids` 是 GSK 虚拟号（如 `610636458`），而 QQ 侧 `type=0` 只认真实 OpenID，永远匹配不上。
+
+- **根因**：Go 在**解析阶段**就做这一步（`handlers/message_parser.go:2697-2701` 的 `parseMDData` 解析完 `[CQ:markdown]` 后调 `ResolveKeyboardVirtualIDs`，实现见 `:2715-2732` → `idmap.ResolveOriginalID`，`idmap/service.go:2323-2360`），且独立 `[CQ:keyboard]` 同样走 `parseMDData`，两种形态一并覆盖；Rust 侧 `compose_keyboard` 只有 `__USER_ID__` 占位符替换与 C2C 类型归一，没有虚拟号转换
+- **修改**：`crates/gensokyo-runtime/src/deferred.rs` 新增 `resolve_keyboard_virtual_ids`，在 `compose_keyboard` 挂载前遍历按钮的 `action.permission.specify_user_ids`：非数字原样保留；数字经 `IdMapStore::retrieve_row_by_id` 反查（等价 Go `RetrieveRealValuev2`，identityDB 兜底扫描 Rust 侧已合并在同一实现里）；查不到或未装配 idmap 时原样保留——与 Go 的「查不到不改」一致
+- **顺序**：与 Go 同序——虚拟号转换在前，之后才走既有的 `__USER_ID__` 替换与 C2C `permission.type` → 2 归一；解析结果是 32 位 OpenID（非数字），两步叠加幂等。`permission.type` 本身不改（群聊保留插件原值）
+- **覆盖**：群聊 / C2C 两种目标 × markdown 内嵌 keyboard / 独立 `[CQ:keyboard]`，且按钮位置按 Go `parseMDData` 的形态口径全覆盖——`content.rows`（官方简写）、`keyboard.content.rows`、`keyboard.rows`、顶层 `rows` 四种；纯模板形态（只有 `id`）没有客户端 `specify_user_ids`，与 Go 一致不处理。归一**只就地替换** `specify_user_ids` 数组里的值：不搬动、不新增、不删除任何字段，出站键盘 JSON 仍是插件给的那套形态（Go 是先解析成 struct 再序列化，Rust 不改写形态）
+- **测试**：`keyboard_virtual_user_ids_become_real_openids`（群聊 `content.rows` 内嵌 / 独立两种键盘 → 真实 OpenID，`type` 仍为 0）、`keyboard_openid_and_unregistered_number_are_kept_verbatim`（32 位 OpenID 与 idmap 查不到的数字原样保留）、`top_level_rows_keyboard_resolves_virtual_user_ids` / `markdown_keyboard_rows_shape_resolves_virtual_user_ids`（顶层 `rows`、`keyboard.rows` 两形态，整段 JSON 等值断言：除 `specify_user_ids` 的值外形态与其余字段不变）、`c2c_keyboard_virtual_user_id_becomes_openid_after_type_normalization`（C2C 同条链：虚拟号 → OpenID、占位符 → 对方 OpenID、`type` → 2）
+
 ### `[CQ:at]` 渲染与 Go 不一致：缺用户名缓存、缺尾空格、反查失败不删段、匹配范围过宽（parity D31/D32，2026-11-21）
 
 活体对照：入站后 10 分钟内，Go 把 `[CQ:at,qq=虚号]` 渲染成 `@用户名 `，Rust 恒发 `<@openid>`——Go 的用户名缓存（`idmap.StoreUserName` / `GetUserName`）在 Rust 侧从未被写过。同一形态下另有两处字节差异：Go 两段替换都带尾空格，且两处都拿不到时整段删除。
