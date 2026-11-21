@@ -100,6 +100,16 @@ QQ 官方自 2026-11-17 起允许群消息事件的 `msg_id` 直接用于私聊�
 
 ## 🐛 修复
 
+### `send_group_msg` 缺参导致无限递归 → `fatal error: stack overflow` 进程退出（1400 回执替代）
+
+直接向实例发 `{"action":"send_group_msg","params":{"message":"x"}}`（不带 `group_id`/`user_id`，或 `group_id` 传空串 / `0`）会让整个进程退出。`ParamsContent.UnmarshalJSON` 把缺失字段归一为空串 `""`，而参数守卫把空串判为「有效 id」（空串既不等于 `nil` 也不等于 `"0"`）→ 不返回 1400；随后递归分支在 `idInt64 == 0` 时无条件自调用，注入的 msgType 写入 echo 键 `appID_0`，探测读的却是 `appID_`，永远读不回 → 无限递归 → `fatal error: stack overflow`（Go 无法 recover）。实例日志表现为 `send_group_msg获取到信息类型:` 重复上万次后进程消失。
+
+- **修改**：`handlers/send_group_msg.go` —— 入口统一用 `groupIDStr`/`userIDStr` 两个安全类型断言取值（缺省不再 panic），`hasUsableID`（非空且非 `"0"`）替代把空串判为有效的 `checkZeroGroupID`/`checkZeroUserID` 闭包；缺参与 `group_id:0` 由守卫回 1400
+- **修改**：递归前必须可推进——`err == nil`、`idInt64 > 0`、且该 id 尚未被探测过（`echo.GetMapping(idInt64) == 0`）；递归一次后仍无消息类型直接回 1400（`无法确定消息类型: group_id/user_id 无效`），结构上不可能二次递归
+- **修改**：`handlers/send_private_msg.go` 同构修复（原递归的返回值还被丢弃），`handlers/send_msg.go` 同一递归形态一并收口；`handlers/send_group_msg_raw.go` 的递归目标即 `send_group_msg`，随其收敛
+- **影响**：可发送路径行为不变（探测成功时仍按 `group_private` → `group` 枚举）；缺参 action 由「打死进程」变为一条 `retcode=1400`、`status=failed`、`data=null` 回执
+- **测试**：`handlers/send_msg_missing_id_test.go` 覆盖 `send_group_msg` 无 id / `group_id:""` / `group_id:0` 与 `send_private_msg` 无 id / `user_id:""`，断言收到 1400 回执、handler 1s 内返回、且 id 0 上未写入递归计数
+
 ### 发送类 action 未映射 id 时无回执，客户端只能等超时
 
 `send_private_msg` 传入未在 idmap 中映射的 `user_id` 时，Go 侧在 id 反查失败分支直接 `return "", nil`，反向 WS 客户端收不到任何 action 回执，实测 15 秒后超时断开（日志只有 `Error reading config: key not found` → `Unknown message type:`）。

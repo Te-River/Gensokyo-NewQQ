@@ -96,20 +96,27 @@ func HandleSendMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.Ope
 	}
 
 	//设置递归 对直接向gsk发送action时有效果
+	// 递归必须可推进：id 可转成正数、转换无错、且该 id 尚未被探测过（GetMapping 为 0），
+	// 否则注入的 msgType 永远读不回，会无限自调用直到 fatal error: stack overflow。
 	if msgType == "" {
-		messageCopy := message
 		if err != nil {
 			mylog.Printf("错误：无法转换 ID %v\n", err)
-		} else {
+		} else if idInt64 > 0 && echo.GetMapping(idInt64) == 0 {
 			// 递归1次（枚举剩余消息类型，当前仅 group）
 			echo.AddMapping(idInt64, 2)
 			// 递归调用handleSendMsg，使用设置的消息类型
 			echo.AddMsgType(config.GetAppIDStr(), idInt64, "group_private")
-			retmsg, _ = HandleSendMsg(client, api, apiv2, messageCopy)
+			retmsg, _ = HandleSendMsg(client, api, apiv2, message)
 		}
 	} else if echo.GetMapping(idInt64) <= 0 {
 		// 特殊值代表不递归
 		echo.AddMapping(idInt64, 10)
+	}
+
+	// 递归一次后仍无法确定类型（注入的类型没被读回 / id 不可转数字）：回执 1400，绝不二次递归。
+	if msgType == "" {
+		mylog.Printf("send_msg无法确定消息类型: %v", message)
+		return sendActionResult(client, message, "无法确定消息类型: group_id/user_id 无效", sendParamRetCode)
 	}
 
 	switch msgType {

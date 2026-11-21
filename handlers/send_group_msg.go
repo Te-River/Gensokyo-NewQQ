@@ -82,52 +82,29 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		// 当 message.Echo 是字符串类型时执行此块
 		msgType = echo.GetMsgTypeByKey(echoStr)
 	}
-	// 检查GroupID是否为0
-	checkZeroGroupID := func(id interface{}) bool {
-		switch v := id.(type) {
-		case int:
-			return v != 0
-		case int64:
-			return v != 0
-		case string:
-			return v != "0" // 检查字符串形式的0
-		default:
-			return true // 如果不是int、int64或string，假定它不为0
-		}
-	}
+	// ParamsContent.UnmarshalJSON 会把缺失字段归一为 ""（非 nil），空串既不是 nil
+	// 也不等于 "0"，所以「有效 id」必须显式排除空串，否则缺参 action 会绕过下面的守卫。
+	groupIDStr, _ := message.Params.GroupID.(string)
+	userIDStr, _ := message.Params.UserID.(string)
+	hasUsableID := func(id string) bool { return id != "" && id != "0" }
 
-	// 检查UserID是否为0
-	checkZeroUserID := func(id interface{}) bool {
-		switch v := id.(type) {
-		case int:
-			return v != 0
-		case int64:
-			return v != 0
-		case string:
-			return v != "0" // 同样检查字符串形式的0
-		default:
-			return true // 如果不是int、int64或string，假定它不为0
+	if !identity.IsOpenID(groupIDStr) {
+		if msgType == "" && hasUsableID(groupIDStr) {
+			msgType = GetMessageTypeByGroupid(config.GetAppIDStr(), groupIDStr)
 		}
-	}
-
-	if message.Params.GroupID != nil && !identity.IsOpenID(message.Params.GroupID.(string)) {
-		if msgType == "" && message.Params.GroupID != nil && checkZeroGroupID(message.Params.GroupID) {
-			msgType = GetMessageTypeByGroupid(config.GetAppIDStr(), message.Params.GroupID)
+		if msgType == "" && hasUsableID(userIDStr) {
+			msgType = GetMessageTypeByUserid(config.GetAppIDStr(), userIDStr)
 		}
-		if msgType == "" && message.Params.UserID != nil && checkZeroUserID(message.Params.UserID) {
-			msgType = GetMessageTypeByUserid(config.GetAppIDStr(), message.Params.UserID)
+		if msgType == "" && hasUsableID(groupIDStr) {
+			msgType = GetMessageTypeByGroupidV2(groupIDStr)
 		}
-		if msgType == "" && message.Params.GroupID != nil && checkZeroGroupID(message.Params.GroupID) {
-			msgType = GetMessageTypeByGroupidV2(message.Params.GroupID)
-		}
-		if msgType == "" && message.Params.UserID != nil && checkZeroUserID(message.Params.UserID) {
-			msgType = GetMessageTypeByUseridV2(message.Params.UserID)
+		if msgType == "" && hasUsableID(userIDStr) {
+			msgType = GetMessageTypeByUseridV2(userIDStr)
 		}
 	}
 
 	// New checks for UserID and GroupID being nil or 0
-	if (message.Params.UserID == nil || !checkZeroUserID(message.Params.UserID)) &&
-		(message.Params.GroupID == nil || !checkZeroGroupID(message.Params.GroupID)) {
+	if !hasUsableID(groupIDStr) && !hasUsableID(userIDStr) {
 		mylog.Printf("send_group_msgs接收到错误action: %v", message)
 		return sendActionResult(client, message, "user_id 或 group_id 至少提供一个有效值", sendParamRetCode)
 	}
@@ -142,39 +119,37 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 	var err error
 	var retmsg string
 
-	if identity.IsOpenID(message.Params.GroupID.(string)) {
+	if identity.IsOpenID(groupIDStr) {
 		msgType = "group"
-	} else if message.Params.UserID != nil && identity.IsOpenID(message.Params.UserID.(string)) {
+	} else if identity.IsOpenID(userIDStr) {
 		msgType = "group_private"
-	} else {
-		// Params 是 interface{}：缺省字段为 nil，nil != "" 成立，需显式判空否则会走进错误分支
-		if message.Params.GroupID != nil && message.Params.GroupID != "" {
-			idInt64, err = ConvertToInt64(message.Params.GroupID)
-		} else if message.Params.UserID != nil && message.Params.UserID != "" {
-			idInt64, err = ConvertToInt64(message.Params.UserID)
+	} else if hasUsableID(groupIDStr) {
+		idInt64, err = ConvertToInt64(groupIDStr)
+	} else if hasUsableID(userIDStr) {
+		idInt64, err = ConvertToInt64(userIDStr)
+	}
+
+	// 递归只用于「直接向 gsk 发 action」时枚举消息类型：注入的 msgType 写入 echo 键
+	// appID_<idInt64>，只有上面的探测块能读回来。因此递归必须可推进——id 可转成正数、
+	// 转换无错、且该 id 尚未被探测过（GetMapping 为 0）；否则注入的类型永远读不回，
+	// 旧实现会无限自调用直到 fatal error: stack overflow 打死进程。
+	if !config.GetStringOb11() {
+		if msgType == "" && err == nil && idInt64 > 0 && echo.GetMapping(idInt64) == 0 {
+			// 递归1次（枚举剩余消息类型，当前仅 group）
+			echo.AddMapping(idInt64, 2)
+			// 递归调用handleSendGroupMsg，使用设置的消息类型
+			echo.AddMsgType(config.GetAppIDStr(), idInt64, "group_private")
+			retmsg, _ = HandleSendGroupMsg(client, api, apiv2, message)
+		} else if msgType != "" && idInt64 > 0 && echo.GetMapping(idInt64) <= 0 {
+			// 特殊值代表不递归
+			echo.AddMapping(idInt64, 10)
 		}
 	}
 
-	if message.Params.GroupID != nil && !identity.IsOpenID(message.Params.GroupID.(string)) {
-		// stringob11通过字段判断类型,不需要递归
-		if !config.GetStringOb11() {
-			//设置递归 对直接向gsk发送action时有效果
-			if msgType == "" {
-				messageCopy := message
-				if err != nil {
-					mylog.Printf("错误：无法转换 ID %v\n", err)
-				} else {
-					// 递归1次（枚举剩余消息类型，当前仅 group）
-					echo.AddMapping(idInt64, 2)
-					// 递归调用handleSendGroupMsg，使用设置的消息类型
-					echo.AddMsgType(config.GetAppIDStr(), idInt64, "group_private")
-					retmsg, _ = HandleSendGroupMsg(client, api, apiv2, messageCopy)
-				}
-			} else if echo.GetMapping(idInt64) <= 0 {
-				// 特殊值代表不递归
-				echo.AddMapping(idInt64, 10)
-			}
-		}
+	// 递归一次后仍无法确定类型（注入的类型没被读回 / id 不可转数字）：回执 1400，绝不二次递归。
+	if msgType == "" {
+		mylog.Printf("send_group_msg无法确定消息类型: %v", message)
+		return sendActionResult(client, message, "无法确定消息类型: group_id/user_id 无效", sendParamRetCode)
 	}
 
 	switch msgType {
