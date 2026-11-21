@@ -51,8 +51,8 @@ func (client *WebSocketClient) SendMessage(message map[string]interface{}) error
 		return errWebSocketClosed
 	}
 
-	// 序列化消息
-	msgBytes, err := json.Marshal(message)
+	// 序列化消息：关闭 HTML 转义（& < > 原样输出），与 Rust 端逐字节一致
+	msgBytes, err := callapi.MarshalNoEscape(message)
 	if err != nil {
 		log.Println("Error marshalling message:", err)
 		return err

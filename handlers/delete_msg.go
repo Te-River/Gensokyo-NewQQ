@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/hoshinonyaruko/gensokyo/callapi"
@@ -103,7 +102,7 @@ func DeleteMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI
 		mylog.Printf("Error sending message via client: %v", err)
 	}
 	//把结果从struct转换为json
-	result, err := json.Marshal(response)
+	result, err := callapi.MarshalNoEscape(response)
 	if err != nil {
 		mylog.Printf("Error marshaling data: %v", err)
 		//todo 符合onebotv11 ws返回的错误码

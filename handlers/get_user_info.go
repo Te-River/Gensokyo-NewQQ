@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/hoshinonyaruko/gensokyo/callapi"
@@ -93,7 +92,7 @@ func sendUserInfoResult(client callapi.Client, message callapi.ActionMessage, da
 			mylog.Printf("get_user_info: 发送响应失败: %v", err)
 		}
 	}
-	result, err := json.Marshal(response)
+	result, err := callapi.MarshalNoEscape(response)
 	if err != nil {
 		mylog.Printf("get_user_info: 序列化响应失败: %v", err)
 		return "", err

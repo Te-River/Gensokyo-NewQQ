@@ -80,7 +80,7 @@ func HandleGetGroupInfo(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			mylog.Printf("get_group_info: 发送响应失败: %v", err)
 		}
 	}
-	result, err := json.Marshal(groupInfo)
+	result, err := callapi.MarshalNoEscape(groupInfo)
 	if err != nil {
 		mylog.Printf("get_group_info: 序列化响应失败: %v", err)
 		return "", nil
@@ -107,7 +107,7 @@ func sendGroupInfoError(client callapi.Client, message callapi.ActionMessage, er
 			mylog.Printf("get_group_info: 发送错误响应失败: %v", err)
 		}
 	}
-	result, err := json.Marshal(response)
+	result, err := callapi.MarshalNoEscape(response)
 	if err != nil {
 		return "", err
 	}

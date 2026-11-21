@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -190,7 +189,7 @@ func sendDeleteGroupMsgResponse(client callapi.Client, echoValue interface{}, su
 	if err := client.SendMessage(outputMap); err != nil {
 		return "", err
 	}
-	encoded, err := json.Marshal(response)
+	encoded, err := callapi.MarshalNoEscape(response)
 	if err != nil {
 		return "", err
 	}

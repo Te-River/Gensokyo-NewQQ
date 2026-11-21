@@ -1,8 +1,6 @@
 package handlers
 
 import (
-	"encoding/json"
-
 	"github.com/hoshinonyaruko/gensokyo/callapi"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/tencent-connect/botgo/openapi"
@@ -73,7 +71,7 @@ func sendActionResult(client callapi.Client, message callapi.ActionMessage, errM
 			mylog.Printf("set_group_add_request: 发送响应失败: %v", err)
 		}
 	}
-	result, err := json.Marshal(response)
+	result, err := callapi.MarshalNoEscape(response)
 	if err != nil {
 		mylog.Printf("set_group_add_request: 序列化响应失败: %v", err)
 		return "", err
@@ -102,7 +100,7 @@ func sendActionResultWithData(client callapi.Client, message callapi.ActionMessa
 			mylog.Printf("set_group_add_request: 发送响应失败: %v", err)
 		}
 	}
-	result, err := json.Marshal(response)
+	result, err := callapi.MarshalNoEscape(response)
 	if err != nil {
 		mylog.Printf("set_group_add_request: 序列化响应失败: %v", err)
 		return "", err

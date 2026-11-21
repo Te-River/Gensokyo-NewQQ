@@ -1,8 +1,6 @@
 package handlers
 
 import (
-	"encoding/json"
-
 	"github.com/hoshinonyaruko/gensokyo/callapi"
 	"github.com/hoshinonyaruko/gensokyo/idmap"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
@@ -57,7 +55,7 @@ func HandleGetFriendList(client callapi.Client, api openapi.OpenAPI, apiv2 opena
 		mylog.Printf("error sending friend list via wsclient: %v", err)
 	}
 
-	result, err := json.Marshal(output)
+	result, err := callapi.MarshalNoEscape(output)
 	if err != nil {
 		mylog.Printf("Error marshaling data: %v", err)
 		//todo 符合onebotv11 ws返回的错误码

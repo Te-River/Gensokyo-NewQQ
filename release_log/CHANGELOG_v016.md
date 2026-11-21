@@ -91,6 +91,16 @@ QQ 官方 2026-11-16 新增 `GET /v2/users/{user_openid}/info`，返回用户昵
 
 ## 🐛 修复
 
+### action 回执不再转义 `&`，与 Rust 端逐字节对齐
+
+`get_user_info` 两侧 `data` 内容一致，但 Go 回执把 `&` 转义成 `\u0026`（`"avatar":"https://thirdqq.qlogo.cn/bqqthird?key=…\u0026kti=…\u0026s=640"`），Rust 端原样输出 `&`——凡是带签名的 URL（头像/图床/短链）回执都逐字节不同：
+
+- **修改**：新增 `callapi/marshal.go` 的 `MarshalNoEscape`——`json.Encoder` + `SetEscapeHTML(false)`，裁掉尾随换行，输出与 `json.Marshal` 逐字节对齐，仅 `&`/`<`/`>` 不再被转义
+- **修改**：回执序列化全部改走该函数——`handlers/message_parser.go` 的 `SendResponse`/`SendResponseSB`/`SendGuildResponse`/`SendC2CResponse`/`SendGuildPrivateResponse` 与 `ConvertMapToJSONString`；`handlers/` 下 `get_user_info`/`get_avatar`/`get_group_info`/`get_group_list`/`get_friend_list`/`delete_msg`/`delete_group_msg`/`put_interaction`/`get_status`/`get_login_info`/`get_online_clients`/`get_version_info`/`mark_msg_as_read`/`set_group_add_request` 及 `outbound_bridge.go` 的回执
+- **修改**：回执还经 `Client.SendMessage` 走 WS 下发，底层序列化同口径——`wsclient/ws.go`、`server/wsserver.go` 的 `SendMessage` 一并关闭 HTML 转义（HTTP API 模式由 handler 返回的字节直接下发，无需二次处理）
+- **影响**：带签名的 URL 回执与 Rust 端逐字节一致；输出仍是合法 JSON，解析语义不变。**未改动**发往 QQ 上游的请求体（`cqcode_pipeline.go`/`handlers_content.go` 的 base64 编码、`normalize.go`）与内部存储/日志序列化
+- **测试**：`callapi/marshal_test.go` 断言 `https://example.com/a?x=1&y=2` 原样输出、不含 `\u0026`、无尾随换行且往返语义不变；`handlers/action_response_test.go` 经 `get_user_info` 全链路断言回执同样不转义
+
 ### 群名片 `member_nickname` 绕过入站敏感词过滤，`sender.nickname` / `sender.card` 原样上报敏感词
 
 入站敏感词过滤只处理 `author.username`，而 `sender.nickname` / `sender.card` 自 2026-11-16 起优先取 `member_nickname`（`Processor/nickname.go` 的 `resolveNicknameAndCard`），群名片含敏感词时会绕过过滤被原样上报：

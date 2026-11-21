@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -163,13 +162,13 @@ func GetGroupList(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.Open
 
 	var result []byte
 	if !config.GetStringOb11() {
-		result, err = json.Marshal(groupList)
+		result, err = callapi.MarshalNoEscape(groupList)
 		if err != nil {
 			mylog.Printf("Error marshaling data: %v", err)
 			return "", nil
 		}
 	} else {
-		result, err = json.Marshal(groupListString)
+		result, err = callapi.MarshalNoEscape(groupListString)
 		if err != nil {
 			mylog.Printf("Error marshaling data: %v", err)
 			return "", nil

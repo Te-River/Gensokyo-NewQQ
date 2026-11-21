@@ -177,7 +177,8 @@ func (c *WebSocketServerClient) SendMessage(message map[string]interface{}) erro
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	msgBytes, err := json.Marshal(message)
+	// 关闭 HTML 转义（& < > 原样输出），与 Rust 端逐字节一致
+	msgBytes, err := callapi.MarshalNoEscape(message)
 	if err != nil {
 		mylog.Println("Error marshalling message:", err)
 		return err

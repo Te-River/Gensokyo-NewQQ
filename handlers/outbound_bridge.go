@@ -288,7 +288,7 @@ func buildOutboundResponse(res outbound.SendResult) string {
 		"retcode": 0,
 		"data":    map[string]interface{}{"message_id": res.MessageID},
 	}
-	b, err := json.Marshal(resp)
+	b, err := callapi.MarshalNoEscape(resp)
 	if err != nil {
 		return `{"status":"ok","retcode":0}`
 	}

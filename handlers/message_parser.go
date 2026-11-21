@@ -403,7 +403,7 @@ func SendResponse(client callapi.Client, err error, message *callapi.ActionMessa
 	// 转化为map并发送
 	outputMap := structToMap(response)
 	// 将map转换为JSON字符串
-	jsonResponse, jsonErr := json.Marshal(outputMap)
+	jsonResponse, jsonErr := callapi.MarshalNoEscape(outputMap)
 	if jsonErr != nil {
 		log.Printf("Error marshaling response to JSON: %v", jsonErr)
 		return "", jsonErr
@@ -447,7 +447,7 @@ func SendResponseSB(client callapi.Client, err error, message *callapi.ActionMes
 	// 转化为map并发送
 	outputMap := structToMap(response)
 	// 将map转换为JSON字符串
-	jsonResponse, jsonErr := json.Marshal(outputMap)
+	jsonResponse, jsonErr := callapi.MarshalNoEscape(outputMap)
 	if jsonErr != nil {
 		log.Printf("Error marshaling response to JSON: %v", jsonErr)
 		return "", jsonErr
@@ -559,7 +559,7 @@ func SendGuildResponse(client callapi.Client, err error, message *callapi.Action
 	// 转化为map并发送
 	outputMap := structToMap(response)
 	// 将map转换为JSON字符串
-	jsonResponse, jsonErr := json.Marshal(outputMap)
+	jsonResponse, jsonErr := callapi.MarshalNoEscape(outputMap)
 	if jsonErr != nil {
 		log.Printf("Error marshaling response to JSON: %v", jsonErr)
 		return "", jsonErr
@@ -623,7 +623,7 @@ func SendC2CResponse(client callapi.Client, err error, message *callapi.ActionMe
 	// 转化为map并发送
 	outputMap := structToMap(response)
 	// 将map转换为JSON字符串
-	jsonResponse, jsonErr := json.Marshal(outputMap)
+	jsonResponse, jsonErr := callapi.MarshalNoEscape(outputMap)
 	if jsonErr != nil {
 		log.Printf("Error marshaling response to JSON: %v", jsonErr)
 		return "", jsonErr
@@ -680,7 +680,7 @@ func SendGuildPrivateResponse(client callapi.Client, err error, message *callapi
 	// 转化为map并发送
 	outputMap := structToMap(response)
 	// 将map转换为JSON字符串
-	jsonResponse, jsonErr := json.Marshal(outputMap)
+	jsonResponse, jsonErr := callapi.MarshalNoEscape(outputMap)
 	if jsonErr != nil {
 		log.Printf("Error marshaling response to JSON: %v", jsonErr)
 		return "", jsonErr
@@ -2571,8 +2571,8 @@ func SendMessage(messageText string, data interface{}, messageType string, api o
 
 // 将map转化为json string
 func ConvertMapToJSONString(m map[string]interface{}) (string, error) {
-	// 使用 json.Marshal 将 map 转换为 JSON 字节切片
-	jsonBytes, err := json.Marshal(m)
+	// 使用 MarshalNoEscape 将 map 转换为 JSON 字节切片（回执不转义 & < >）
+	jsonBytes, err := callapi.MarshalNoEscape(m)
 	if err != nil {
 		log.Printf("Error marshalling map to JSON: %v", err)
 		return "", err
