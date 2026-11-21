@@ -5,6 +5,7 @@
 mod support;
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use gensokyo_core::Ob11Id;
 use gensokyo_protocol::Event;
@@ -29,6 +30,26 @@ fn inbound(settings: &str) -> (Inbound, TempDir) {
     (Inbound::from_state(&state), dir)
 }
 
+/// 转换时刻的墙上时钟（秒），给 `time` 断言取闭区间用。
+fn wall_clock_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("系统时钟早于 UNIX_EPOCH")
+        .as_secs() as i64
+}
+
+/// `time` 是处理时刻而非负载 `timestamp`：Go 在
+/// `Processor/ProcessGroupNormalMessage.go:223`、`ProcessGroupMessage.go:235`、
+/// `ProcessC2CMessage.go:150,200` 等处一律用 `time.Now().Unix()`。
+/// 断言取「转换前后两次取钟」的闭区间：既不依赖负载字段，也不会因跨秒抖动。
+fn assert_processed_now(time: i64, before: i64, after: i64, what: &str) {
+    assert!(
+        (before..=after).contains(&time),
+        "{what} 的 time 应为处理时刻（Go 用 time.Now()，见 ProcessGroupNormalMessage.go:223），\
+         期望落在 [{before}, {after}]，实际 {time}"
+    );
+}
+
 fn group_message_payload() -> Value {
     json!({
         "id": "M1",
@@ -42,6 +63,7 @@ fn group_message_payload() -> Value {
 #[test]
 fn group_at_message_becomes_group_message() {
     let (inbound, _dir) = inbound(BASE);
+    let before = wall_clock_now();
     let events = inbound
         .convert(
             "GROUP_AT_MESSAGE_CREATE",
@@ -49,6 +71,7 @@ fn group_at_message_becomes_group_message() {
             None,
         )
         .expect("转换失败");
+    let after = wall_clock_now();
     assert_eq!(events.len(), 1);
 
     let Event::Message(message) = &events[0] else {
@@ -63,7 +86,7 @@ fn group_at_message_becomes_group_message() {
     assert_eq!(message.raw_message, "hi");
     assert_eq!(message.text(), "hi");
     assert_eq!(message.to_me, Some(true));
-    assert_eq!(message.time, 1_700_000_000);
+    assert_processed_now(message.time, before, after, "群消息");
     let sender = message.sender.as_ref().expect("sender 不应缺失");
     assert_eq!(sender.nickname.as_deref(), Some("alice"));
     assert_eq!(sender.role.as_deref(), Some("admin"));
@@ -163,9 +186,11 @@ fn c2c_message_becomes_private_message() {
         "timestamp": 1_700_000_100,
         "author": {"id": "U2", "username": "bob"}
     });
+    let before = wall_clock_now();
     let events = inbound
         .convert("C2C_MESSAGE_CREATE", Some(&payload), None)
         .expect("转换失败");
+    let after = wall_clock_now();
     let Event::Message(message) = &events[0] else {
         panic!("应为 message 事件");
     };
@@ -175,7 +200,7 @@ fn c2c_message_becomes_private_message() {
     assert_eq!(message.to_me, None);
     assert_eq!(message.user_id, Ob11Id::str("U2"));
     assert_eq!(message.raw_message, "私聊");
-    assert_eq!(message.time, 1_700_000_100);
+    assert_processed_now(message.time, before, after, "C2C 消息");
 }
 
 /// Go 私信 sender 是结构体二选一：`string_ob11` 关闭用 `PrivateSender`（`Processor.go:202`，
@@ -282,15 +307,19 @@ fn group_management_events_map_to_their_notices() {
         "op_member_openid": "U7",
         "timestamp": 1_700_000_400
     });
+    // `GROUP_DEL_ROBOT` 走 `group_op_notice`，`time` 仍取负载 timestamp（`src/inbound.rs:1379`）；
+    // `GROUP_MSG_REJECT` / `GROUP_MSG_RECEIVE` 走 `group_payload_notice`，取处理时刻（`:1441`）。
     let cases = [
-        ("GROUP_DEL_ROBOT", "group_decrease", Some("kick_me")),
-        ("GROUP_MSG_REJECT", "group_reject", Some("create")),
-        ("GROUP_MSG_RECEIVE", "group_receive", Some("create")),
+        ("GROUP_DEL_ROBOT", "group_decrease", Some("kick_me"), false),
+        ("GROUP_MSG_REJECT", "group_reject", Some("create"), true),
+        ("GROUP_MSG_RECEIVE", "group_receive", Some("create"), true),
     ];
-    for (kind, notice_type, sub_type) in cases {
+    for (kind, notice_type, sub_type, processed_now) in cases {
+        let before = wall_clock_now();
         let events = inbound
             .convert(kind, Some(&payload), None)
             .expect("转换失败");
+        let after = wall_clock_now();
         assert_eq!(events.len(), 1, "{kind} 应只产出一条 notice");
         let Event::Notice(notice) = &events[0] else {
             panic!("{kind} 应为 notice");
@@ -298,7 +327,14 @@ fn group_management_events_map_to_their_notices() {
         assert_eq!(notice.notice_type, notice_type);
         assert_eq!(notice.sub_type.as_deref(), sub_type);
         assert_eq!(notice.group_id.as_ref(), Some(&Ob11Id::str("G7")));
-        assert_eq!(notice.time, 1_700_000_400);
+        if processed_now {
+            assert_processed_now(notice.time, before, after, kind);
+        } else {
+            assert_eq!(
+                notice.time, 1_700_000_400,
+                "{kind} 的 time 取负载 timestamp（group_op_notice）"
+            );
+        }
     }
 }
 
@@ -332,9 +368,11 @@ fn c2c_switch_events_become_their_notices() {
         ("C2C_MSG_REJECT", "c2c_msg_reject"),
         ("C2C_MSG_RECEIVE", "c2c_msg_receive"),
     ] {
+        let before = wall_clock_now();
         let events = inbound
             .convert(kind, Some(&payload), None)
             .expect("转换失败");
+        let after = wall_clock_now();
         assert_eq!(events.len(), 1, "{kind} 应只产出一条 notice");
         let Event::Notice(notice) = &events[0] else {
             panic!("{kind} 应为 notice");
@@ -342,7 +380,7 @@ fn c2c_switch_events_become_their_notices() {
         assert_eq!(notice.notice_type, notice_type);
         assert_eq!(notice.group_id, None);
         assert_eq!(notice.user_id.as_ref(), Some(&Ob11Id::str("U6")));
-        assert_eq!(notice.time, 1_700_000_700);
+        assert_processed_now(notice.time, before, after, kind);
     }
 }
 
