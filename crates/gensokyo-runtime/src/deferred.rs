@@ -2617,7 +2617,7 @@ mod tests {
 
     use gensokyo_actions::{
         ActionContext, EchoContext, ForwardParseFailure, ForwardPlan, ForwardRequest, MessageOut,
-        QqApi, QqFuture, SendRequest, SendTarget, SseRequest,
+        QqApi, QqFuture, SendRequest, SendTarget, SseRequest, plan_send_group_msg_raw,
     };
     use gensokyo_config::ConfigManager;
     use gensokyo_core::{Error, Ob11Id, Result};
@@ -3945,6 +3945,36 @@ mod tests {
             .expect("字符串形态直接当真实 ID");
 
         assert_eq!(api.sent()[0].msg_id.as_deref(), Some("REAL-MSG-ID"));
+    }
+
+    /// QQ 2026-11-17：群消息 `msg_id` 可直接用于
+    /// `POST /v2/users/{user_openid}/messages`。计划里带显式真实 `msg_id` 时，私聊出站体必须
+    /// 原样带上它（`msg_id`），且被动凭据与 `event_id` 二选一（`stamp_message`）。
+    #[tokio::test]
+    async fn private_reply_with_explicit_msg_id_stamps_msg_id_only() {
+        let api = Arc::new(FakeQqApi::default().with_send("OUT-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        // 仅 user_id 的 raw 规划即「群消息 msg_id → 私聊回复」的现有入口
+        let plan = plan_send_group_msg_raw(&json!({
+            "user_id": OPENID,
+            "message": "hi",
+            "message_id": "ROBOT1.0_FROM_GROUP"
+        }))
+        .expect("显式 msg_id 的私聊应规划成功");
+        assert_eq!(plan.target, SendTarget::Private(OPENID.to_owned()));
+
+        execute(&context, &plan, &deps(&no_media(), None))
+            .await
+            .expect("显式 msg_id 的私聊应发送成功");
+
+        let sent = api.sent();
+        assert_eq!(sent.len(), 1, "纯文本只发一条");
+        assert_eq!(
+            sent[0].msg_id.as_deref(),
+            Some("ROBOT1.0_FROM_GROUP"),
+            "群消息 msg_id 必须原样进私聊出站体"
+        );
+        assert_eq!(sent[0].event_id, None, "被动凭据与 event_id 二选一");
     }
 
     #[tokio::test]

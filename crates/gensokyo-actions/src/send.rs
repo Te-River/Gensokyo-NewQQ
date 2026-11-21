@@ -51,6 +51,8 @@
 //!   猜不出再递归重试；这里没有那份进程内缓存，直接按参数落点路由（`group_id` → 群，仅
 //!   `user_id` → 私聊），与 `plan_send_group_msg` 同口径。Go 的 `params.message_id` 在这里映射成
 //!   被动回复的 `reply_msg_id`（`"0"` / 空串视为主动发送，Go 会把 `"0"` 原样写进 `msg_id`）。
+//!   官方 2026-11-17 起群消息 `msg_id` 可直接用于私聊回复，`send_private_msg` / `send_msg`
+//!   的 private 分支经同一个助手（`apply_raw_message_id`）读同一参数。
 //! - **`send_private_msg_sse`**：Go 把 `stream` 的 `index` 与续写 `id` 存在进程内 `sync.Map`
 //!   （按 message_id 自增、缓存首片返回的消息 ID）；这里没有那份缓存，`index` / `id` 由调用方
 //!   显式传入（缺省 `index = 0`、首片不带 `id`），`msg_seq = index + 10` 的防去重写法保留。
@@ -369,8 +371,12 @@ fn user_context(object: &Map<String, Value>) -> Option<String> {
 
 /// `send_private_msg`（含 `send_private_msg_wakeup` 的规划部分）的参数规划。
 ///
+/// 官方 2026-11-17 起群消息的 `msg_id` 可直接用于 `POST /v2/users/{openid}/messages`，
+/// 所以这里同样把 `params.message_id` 落成被动凭据（见 `apply_raw_message_id`）。
+///
 /// # Errors
-/// 同 [`plan_send_group_msg`]，ID 字段换成 `user_id`（`group_id` 不参与规划）。
+/// 同 [`plan_send_group_msg`]，ID 字段换成 `user_id`（`group_id` 不参与规划）；
+/// `message_id` 存在但不是数字 / 字符串时也是参数错误。
 pub fn plan_send_private_msg(params: &Value) -> Result<SendRequest> {
     let object = params_object(params)?;
     require_message(object)?;
@@ -381,13 +387,15 @@ pub fn plan_send_private_msg(params: &Value) -> Result<SendRequest> {
     };
     let parsed: SendPrivateMsgParams =
         deserialize_params(normalized_params(object, &[("user_id", user_id)])?)?;
-    Ok(SendRequest {
+    let mut planned = SendRequest {
         target: SendTarget::Private(parsed.user_id.to_string()),
         message: message_out(&parsed.message, auto_escape)?,
         wakeup: false,
         // 收件人本身就是用户号，没有额外的群上下文
         echo_context: EchoContext::default(),
-    })
+    };
+    apply_raw_message_id(&mut planned, object)?;
+    Ok(planned)
 }
 
 /// `send_msg` 的参数规划：按 `message_type` 分派到群聊 / 私聊。
@@ -465,13 +473,21 @@ pub fn plan_send_private_msg_wakeup(params: &Value) -> Result<SendRequest> {
 /// 同 [`plan_send_group_msg`]；`message_id` 存在但不是数字 / 字符串时也是参数错误。
 pub fn plan_send_group_msg_raw(params: &Value) -> Result<SendRequest> {
     let mut planned = plan_send_group_msg(params)?;
-    let object = params_object(params)?;
+    apply_raw_message_id(&mut planned, params_object(params)?)?;
+    Ok(planned)
+}
+
+/// 把 `params.message_id` 落成被动回复的 `reply_msg_id`（语义与 [`raw_message_id`] 一致）。
+///
+/// `send_group_msg_raw` 与私聊发送共用同一份实现：官方 2026-11-17 起群消息的 `msg_id`
+/// 可直接用于 `POST /v2/users/{openid}/messages`，两条链读的是同一个参数。
+fn apply_raw_message_id(planned: &mut SendRequest, object: &Map<String, Value>) -> Result<()> {
     if let Some(value) = raw_message_id(object)? {
         let reply = serde_json::from_value(value)
             .map_err(|err| Error::Protocol(format!("message_id 形态非法: {err}")))?;
         planned.message.plan.reply_msg_id = Some(reply);
     }
-    Ok(planned)
+    Ok(())
 }
 
 /// `send_group_msg_raw` 的 `message_id`：缺失 / `null` / 空串 / `0` 都按主动发送
@@ -1355,6 +1371,55 @@ mod tests {
         }))
         .expect_err("非法 message_id 应报错");
         assert!(err.to_string().contains("message_id"), "实际错误: {err}");
+    }
+
+    /// QQ 2026-11-17 新能力：群消息 `msg_id` 可直接用于
+    /// `POST /v2/users/{user_openid}/messages`（私聊回复该群消息的发送者），
+    /// 因此 [`plan_send_private_msg`] 与 `send_group_msg_raw` 读同一个 `params.message_id`。
+    #[test]
+    fn private_send_maps_explicit_message_id_to_passive_reply() {
+        let planned = plan_send_private_msg(&json!({
+            "user_id": "789", "message": "hi", "message_id": "ROBOT1.0_FROM_GROUP"
+        }))
+        .expect("带 message_id 的私聊应规划成功");
+
+        assert_eq!(planned.target, SendTarget::Private("789".to_owned()));
+        assert_eq!(
+            planned.message.plan.reply_msg_id,
+            Some(Ob11Id::str("ROBOT1.0_FROM_GROUP")),
+            "群消息 msg_id 必须落成私聊的被动凭据"
+        );
+        assert!(!planned.wakeup, "显式 msg_id 不是互动召回");
+    }
+
+    /// 同一能力当前可达的规划入口：`send_group_msg_raw` 只带 `user_id` 时按私聊路由，
+    /// `message_id` 落成 `reply_msg_id`。这是 [`plan_send_private_msg`] 补映射时要对齐的口径。
+    #[test]
+    fn raw_private_route_maps_explicit_group_message_id() {
+        let planned = plan_send_group_msg_raw(&json!({
+            "user_id": "789", "message": "hi", "message_id": "ROBOT1.0_FROM_GROUP"
+        }))
+        .expect("仅 user_id 的 raw 应规划成功");
+
+        assert_eq!(planned.target, SendTarget::Private("789".to_owned()));
+        assert_eq!(
+            planned.message.plan.reply_msg_id,
+            Some(Ob11Id::str("ROBOT1.0_FROM_GROUP"))
+        );
+    }
+
+    /// 边界：`message_id = "0"` 是既有语义里的「主动发送」，私聊路由下同样不产生被动凭据。
+    #[test]
+    fn raw_private_route_treats_zero_message_id_as_active() {
+        let planned = plan_send_group_msg_raw(&json!({
+            "user_id": "789", "message": "hi", "message_id": "0"
+        }))
+        .expect("message_id 0 应放行");
+
+        assert_eq!(
+            planned.message.plan.reply_msg_id, None,
+            "\"0\" 不构成被动凭据"
+        );
     }
 
     #[test]
