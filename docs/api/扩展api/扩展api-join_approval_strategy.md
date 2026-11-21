@@ -27,13 +27,18 @@
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|:----:|------|
-| `group_openids` | array | 条件必填 | 关联的群 OpenID 列表，最多 100 个；与 `group_ids` 互斥 |
-| `group_ids` | array | 条件必填 | 关联的 QQ 群号列表（uint64），最多 100 个；与 `group_openids` 互斥 |
+| `group_openids` | array | 条件必填 | 关联群列表（GSK 虚拟群号或 32 位群 OpenID），最多 100 个 |
+| `group_ids` | array | 条件必填 | 同 `group_openids`（两个字段等价，插件填错字段也照处理） |
 | `is_enable` | string | 否 | `on`-启用 / `off`-关闭，默认 `on` |
 | `expire_at` | string | 否 | 过期时间（RFC3339 格式）；不传默认一年过期 |
 | `remark` | string | 否 | 策略备注，最多 255 个汉字 |
 
-`group_openids` 与 `group_ids` 二选一必填，同时传入或均未传入均返回错误。
+`group_openids` 与 `group_ids` 任填其一（都不填由上游回错）。**两个字段的值按同一口径换算**：
+
+- 32 位 OpenID → 直接使用；
+- 其余（GSK 虚拟群号，如 `610636458`）→ 经 idmap 反查成群 OpenID；查不到回 `1400`，`message` 里带上字段名与该值。
+
+上层发往官方接口时统一填 `group_openids`——官方 `group_ids` 收的是真实 QQ 群号，而插件侧只有虚拟号、服务端也没有虚拟号 → 真实群号的映射。
 
 ### 返回
 
@@ -49,12 +54,14 @@
 {
   "action": "join_approval_strategy_create",
   "params": {
-    "group_ids": [870389197, 870389198],
+    "group_ids": [610636458, 610636459],
     "is_enable": "on",
     "remark": "读书会群自动放行"
   }
 }
 ```
+
+> `610636458` / `610636459` 是 GSK 虚拟群号（`string_ob11: false` 的数字形态），服务端会换算成真实群 OpenID 再上行。
 
 ---
 
@@ -81,8 +88,8 @@
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `strategy_id` | string | 策略 ID |
-| `group_openids` | array | 关联的群 OpenID 列表（创建时使用 `group_openids` 时返回） |
-| `group_ids` | array | 关联的 QQ 群号列表（创建时使用 `group_ids` 时返回） |
+| `group_openids` | array | 关联群的真实群 OpenID 列表（服务端创建/修改时统一用这个字段） |
+| `group_ids` | array | 关联的真实 QQ 群号列表（仅策略由官方侧以 `group_ids` 建过时出现） |
 | `whitelist_user_count` | int | 白名单中的号码数量（估算，可能存在少量误差） |
 | `is_enable` | string | 策略是否启用 |
 | `expire_at` / `created_at` / `updated_at` | string | RFC3339 格式时间 |
@@ -114,10 +121,10 @@
 | `expire_at` | string | 否 | 过期时间（RFC3339 格式） |
 | `remark` | string | 否 | 策略备注 |
 | `op` | string | 条件必填 | 关联群操作：`add`-新增关联群 / `del`-删除关联群 |
-| `group_openids` | array | 条件必填 | 待操作的群 OpenID 列表；与 `group_ids` 互斥 |
-| `group_ids` | array | 条件必填 | 待操作的 QQ 群号列表；与 `group_openids` 互斥 |
+| `group_openids` | array | 条件必填 | 待操作的群列表（GSK 虚拟群号或 32 位群 OpenID） |
+| `group_ids` | array | 条件必填 | 同 `group_openids`（两个字段等价） |
 
-`op` + `group_openids`/`group_ids` 组合成 `group_action` 增删关联群，群标识形式须与创建时一致。
+`op` + `group_openids`/`group_ids` 组合成 `group_action` 增删关联群，取值与创建同口径：32 位 OpenID 直通、虚拟群号经 idmap 反查，查不到回 `1400`（`message` 带上字段名与该值）。
 
 ### 返回
 
@@ -148,7 +155,7 @@
   "params": {
     "strategy_id": "st_d83eca11e9",
     "op": "add",
-    "group_ids": [870389199]
+    "group_ids": [610636460]
   }
 }
 ```

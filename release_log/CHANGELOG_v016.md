@@ -221,6 +221,17 @@ Go 在 `global_group_msg_rre_to_message` / `global_c2c_msg_switch_to_message` / 
 
 ## 🐛 修复
 
+### `join_approval_strategy_*` 的关联群虚拟号未转 OpenID，上游拿到的是虚拟号（2026-11-21）
+
+全链路 ID 转换审计查出：`join_approval_strategy_create` / `_update` 把 `group_openids` 原样上行，`group_ids` 只做了 `parse::<u64>()`——插件的 GSK 虚拟群号（如 `610636458`）被当作真实群 OpenID / 真实群号发给 QQ，策略关联到不存在的群。契约是「插件侧只见虚拟号；调上游必须用真实 openid」。
+
+- **根因**：`crates/gensokyo-actions/src/panels.rs` 两处直接 `params::id_list(object, "group_openids")`，`group_ids` 走局部 `group_ids()` 只做数字校验，都绕过了 `ActionContext::resolve_openid`（`util::is_openid` / `resolve_identity_text` 的既有口径）
+- **修改**：新增 `panels.rs::strategy_group_openids`，`group_openids` 与 `group_ids` 两个字段都收（插件填错字段也照处理）：每个值 32 位 OpenID 直通，其余视为虚拟群号经 idmap 反查成群 OpenID；任一值查不到整体回 `1400`，`message` 形如 `group_ids 的 610636458 无法换算成群 OpenID: 反查 group_openid 失败: …`。上游请求体统一只填 `group_openids`（`group_ids` 留空、`skip_serializing_if` 不序列化）
+- **为什么不填 group_ids 上行**：官方 `group_ids` 收的是真实 QQ 群号，而插件侧只有虚拟号、idmap 里也只有 OpenID，虚拟号 → 真实群号的映射在服务端不存在；官方两字段互斥，统一走 `group_openids` 仍满足「二选一必填」
+- **范围**：`create` 与 `update` 的 `group_action` 两处；`execute` / `whitelist` / `delete` 只吃 `strategy_id`（策略 ID，不是群 ID）不动，`whitelist_users` 是 QQ 号码不是群 ID 也不动。删除原 `group_ids()` 辅助函数（不再有调用方）
+- **文档**：`docs/api/扩展api/扩展api-join_approval_strategy.md` 的 `create` / `update` 参数表与示例改为虚拟群号口径，并写明换算规则与 `1400` 文案形态
+- **测试**：`panels::tests::strategy_group_fields_normalize_virtual_ids_to_openids`（虚拟号填 `group_openids`、32 位 OpenID 填 `group_ids` → 上游 `group_openids` 为两个真实 OpenID 且 `group_ids` 为空；`update` 的 `group_action` 同断言）、`panels::tests::strategy_unknown_group_number_fails_1400`（两个字段各喂一个未登记数字 → `1400`，`message` 带字段名与值，且不触达上游）；既有 `strategy_create_and_list_forward_their_fields` / `strategy_update_execute_whitelist_and_delete_forward_ids` 按新口径更新断言
+
 ### keyboard `specify_user_ids` 的虚拟号未转 OpenID：群里点按钮恒提示「无权限操作」（2026-11-21）
 
 活体回报：插件给按钮设了 `permission.type=0` + `specify_user_ids`，同一条插件在 Go 版点击正常、Rust 最新 windows-amd64 构建里点击恒提示「无权限操作」。出站体里的 `specify_user_ids` 是 GSK 虚拟号（如 `610636458`），而 QQ 侧 `type=0` 只认真实 OpenID，永远匹配不上。

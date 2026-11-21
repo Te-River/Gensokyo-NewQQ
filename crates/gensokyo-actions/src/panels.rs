@@ -35,6 +35,9 @@
 //! - **关联对象列表**：Go 用 `idmap.StoreIDv2` / `RetrieveRowByIDv2` 双向换算；这里复用
 //!   [`ActionContext::resolve_openid`]，虚拟号未装配 idmap 时回 `1400` 而不是静默跳过。
 //!   `get_panel` 的 `user_openids` / `group_openids` 仍按 Go 口径转回虚拟号，反查失败跳过该条。
+//! - **审批策略的关联群**：`group_openids` / `group_ids` 两个字段都按同一口径归一（32 位 OpenID
+//!   直通，其余视为虚拟群号反查），上游一律只填 `group_openids`——官方 `group_ids` 收的是真实
+//!   群号，而插件侧只有虚拟号、idmap 里也只有 OpenID，填不进真实群号。
 //! - **`get_panel_list` 分页**：`limit` 缺省 / 0 时取 20（Go 同值），不额外截断——官方自己有限流。
 
 use std::sync::Arc;
@@ -494,8 +497,8 @@ impl JoinApprovalStrategyCreateHandler {
     async fn execute(&self, request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
         let object = params_object(request)?;
         let body = CreateJoinApprovalStrategyRequest {
-            group_openids: params::id_list(object, "group_openids")?,
-            group_ids: group_ids(object)?,
+            group_openids: strategy_group_openids(&self.context, object)?,
+            group_ids: Vec::new(),
             is_enable: params::optional_text(object, "is_enable")?.unwrap_or_default(),
             expire_at: params::optional_text(object, "expire_at")?.unwrap_or_default(),
             remark: params::optional_text(object, "remark")?.unwrap_or_default(),
@@ -585,8 +588,8 @@ impl JoinApprovalStrategyUpdateHandler {
         let group_action = match op {
             Some(op) if !op.is_empty() => Some(GroupAction {
                 op,
-                group_openids: params::id_list(object, "group_openids")?,
-                group_ids: group_ids(object)?,
+                group_openids: strategy_group_openids(&self.context, object)?,
+                group_ids: Vec::new(),
             }),
             _ => None,
         };
@@ -738,15 +741,26 @@ impl Handler for JoinApprovalStrategyDeleteHandler {
     }
 }
 
-/// 群号列表（`group_ids`）→ `Vec<u64>`。
-fn group_ids(object: &Map<String, Value>) -> Result<Vec<u64>> {
-    params::id_list(object, "group_ids")?
-        .into_iter()
-        .map(|id| {
-            id.parse::<u64>()
-                .map_err(|_| Error::Protocol(format!("group_ids 必须是数字群号: {id}")))
-        })
-        .collect()
+/// 审批策略的关联群 → 真实 OpenID。
+///
+/// `group_openids` 与 `group_ids` 两个字段都收（插件可能填错字段）：32 位 OpenID 直通，其余
+/// 视为虚拟群号经 idmap 反查，任一失败整体 `1400` 并在文案里带上字段名与该值。
+fn strategy_group_openids(
+    context: &ActionContext,
+    object: &Map<String, Value>,
+) -> Result<Vec<String>> {
+    let mut openids = Vec::new();
+    for key in ["group_openids", "group_ids"] {
+        for id in params::id_list(object, key)? {
+            let openid = context
+                .resolve_openid(key, &id, "group_openid")
+                .map_err(|err| {
+                    Error::Protocol(format!("{key} 的 {id} 无法换算成群 OpenID: {err}"))
+                })?;
+            openids.push(openid);
+        }
+    }
+    Ok(openids)
 }
 
 #[cfg(test)]
@@ -762,7 +776,8 @@ mod tests {
     };
     use crate::handler::RETCODE_BAD_REQUEST;
     use crate::testing::{
-        Call, block_on, context, failed, ok_data, request, request_without_params,
+        Call, block_on, context, context_with_idmap, failed, idmap_store, ok_data, request,
+        request_without_params,
     };
     use crate::util::RETCODE_UPSTREAM;
     use gensokyo_core::Error;
@@ -779,6 +794,7 @@ mod tests {
     const PANEL: &str = "panel-1";
     const STRATEGY: &str = "strategy-1";
     const GROUP: &str = "0123456789abcdef0123456789abcdef";
+    const GROUP2: &str = "fedcba9876543210fedcba9876543210";
 
     /// 断言 `1400`。
     fn assert_bad_request(handler: &dyn Handler, params: Value) {
@@ -1048,7 +1064,6 @@ mod tests {
             "join_approval_strategy_create",
             json!({
                 "group_openids": [GROUP],
-                "group_ids": [123456],
                 "is_enable": "on",
                 "remark": "自动通过",
             }),
@@ -1059,7 +1074,7 @@ mod tests {
             api.calls(),
             vec![Call::StrategyCreate(CreateJoinApprovalStrategyRequest {
                 group_openids: vec![GROUP.to_owned()],
-                group_ids: vec![123_456],
+                group_ids: Vec::new(),
                 is_enable: "on".to_owned(),
                 expire_at: String::new(),
                 remark: "自动通过".to_owned(),
@@ -1083,6 +1098,95 @@ mod tests {
         assert_bad_request(&list, json!({"limit": -1}));
     }
 
+    /// 关联群的两个字段都按「32 位 OpenID 直通 / 虚拟群号反查」归一，上游只填 `group_openids`。
+    #[test]
+    fn strategy_group_fields_normalize_virtual_ids_to_openids() {
+        let store = idmap_store("strategy-groups");
+        let vuin = store.retrieve_virtual_value(GROUP).expect("分配群 vuin").1;
+        let vuin2 = store.retrieve_virtual_value(GROUP2).expect("分配群 vuin").1;
+
+        // 虚拟号填进 group_openids、32 位 OpenID 填进 group_ids：字段填错也照同一口径归一
+        let (ctx, api) = context_with_idmap(store.clone(), true);
+        *api.strategy_create.lock().unwrap() =
+            Some(Ok(CreateJoinApprovalStrategyResponse::default()));
+        let create = JoinApprovalStrategyCreateHandler::new(ctx);
+        let response = block_on(create.handle(&request(
+            "join_approval_strategy_create",
+            json!({"group_openids": [vuin], "group_ids": [GROUP2], "is_enable": "on"}),
+        )))
+        .expect("创建策略不应失败");
+        assert_eq!(ok_data(response)["strategy_id"], json!(""));
+        assert_eq!(
+            api.calls(),
+            vec![Call::StrategyCreate(CreateJoinApprovalStrategyRequest {
+                group_openids: vec![GROUP.to_owned(), GROUP2.to_owned()],
+                group_ids: Vec::new(),
+                is_enable: "on".to_owned(),
+                expire_at: String::new(),
+                remark: String::new(),
+            })]
+        );
+
+        // update 的 group_action 同一口径
+        let (ctx, api) = context_with_idmap(store, true);
+        *api.strategy_update.lock().unwrap() =
+            Some(Ok(UpdateJoinApprovalStrategyResponse::default()));
+        let update = JoinApprovalStrategyUpdateHandler::new(ctx);
+        let response = block_on(update.handle(&request(
+            "join_approval_strategy_update",
+            json!({"strategy_id": STRATEGY, "op": "add", "group_ids": [vuin2]}),
+        )))
+        .expect("更新策略不应失败");
+        let _ = ok_data(response);
+        assert_eq!(
+            api.calls(),
+            vec![Call::StrategyUpdate(
+                STRATEGY.to_owned(),
+                UpdateJoinApprovalStrategyRequest {
+                    is_enable: String::new(),
+                    expire_at: String::new(),
+                    group_action: Some(GroupAction {
+                        op: "add".to_owned(),
+                        group_openids: vec![GROUP2.to_owned()],
+                        group_ids: Vec::new(),
+                    }),
+                    remark: String::new(),
+                }
+            )]
+        );
+    }
+
+    /// 查不到的群号回 `1400`，文案带上字段名与该值；两个字段同一口径。
+    #[test]
+    fn strategy_unknown_group_number_fails_1400() {
+        let (ctx, api) = context_with_idmap(idmap_store("strategy-unknown"), true);
+        let create = JoinApprovalStrategyCreateHandler::new(ctx);
+        for (key, value, params) in [
+            (
+                "group_openids",
+                987_654_321,
+                json!({"group_openids": [987_654_321]}),
+            ),
+            (
+                "group_ids",
+                987_654_322,
+                json!({"group_ids": [987_654_322]}),
+            ),
+        ] {
+            let response =
+                block_on(create.handle(&request("join_approval_strategy_create", params)))
+                    .expect("参数错误也应是 Ok(失败响应)");
+            let message = response.message.clone().unwrap_or_default();
+            let (status, retcode, data) = failed(response);
+            assert_eq!(status, Status::Failed);
+            assert_eq!(retcode, RETCODE_BAD_REQUEST);
+            assert_eq!(data, None);
+            assert!(message.contains(key), "{message}");
+            assert!(message.contains(&value.to_string()), "{message}");
+        }
+        assert!(api.calls().is_empty(), "参数错误不应触达上游");
+    }
+
     #[test]
     fn strategy_update_execute_whitelist_and_delete_forward_ids() {
         let (ctx, api) = context();
@@ -1094,7 +1198,7 @@ mod tests {
 
         let response = block_on(update.handle(&request(
             "join_approval_strategy_update",
-            json!({"strategy_id": STRATEGY, "op": "del", "group_ids": [42], "is_enable": "off"}),
+            json!({"strategy_id": STRATEGY, "op": "del", "group_openids": [GROUP], "is_enable": "off"}),
         )))
         .expect("更新策略不应失败");
         assert_eq!(ok_data(response)["is_enable"], json!("off"));
@@ -1107,8 +1211,8 @@ mod tests {
                     expire_at: String::new(),
                     group_action: Some(GroupAction {
                         op: "del".to_owned(),
-                        group_openids: Vec::new(),
-                        group_ids: vec![42],
+                        group_openids: vec![GROUP.to_owned()],
+                        group_ids: Vec::new(),
                     }),
                     remark: String::new(),
                 }

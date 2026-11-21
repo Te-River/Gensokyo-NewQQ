@@ -27,7 +27,7 @@ use gensokyo_qq::dto::{
     UpdateJoinApprovalStrategyResponse, UpdatePanelRequest, UserInfo, VersionResponse,
     WhitelistUsersRequest, WhitelistUsersResponse,
 };
-use gensokyo_storage::IdMapStore;
+use gensokyo_storage::{IdMapOptions, IdMapStore};
 
 use crate::qqapi::{
     ActionContext, KickResult, MsgDetail, QqApi, QqFuture, RetractRequest, StrangerProfile,
@@ -549,6 +549,22 @@ pub(crate) fn context() -> (Arc<ActionContext>, Arc<FakeQqApi>) {
     let api = Arc::new(FakeQqApi::default());
     let context = Arc::new(ActionContext::new(api.clone(), config()));
     (context, api)
+}
+
+/// 系统临时目录里的全新 idmap 存储；调用方用 `retrieve_virtual_value(openid)` 预置虚拟号。
+///
+/// redb 文件锁禁止同名并发打开，计数器保证同一进程内的用例互不撞路径。
+pub(crate) fn idmap_store(tag: &str) -> Arc<IdMapStore> {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "gensokyo-actions-{tag}-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
+    std::fs::create_dir_all(&dir).expect("创建临时存储目录");
+    let options = IdMapOptions::new(dir.join("openid-map.redb"), dir.join("msgid-map.redb"))
+        .with_app_id("102001234");
+    Arc::new(IdMapStore::open(options).expect("打开 idmap 存储失败"))
 }
 
 /// 带 idmap 的 `ActionContext` + 与它共享的替身；`string_ob11` 决定响应 ID 形态。
