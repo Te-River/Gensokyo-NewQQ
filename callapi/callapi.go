@@ -267,9 +267,14 @@ func RegisterHandler(action string, handler HandlerFunc) {
 // CallAPIFromDict 处理信息 by calling the 对应的 handler.
 // 按 config.GetArchMode() 切换：new 走 action.Dispatcher；shadow 以 legacy 产物为准并 diff；
 // legacy（及默认）走原逻辑。OneBot 响应逐字节兼容。
-func CallAPIFromDict(client Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, message ActionMessage) string {
-	// 所有传输（反向ws/正向ws/http）的 action 都在此汇聚，单点兜底避免 handler panic 杀进程
-	defer mylog.RecoverPanic("callapi." + message.Action)
+func CallAPIFromDict(client Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, message ActionMessage) (result string) {
+	// 所有传输（反向ws/正向ws/http）的 action 都在此汇聚：panic 既不能杀进程，也不能让客户端空等到超时。
+	// panic 在内层 legacy/new 已被各自接住，此处只兜分发层自身的 panic，因此不会与内层回执双发。
+	defer func() {
+		if r := recover(); r != nil {
+			result = panicFailureReceipt(client, message, false, r)
+		}
+	}()
 
 	switch config.GetArchMode() {
 	case "new":
@@ -288,7 +293,14 @@ func CallAPIFromDict(client Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, 
 }
 
 // callAPIFromDictLegacy 原逻辑：全局 handlers map 直调。
-func callAPIFromDictLegacy(client Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, message ActionMessage) string {
+func callAPIFromDictLegacy(client Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, message ActionMessage) (result string) {
+	// handler panic 在此接住并回执：panic 不外泄，外层兜底不会被触发，回执只发一份。
+	defer func() {
+		if r := recover(); r != nil {
+			result = panicFailureReceipt(client, message, false, r)
+		}
+	}()
+
 	handler, ok := handlers[message.Action]
 	if !ok {
 		mylog.Println("Unsupported action:", message.Action)
@@ -308,7 +320,14 @@ func callAPIFromDictLegacy(client Client, api openapi.OpenAPI, apiv2 openapi.Ope
 // callAPIFromDictNew 新路径：经 action.Dispatcher 分发（Registry 按 client 缓存）。
 // Echo/PostType/MessageType 经 ctx 透传给桥接 handler，保证响应逐字节兼容；
 // dryRun（shadow 的 new 对比执行）同样经 ctx 透传，避免进程级标志被并发请求串读。
-func callAPIFromDictNew(client Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, message ActionMessage, dryRun bool) string {
+func callAPIFromDictNew(client Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, message ActionMessage, dryRun bool) (result string) {
+	// handler panic 在此接住并回执（dryRun 时只构造不下发，与 1500 分支同一规则）。
+	defer func() {
+		if r := recover(); r != nil {
+			result = panicFailureReceipt(client, message, dryRun, r)
+		}
+	}()
+
 	raw, err := json.Marshal(message)
 	if err != nil {
 		mylog.Println("Error marshalling action:", message.Action, "Error:", err)
@@ -342,6 +361,15 @@ func callAPIFromDictNew(client Client, api openapi.OpenAPI, apiv2 openapi.OpenAP
 		return s
 	}
 	return ""
+}
+
+// panicFailureReceipt 是 defer 中的 panic 兜底：先按原 mylog.RecoverPanic 的同一路径记录
+// panic 值与完整堆栈（日志保留现场），再把一份失败回执发给客户端——否则 panic 后客户端只能等超时。
+// message 只带 panic 值与 action 名，堆栈仅入日志、不回给客户端。
+func panicFailureReceipt(client Client, message ActionMessage, dryRun bool, r interface{}) string {
+	mylog.RecordPanic("callapi."+message.Action, r)
+	return actionFailureReceipt(client, message, 1500,
+		fmt.Sprintf("handler panic: %v (action: %s)", r, message.Action), dryRun)
 }
 
 // actionFailureReceipt 构造失败回执并（非 dryRun 时）经 client 下发，返回该 JSON 字符串：

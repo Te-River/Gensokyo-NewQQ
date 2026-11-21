@@ -317,6 +317,15 @@ C2C 单聊只支持按钮 `permission.type=2`（所有人）：此前的兜底�
 - **影响**：仍为逐条降级下发（官方无合并转发出站结构），节点正文多出署名前缀；`forward_msg_limit`、动作码拦截（M1）语义不变
 - **测试**：`TestForwardNodeUinNameAndKeyboard`——两节点转发，断言上游请求体逐节点保留 `uin`/`name`（字符串与数值两种形态）、节点内 keyboard 存在且 `specify_user_ids` 已转 OpenID、群聊保留原始 `permission.type`、无键盘节点不凭空带键盘
 
+### handler panic 时仍无回执：`RecoverPanic` 只兜住进程不崩，客户端只能等超时（2026-11-21）
+
+`callapi/callapi.go:270` 的分发入口只有 `defer mylog.RecoverPanic("callapi."+action)`：handler panic 被 recover 后日志留下堆栈，但没有任何响应回给客户端。与 Rust 端 `dispatcher.rs:180-185`（panic → `1500/failed`）不一致，也与「任何路径都必须给客户端一个回执」的原则冲突：
+
+- **修改**：三处入口（`CallAPIFromDict`、`callAPIFromDictLegacy`、`callAPIFromDictNew`）的 `defer` 改成 recover 后构造并下发失败回执——`retcode:1500` / `status:"failed"` / `data:null` / `echo` 原样回显，`message` 为 `handler panic: <panic 值> (action: <action>)`（含排障信息，不含堆栈）
+- **修改**：回执复用既有 `actionFailureReceipt(...)`，panic 兜底只是新增 `panicFailureReceipt(...)`（先 `mylog.RecordPanic` 记录 panic 值与完整堆栈，再委托前者构造/下发），堆栈仍只落 `logs/panic.log` 与 mylog
+- **影响**：panic 在内层 legacy/new 即被接住，panic 不会外泄，外层兜底不会触发，客户端**只收到一份**回执；shadow 的 new 对比执行（dryRun）panic 时只构造不下发，不与 legacy 双发；`1404`（未知 action）与 `1500`（handler 返回 error）两个分支不变
+- **测试**：新增 `callapi/panic_test.go`——注入 panic handler 后 `legacy` / `new` / 顶层入口三条路径均断言 `1500/failed` + `data:null` + 原样 echo + `message` 含 panic 值与 action 名，且 `SendMessage` 恰好 1 次；`TestNewHandlerPanicDryRunDoesNotSend` 断言 dryRun 下 0 次发送
+
 ### `[CQ:contact]` / `[CQ:poke]` / `[CQ:json]` / `[CQ:forward]` 无解析分支：CQ 码以字面量文本发给群成员（2026-11-21）
 
 `handlers/cqcode_pipeline.go` 的管道没有这四种码的分支，它们既不被转换也不被剥离，随正文原样下发。经核对官方能力，四者**均无出站结构**（`forward`：官方无合并转发接口；`poke`：官方无拍一拍接口；`contact`：名片仅入站 `ark_data` 可读，出站 ark 需模板 `template_id`+`kv`；`json`：小程序 JSON 原文无模板 id，官方群卡片只有 `[CQ:card]` 的 `msg_type=8` 图文卡片）：
