@@ -1246,11 +1246,14 @@ impl Inbound {
 
         // 私聊无 card：同一函数传 `""` 只取昵称（`member_nickname > username`）。
         let (nickname, _) = resolve_nickname_and_card(author, "");
+        // Go 私信 sender 是**结构体二选一**（`ProcessC2CMessage.go:145` / `:195`）：
+        // `string_ob11` 关闭时用 `PrivateSender`（`Processor.go:202`，只有 nickname / user_id，
+        // 没有 `tiny_id` 字段）；打开时用 `PrivateSenderS`（`Processor.go:208`，`TinyID` 非
+        // omitempty 且从未赋值，恒上报空串）。
         let sender = Sender {
             user_id: Some(sender_user_id),
-            // Go `PrivateSenderS`：nickname / tiny_id 非 omitempty，恒上报（昵称缺失时为空串）。
             nickname: Some(nickname),
-            tiny_id: Some(String::new()),
+            tiny_id: settings.get_string_ob11().then(String::new),
             ..Sender::default()
         };
 

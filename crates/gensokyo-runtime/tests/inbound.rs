@@ -178,6 +178,40 @@ fn c2c_message_becomes_private_message() {
     assert_eq!(message.time, 1_700_000_100);
 }
 
+/// Go 私信 sender 是结构体二选一：`string_ob11` 关闭用 `PrivateSender`（`Processor.go:202`，
+/// 没有 `tiny_id` 字段），打开用 `PrivateSenderS`（`:208`，`TinyID` 非 omitempty，恒空串）。
+#[test]
+fn c2c_sender_tiny_id_follows_string_ob11() {
+    let payload = json!({
+        "id": "M2",
+        "content": "私聊",
+        "timestamp": 1_700_000_100,
+        "author": {"id": "U2", "username": "bob"}
+    });
+
+    let (numeric, _dir) = inbound(&BASE.replace("string_ob11: true", "string_ob11: false"));
+    let events = numeric
+        .convert("C2C_MESSAGE_CREATE", Some(&payload), None)
+        .expect("转换失败");
+    let encoded = serde_json::to_value(&events[0]).expect("事件序列化失败");
+    assert_eq!(
+        encoded["sender"].get("tiny_id"),
+        None,
+        "string_ob11 关闭时用 Go PrivateSender，事件帧不含 tiny_id"
+    );
+
+    let (string_form, _dir) = inbound(BASE);
+    let events = string_form
+        .convert("C2C_MESSAGE_CREATE", Some(&payload), None)
+        .expect("转换失败");
+    let encoded = serde_json::to_value(&events[0]).expect("事件序列化失败");
+    assert_eq!(
+        encoded["sender"].get("tiny_id"),
+        Some(&Value::String(String::new())),
+        "string_ob11 打开时 PrivateSenderS.TinyID 恒为空串"
+    );
+}
+
 #[test]
 fn friend_add_emits_request_then_notice() {
     let (inbound, _dir) = inbound(BASE);

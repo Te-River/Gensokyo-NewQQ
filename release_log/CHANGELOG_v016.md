@@ -221,6 +221,14 @@ Go 在 `global_group_msg_rre_to_message` / `global_c2c_msg_switch_to_message` / 
 
 ## 🐛 修复
 
+### 私聊 `sender` 按 `string_ob11` 二选一（2026-11-21）
+
+活体对打：同一 C2C 消息，Go 与 Rust 的事件帧只剩 `sender.tiny_id` 一处差异——Go 的私信 sender 是**结构体二选一**，Rust 原先把 `PrivateSenderS` 的形态无条件套在两种配置下。
+
+- **修改**：`crates/gensokyo-runtime/src/inbound.rs` 的 `private_message` 改为 `tiny_id: settings.get_string_ob11().then(String::new)`。`string_ob11` 关闭时 Go 用 `PrivateSender`（`Processor/Processor.go:202`，只有 `nickname` / `user_id`，没有 `tiny_id` 字段，Rust 侧 `None` + `skip_serializing_if` 即不出现）；打开时用 `PrivateSenderS`（`:208`，`TinyID` 非 omitempty 且从未赋值，恒空串）
+- **影响**：`string_ob11: false` 的私聊事件帧不再带 `sender.tiny_id`；`string_ob11: true` 的字节形态不变。群消息 `Sender`（`Processor.go:54`，`TinyID` 非 omitempty）、`GROUP_MSG_RECEIVE` / `GROUP_MSG_REJECT`、`INTERACTION_CREATE` 四个分支的 Go 结构体都带 `TinyID`，口径不动
+- **测试**：`inbound` 集成测试 `c2c_sender_tiny_id_follows_string_ob11`（两种 `string_ob11` 各喂一条 C2C 消息，断言序列化后 `sender` 有无 `tiny_id`）
+
 ### 事件帧与 `[CQ:active]` 的逐字节对齐（2026-11-21）
 
 活体对打把入站字段补齐后还剩两处差异：`[CQ:active]` 的被动凭据优先级与 Go 相反，事件帧的 JSON 键序与 Go 不同。
