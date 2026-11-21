@@ -46,6 +46,10 @@ type outboundMsgCtx struct {
 	eventID         string
 	hasEventID      bool
 	origGroupOpenID string
+	// explicitMsgID 为请求参数里显式传入的 message_id：hasExplicitMsgID 为 true 时优先于 echo 查询，
+	// "0" 视为主动（explicitMsgID 为空，且不回落到缓存 msg_id）。
+	explicitMsgID    string
+	hasExplicitMsgID bool
 }
 
 type outboundMsgCtxKey struct{}
@@ -72,6 +76,12 @@ func outboundMsgCtxFor(msg callapi.ActionMessage) outboundMsgCtx {
 	}
 	if echoStr, ok := msg.Echo.(string); ok {
 		c.echo = echoStr
+	}
+	if mid, ok := msg.Params.MessageID.(string); ok && mid != "" {
+		c.hasExplicitMsgID = true
+		if mid != "0" {
+			c.explicitMsgID = mid
+		}
 	}
 	return c
 }
@@ -770,26 +780,30 @@ func resolveGroupMessageContext(ctx context.Context, groupOpenID string, foundIt
 		lookupGroup = c.origGroupOpenID
 	}
 	messageID := ""
-	if config.GetLazyMessageId() {
+	useExplicit := hasCtx && c.hasExplicitMsgID
+	if useExplicit {
+		messageID = c.explicitMsgID
+	}
+	if !useExplicit && config.GetLazyMessageId() {
 		if hasCtx && c.virtualUserID != "" {
 			messageID = echo.GetLazyMessagesIdv2(lazyGroupKey, c.virtualUserID)
 		} else {
 			messageID = echo.GetLazyMessagesId(lazyGroupKey)
 		}
 	}
-	if messageID == "" && hasCtx && c.echo != "" {
+	if !useExplicit && messageID == "" && hasCtx && c.echo != "" {
 		messageID = echo.GetMsgIDByKey(c.echo)
 	}
 	// 逐用户兜底（legacy send_group_msg.go:286-295）：legacy 此处传真实 OpenID，
 	// 由 StoreIDv2 反查回虚拟 ID 命中 AddMsgIDv2 写入的 (群,用户) 键。
-	if messageID == "" && hasCtx && c.virtualUserID != "" {
+	if !useExplicit && messageID == "" && hasCtx && c.virtualUserID != "" {
 		realUser := c.virtualUserID
 		if real, err := idmap.RetrieveRowByIDv2(c.virtualUserID); err == nil && real != "" {
 			realUser = real
 		}
 		messageID = GetMessageIDByUseridAndGroupid(config.GetAppIDStr(), realUser, lookupGroup)
 	}
-	if messageID == "" {
+	if !useExplicit && messageID == "" {
 		messageID = GetMessageIDByUseridOrGroupid(config.GetAppIDStr(), lookupGroup)
 	}
 	// 主动推送：没有用户上下文时，缓存的 msg_id 已过期，清掉（legacy send_group_msg.go:289-293）
@@ -829,17 +843,21 @@ func resolvePrivateMessageContext(ctx context.Context, userOpenID string, foundI
 		lazyUserKey = c.virtualUserID
 	}
 	messageID := ""
-	if config.GetLazyMessageId() {
+	useExplicit := hasCtx && c.hasExplicitMsgID
+	if useExplicit {
+		messageID = c.explicitMsgID
+	}
+	if !useExplicit && config.GetLazyMessageId() {
 		if hasCtx && c.virtualGroupID != "" && c.virtualUserID != "" {
 			messageID = echo.GetLazyMessagesIdv2(c.virtualGroupID, c.virtualUserID)
 		} else {
 			messageID = echo.GetLazyMessagesId(lazyUserKey)
 		}
 	}
-	if messageID == "" && hasCtx && c.echo != "" {
+	if !useExplicit && messageID == "" && hasCtx && c.echo != "" {
 		messageID = echo.GetMsgIDByKey(c.echo)
 	}
-	if messageID == "" {
+	if !useExplicit && messageID == "" {
 		messageID = GetMessageIDByUseridOrGroupid(config.GetAppIDStr(), userOpenID)
 	}
 	var eventID string

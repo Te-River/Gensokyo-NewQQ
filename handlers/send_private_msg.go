@@ -321,12 +321,21 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 		var messageID string
 		// EventID
 		var eventID string
-		if config.GetLazyMessageId() {
+		// 显式传入的 message_id 优先（QQ 2026-11-17 起群消息 msg_id 可直接用于私聊被动回复）。
+		// "0" 沿用主动推送约定：不设凭据，且不回落到缓存 msg_id，避免主动请求被当成被动回复。
+		msgIDFromParams := false
+		if mid, ok := message.Params.MessageID.(string); ok && mid != "" {
+			msgIDFromParams = true
+			if mid != "0" {
+				messageID = mid
+			}
+		}
+		if !msgIDFromParams && config.GetLazyMessageId() {
 			//由于实现了Params的自定义unmarshell 所以可以类型安全的断言为string
 			messageID = echo.GetLazyMessagesId(UserID)
 			mylog.Printf("GetLazyMessagesId: %v", messageID)
 		}
-		if messageID == "" {
+		if !msgIDFromParams && messageID == "" {
 			if echoStr, ok := message.Echo.(string); ok {
 				messageID = echo.GetMsgIDByKey(echoStr)
 				mylog.Println("echo取私聊发信息对应的message_id:", messageID)
@@ -334,7 +343,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 		}
 		// 如果messageID仍然为空，尝试使用config.GetAppID和UserID的组合来获取messageID
 		// 如果messageID为空，通过函数获取
-		if messageID == "" {
+		if !msgIDFromParams && messageID == "" {
 			messageID = GetMessageIDByUseridOrGroupid(config.GetAppIDStr(), UserID)
 			mylog.Println("通过GetMessageIDByUserid函数获取的message_id:", messageID)
 		}

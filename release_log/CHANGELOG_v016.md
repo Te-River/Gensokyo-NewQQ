@@ -87,6 +87,15 @@ QQ 官方 2026-11-16 新增 `GET /v2/users/{user_openid}/info`，返回用户昵
 - **上报**：`GROUP_MESSAGE_CREATE`、`GROUP_AT_MESSAGE_CREATE`、`GROUP_ADD_ROBOT`、`GROUP_DEL_ROBOT`、`GROUP_MEMBER_ADD`、`GROUP_MEMBER_REMOVE`、`GROUP_JOIN_REQUEST` 的上报 JSON 顶层原样带出 `union_group_openid`，**非空时才出现**（`omitempty`）；不塞进 `group_id`、不改写现有字段
 - **测试**：`Processor/zzzzzz_union_group_openid_test.go` 覆盖带字段→上报含它、不带→不出现（成员变动 / 入群申请 / 群消息三条路径）
 
+### `send_private_msg` 支持显式 `message_id`：群消息 `msg_id` 可用于私聊被动回复（2026-11-17 官方放开）
+
+QQ 官方自 2026-11-17 起允许群消息事件的 `msg_id` 直接用于私聊接口 `POST /v2/users/{openid}/messages`；Rust 侧已支持（`plan_send_private_msg` 把 `params.message_id` 映射为被动凭据），Go 侧此前只查 lazy 池 / echo 键 / 用户-群映射，**从不读 `params.message_id`**，凭据被静默丢弃：
+
+- **修改**：`handlers/send_private_msg.go` 的 msg_id 解析链最前面新增显式来源——`params.message_id` 优先于 lazy 池与 echo 缓存；命中后不再回落到缓存查询
+- **修改**：新链同步（`handlers/outbound_bridge.go`）——`outboundMsgCtx` 新增 `explicitMsgID`/`hasExplicitMsgID`，由 `outboundMsgCtxFor` 从请求参数填充；`resolvePrivateMessageContext` 与 `resolveGroupMessageContext` 均以它优先
+- **边界**：`message_id: "0"` 沿用主动推送约定（不设 `msg_id`，且不回落缓存）；`[CQ:active]` 仍强制清空 `msg_id` / `event_id`（优先级不变）；参数校验与回执形状不变
+- **测试**：`handlers/send_private_msg_msgid_reply_test.go`（显式 `message_id` 透传为 `MessageToCreate.MsgID`、`EventID` 为空）
+
 ---
 
 ## 🐛 修复
