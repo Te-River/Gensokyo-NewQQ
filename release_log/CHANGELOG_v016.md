@@ -221,16 +221,16 @@ Go 在 `global_group_msg_rre_to_message` / `global_c2c_msg_switch_to_message` / 
 
 ## 🐛 修复
 
-### 普通文本 `[CQ:at]` 渲染与 Go 不一致：缺用户名缓存、缺尾空格、反查失败不删段（parity D31，2026-11-21）
+### `[CQ:at]` 渲染与 Go 不一致：缺用户名缓存、缺尾空格、反查失败不删段、匹配范围过宽（parity D31/D32，2026-11-21）
 
 活体对照：入站后 10 分钟内，Go 把 `[CQ:at,qq=虚号]` 渲染成 `@用户名 `，Rust 恒发 `<@openid>`——Go 的用户名缓存（`idmap.StoreUserName` / `GetUserName`）在 Rust 侧从未被写过。同一形态下另有两处字节差异：Go 两段替换都带尾空格，且两处都拿不到时整段删除。
 
 - **修改**：`crates/gensokyo-runtime/src/deferred.rs` 的文本路径改为 Go `resolvePlainTextAtMentions`（`handlers/message_parser.go:2799-2815`）的三段式 `text_at_mention`——① 用户名缓存命中 → `@用户名 `；② 缓存未命中但 idmap 能反查到 OpenID → `<@openid> `；③ 两者都拿不到 → 空串（整段删除，不再透传不可渲染的 CQ 原文）。两处都带尾空格，与 Go 的 `"@" + username + " "` / `"<@" + realID + "> "` 逐字节一致
 - **缓存**：不新增状态——直接复用 `gensokyo-storage` 里已有的 `IdMapStore::store_user_name` / `get_user_name`（`Mutex<HashMap<i64, UserNameEntry>>`，默认 10 分钟 TTL、读时惰性过期、写满阈值顺带清理，即 Go `idmap/service.go:96-130` 的等价物）。键是虚拟用户号（`i64`，与 Go `strconv.FormatInt(userid64, 10)` 同键），值是 `author.username`
 - **写入点**：`crates/gensokyo-runtime/src/inbound.rs` 的 `group_message` 在身份映射之后写一次，`GROUP_AT_MESSAGE_CREATE` 与 `GROUP_MESSAGE_CREATE` 共用该函数——与 Go 的两处写入点（`ProcessGroupMessage.go:98-101` / `ProcessGroupNormalMessage.go:82-85`）一一对应；取 `author.username`（不是 `member_nickname`），空用户名跳过。C2C / notice 事件 Go 不写，这里同样不写；`string_ob11: true` 没有数字虚号（Go 也只在 `!string_ob11` 分支里写），自然跳过
-- **markdown 不回归**：`AtTag::Markdown` 分支原样未动（`[CQ:at]` → `<qqbot-at-user id="…" />`，反查失败保留 CQ 原文 / 正文 `1400`），既有的 markdown @ 用例全部保持绿
-- **影响**：文本 at 段在缓存命中时显示 `@昵称`（10 分钟后自动回落到 `<@openid>` / 删除）；`[CQ:at,qq=all]`、缺 `qq` 的 at 段、`auto_escape`、`[CQ:active]`、markdown 前缀逻辑均不变
-- **测试**：`text_at_mention_uses_cached_user_name`（缓存命中 → `@阿求 你好`）、`text_at_mention_still_resolves_to_openid` / `text_at_mention_accepts_whitespace_params`（未命中 → `<@openid> `，含 Go 的尾空格）、`text_at_mention_without_cache_or_idmap_is_dropped` / `text_at_mention_without_idmap_is_dropped`（两处都拿不到 → 整段删除）、`text_at_mention_falls_back_after_user_name_ttl`（TTL 50ms 过期后回落到 `<@openid>`）、`inbound::tests::group_message_caches_author_username`（两种群消息各写一次 `author.username`）
+- **markdown 与匹配范围**：`AtTag::Markdown` 分支仍产出 `<qqbot-at-user id="…" />`；两条路径的匹配条件统一收紧为**纯数字 `qq`**（Go `cqAtNumRe = \[CQ:at,qq=(\d+)\]`，`handlers/message_parser.go:56`）——非纯数字 `qq`（空值 / 32 位 openid / 缺 `qq` / `[CQ:at,foo]`）**原样保留 CQ 码**，不反查、不替换、不删除（markdown 正文此前误报 `1400`，现与 Go 的 `return m` 一致）；数字虚拟号反查失败仍是 markdown `1400` / 文本整段删除
+- **影响**：文本 at 段在缓存命中时显示 `@昵称`（10 分钟后自动回落到 `<@openid>` / 删除）；非纯数字 `qq` 的 at 段（含 32 位 openid）两条路径都原样透传；`[CQ:at,qq=all]`、`auto_escape`、`[CQ:active]`、markdown 前缀逻辑均不变
+- **测试**：`text_at_mention_uses_cached_user_name`（缓存命中 → `@阿求 你好`）、`text_at_mention_still_resolves_to_openid` / `text_at_mention_accepts_whitespace_params`（未命中 → `<@openid> `，含 Go 的尾空格）、`text_at_mention_without_cache_or_idmap_is_dropped` / `text_at_mention_without_idmap_is_dropped`（两处都拿不到 → 整段删除）、`text_at_mention_falls_back_after_user_name_ttl`（TTL 50ms 过期后回落到 `<@openid>`）、`inbound::tests::group_message_caches_author_username`（两种群消息各写一次 `author.username`）、`text_non_numeric_qq_is_passed_through` / `markdown_non_numeric_qq_keeps_cq_code` / `markdown_prefix_non_numeric_qq_keeps_cq_code`（openid 与缺 `qq` 形态原样保留）
 
 ### 文本 + `[CQ:markdown]` 同现时前缀文本丢失（2026-11-21）
 

@@ -12,7 +12,7 @@
 //!
 //! | 段 | 落到 | 说明 |
 //! |----|------|------|
-//! | 文本 | `content` | 按 CQ 重新分词，`[CQ:at,qq=数字]` 走 Go `resolvePlainTextAtMentions` 的三段式：用户名缓存命中 → `@用户名 `（尾空格），未命中但 idmap 可反查 → `<@openid> `，两者都拿不到 → 整段删除；缺 `qq` 的 at 段（`[CQ:at]` / `[CQ:at ]` / `[CQ:at,foo]` / `[CQ:at,qq=]`）原样透传；`at` 后与键值两侧允许空白（`[CQ:at , qq = 1]` 照常解析）；`auto_escape = true` 时原样发送、不解析 |
+//! | 文本 | `content` | 按 CQ 重新分词，`[CQ:at,qq=数字]` 走 Go `resolvePlainTextAtMentions` 的三段式：用户名缓存命中 → `@用户名 `（尾空格），未命中但 idmap 可反查 → `<@openid> `，两者都拿不到 → 整段删除；`qq` 非纯数字的 at 段（缺 `qq` / 空值 / 32 位 openid / `[CQ:at,foo]`）原样透传；`at` 后与键值两侧允许空白（`[CQ:at , qq = 1]` 照常解析）；`auto_escape = true` 时原样发送、不解析 |
 //! | `[CQ:at,qq=all]` / `[CQ:at,qq=everyone]` / 字面 `<qqbot-at-everyone />` | `<qqbot-at-everyone />` | 仅群聊，且受「每群每自然日 1 次」限制，见下节「@全员」 |
 //! | `markdown` | `markdown` + `msg_type=2` | 只取 `content`：模板字段（`template_id` / `custom_template_id`）已废弃，出站不构造；文本被丢弃、`card` 让位；正文里的本地图片按 `oss_type` 换引用：`7` → `qqbot-media://` 素材库，`1~3` → 内置云 OSS 对象 URL，`4~6/8~10` → 图床 CDN URL（[`resolve_markdown_images`]）；与媒体同现时先发这一条，媒体另起 `msg_type=7` 条 |
 //! | `card` | `card` + `msg_type=8` | 群聊与单聊同构；`{type:"tuwen", content:{title,description,url,pic_url}}`，四字段校验见 [`compose_card`]；`pic_url` 是本地路径时先上传成公网 URL（Go `resolveCardPic`，失败保留原值）；与媒体同现时卡片先发、媒体另起 `msg_type=7` 条 |
@@ -64,9 +64,9 @@
 //! 的 @用户 走两套标签：
 //! 文本是 Go `resolvePlainTextAtMentions` 的三段式（入站群消息缓存的用户名 → `@用户名 `，
 //! 否则 idmap 反查 → `<@openid> `，都拿不到 → 整段删除，见 [`text_at_mention`]）；markdown
-//! 是官方 `<qqbot-at-user id="openid" />`（数字虚拟号必须经 idmap 反查，失败 `1400`）。缺 `qq`
-//! 的 at 段两条路径口径不同：markdown 正文 `1400`（否则会原样发一段不可渲染的 CQ 码），文本
-//! 路径原样透传（与 Go 一致）；数字虚拟号反查失败只在 markdown `1400`，文本路径删掉该段
+//! 是官方 `<qqbot-at-user id="openid" />`（数字虚拟号必须经 idmap 反查，失败 `1400`）。两条路径
+//! 都只认**纯数字** `qq`（Go `cqAtNumRe` 的 `(\d+)`）：非纯数字（缺 `qq` / 空值 / 32 位 openid）
+//! 原样保留 CQ 码，既不反查也不删除；数字虚拟号反查失败只在 markdown `1400`，文本路径删掉该段
 //! （Go 的 `return ""`）。发送前扫最终载荷：
 //!
 //! - 单聊出现标签 → `1400`（官方只允许群聊，静默丢弃不可接受）；
@@ -1106,7 +1106,7 @@ fn stamp_message(body: &mut MessageToCreate, passive: &Passive, echo: Option<&Ec
 /// `openid` 由调用方从 `target` 还原：媒体上传要按群 / C2C 选端点，两者都要它。
 ///
 /// # Errors
-/// markdown 正文里的 `[CQ:at]` 缺 `qq`、markdown 里的 `at` 虚拟号无法反查、reply 无法还原、
+/// markdown 里的 `at` 虚拟号无法反查、reply 无法还原、
 /// 单聊专属段（`input_notify` / `stream`）出现在群聊、它们与其它内容同条出现，或消息含本阶段
 /// 仍不支持的段。
 pub async fn compose(
@@ -1364,9 +1364,9 @@ fn strip_markdown_codes(text: &str) -> String {
 /// markdown 只认 `<qqbot-at-user id="OpenID" />`，文本那套 `<@openid>` 在 markdown 里不会
 /// 渲染成 @。数字虚拟号必须经 idmap 反查到真实 OpenID；反查失败直接 `1400`——Go 这里会原样
 /// 留着 CQ 码（等于发一段不可渲染的文本），Rust 侧不静默。
-/// 缺 `qq` 的 at 段（`[CQ:at]` / `[CQ:at ]` / `[CQ:at,foo]` / `[CQ:at,qq=]`）同样 `1400`：
-/// markdown 里留一段 CQ 码只会显示成字面文本。`at` 后带空白、但参数齐备的写法
-/// （`[CQ:at ,qq=1]`）照常解析，不算缺 `qq`。
+/// 匹配范围与 Go `cqAtNumRe` 的 `(\d+)` 一致：`qq` 不是纯数字（空值 / 32 位 openid / 缺 `qq` /
+/// `[CQ:at,foo]`）一律原样保留 CQ 码，不反查、不改写；`at` 后带空白但取值是纯数字的写法
+/// （`[CQ:at ,qq=1]`）照常解析。
 /// 文本路径相反，原样透传（见 [`render_text`]）。
 ///
 /// 只替换 at 段，其余字节原样保留：不重新转义 `[` `]`，否则会破坏 `[文本](链接)` 语法。
@@ -1392,9 +1392,12 @@ fn render_markdown(context: &ActionContext, content: &str) -> Result<String> {
             return Ok(out);
         };
         let code = &after[..=end];
-        let id = at_everyone::at_mention_id(code).ok_or_else(|| {
-            Error::Protocol(format!("markdown 里的 {code} 不是合法的 at 段（缺 qq）"))
-        })?;
+        // Go 只认 `qq=(\d+)`：非纯数字的 CQ 码原样留在正文里（不反查、不替换、不报错）
+        let Some(id) = at_everyone::at_mention_id(code).filter(|id| is_numeric_qq(id)) else {
+            out.push_str(code);
+            from = start + end + 1;
+            continue;
+        };
         let openid = context.resolve_openid("qq", id, "user_openid")?;
         out.push_str(&qqbot_at_user(&openid));
         from = start + end + 1;
@@ -1404,6 +1407,13 @@ fn render_markdown(context: &ActionContext, content: &str) -> Result<String> {
 /// 官方 markdown @ 标签（Go `ResolveMarkdownAtMentions` 的最终形态）。
 fn qqbot_at_user(openid: &str) -> String {
     format!("<qqbot-at-user id=\"{openid}\" />")
+}
+
+/// `qq` 取值是否命中 Go `cqAtNumRe` 的 `(\d+)`：非空且全是 ASCII 数字。
+///
+/// 空值、负数、32 位 openid 都不算——这些形态在 Go 侧正则根本不匹配，CQ 码原样留在正文。
+fn is_numeric_qq(id: &str) -> bool {
+    !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Markdown 正文里的本地图片 → 可公网访问的引用（Go `ResolveMarkdownImages`）。
@@ -2175,18 +2185,18 @@ enum AtTag {
     Markdown,
 }
 
-/// 文本主体 → v2 `content`：`[CQ:at,qq=…]` 转 `at_tag` 形态的 @ 标签，`qq=all` / `everyone`
-/// 转 @全员标签，缺 `qq` 的 at 段与其余 CQ 码保持原样。
+/// 文本主体 → v2 `content`：`[CQ:at,qq=数字]` 转 `at_tag` 形态的 @ 标签，`qq=all` / `everyone`
+/// 转 @全员标签，`qq` 非纯数字的 at 段与其余 CQ 码保持原样。
 ///
 /// markdown 语境（文本与 `[CQ:markdown]` 同现，整段文本并进正文头部）必须产出
 /// `<qqbot-at-user>`：Go 在拼前缀前对 messageText 跑一遍 `ResolveMarkdownAtMentions`
 /// （`send_group_msg.go:556`），前缀与正文因此是同一套标签。
 ///
-/// 缺 `qq` 的 at 段（`[CQ:at]` / `[CQ:at ]` / `[CQ:at,foo]` / `[CQ:at,qq=]`）**原样透传**，
-/// 不报错（与 Go 文本路径及 `ResolveMarkdownAtMentions` 的 `return m` 一致）；`at` 后带空白
-/// 但参数齐备的写法照常反查。数字虚拟号文本路径反查失败**整段删除**（Go
-/// `resolvePlainTextAtMentions` 的 `return ""`），见 [`text_at_mention`]；markdown 语境与
-/// markdown **正文**相反，保留原文 / `1400`，见 [`render_markdown`]。
+/// **只有纯数字 `qq` 才反查**（Go `cqAtNumRe` 的 `(\d+)`）：非纯数字（缺 `qq` / 空值 /
+/// 32 位 openid / `[CQ:at,foo]`）原样透传，不报错也不删除（与 Go 两条渲染函数的
+/// `return m` 一致）；`at` 后带空白但取值是纯数字的写法照常反查。数字虚拟号文本路径反查失败
+/// **整段删除**（Go `resolvePlainTextAtMentions` 的 `return ""`），见 [`text_at_mention`]；
+/// markdown 语境与 markdown **正文**相反，保留原文 / `1400`，见 [`render_markdown`]。
 /// 这里按 at 段切原文再逐段渲染，而不是整条过一遍 `cqcode::parse`：解析器会丢掉
 /// `[CQ:at,foo]` 里那个不成对的参数，重新序列化后就吐不出原文了。
 fn render_text(context: &ActionContext, message: &MessageOut, at_tag: AtTag) -> Result<String> {
@@ -2212,7 +2222,7 @@ fn render_text(context: &ActionContext, message: &MessageOut, at_tag: AtTag) -> 
             Some(id) if at_everyone::is_everyone_id(id) => out.push_str(at_everyone::TAG),
             // 文本走 Go `resolvePlainTextAtMentions` 的三段式，markdown 只认官方标签
             // （Go `ResolveMarkdownAtMentions`，反查失败 `return m` 保留 CQ 原文）
-            Some(id) if !id.is_empty() => match at_tag {
+            Some(id) if is_numeric_qq(id) => match at_tag {
                 AtTag::Text => out.push_str(&text_at_mention(context, id)),
                 AtTag::Markdown => match context.resolve_openid("qq", id, "user_openid") {
                     Ok(openid) => out.push_str(&qqbot_at_user(&openid)),
@@ -2222,8 +2232,8 @@ fn render_text(context: &ActionContext, message: &MessageOut, at_tag: AtTag) -> 
                     }
                 },
             },
-            // 缺 `qq`（含 `qq=` 空值）：原样透传（Go 文本路径如此，`ResolveMarkdownAtMentions`
-            // 也只认带 `qq` 的 at 段，前缀同口径）
+            // 非纯数字 `qq`（空值 / 32 位 openid）与缺 `qq`：原样透传——Go 的 `cqAtNumRe`
+            // 只认 `qq=(\d+)`，其余形态它一个字节都不动
             _ => out.push_str(code),
         }
         from = start + end + 1;
@@ -5753,6 +5763,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn text_non_numeric_qq_is_passed_through() {
+        // `[CQ:at,qq=<32 位 openid>]`：Go 的正则只认数字，openid 形态原样保留
+        // （改前会被当成虚拟号反查，失败后整段删除）
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let text = format!("[CQ:at,qq={MEMBER_OPENID}] 你好");
+        let plan = text_plan(SendTarget::Group(OPENID.to_owned()), &text);
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("文本路径非纯数字 qq 不应报错");
+
+        assert_eq!(
+            api.sent()[0].content.as_deref(),
+            Some(text.as_str()),
+            "非纯数字 qq 的 CQ 码必须原样保留"
+        );
+    }
+
+    #[tokio::test]
     async fn text_at_with_space_before_comma_still_resolves() {
         // `[CQ:at ,qq=N]` 与紧凑写法同口径：照样反查成 `<@openid>`；
         // 裸 at 段（`[CQ:at ]`）仍按缺 qq 原样透传
@@ -6245,9 +6276,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn markdown_at_without_qq_is_a_request_error() {
-        // markdown 正文缺 qq 一律 1400：裸 at 段（含 `at` 后带空白的写法）、不成对的参数、
-        // 空的 qq 值
+    async fn markdown_non_numeric_qq_keeps_cq_code() {
+        // Go `cqAtNumRe` 只认 `qq=(\d+)`：裸 at 段、不成对的参数、空值、32 位 openid 都不进
+        // 替换——CQ 码原样留在正文里（不反查、不删、不 1400）
         for content in [
             "[CQ:at] 你好",
             "[CQ:at ] 你好",
@@ -6260,15 +6291,26 @@ mod tests {
             let media = no_media();
             let plan = request(SendTarget::Group(OPENID.to_owned()), markdown_plan(content));
 
-            let err = execute(&context, &plan, &deps(&media, None))
+            execute(&context, &plan, &deps(&media, None))
                 .await
-                .expect_err("markdown 缺 qq 必须拒绝");
-            assert!(
-                matches!(err, Error::Protocol(_)),
-                "{content} 应映射 1400: {err}"
-            );
-            assert!(api.sent().is_empty(), "{content} 不应发送");
+                .expect("非纯数字 qq 不得拒绝整条消息");
+            assert_eq!(sent_markdown(&api), content, "{content} 必须原样保留");
         }
+
+        // 32 位 openid 不是受支持取值：同样原样保留，不反查成 `<qqbot-at-user>`
+        let content = format!("[CQ:at,qq={MEMBER_OPENID}] 你好");
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let plan = request(
+            SendTarget::Group(OPENID.to_owned()),
+            markdown_plan(&content),
+        );
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("openid 形态的 qq 不得拒绝整条消息");
+        assert_eq!(sent_markdown(&api), content, "openid 形态必须原样保留");
     }
 
     #[tokio::test]
@@ -6384,6 +6426,27 @@ mod tests {
             sent_markdown(&api),
             format!("<qqbot-at-user id=\"{MEMBER_OPENID}\" /> 你好\n# 今天的议题"),
             "前缀里的 @ 必须与正文同一形态"
+        );
+    }
+
+    #[tokio::test]
+    async fn markdown_prefix_non_numeric_qq_keeps_cq_code() {
+        // 前缀与正文同一口径：openid 形态的 `qq` 不反查，CQ 码原样进 markdown 头部
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let media = no_media();
+        let text = format!("[CQ:at,qq={MEMBER_OPENID}] 你好");
+        let mut plan = text_plan(SendTarget::Group(OPENID.to_owned()), &text);
+        plan.message.plan = markdown_plan("# 今天的议题");
+
+        execute(&context, &plan, &deps(&media, None))
+            .await
+            .expect("前缀 openid 形态不应拒绝整条消息");
+
+        assert_eq!(
+            sent_markdown(&api),
+            format!("{text}\n# 今天的议题"),
+            "前缀里的非纯数字 qq 必须原样保留"
         );
     }
 
