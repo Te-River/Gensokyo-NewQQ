@@ -187,6 +187,7 @@ P81 收口空消息回执时发现响应形态疑点，专项审计（黑板 `p8
 | D23 | action 回执的 JSON HTML 转义（2026-11-21） | Go 的 `json.Marshal` 把 `&` 转义成 `\u0026`（头像 / 图床 / 短链等带签名的 URL 会受影响）；Rust 的 serde 输出原样 `&` | Go 提交 `9126fe7`：新增 `callapi.MarshalNoEscape`（`SetEscapeHTML(false)`）并用于 19 条回执路径，**包括真正上线的 `wsclient` / `server.wsserver` 的 `SendMessage`**（否则传输层会二次转义）；发往 QQ 上游的请求体仍是 `json.Marshal` | **已对齐**（活体实测 `get_user_info`：两侧均输出原样 `&`，结构与字段值一致；avatar 的 `key/kti` 每次请求由官方重新签名，不构成差异） |
 
 
+| D24 | 入站**群消息事件帧**的字段与键序（2026-11-21，**活体实测首次对打成功路径**） | ① 顶层 `avatar`：Go 在 `!native_ob11` 时按 `https://q.qlogo.cn/qqapp/{appid}/{openid}/640` 生成（`Processor/ProcessGroupNormalMessage.go:232` + `Processor/Processor.go:1177`），Rust `MessageEvent` 无该字段 → 缺失。② `sender.area`：Go 群消息 Sender 显式 `Area: "0"`（`ProcessGroupNormalMessage.go:217` 等 6 处），Rust 走 `..Sender::default()` → `None` 被 `skip_serializing_if` 丢。③ `time`：Go 群消息用 `time.Now().Unix()`（处理时刻），Rust 用 QQ 负载 `timestamp`。④ **键序**：Go 事件帧经 map 序列化 → 键**字母序**（事件与 `sender` 两级均如此，实测确认）；Rust 走 struct 声明序 → 即使字段相同也非逐字节一致 | ① `MessageEvent` 加 `avatar`；② 群消息类 `Sender` 补 `area`；③ 群消息类 `time` 改用 `now_unix()`；④ 事件序列化统一改为 `serde_json::to_value` 后 `to_string`（`serde_json` 未开 `preserve_order`，`Map` 即 `BTreeMap` → 键自动字母序） | **部分对齐**：实测 25 字段中 19 一致；`group_id`/`user_id`/`sender.user_id` 3 项差异是**测试配置**（Rust `op_userid_type: raw` vs Go `vuin`）已改配置；①②③ 已派工修，④ 单列一单。证据：`%TEMP%\opencode\event.go.json` / `event.rust.json`（同一群消息 114514，两侧同时在线抓取的原始帧） |
 
 > D16–D18 是精简构建（`--no-default-features` = 四能力全关）的三处刻意差异，语义表见 `docs/rust-build.md`「四能力 feature」。
 
