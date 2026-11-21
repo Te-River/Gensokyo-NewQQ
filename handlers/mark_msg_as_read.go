@@ -4,16 +4,15 @@ import (
 	"github.com/hoshinonyaruko/gensokyo/callapi"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/tencent-connect/botgo/openapi"
-	"github.com/tidwall/gjson"
 )
 
 type MarkThisMessageAsReadAPIResponse struct {
-	Status  string       `json:"status"`
-	Data    gjson.Result `json:"data"`
-	Msg     string       `json:"msg"`
-	Wording string       `json:"wording"`
-	RetCode int64        `json:"retcode"`
-	Echo    interface{}  `json:"echo"`
+	Status  string      `json:"status"`
+	Data    interface{} `json:"data"` // 空实现：零值 nil 序列化为 data:null（不暴露内部类型字段）
+	Msg     string      `json:"msg"`
+	Wording string      `json:"wording"`
+	RetCode int64       `json:"retcode"`
+	Echo    interface{} `json:"echo"`
 }
 
 func init() {

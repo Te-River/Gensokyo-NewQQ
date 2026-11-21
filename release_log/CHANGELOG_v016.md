@@ -334,6 +334,23 @@ C2C 单聊只支持按钮 `permission.type=2`（所有人）：此前的兜底�
 - **影响**：不再硬造官方不具备的能力，也不再把码当字面量泄漏给群成员；`[CQ:face]`/`[CQ:at]` 等标准码与 `[CQ:reply,id=数字]` 语义不变
 - **测试**：`TestUnsupportedCQCodesStrippedPipeline` / `TestUnsupportedCQCodesStrippedCQParse`（四码×两条解析链，断言剥离、无 `foundItems`/`pending`、日志有 warn）、`TestUnsupportedCQCodesKeepKnownCodes`（相邻标准码不受影响）
 
+### `mark_msg_as_read` 回执把 `gjson.Result` 内部字段当 `data` 返回（2026-11-21）
+
+`handlers/mark_msg_as_read.go` 的 `MarkThisMessageAsReadAPIResponse.Data` 声明为 `gjson.Result`。该 action 是空实现（官方无已读上报接口），字段零值仍会被序列化成对象，实测回执 `data` 键集为 `Index,Indexes,Num,Raw,Str,Type`——内部类型字段泄漏给客户端，与 Rust 侧 `data:null` 不一致：
+
+- **修改**：`Data` 改为 `interface{}`，零值序列化为 `data:null`；`retcode:0` / `status:"ok"` / `echo` 原样不变
+- **影响**：47 例 action 回执对照中的 G-1 差异消除；`msg` / `wording` 空串字段保持原样，与其它空实现 action 同形状
+- **测试**：新增 `handlers/mark_msg_as_read_test.go`——断言 `data` 为 `null`（不是对象、不是 gjson 内部字段）、回执不含 `Indexes/Raw/Str/Num`、下发给客户端的 payload 的 `data` 为 nil
+
+### `get_group_member_info` 上游失败仍伪造成功回执（2026-11-21）
+
+官方 `GET /v2/groups/{gid}/members/{member_openid}` 返回 `400 {"message":"应用无接口访问权限","code":11253}` 时，`handlers/get_group_member_info.go` 捕获错误后走 `buildFallbackMemberInfo(...)`，仍回 `retcode:0/status:"ok"` + 中性假数据；客户端只看到“成功”，无从得知应用没有该接口权限（Rust 侧同为 400 但如实回 `1500/failed`）：
+
+- **修改**：反查 `group_openid` / `member_openid` 失败 → `1400/failed`（参数/映射问题）；官方接口调用失败 → `1500/failed` + `data:null`，`message` 为上游真实错误（`err.Error()`，含官方 `code` 与 `message`）
+- **修改**：删除“上游失败 → 中性值兜底”路径；`buildFallbackMemberInfo` 无其他调用者，随该路径一并删除；成功路径 body 形状（`retcode/status/data/echo`）保持不变
+- **影响**：上游失败不再伪装成功，与「上游失败进入错误分支，比看起来成功但数据是假的更好」原则一致；`get_group_member_list` 的兜底逻辑本次未改动
+- **测试**：新增 `handlers/get_group_member_info_test.go`——mock 上游 `errs.New(11253, "应用无接口访问权限")` → `1500/failed` 且 `message` 含 `11253` 与错误文案；反查失败 → `1400` 且不调用上游；上游成功路径字段与 body 形状不变
+
 ---
 
 ## 📝 工程与文档变更

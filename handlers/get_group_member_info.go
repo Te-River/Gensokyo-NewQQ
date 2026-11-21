@@ -69,15 +69,13 @@ func buildResponseForSingleMember(memberInfo *MemberInfo, echoValue interface{})
 }
 
 // GetGroupMemberInfo 是处理获取群成员信息的函数。
-// 优先调用官方 v2 单成员接口取真实数据；接口失败时回退中性值兜底 body（不伪造成员信息）。
+// 优先调用官方 v2 单成员接口取真实数据；反查失败回 1400，官方接口失败回 1500（如实失败，不伪造成员信息）。
 func GetGroupMemberInfo(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, message callapi.ActionMessage) (string, error) {
 	groupID, _ := message.Params.GroupID.(string)
 	userID, _ := message.Params.UserID.(string)
 
-	memberInfo := fetchMemberInfoByAPI(apiv2, groupID, userID)
-
-	// 构建响应JSON
-	responseJSON := buildResponseForSingleMember(memberInfo, message.Echo)
+	memberInfo, errMsg, retCode := fetchMemberInfoByAPI(apiv2, groupID, userID)
+	responseJSON := buildGroupMemberInfoResponse(memberInfo, message.Echo, errMsg, retCode)
 	mylog.Printf("get_group_member_info: %s\n", responseJSON)
 
 	// 发送响应回去
@@ -94,24 +92,39 @@ func GetGroupMemberInfo(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 	return string(result), nil
 }
 
-// fetchMemberInfoByAPI 调用官方单成员接口构造 MemberInfo，失败时返回中性值兜底。
-func fetchMemberInfoByAPI(apiv2 openapi.OpenAPI, groupID, userID string) *MemberInfo {
+// buildGroupMemberInfoResponse 成功回执保持原 body；失败回执带真实错误，data 为 null。
+func buildGroupMemberInfoResponse(memberInfo *MemberInfo, echoValue interface{}, errMsg string, retCode int) map[string]interface{} {
+	if retCode == 0 {
+		return buildResponseForSingleMember(memberInfo, echoValue)
+	}
+	return map[string]interface{}{
+		"retcode": retCode,
+		"status":  "failed",
+		"data":    nil,
+		"message": errMsg,
+		"echo":    echoValue,
+	}
+}
+
+// fetchMemberInfoByAPI 调用官方单成员接口构造 MemberInfo；
+// 失败时返回非 0 retcode 与真实错误（1400 反查失败，1500 官方接口失败）。
+func fetchMemberInfoByAPI(apiv2 openapi.OpenAPI, groupID, userID string) (*MemberInfo, string, int) {
 	// 反查真实 OpenID（32 位原生 OpenID 直接使用）
 	groupOpenID, err := resolveGroupOpenID(groupID)
 	if err != nil {
-		mylog.Printf("get_group_member_info: 反查 group_openid 失败,使用中性值兜底: %v", err)
-		return buildFallbackMemberInfo(groupID, userID)
+		mylog.Printf("get_group_member_info: 反查 group_openid 失败: %v", err)
+		return nil, err.Error(), sendParamRetCode
 	}
 	memberOpenID, err := resolveMemberOpenID(userID)
 	if err != nil {
-		mylog.Printf("get_group_member_info: 反查 member_openid 失败,使用中性值兜底: %v", err)
-		return buildFallbackMemberInfo(groupID, userID)
+		mylog.Printf("get_group_member_info: 反查 member_openid 失败: %v", err)
+		return nil, err.Error(), sendParamRetCode
 	}
 
 	member, err := apiv2.GroupMemberInfo(context.TODO(), groupOpenID, memberOpenID)
 	if err != nil {
-		mylog.Printf("get_group_member_info: 官方接口调用失败,使用中性值兜底: %v", err)
-		return buildFallbackMemberInfo(groupID, userID)
+		mylog.Printf("get_group_member_info: 官方接口调用失败: %v", err)
+		return nil, err.Error(), 1500
 	}
 
 	// 虚拟 ID 输出：参数可解析则直接用，否则经 StoreIDv2 反查
@@ -133,24 +146,5 @@ func fetchMemberInfoByAPI(apiv2 openapi.OpenAPI, groupID, userID string) *Member
 		JoinTime: parseRFC3339ToInt32(member.JoinedAt, "joined_at"),
 		Role:     normalizeMemberRole(member.MemberRole),
 		// Age/Area/LastSentTime/Level/Title 等官方无对应字段,保留中性值
-	}
-}
-
-// buildFallbackMemberInfo 官方接口失败时的中性值兜底 body（保留原 body 结构,不再伪造具体成员信息）。
-func buildFallbackMemberInfo(groupID, userID string) *MemberInfo {
-	userIDInt, err := strconv.ParseInt(userID, 10, 64)
-	if err != nil {
-		userIDInt = 0
-	}
-	groupIDInt, err := strconv.ParseInt(groupID, 10, 64)
-	if err != nil {
-		groupIDInt = 0
-	}
-	return &MemberInfo{
-		UserID:  userIDInt,
-		GroupID: groupIDInt,
-		Sex:     "unknown",
-		Role:    "member",
-		Level:   "0",
-	}
+	}, "", 0
 }
