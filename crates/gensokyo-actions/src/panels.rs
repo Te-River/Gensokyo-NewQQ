@@ -35,6 +35,8 @@
 //! - **关联对象列表**：Go 用 `idmap.StoreIDv2` / `RetrieveRowByIDv2` 双向换算；这里复用
 //!   [`ActionContext::resolve_openid`]，虚拟号未装配 idmap 时回 `1400` 而不是静默跳过。
 //!   `get_panel` 的 `user_openids` / `group_openids` 仍按 Go 口径转回虚拟号，反查失败跳过该条。
+//!   `join_approval_strategy_list` 的 `group_openids` 同样转回虚拟群号，反查失败**保留原值**
+//!   并 `warn`（少一条关联群会让插件误判策略失效，不能像详情那样跳过）。
 //! - **审批策略的关联群**：`group_openids` / `group_ids` 两个字段都按同一口径归一（32 位 OpenID
 //!   直通，其余视为虚拟群号反查），上游一律只填 `group_openids`——官方 `group_ids` 收的是真实
 //!   群号，而插件侧只有虚拟号、idmap 里也只有 OpenID，填不进真实群号。
@@ -49,9 +51,9 @@ use gensokyo_core::{Error, Ob11Id, Result};
 use gensokyo_protocol::action::{ActionRequest, ActionResponse};
 use gensokyo_protocol::{Handler, HandlerFuture};
 use gensokyo_qq::dto::{
-    CreateJoinApprovalStrategyRequest, CreatePanelRequest, GroupAction, PanelList,
-    PanelRecordDetail, PanelTargetRequest, PutMenuRequest, UpdateJoinApprovalStrategyRequest,
-    UpdatePanelRequest, WhitelistUsersRequest,
+    CreateJoinApprovalStrategyRequest, CreatePanelRequest, GroupAction, JoinApprovalStrategyList,
+    PanelList, PanelRecordDetail, PanelTargetRequest, PutMenuRequest,
+    UpdateJoinApprovalStrategyRequest, UpdatePanelRequest, WhitelistUsersRequest,
 };
 
 use crate::params;
@@ -116,21 +118,69 @@ fn resolve_openids(
     Ok(openids)
 }
 
+/// 单条真实 OpenID → 虚拟号；未装配 idmap 或反查失败返回 `None`。
+fn virtual_id(context: &ActionContext, openid: &str) -> Option<Ob11Id> {
+    let (_, vuin) = context.idmap()?.retrieve_virtual_value(openid).ok()?;
+    Some(ob11_id(&vuin.to_string(), context.string_ob11()))
+}
+
 /// 真实 OpenID → 虚拟号；未装配 idmap 或反查失败时跳过该条（对齐 Go `get_panel`）。
 fn virtual_ids(context: &ActionContext, openids: &[String]) -> Vec<Ob11Id> {
-    let Some(store) = context.idmap() else {
-        return Vec::new();
-    };
-    let string_mode = context.string_ob11();
     openids
         .iter()
-        .filter_map(|openid| {
-            store
-                .retrieve_virtual_value(openid)
-                .ok()
-                .map(|(_, vuin)| ob11_id(&vuin.to_string(), string_mode))
+        .filter_map(|openid| virtual_id(context, openid))
+        .collect()
+}
+
+/// 审批策略列表的关联群：真实 OpenID → 虚拟群号，反查不到保留原值并 `warn`。
+///
+/// 与 `get_panel` 的跳过口径不同：策略列表少一条关联群，插件会以为该策略不再生效于那个群，
+/// 保留原值至少还能原样回传给 `join_approval_strategy_update`。
+fn strategy_virtual_groups(context: &ActionContext, openids: &[String]) -> Vec<Value> {
+    openids
+        .iter()
+        .map(|openid| match virtual_id(context, openid) {
+            Some(id) => json!(id),
+            None => {
+                tracing::warn!(
+                    group_openid = %openid,
+                    "审批策略关联群反查不到虚拟群号，响应保留原值"
+                );
+                Value::String(openid.clone())
+            }
         })
         .collect()
+}
+
+/// `join_approval_strategy_list` 的响应体：`group_openids` 换回虚拟群号，其余字段原样透传。
+///
+/// 直接在序列化结果上改字段，不另建镜像结构：官方后续加字段时不会在这里被静默吞掉。
+fn strategy_list_data(context: &ActionContext, list: &JoinApprovalStrategyList) -> Result<Value> {
+    let mut data = serde_json::to_value(list)
+        .map_err(|err| Error::Protocol(format!("审批策略列表序列化失败: {err}")))?;
+    let Some(strategies) = data.get_mut("strategies").and_then(Value::as_array_mut) else {
+        return Ok(data);
+    };
+    for strategy in strategies {
+        let Some(object) = strategy.as_object_mut() else {
+            continue;
+        };
+        let openids: Vec<String> = object
+            .get("group_openids")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str().map(ToOwned::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        object.insert(
+            "group_openids".to_owned(),
+            Value::Array(strategy_virtual_groups(context, &openids)),
+        );
+    }
+    Ok(data)
 }
 
 /// 分页条数：缺省 / 0 用默认值（Go `limit <= 0 → 默认`）。
@@ -549,7 +599,8 @@ impl JoinApprovalStrategyListHandler {
             .api()
             .list_join_approval_strategy(cursor.as_deref(), limit)
             .await?;
-        ok_data(request, &response)
+        let data = strategy_list_data(&self.context, &response)?;
+        ok_data(request, &data)
     }
 }
 
@@ -785,10 +836,11 @@ mod tests {
     use gensokyo_protocol::Status;
     use gensokyo_qq::dto::{
         CreateJoinApprovalStrategyRequest, CreateJoinApprovalStrategyResponse, CreatePanelRequest,
-        CreatePanelResponse, GroupAction, JoinApprovalStrategyList, MenuResponse, Panel, PanelItem,
-        PanelList, PanelRecord, PanelRecordDetail, PanelTargetRequest, PutMenuRequest,
-        UpdateJoinApprovalStrategyRequest, UpdateJoinApprovalStrategyResponse, VersionResponse,
-        WhitelistUsersRequest, WhitelistUsersResponse,
+        CreatePanelResponse, GroupAction, JoinApprovalStrategy, JoinApprovalStrategyList,
+        MenuResponse, Panel, PanelItem, PanelList, PanelRecord, PanelRecordDetail,
+        PanelTargetRequest, PutMenuRequest, UpdateJoinApprovalStrategyRequest,
+        UpdateJoinApprovalStrategyResponse, VersionResponse, WhitelistUsersRequest,
+        WhitelistUsersResponse,
     };
 
     const PANEL: &str = "panel-1";
@@ -1153,6 +1205,52 @@ mod tests {
                     remark: String::new(),
                 }
             )]
+        );
+    }
+
+    /// 关联群反查：命中 → 虚拟群号；未装配 idmap → 保留原值（不能变 0 / 空）。
+    #[test]
+    fn strategy_list_maps_group_openids_back_to_virtual_ids() {
+        let store = idmap_store("strategy-list-virtual");
+        let vuin = store.retrieve_virtual_value(GROUP).expect("分配群 vuin").1;
+        let (ctx, api) = context_with_idmap(store, true);
+        *api.strategy_list.lock().unwrap() = Some(Ok(JoinApprovalStrategyList {
+            strategies: vec![JoinApprovalStrategy {
+                strategy_id: STRATEGY.to_owned(),
+                group_openids: vec![GROUP.to_owned()],
+                ..JoinApprovalStrategy::default()
+            }],
+            next_cursor: "n1".to_owned(),
+        }));
+        let list = JoinApprovalStrategyListHandler::new(ctx);
+        let response = block_on(list.handle(&request("join_approval_strategy_list", json!({}))))
+            .expect("策略列表不应失败");
+        let data = ok_data(response);
+        assert_eq!(data["strategies"][0]["strategy_id"], json!(STRATEGY));
+        assert_eq!(
+            data["strategies"][0]["group_openids"],
+            json!([vuin.to_string()]),
+            "命中的关联群必须换回虚拟群号"
+        );
+        assert_eq!(data["next_cursor"], json!("n1"));
+
+        // 没有 idmap 就没有虚拟号可给：保留原值（跳过会让插件以为策略不再关联任何群）
+        let (ctx, api) = context();
+        *api.strategy_list.lock().unwrap() = Some(Ok(JoinApprovalStrategyList {
+            strategies: vec![JoinApprovalStrategy {
+                strategy_id: STRATEGY.to_owned(),
+                group_openids: vec![GROUP2.to_owned()],
+                ..JoinApprovalStrategy::default()
+            }],
+            next_cursor: String::new(),
+        }));
+        let list = JoinApprovalStrategyListHandler::new(ctx);
+        let response = block_on(list.handle(&request("join_approval_strategy_list", json!({}))))
+            .expect("策略列表不应失败");
+        assert_eq!(
+            ok_data(response)["strategies"][0]["group_openids"],
+            json!([GROUP2]),
+            "反查不到时保留原值"
         );
     }
 

@@ -250,6 +250,7 @@ fn request(action: &str, params: Value, echo: Option<Value>) -> ActionRequest<Va
         action: action.to_owned(),
         params: Some(params),
         echo,
+        post_type: None,
     }
 }
 

@@ -203,6 +203,7 @@ fn request(action: &str, params: Value) -> ActionRequest<Value> {
         action: action.to_owned(),
         params: Some(params),
         echo: None,
+        post_type: None,
     }
 }
 

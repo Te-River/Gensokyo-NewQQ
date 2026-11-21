@@ -33,6 +33,10 @@ pub struct ActionRequest<P> {
     /// 原样回传的 echo。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub echo: Option<Echo>,
+    /// 顶层 `post_type`（Go `callapi.ActionMessage.PostType`）：只有 `put_interaction`
+    /// 读它当互动结果码，其余 action 忽略；`None` 时不序列化，反序列化行为与新增前一致。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_type: Option<Value>,
 }
 
 impl<P> ActionRequest<P> {
@@ -43,6 +47,7 @@ impl<P> ActionRequest<P> {
             action: action.into(),
             params: Some(params),
             echo: None,
+            post_type: None,
         }
     }
 
@@ -73,7 +78,8 @@ pub enum Status {
 /// 写键；新增键必须插到正确位置，否则 golden 整串断言会失配。
 ///
 /// 线上键集由 [`ActionResponse::envelope`] 决定：A 发送类 / C 查询类是 [`EnvelopeKind::Full`]
-/// （现状），B 管理类是 [`EnvelopeKind::Compact`]（Go `sendActionResult` 形状）。
+/// （现状），B 管理类是 [`EnvelopeKind::Compact`]（Go `sendActionResult` 形状），
+/// `send_private_msg_wakeup` 是 [`EnvelopeKind::GoWakeupOk`]（Go 的字面量回执）。
 ///
 /// 唯一换键名的一处是 `mark_msg_as_read`：Go 的响应结构用 `msg` 而不是 `message`，另带
 /// `wording`（见 [`ActionResponse::msg`] / [`ActionResponse::wording`]）。
@@ -169,7 +175,13 @@ impl<T: Serialize> Serialize for ActionResponse<T> {
         S: serde::Serializer,
     {
         let mut map = serializer.serialize_map(None)?;
-        match self.envelope {
+        // `GoWakeupOk` 只对成功生效：失败仍是普通 Full（`1400` / `1500` 要带 `message`）
+        let envelope = match self.envelope {
+            EnvelopeKind::GoWakeupOk if self.status == Status::Ok => EnvelopeKind::GoWakeupOk,
+            EnvelopeKind::GoWakeupOk => EnvelopeKind::Full,
+            other => other,
+        };
+        match envelope {
             EnvelopeKind::Full => {
                 map.serialize_entry("data", &self.data)?;
                 map.serialize_entry("echo", &self.echo)?;
@@ -213,6 +225,11 @@ impl<T: Serialize> Serialize for ActionResponse<T> {
                 map.serialize_entry("message", self.message.as_deref().unwrap_or_default())?;
                 map.serialize_entry("retcode", &self.retcode)?;
                 map.serialize_entry("status", &self.status)?;
+            }
+            EnvelopeKind::GoWakeupOk => {
+                // Go 的字面量只有这两个键，键序 `status` → `retcode`
+                map.serialize_entry("status", &self.status)?;
+                map.serialize_entry("retcode", &self.retcode)?;
             }
         }
         map.end()
@@ -831,6 +848,47 @@ mod tests {
         assert_eq!(
             to_json(&response),
             r#"{"data":{"group_id":456,"group_name":"测试群"},"echo":"e1","message":"success","retcode":0,"status":"ok"}"#
+        );
+    }
+
+    /// `send_private_msg_wakeup` 的成功回执只有 `status` + `retcode`（Go 字面量），
+    /// 失败回落到 Full：`1400` / `1500` 的 `data` / `message` / `echo` 照旧。
+    #[test]
+    fn wakeup_envelope_drops_data_and_echo() {
+        let mut ok = ActionResponse::ok(serde_json::json!({ "message_id": 1 }))
+            .with_echo(Some(serde_json::json!("e1")));
+        ok.envelope = EnvelopeKind::GoWakeupOk;
+        assert_eq!(to_json(&ok), r#"{"status":"ok","retcode":0}"#);
+
+        let mut failed = ActionResponse::<serde_json::Value>::failed(1500, "boom")
+            .with_echo(Some(serde_json::json!("e1")));
+        failed.envelope = EnvelopeKind::GoWakeupOk;
+        assert_eq!(
+            to_json(&failed),
+            r#"{"data":null,"echo":"e1","message":"boom","retcode":1500,"status":"failed"}"#
+        );
+    }
+
+    /// 顶层 `post_type` 是可选字段：缺席时不序列化，其它 action 的请求/响应逐字节不变。
+    #[test]
+    fn top_level_post_type_is_optional() {
+        let request: ActionRequest<SendGroupMsgParams> = serde_json::from_str(
+            r#"{"action":"send_group_msg","params":{"group_id":42,"message":"hi"}}"#,
+        )
+        .expect("反序列化失败");
+        assert_eq!(request.post_type, None);
+        assert_eq!(
+            serde_json::to_string(&request).expect("序列化失败"),
+            r#"{"action":"send_group_msg","params":{"group_id":42,"message":"hi"}}"#
+        );
+
+        let with: ActionRequest<serde_json::Value> =
+            serde_json::from_str(r#"{"action":"put_interaction","echo":"i","post_type":0}"#)
+                .expect("反序列化失败");
+        assert_eq!(with.post_type, Some(serde_json::json!(0)));
+        assert_eq!(
+            serde_json::to_string(&with).expect("序列化失败"),
+            r#"{"action":"put_interaction","echo":"i","post_type":0}"#
         );
     }
 

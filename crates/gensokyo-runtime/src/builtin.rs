@@ -193,6 +193,7 @@ mod tests {
             action: action.to_owned(),
             params: None,
             echo: None,
+            post_type: None,
         }
     }
 
@@ -301,6 +302,7 @@ mod tests {
                 action: "get_status".to_owned(),
                 params: Some(json!({})),
                 echo: None,
+                post_type: None,
             })
             .await
             .expect("应成功");

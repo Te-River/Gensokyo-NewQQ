@@ -591,6 +591,54 @@ P86 审计遗留的两条回执路径（`send_private_msg_sse` 与 `send_*_forwa
 - **`time` 口径**：Go 用 `time.Now().Unix()` 的消息事件与通知（群/私聊消息、`GROUP_MSG_RECEIVE`/`REJECT`、`C2C_MSG_*`、`INTERACTION_CREATE`）改取处理时刻；好友增删、机器人入群/退群、群成员增删、入群申请仍用负载 `timestamp`
 - **测试**：`inbound` 单元测试新增 2 例（群消息 JSON 的 `avatar` / `sender.area` / `time` 断言，`native_ob11` 打开时不出现 `avatar`）
 
+### `join_approval_strategy_list` 响应泄漏真实 OpenID（2026-11-21）
+
+`join_approval_strategy_list` 原样透传官方响应，`group_openids` 里是**真实 OpenID**——插件侧只见虚拟号的契约被响应侧打破（`get_panel` 早已反查，列表漏了）。
+
+- **修改**（`crates/gensokyo-actions/src/panels.rs`）：抽出单条反查 `virtual_id`（`get_panel` 与列表共用同一实现），列表新增 `strategy_list_data`：序列化后把每条策略的 `group_openids` 换回虚拟群号，其余字段原样透传（官方后续加字段不会被静默吞掉）。反查不到的条目**保留原值 + `tracing::warn!`**（不像 `get_panel` 那样跳过：少一条关联群会让插件误判策略失效），不回 `1400`。`get_panel` 口径不变（失败跳过该条）
+- **影响**：`join_approval_strategy_list` 的 `data.strategies[].group_openids` 变为虚拟群号（`string_ob11` 决定数字/字符串形态）；idmap 未装配或反查失败时保留上游原值并在日志里留痕
+- **测试**：`panels::tests::strategy_list_maps_group_openids_back_to_virtual_ids`（预置映射 → 虚拟群号；无 idmap → 原值）
+
+### `send_private_msg_wakeup` 是否丢独立 `[CQ:keyboard]` / `[CQ:card]` / `[CQ:stream]`（已核实无需修改，2026-11-21）
+
+核实结论：**不丢**，无需改动。
+
+- **核实**：`send_private_msg_wakeup` 走 `plan_send_private_msg` 同一条链（`crates/gensokyo-actions/src/send.rs:462` 的 `plan_send_private_msg_wakeup` → `:384` 的 `plan_send_private_msg`），消息解析仍由 `MessageOut::from_content` → `OutboundPlan::from_segments` 完成（`crates/gensokyo-protocol/src/outbound.rs:918` keyboard / `:927` card / `:955` stream 各有消费臂）；runtime 侧 `compose` 只在 `plan.wakeup` 时清 `reply_msg_id`（`crates/gensokyo-runtime/src/deferred.rs:327-339`），键盘走 `compose_keyboard`、卡片走 `msg_type=8`、流式走 `compose_stream`（C2C 目标合法），`is_wakeup` 在其上追加
+- **测试**：`send::tests::wakeup_keeps_keyboard_card_and_stream`（三种段各自出现在计划里）
+
+### 官方出站无结构的 CQ 码（`contact` / `poke` / `json` / `forward`）以字面量发给用户（2026-11-21）
+
+Go 侧已按「剥离 + warn」处理（`handlers/cqcode.go:208-238` 的 `ProcessCQUnsupportedCodes`，new 链 `handlers/cqparse/handlers_control.go:23` 同口径）；Rust 的字符串路径此前按「无消费点的码字面保留」把整段码发给群里。
+
+- **核实（官方无对应结构）**：`forward` 无折叠转发端点（`docs/cq码/CQ码汇总.md` 标注「暂不支持」）；`poke` 无拍一拍接口；`contact` 名片只在入站 `ark_data` 可读，出站 ark 需模板 id；`json` 小程序卡片无模板 id，官方群出站卡片只有 `[CQ:card]` 的 `msg_type=8`
+- **修改**（`crates/gensokyo-protocol/src/outbound.rs` 的 `from_segments`）：新增 `"contact" | "poke" | "json" | "forward"` 臂——整段剥离并 `tracing::warn!`，不进正文、不进 `extra`；数组段路径同一口径（原先落 `default:` 丢弃）。模块文档与「字面保留」清单同步收窄为 `face` / `node` / `group_info` / 未知码
+- **影响**：这四种码不再以字面量出现在群消息里（避免泄漏给群成员），也不会被硬造成上游看不懂的结构
+- **测试**：`outbound::tests::unsupported_outbound_codes_are_stripped`（四种码 + 数组段路径），并从 `literal_segments_round_trip_byte_for_byte` 的字面清单里移除 `poke` / `json`
+
+### 合并转发丢节点署名 `uin` / `name`（2026-11-21）
+
+Go 的 `send_group_forward_msg` 把节点署名并入正文（`handlers/send_group_forward_msg.go:65-70` + `forwardNodeAuthor`：`name(uin): content`，标准形态 `user_id` / `nickname`）；Rust 只取 `data.content`，署名整段丢失。
+
+- **修改**（`crates/gensokyo-actions/src/send.rs` 的 `plan_forward`）：新增 `node_author` / `node_text`，`uin` / `name` 优先、`user_id` / `nickname` 兜底，两者都有时输出「昵称(uin)」；署名以 `"{author}: {正文}"` 并入该 node 的 `message.text`（纯媒体 node 同样带署名，与 Go 同序）。节点内 `[CQ:keyboard]` **已核实无需修改**：完整出站计划保留在 `ForwardPlan.request.message.plan` 里，逐条重发时走 `compose_keyboard`，`specify_user_ids` 的虚拟号→OpenID 与普通群消息同一套
+- **影响**：合并转发的每条降级消息以「昵称(uin): 正文」呈现；节点内键盘、媒体行为不变
+- **测试**：`send::tests::forward_nodes_keep_author_and_keyboard`（字符串 / 数字形态署名、节点内键盘进计划、纯媒体 node 带署名）
+
+### `put_interaction` 读不到顶层 `post_type`（2026-11-21）
+
+Go 从**顶层** `post_type`（`callapi.ActionMessage.PostType`，字符串 `"0"`~`"5"`）取互动结果码、无效值回 `1400`（`handlers/put_interaction.go:62-78`）；Rust 的 `ActionRequest` 没有该字段，只能读 `params.code`，插件按 Go 写法发的请求拿不到结果码。
+
+- **修改**：`crates/gensokyo-protocol/src/action.rs` 的 `ActionRequest` 新增 `post_type: Option<Value>`（`#[serde(default, skip_serializing_if = "Option::is_none")]`，缺席时不序列化，其余 action 的请求/响应逐字节不变）；`crates/gensokyo-actions/src/interaction.rs` 的结果码改按 `params.code` → 顶层 `post_type` → `params.post_type`（旧写法）取值，JSON 数字与十进制字符串两种形态都接受，缺失 / 越界 / 非数字一律 `1400`（不再静默当 0）
+- **影响**：插件可用 Go 的 `{"action":"put_interaction","echo":"…","post_type":"4"}`（或数字 `4`）写法；两条都缺时由「默认 0」改为 `1400`
+- **测试**：`interaction::tests::put_interaction_reads_top_level_post_type`（数字 / 字符串 / 具名参数优先 / 两者都缺 1400 / 越界 1400）、`action::tests::top_level_post_type_is_optional`（缺席时不序列化、其它 action 请求逐字节不变）
+
+### `send_private_msg_wakeup` 成功回执形状与 Go 不一致（2026-11-21）
+
+Go 的成功路径直接 `return` 字面量 `{"status": "ok", "retcode": 0}`（`handlers/send_private_msg_wakeup.go:322`，没有 `echo`、没有 `data`）；Rust 走标准 Full 信封（`data` + `echo` + `message`）。
+
+- **修改**：`crates/gensokyo-protocol/src/envelope.rs` 新增 `EnvelopeKind::GoWakeupOk`（`envelope_for("send_private_msg_wakeup")` 命中的唯一 action），`ActionResponse` 的 `Serialize` 成功时只写 `status` + `retcode`；`crates/gensokyo-runtime/src/dispatcher.rs` 的 `encode`（唯一 wire 出口）按 Go 的含空格字面量输出，逐字节一致。**失败路径不变**：`GoWakeupOk` 回落成 Full，`1400` / `1500` 带 `message` 照旧
+- **影响**：wakeup 成功回执不再带 `echo` / `data`（与 Go 一致）。按 `echo` 关联响应的客户端该 action 从此对不上——这是 Go 既有行为，`echo` 在本仓内部的懒消息池 / `msg_seq` 键上仍照常使用，只是不上线
+- **测试**：`dispatcher::tests::wakeup_receipt_is_the_go_literal`（`encode` 整串 + 失败回落）、`action::tests::wakeup_envelope_drops_data_and_echo`、`envelope::tests::wakeup_uses_the_go_literal_envelope`、`deferred.rs::wakeup_receipt_is_the_go_literal`（`dispatch_json` 端到端：成功 `{"status": "ok", "retcode": 0}`，缺 `message` 时 `retcode 1400` 且带 `echo`）
+
 ---
 
 ## 📝 工程与文档变更

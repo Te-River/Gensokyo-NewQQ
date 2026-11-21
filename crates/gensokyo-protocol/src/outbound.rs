@@ -22,7 +22,7 @@
 //!
 //! 1. **字面保留**（仅**字符串 CQ 路径**——段由 [`crate::cqcode::parse`] 产出、带原文切片）：
 //!    写回 [`OutboundPlan::text`]，跟着正文一起发出去。
-//!    - 无消费点的码：`face` / `node` / `poke` / `group_info` / `json` / 未知码——Go 的 `cqparse`
+//!    - 无消费点的码：`face` / `node` / `group_info` / 未知码——Go 的 `cqparse`
 //!      没有 handler 时回填 `tok.Raw`（`handlers/cqparse/walk.go:61-72`，金样
 //!      `cq_legacy_semantics_test.go:173-174`）；
 //!    - 形态不命中的码：`music` 非 `type=qq,id=<数字>`（`handlers/cqcode.go:38`）、
@@ -32,9 +32,11 @@
 //!    入口统一走 [`push_literal`]（只回写 [`Segment::raw_or_cq`] 的原文切片）：写回的字面再次
 //!    经 [`OutboundPlan::to_segments`] 重分词得到同一段，两个方向互为逆运算（用例见
 //!    `literal_segments_round_trip_byte_for_byte`）。
-//! 2. **静默丢弃**：`ark`（Go 在 `parseMessageContent` 之后由 `ProcessCQInboundOnlyCodes`
+//! 2. **静默丢弃 / 剥离**：`ark`（Go 在 `parseMessageContent` 之后由 `ProcessCQInboundOnlyCodes`
 //!    整段剥掉，`handlers/cqcode.go:198-205`、`handlers/cqcode_pipeline.go:57-59`）与空 `card`
 //!    （`handlers/cqcode_pipeline.go:124-130`：cardData 为空时不入 `foundItems`、正文也不留）；
+//!    `contact` / `poke` / `json` / `forward` 官方出站无对应结构，同样整段剥离、另打 `warn`
+//!    （Go `ProcessCQUnsupportedCodes`，`handlers/cqcode.go:208-238`）。
 //!    **数组段路径**（段来自 JSON、无原文切片）的未知段类型与数组形 `remove` 同样丢弃——Go 的
 //!    消息段分发没有对应 `case`，落 `default:` 只打一条日志、不追加正文
 //!    （`handlers/message_parser.go:1252-1254`），Rust 另打 `warn!` 留痕。
@@ -980,6 +982,17 @@ impl OutboundPlan {
                 // （handlers/cqcode.go:198-205、handlers/cqcode_pipeline.go:57-59）——既不发送
                 // 也不留字面，这里同样静默丢弃
                 "ark" => {}
+                // contact / poke / json / forward：官方出站没有对应结构（名片 / 拍一拍 /
+                // 小程序卡片 / 合并转发），硬造会被上游拒绝或把码当字面量发给群成员——整段
+                // 剥离 + warn（Go `ProcessCQUnsupportedCodes`，handlers/cqcode.go:208-238；
+                // new 链 cqparse/handlers_control.go:23 同口径）
+                "contact" | "poke" | "json" | "forward" => {
+                    tracing::warn!(
+                        segment_type = %segment.kind,
+                        raw_cq = %segment.raw_or_cq(),
+                        "[CQ] 官方出站无对应结构，已从正文剥离"
+                    );
+                }
                 // member / set_group / remove：P83 起解析成类型化 AdminOp，运行期由
                 // gensokyo_runtime::cq_admin 执行（Go message_parser.go:1166-1181、:1611-1617
                 // 还原 CQ 文本 → cqcode.go:235-240 分派真执行）。L1 解析期缺陷（缺必填 /
@@ -1015,7 +1028,7 @@ impl OutboundPlan {
                         push_literal(&mut plan, segment);
                     }
                 },
-                // face / node / poke / group_info / json / 未知码：字符串路径按 Go 的 cqparse
+                // face / node / group_info / 未知码：字符串路径按 Go 的 cqparse
                 // 回填 `tok.Raw`（cqparse/walk.go:61-72；金样 cq_legacy_semantics_test.go:173-174）
                 // ⇒ 逐字节留在正文；数组路径没有可回填的原文，Go 的段分发也落 `default:` 只打
                 // 日志（message_parser.go:1252-1254）⇒ 丢弃，不把官方 API 不认的字面发进群。
@@ -2999,9 +3012,7 @@ mod tests {
             "[CQ:face,id=1]",
             "[CQ:face , id = 14, name=a&#44;b]",
             "[CQ:node,id=1,user_id=2,nickname=n,content=c]",
-            "[CQ:poke,qq=10086]",
             "[CQ:group_info]",
-            "[CQ:json,data=abc]",
             "[CQ:unknown_code,x=1]",
             "[CQ:markdown]",
             "[CQ:markdown,data=]",
@@ -3026,6 +3037,27 @@ mod tests {
                 "字面往返必须幂等: {code}"
             );
         }
+    }
+
+    /// 官方出站无对应结构（Go `ProcessCQUnsupportedCodes`，`handlers/cqcode.go:208-238`）：
+    /// contact / poke / json / forward 整段剥离，不把码当字面量发给用户。
+    #[test]
+    fn unsupported_outbound_codes_are_stripped() {
+        for code in [
+            "[CQ:contact,type=qq,id=10086]",
+            "[CQ:poke,qq=10086]",
+            "[CQ:json,data=abc]",
+            "[CQ:forward,id=x]",
+        ] {
+            let plan = OutboundPlan::from_segments(&cqcode::parse(&format!("a{code}b")));
+            assert_eq!(plan.text, "ab", "应剥离该码并保留周围正文: {code}");
+            assert!(plan.extra.is_empty(), "剥离的码不该进 extra: {code}");
+        }
+
+        // 数组段路径同一口径：段来自 JSON、无原文切片，同样不进正文
+        let array = OutboundPlan::from_segments(&[Segment::new("poke").param("qq", "10086")]);
+        assert!(array.text.is_empty());
+        assert!(array.extra.is_empty());
     }
 
     /// 收紧后的载荷形态：`markdown` / `keyboard` 只认 `base64://` 与 `{` 两种前缀，

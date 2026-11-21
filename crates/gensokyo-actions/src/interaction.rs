@@ -57,7 +57,8 @@
 //!   丢弃；这里保留 node 的完整出站计划（媒体走同一条 deferred 发送链），单条 node 组合非法
 //!   （如 markdown 与图片同条）只让该条进失败清单，不回滚已发送的条——失败清单按**原 node
 //!   序号**上报（坏 / 空 node 被跳过后计划下标≠node 位置），段解析失败的 node 也计入回执，
-//!   不静默消失。细节见 [`crate::send`] 模块文档。
+//!   不静默消失。节点署名（`uin` / `name`）与节点内 `[CQ:keyboard]` 与 Go 同口径保留，
+//!   细节见 [`crate::send`] 模块文档。
 //! - **合并转发的空 `messages` 数组**：Go 循环零轮后照发**整体成功回执**（`retcode = 0`、
 //!   一条未发）；这里在规划层直接 `1400` 拒绝——**刻意收紧**，retcode 对客户端可见，
 //!   空转发几乎必为客户端 bug，要暴露而不是假装成功。
@@ -65,8 +66,9 @@
 //!   客户端，action 本身回 `"{}"`。本 crate 的 handler 契约只能回一个响应，因此把链接放进
 //!   `data`（`url` + 回显的 `callback_data`），不伪造事件。
 //! - **`put_interaction`**：Go 从 `echo`（字符串）取 interaction_id、从顶层 `post_type` 取结果码；
-//!   本 crate 的 `ActionRequest` 没有 `post_type` 字段，因此改读 `params.interaction_id`
-//!   （缺省回退 `echo`）与 `params.code`。
+//!   `ActionRequest` 现在也有顶层 `post_type`，结果码按 `params.code` → 顶层 `post_type`
+//!   → `params.post_type`（旧写法）取值；interaction_id 仍先看 `params.interaction_id`，
+//!   缺省回退 `echo`。
 //! - **黑名单 / 审批的 ID 反查**：Go 逐个反查、失败跳过该条；这里任一反查失败整体回 `1400`，
 //!   与 [`crate::group_admin`] 的 `set_group_kick` 同口径——`add` 少一个成员比多一个更安全。
 
@@ -160,21 +162,43 @@ fn interaction_id(request: &ActionRequest<Value>, object: &Map<String, Value>) -
     }
 }
 
-/// 互动结果码：`params.code`（0~5），兼容 Go 顶层 `post_type` 的文本形态。
-fn interaction_code(object: &Map<String, Value>) -> Result<u32> {
-    let code = match params::optional_u32(object, "code")? {
-        Some(code) => code,
-        None => match params::optional_text(object, "post_type")? {
-            Some(text) => text
-                .parse::<u32>()
-                .map_err(|_| Error::Protocol(format!("post_type 必须是 0~5 的数字: {text}")))?,
-            None => 0,
-        },
-    };
-    if code > 5 {
-        return Err(Error::Protocol(format!("code 只支持 0~5: {code}")));
+/// 互动结果码：`params.code` → 顶层 `post_type`（Go 的唯一来源）→ `params.post_type`（旧写法）。
+///
+/// Go 读 `callapi.ActionMessage.PostType`（**字符串** `"0"`~`"5"`，
+/// `handlers/put_interaction.go:62-78`）；插件也可能按数字发 `{"post_type": 0}`，两种形态都
+/// 接受。缺失 / 越界一律 `1400`——Go 的 `switch` 没有默认分支，不会静默当 0。
+fn interaction_code(request: &ActionRequest<Value>, object: &Map<String, Value>) -> Result<u32> {
+    if let Some(code) = params::optional_u32(object, "code")? {
+        return match code {
+            0..=5 => Ok(code),
+            _ => Err(Error::Protocol(format!("code 只支持 0~5: {code}"))),
+        };
     }
-    Ok(code)
+    if let Some(value) = request
+        .post_type
+        .as_ref()
+        .or_else(|| object.get("post_type"))
+    {
+        return post_type_code(value);
+    }
+    Err(Error::Protocol(
+        "put_interaction 需要结果码：params.code 或顶层 post_type（0~5）".to_owned(),
+    ))
+}
+
+/// `post_type` 值 → 结果码：JSON 数字与十进制字符串都接受（Go 侧是字符串）。
+fn post_type_code(value: &Value) -> Result<u32> {
+    let parsed = match value {
+        Value::Number(number) => number.as_u64().and_then(|code| u32::try_from(code).ok()),
+        Value::String(text) => text.trim().parse::<u32>().ok(),
+        _ => None,
+    };
+    match parsed {
+        Some(code) if code <= 5 => Ok(code),
+        _ => Err(Error::Protocol(format!(
+            "无效的 post_type: {value}（只支持 0~5）"
+        ))),
+    }
 }
 
 /// `send_group_forward_msg`：`group_id` + 非空 `messages`。
@@ -523,7 +547,7 @@ impl PutInteractionHandler {
         let object = params_or_empty(request)?;
         let object = object.as_ref();
         let interaction_id = interaction_id(request, object)?;
-        let code = interaction_code(object)?;
+        let code = interaction_code(request, object)?;
         self.context
             .api()
             .put_interaction(&interaction_id, code)
@@ -1285,9 +1309,10 @@ mod tests {
             vec![Call::Interaction("inter-1".to_owned(), 3)]
         );
 
-        // Go 口径：echo 就是 interaction_id，params 缺省时回退它
+        // Go 口径：echo 就是 interaction_id，结果码走顶层 post_type（Go 侧是字符串形态）
         let mut by_echo = request("put_interaction", json!({}));
         by_echo.echo = Some(json!("inter-2"));
+        by_echo.post_type = Some(json!("0"));
         *api.interaction.lock().unwrap() = Some(Ok(()));
         let response = block_on(handler.handle(&by_echo)).expect("echo 也应可作 interaction_id");
         assert_eq!(response.echo, Some(json!("inter-2")));
@@ -1307,6 +1332,56 @@ mod tests {
         assert_eq!(missing.retcode, RETCODE_BAD_REQUEST);
         assert_bad_request(&handler, json!({"interaction_id": "i2", "code": 9}));
         assert_eq!(handler.name(), "put_interaction");
+    }
+
+    /// A：顶层 `post_type` 是互动结果码的正式来源（Go `callapi.ActionMessage.PostType`），
+    /// 数字与字符串两种形态都收；`params.code` 优先；两者都缺 → `1400`。
+    #[test]
+    fn put_interaction_reads_top_level_post_type() {
+        let (ctx, api) = context();
+        let handler = PutInteractionHandler::new(ctx);
+
+        for (post_type, expected) in [(json!(0), 0), (json!("4"), 4)] {
+            *api.interaction.lock().unwrap() = Some(Ok(()));
+            let mut req = request("put_interaction", json!({}));
+            req.echo = Some(json!("inter-9"));
+            req.post_type = Some(post_type.clone());
+            let response = block_on(handler.handle(&req)).expect("回应互动不应失败");
+            assert_eq!(response.status, Status::Ok);
+            assert_eq!(response.data, Some(Value::Null));
+            assert_eq!(
+                api.calls().last(),
+                Some(&Call::Interaction("inter-9".to_owned(), expected)),
+                "post_type {post_type} 应转成结果码 {expected}"
+            );
+        }
+
+        // 具名参数优先于顶层 post_type
+        *api.interaction.lock().unwrap() = Some(Ok(()));
+        let mut both = request("put_interaction", json!({"interaction_id": "i", "code": 1}));
+        both.post_type = Some(json!(2));
+        let _ = block_on(handler.handle(&both)).expect("两者都给也应成功");
+        assert_eq!(
+            api.calls().last(),
+            Some(&Call::Interaction("i".to_owned(), 1))
+        );
+
+        // 两者都缺 → 1400（Go 的 switch 没有默认分支，不会静默当 0）
+        let mut missing = request("put_interaction", json!({}));
+        missing.echo = Some(json!("inter-x"));
+        let response = block_on(handler.handle(&missing)).expect("参数错误也应是 Ok(失败响应)");
+        assert_eq!(response.status, Status::Failed);
+        assert_eq!(response.retcode, RETCODE_BAD_REQUEST);
+        assert_eq!(response.data, None);
+
+        // 越界 / 非数字同样 1400
+        for bad in [json!(6), json!("abc"), json!(true)] {
+            let mut req = request("put_interaction", json!({}));
+            req.echo = Some(json!("inter-y"));
+            req.post_type = Some(bad.clone());
+            let response = block_on(handler.handle(&req)).expect("参数错误也应是 Ok(失败响应)");
+            assert_eq!(response.retcode, RETCODE_BAD_REQUEST, "{bad}");
+        }
     }
 
     #[test]

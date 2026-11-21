@@ -244,6 +244,7 @@ fn request(action: &str, params: Value, echo: Option<Value>) -> ActionRequest<Va
         action: action.to_owned(),
         params: Some(params),
         echo,
+        post_type: None,
     }
 }
 
@@ -303,12 +304,14 @@ async fn send_group_msg_sends_text_and_returns_message_id() {
 }
 
 #[tokio::test]
-async fn at_segments_become_v2_mentions() {
+async fn at_segments_with_openid_are_passed_through() {
     let (_dir, api, state) = state("app_id: 12345\n");
     api.push_group(api.ok("m-2"));
 
+    // Go `cqAtNumRe = \[CQ:at,qq=(\d+)\]`：只匹配纯数字虚拟号。
+    // 32 位 openid 不是受支持用法（插件侧只见虚拟号），原样透传。
     let mention = format!("[CQ:at,qq={USER_OPENID}] hi");
-    let expected = format!("<@{USER_OPENID}> hi");
+    let expected = mention.clone();
     let response = state
         .dispatcher()
         .dispatch(&request(
@@ -543,6 +546,32 @@ async fn wakeup_send_marks_is_wakeup_on_c2c_endpoint() {
         }
         other => panic!("wakeup 应发 C2C: {other:?}"),
     }
+}
+
+/// B：wakeup 的线上回执与 Go 字面量逐字节一致（无 echo / data），失败才是 1500 信封。
+#[tokio::test]
+async fn wakeup_receipt_is_the_go_literal() {
+    let (_dir, api, state, _echo) = state_with_echo("app_id: 12345\n");
+    api.push_c2c(api.ok("w-2"));
+    let payload = serde_json::to_vec(&json!({
+        "action": "send_private_msg_wakeup",
+        "params": { "user_id": USER_OPENID, "message": "召回一下" },
+        "echo": "e-w",
+    }))
+    .expect("请求应可序列化");
+    let text = gensokyo_runtime::dispatcher::dispatch_json(state.dispatcher(), payload).await;
+    assert_eq!(text, r#"{"status": "ok", "retcode": 0}"#);
+
+    // 参数错误仍走 1500/1400 的 Full 信封（带 message，便于定位）
+    let payload = serde_json::to_vec(&json!({
+        "action": "send_private_msg_wakeup",
+        "params": { "user_id": USER_OPENID },
+        "echo": "e-w2",
+    }))
+    .expect("请求应可序列化");
+    let text = gensokyo_runtime::dispatcher::dispatch_json(state.dispatcher(), payload).await;
+    assert!(text.contains(r#""retcode":1400"#), "{text}");
+    assert!(text.contains(r#""echo":"e-w2""#), "{text}");
 }
 
 #[tokio::test]

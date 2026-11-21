@@ -492,10 +492,17 @@ fn retcode_for(err: &CoreError) -> i32 {
 /// 模式取自 `response.envelope`：[`Dispatcher::dispatch`] 已用
 /// [`envelope_for`] 按 action 名设置；解析失败的请求没进 `dispatch`，保持默认 Full。
 fn encode<T: Serialize>(response: &ActionResponse<T>) -> String {
+    // Go `send_private_msg_wakeup.go:322` 回的是含空格的**字面量**，不是结构体序列化；
+    // 这里在唯一的 wire 出口按字节还原（`{"status":"ok","retcode":0}` 与它 JSON 等价，
+    // 但字节不同）。失败路径不进这里——见 `EnvelopeKind::GoWakeupOk` 的回落语义。
+    if response.envelope == EnvelopeKind::GoWakeupOk && response.status == Status::Ok {
+        return r#"{"status": "ok", "retcode": 0}"#.to_owned();
+    }
     serde_json::to_string(response).unwrap_or_else(|err| {
         tracing::error!(error = %err, "action 响应序列化失败");
         match response.envelope {
-            EnvelopeKind::Full => {
+            // `GoWakeupOk` 的失败 / 兜底形状与 Full 一致（成功路径已在上面提前返回）
+            EnvelopeKind::Full | EnvelopeKind::GoWakeupOk => {
                 r#"{"data":null,"echo":null,"message":"","retcode":1500,"status":"failed"}"#
                     .to_owned()
             }
@@ -528,9 +535,25 @@ mod tests {
 
     use super::{
         Dispatcher, RETCODE_BAD_REQUEST, RETCODE_INTERNAL, RETCODE_MANAGEMENT_FAILED,
-        RETCODE_UNKNOWN_ACTION, dispatch_json,
+        RETCODE_UNKNOWN_ACTION, dispatch_json, encode,
     };
     use crate::deferred::EMPTY_MESSAGE_ID;
+
+    /// `send_private_msg_wakeup` 的 wire 字节与 Go 字面量一致；失败仍是 Full（1400 / 1500）。
+    #[test]
+    fn wakeup_receipt_is_the_go_literal() {
+        let mut ok = ActionResponse::ok(json!({ "message_id": 1 }));
+        ok.envelope = EnvelopeKind::GoWakeupOk;
+        ok.echo = Some(json!("e1"));
+        assert_eq!(encode(&ok), r#"{"status": "ok", "retcode": 0}"#);
+
+        let mut failed = ActionResponse::<Value>::failed(RETCODE_BAD_REQUEST, "bad");
+        failed.envelope = EnvelopeKind::GoWakeupOk;
+        assert_eq!(
+            encode(&failed),
+            r#"{"data":null,"echo":null,"message":"bad","retcode":1400,"status":"failed"}"#
+        );
+    }
 
     #[derive(Debug)]
     struct Fixed;
@@ -630,6 +653,7 @@ mod tests {
             action: action.to_owned(),
             params: None,
             echo,
+            post_type: None,
         }
     }
 

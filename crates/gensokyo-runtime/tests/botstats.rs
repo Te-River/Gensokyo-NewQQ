@@ -58,6 +58,7 @@ fn get_status_request() -> ActionRequest<Value> {
         action: "get_status".to_owned(),
         params: None,
         echo: None,
+        post_type: None,
     }
 }
 

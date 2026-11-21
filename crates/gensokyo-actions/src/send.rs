@@ -58,12 +58,16 @@
 //!   显式传入（缺省 `index = 0`、首片不带 `id`），`msg_seq = index + 10` 的防去重写法保留。
 //! - **`send_private_msg_wakeup`**：Go 空 `message` 时会补一条 `" "` 的纯唤醒消息；这里要求
 //!   `message` 非空（`1400`），唤醒语义全部落在 `SendRequest.wakeup` 标记上，由 runtime 执行链
-//!   置 `is_wakeup` 并清空 `msg_id` / `event_id`（互斥约束）。
+//!   置 `is_wakeup` 并清空 `msg_id` / `event_id`（互斥约束）。成功回执是 Go 的字面量
+//!   `{"status": "ok", "retcode": 0}`（无 `echo` / `data`，见 `EnvelopeKind::GoWakeupOk`）。
 //! - **合并转发（`send_group_forward_msg` / `send_private_forward_msg`）**：Go 逐条重发 node 正文，
 //!   node 内的图片 / 语音在「先解析再拼回文本」的往返中丢失；这里保留 node 的完整出站计划
 //!   （媒体走同一条 deferred 发送链），某条 node 组合非法（如 markdown + 图片同条）时该条进
-//!   失败清单、其余照发，不回滚已发送的条。`Go` 未注册 `send_private_forward_msg`，本 crate
-//!   按群侧同款「逐条重发」口径实现，端点是真实的 C2C 消息端点。
+//!   失败清单、其余照发，不回滚已发送的条。节点署名（`uin` / `name`，标准形态
+//!   `user_id` / `nickname`）与 Go 同口径并入正文前缀，节点内 `[CQ:keyboard]` 走普通群消息
+//!   同一套解析（`specify_user_ids` 的虚拟号→OpenID 由 runtime 的 `compose_keyboard` 完成）。
+//!   `Go` 未注册 `send_private_forward_msg`，本 crate 按群侧同款「逐条重发」口径实现，
+//!   端点是真实的 C2C 消息端点。
 //!
 //! # 未做项（M1i 明确不做）
 //!
@@ -756,10 +760,15 @@ fn plan_forward(params: &Value, limit: i64, to_group: bool) -> Result<ForwardReq
             NodeContent::Planned(content) => content,
         };
         count += 1;
-        let message = MessageOut::from_content(&content, false);
+        let mut message = MessageOut::from_content(&content, false);
         // 空正文 node（空串 / 空段数组）：Go 会跑完发送链但没有任何上游调用，这里不入队
         if message.text.is_empty() && message.plan.is_empty() {
             continue;
+        }
+        // 节点署名：官方群消息出站没有作者字段，合并转发也没有官方端点（逐条降级下发），
+        // uin / name 只能并入正文（Go `send_group_forward_msg.go:65-70` + `forwardNodeAuthor`）
+        if let Some(author) = node_author(node) {
+            message.text = format!("{author}: {}", message.text);
         }
         plans.push(ForwardPlan {
             node_index,
@@ -806,6 +815,36 @@ fn classify_node(node: &Value) -> NodeContent {
         }
         _ => NodeContent::Skipped,
     }
+}
+
+/// 合并转发 node 的署名：`uin` / `name`（go-cqhttp）优先，OneBot v11 标准的 `user_id` /
+/// `nickname` 兜底；两者都给时输出「昵称(uin)」，保证两个字段都不丢（对齐 Go `forwardNodeAuthor`）。
+fn node_author(node: &Value) -> Option<String> {
+    let data = node.get("data")?.as_object()?;
+    let uin = node_text(data, &["uin", "user_id"]);
+    let name = node_text(data, &["name", "nickname"]);
+    match (name, uin) {
+        (Some(name), Some(uin)) => Some(format!("{name}({uin})")),
+        (Some(name), None) => Some(name),
+        (None, uin) => uin,
+    }
+}
+
+/// 取第一个非空字段的文本形态（数字按十进制输出，对齐 Go `nodeDataString`）。
+fn node_text(data: &Map<String, Value>, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        match data.get(*key) {
+            Some(Value::String(text)) if !text.is_empty() => return Some(text.clone()),
+            Some(Value::Number(number)) => {
+                return Some(match number.as_i64() {
+                    Some(value) => value.to_string(),
+                    None => number.to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn require_message(object: &Map<String, Value>) -> Result<()> {
@@ -1538,6 +1577,65 @@ mod tests {
         let err = plan_send_private_msg_sse(&json!({"message": {"state": 1}}))
             .expect_err("缺 user_id 应报错");
         assert!(err.to_string().contains("user_id"));
+    }
+
+    /// `send_private_msg_wakeup` 与 `send_private_msg` 同一条解析链：独立的
+    /// `[CQ:keyboard]` / `[CQ:card]` / `[CQ:stream]` 都留在计划里，交由 runtime 合成。
+    #[test]
+    fn wakeup_keeps_keyboard_card_and_stream() {
+        let keyboard = plan_send_private_msg_wakeup(&json!({
+            "user_id": "u1",
+            "message": "[CQ:keyboard,data={\"id\":\"k1\"}]召回"
+        }))
+        .expect("带键盘的唤醒消息应规划成功");
+        assert!(keyboard.wakeup);
+        assert_eq!(keyboard.message.text, "召回");
+        assert_eq!(keyboard.message.plan.keyboard.len(), 1);
+
+        let card = plan_send_private_msg_wakeup(&json!({
+            "user_id": "u1",
+            "message": "[CQ:card,title=t,desc=d,pic=https://example.com/p.png,url=https://example.com]"
+        }))
+        .expect("带卡片的唤醒消息应规划成功");
+        assert!(card.wakeup);
+        assert_eq!(card.message.plan.card.len(), 1);
+
+        let stream = plan_send_private_msg_wakeup(&json!({
+            "user_id": "u1",
+            "message": "[CQ:stream,type:start,qq:1]召回"
+        }))
+        .expect("带流式的唤醒消息应规划成功");
+        assert!(stream.wakeup);
+        assert!(stream.message.plan.stream.is_some());
+    }
+
+    /// 节点署名（`uin` / `name`，标准形态 `user_id` / `nickname`）并入正文前缀；节点内
+    /// `[CQ:keyboard]` 走普通群消息同一套解析（Go `send_group_forward_msg.go:65-77`）。
+    #[test]
+    fn forward_nodes_keep_author_and_keyboard() {
+        let params = json!({
+            "group_id": 100,
+            "messages": [
+                {"data": {"uin": "10086", "name": "阿求", "content": "第一段"}},
+                {"data": {"user_id": 42, "nickname": "小铃", "content": "[CQ:keyboard,data={\"id\":\"k1\"}]hi"}},
+                {"data": {"uin": 10087, "content": "[CQ:image,file=https://example.com/a.png]"}},
+            ]
+        });
+        let planned = plan_send_group_forward_msg(&params, 10).expect("转发应规划成功");
+
+        assert_eq!(
+            planned.forward[0].request.message.text,
+            "阿求(10086): 第一段"
+        );
+        assert_eq!(planned.forward[1].request.message.text, "小铃(42): hi");
+        assert_eq!(
+            planned.forward[1].request.message.plan.keyboard.len(),
+            1,
+            "节点内键盘要进发送计划，虚拟号→OpenID 由 runtime 的 compose_keyboard 完成"
+        );
+        // 纯媒体 node：署名照样并入正文（Go 同口径），媒体继续单独成条
+        assert_eq!(planned.forward[2].request.message.text, "10087: ");
+        assert_eq!(planned.forward[2].request.message.plan.images.len(), 1);
     }
 
     #[test]

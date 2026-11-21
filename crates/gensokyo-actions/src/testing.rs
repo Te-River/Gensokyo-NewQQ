@@ -607,6 +607,7 @@ pub(crate) fn request_without_params(action: &str) -> ActionRequest<Value> {
         action: action.to_owned(),
         params: None,
         echo: Some(json!("e-1")),
+        post_type: None,
     }
 }
 

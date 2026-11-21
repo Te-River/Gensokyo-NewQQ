@@ -258,6 +258,7 @@ mod tests {
             action: action.to_owned(),
             params: None,
             echo: Some(json!("e-1")),
+            post_type: None,
         }
     }
 
@@ -408,6 +409,7 @@ mod tests {
             action: "send_group_msg".to_owned(),
             params: None,
             echo: Some(json!({"id": 7})),
+            post_type: None,
         };
         let response = block_on(SendGroupHandler::new().handle(&req));
         let response = response.expect("参数错误也应是 Ok(失败响应)");

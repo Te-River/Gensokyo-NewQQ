@@ -1814,6 +1814,7 @@ mod tests {
                 action: "get_status".to_owned(),
                 params: None,
                 echo: None,
+                post_type: None,
             })
             .await;
         assert_eq!(response.retcode, 0);

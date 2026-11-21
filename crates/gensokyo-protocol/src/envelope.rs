@@ -5,6 +5,9 @@
 //! - **B 管理类**（23 条）用 [`EnvelopeKind::Compact`]：Go 的 `sendActionResult` /
 //!   `sendActionResultWithData` 没有 `group_id` / `user_id`，`echo` 带 `omitempty`，失败
 //!   一律 `retcode 100`。
+//! - **`send_private_msg_wakeup`** 用 [`EnvelopeKind::GoWakeupOk`]：Go 的成功路径直接
+//!   `return` 字面量 `{"status": "ok", "retcode": 0}`（`handlers/send_private_msg_wakeup.go:322`），
+//!   没有 `data` / `echo` / `message`；失败路径仍是普通 Full（`1400` / `1500`）。
 //!
 //! 表逐条来自 Go 源码，**不要按 action 名字猜**：无 `data` 的在
 //! `handlers/set_group_add_request.go:54-82`，`data` 恒 `null` 的在
@@ -21,6 +24,11 @@ pub enum EnvelopeKind {
     Full,
     /// B 管理类：Go `sendActionResult` 系列形状，`data` 形态由 [`CompactData`] 决定。
     Compact(CompactData),
+    /// `send_private_msg_wakeup` 的成功回执：只有 `status` + `retcode`
+    /// （Go `handlers/send_private_msg_wakeup.go:322` 的字面量，没有 `data` / `echo` / `message`）。
+    ///
+    /// 失败路径回落到 [`Self::Full`]：`1400` / `1500` 的字段照旧，客户端仍能拿错误文案。
+    GoWakeupOk,
 }
 
 /// Compact 信封里 `data` 的形态。
@@ -67,9 +75,13 @@ const COMPACT_ACTIONS: &[(&str, CompactData)] = &[
     ("join_approval_strategy_whitelist", CompactData::AsIs),
 ];
 
-/// 该 action 的响应信封模式；不在 B 类表里的（A 发送 / C 查询 / Rust 扩展）一律 [`EnvelopeKind::Full`]。
+/// 该 action 的响应信封模式；B 类表与 wakeup 之外的（A 发送 / C 查询 / Rust 扩展）一律
+/// [`EnvelopeKind::Full`]。
 #[must_use]
 pub fn envelope_for(action: &str) -> EnvelopeKind {
+    if action == "send_private_msg_wakeup" {
+        return EnvelopeKind::GoWakeupOk;
+    }
     match COMPACT_ACTIONS.iter().find(|(name, _)| *name == action) {
         Some((_, data)) => EnvelopeKind::Compact(*data),
         None => EnvelopeKind::Full,
@@ -126,6 +138,16 @@ mod tests {
             envelope_for("set_group_kick"),
             EnvelopeKind::Compact(CompactData::AsIs)
         );
+    }
+
+    /// `send_private_msg_wakeup` 是独立信封：Go 的成功回执是字面量，没有 data / echo / message。
+    #[test]
+    fn wakeup_uses_the_go_literal_envelope() {
+        assert_eq!(
+            envelope_for("send_private_msg_wakeup"),
+            EnvelopeKind::GoWakeupOk
+        );
+        assert_eq!(envelope_for("send_private_msg"), EnvelopeKind::Full);
     }
 
     /// A 发送类 / C 查询类 / Rust 扩展都不进 Compact。
