@@ -219,6 +219,26 @@ func sendFailureMessage(err error) string {
 	return err.Error() + sendFailReviewTip
 }
 
+// storeVirtualMessageID 缓存真实 message_id → 虚拟 ID（按 GetMemoryMsgid 切换内存/idmap）。
+// 注入缝：handlers 套件用例替换为返回错误，覆盖"消息已发出但写缓存失败"的回执分支（用例禁止 t.Parallel()）。
+var storeVirtualMessageID = func(realID string) (int64, error) {
+	if config.GetMemoryMsgid() {
+		return echo.StoreCacheInMemory(realID)
+	}
+	return idmap.StoreCachev2(realID)
+}
+
+// cacheMessageIDForReceipt 写缓存失败时的回执口径：消息已发出，必须回成功（retcode 0 / status ok），
+// data.message_id 以 0 兜底——回 failed 会让插件误判未发出而重发。
+func cacheMessageIDForReceipt(realID string) int64 {
+	id, err := storeVirtualMessageID(realID)
+	if err != nil {
+		mylog.Printf("Error storing ID: %v（缓存写入失败，消息已发出，回执 message_id=0）", err)
+		return 0
+	}
+	return id
+}
+
 // 定义了一个符合 Client 接口的 HttpAPIClient 结构体
 type HttpAPIClient struct {
 	// 可添加所需字段
@@ -237,7 +257,6 @@ func (c *HttpAPIClient) SendMessage(message map[string]interface{}) error {
 // 发送成功回执 todo 返回可互转的messageid 实现群撤回api
 func SendResponse(client callapi.Client, err error, message *callapi.ActionMessage, resp *dto.GroupMessageResponse, api openapi.OpenAPI, apiv2 openapi.OpenAPI) (string, error) {
 	var messageID64 int64
-	var mapErr error
 
 	// 转换群号
 	var errr error
@@ -318,20 +337,8 @@ func SendResponse(client callapi.Client, err error, message *callapi.ActionMessa
 	// 设置响应值
 	response := ServerResponse{}
 	if resp != nil {
-		if config.GetMemoryMsgid() {
-			messageID64, mapErr = echo.StoreCacheInMemory(resp.Message.ID)
-			if mapErr != nil {
-				mylog.Printf("Error storing ID: %v", mapErr)
-				return "", nil
-			}
-		} else {
-			messageID64, mapErr = idmap.StoreCachev2(resp.Message.ID)
-			if mapErr != nil {
-				mylog.Printf("Error storing ID: %v", mapErr)
-				return "", nil
-			}
-		}
-
+		// 写缓存失败不回 failed：消息已发出，回成功回执 message_id=0
+		messageID64 = cacheMessageIDForReceipt(resp.Message.ID)
 		response.Data.MessageID = int(messageID64)
 		// 发送成功 增加今日发信息数
 		botstats.RecordMessageSent()
@@ -340,7 +347,8 @@ func SendResponse(client callapi.Client, err error, message *callapi.ActionMessa
 			msg_on_touch := echo.GetMsgIDv3(config.GetAppIDStr(), echoStr)
 			// 检查是否需要自动撤回
 			autoWithdrawPrefixes := config.GetAutoWithdraw()
-			if len(autoWithdrawPrefixes) > 0 {
+			// messageID64=0 表示写缓存失败、无真实可撤回 id：跳过自动撤回，避免发 delete_msg id=0
+			if len(autoWithdrawPrefixes) > 0 && messageID64 > 0 {
 				for _, prefix := range autoWithdrawPrefixes {
 					if strings.HasPrefix(msg_on_touch, prefix) {
 						go func() {
@@ -512,25 +520,11 @@ func SendResponseSB(client callapi.Client, err error, message *callapi.ActionMes
 
 // 发送成功回执 todo 返回可互转的messageid 实现频道撤回api
 func SendGuildResponse(client callapi.Client, err error, message *callapi.ActionMessage, resp *dto.Message) (string, error) {
-	var messageID64 int64
-	var mapErr error
 	// 设置响应值
 	response := ServerResponse{}
 	if resp != nil {
-		if config.GetMemoryMsgid() {
-			messageID64, mapErr = echo.StoreCacheInMemory(resp.ID)
-			if mapErr != nil {
-				mylog.Printf("Error storing ID: %v", mapErr)
-				return "", nil
-			}
-		} else {
-			messageID64, mapErr = idmap.StoreCachev2(resp.ID)
-			if mapErr != nil {
-				mylog.Printf("Error storing ID: %v", mapErr)
-				return "", nil
-			}
-		}
-		response.Data.MessageID = int(messageID64)
+		// 写缓存失败不回 failed：消息已发出，回成功回执 message_id=0
+		response.Data.MessageID = int(cacheMessageIDForReceipt(resp.ID))
 		// 发送成功 增加今日发信息数
 		botstats.RecordMessageSent()
 	} else {
@@ -541,8 +535,9 @@ func SendGuildResponse(client callapi.Client, err error, message *callapi.Action
 	//转换成int
 	ChannelID64, errr := idmap.StoreIDv2(message.Params.ChannelID.(string))
 	if errr != nil {
-		mylog.Printf("Error storing ID: %v", err)
-		return "", nil
+		// 消息已发出：频道号写缓存失败只降级 channel_id，不回 failed
+		mylog.Printf("Error storing ID: %v（缓存写入失败，消息已发出，回执 channel_id=0）", errr)
+		ChannelID64 = 0
 	}
 	response.ChannelID = ChannelID64
 	response.Echo = message.Echo
@@ -577,25 +572,11 @@ func SendGuildResponse(client callapi.Client, err error, message *callapi.Action
 
 // 发送成功回执 todo 返回可互转的messageid 实现C2C撤回api
 func SendC2CResponse(client callapi.Client, err error, message *callapi.ActionMessage, resp *dto.C2CMessageResponse) (string, error) {
-	var messageID64 int64
-	var mapErr error
 	// 设置响应值
 	response := ServerResponse{}
 	if resp != nil {
-		if config.GetMemoryMsgid() {
-			messageID64, mapErr = echo.StoreCacheInMemory(resp.Message.ID)
-			if mapErr != nil {
-				mylog.Printf("Error storing ID: %v", mapErr)
-				return "", nil
-			}
-		} else {
-			messageID64, mapErr = idmap.StoreCachev2(resp.Message.ID)
-			if mapErr != nil {
-				mylog.Printf("Error storing ID: %v", mapErr)
-				return "", nil
-			}
-		}
-		response.Data.MessageID = int(messageID64)
+		// 写缓存失败不回 failed：消息已发出，回成功回执 message_id=0
+		response.Data.MessageID = int(cacheMessageIDForReceipt(resp.Message.ID))
 		// 发送成功 增加今日发信息数
 		botstats.RecordMessageSent()
 	} else {
@@ -641,25 +622,11 @@ func SendC2CResponse(client callapi.Client, err error, message *callapi.ActionMe
 
 // 会返回guildid的频道私信专用SendGuildPrivateResponse
 func SendGuildPrivateResponse(client callapi.Client, err error, message *callapi.ActionMessage, resp *dto.Message, guildID string) (string, error) {
-	var messageID64 int64
-	var mapErr error
 	// 设置响应值
 	response := ServerResponse{}
 	if resp != nil {
-		if config.GetMemoryMsgid() {
-			messageID64, mapErr = echo.StoreCacheInMemory(resp.ID)
-			if mapErr != nil {
-				mylog.Printf("Error storing ID: %v", mapErr)
-				return "", nil
-			}
-		} else {
-			messageID64, mapErr = idmap.StoreCachev2(resp.ID)
-			if mapErr != nil {
-				mylog.Printf("Error storing ID: %v", mapErr)
-				return "", nil
-			}
-		}
-		response.Data.MessageID = int(messageID64)
+		// 写缓存失败不回 failed：消息已发出，回成功回执 message_id=0
+		response.Data.MessageID = int(cacheMessageIDForReceipt(resp.ID))
 	} else {
 		// Default ID handling
 		// 无真实 message_id 不再伪造固定假值,诚实置 0

@@ -116,6 +116,17 @@ QQ 官方 2026-11-16 新增 `GET /v2/users/{user_openid}/info`，返回用户昵
 - **测试**：`callapi/receipt_test.go` 覆盖 legacy/new 两链的未知 action（1404，mock client 恰收到一次 `SendMessage`）与 handler 异常（1500），并断言 dry-run 不下发
 - **测试**：`handlers/query_action_receipt_test.go` 覆盖未映射 `group_id` 的 `get_group_member_list`（1400）、未映射 `group_id` 的 `get_group_info`（失败回执 + `echo` 原样）、未映射 `user_id` 的 `get_avatar`（1400）
 
+### 消息已发出但虚拟 message_id 写缓存失败时无回执（成功回执 + `message_id:0`）
+
+`SendResponse` / `SendGuildResponse` / `SendC2CResponse` / `SendGuildPrivateResponse`（`handlers/message_parser.go`）在 `echo.StoreCacheInMemory` / `idmap.StoreCachev2` 写虚拟 `message_id` 缓存失败时，只打一条 `Error storing ID` 日志便 `return "", nil`——消息其实已经发到 QQ，但客户端既收不到 `SendMessage` 回执也收不到 JSON 串，只能等超时断开。
+
+- **修改**：9 处裸返回（`SendResponse` 内存/idmap 两分支、`SendGuildResponse` 内存/idmap/`channel_id` 三处、`SendC2CResponse` 内存/idmap 两分支、`SendGuildPrivateResponse` 内存/idmap 两分支）抽出统一入口 `storeVirtualMessageID` / `cacheMessageIDForReceipt`（按 `memory_msgid` 在内存与 idmap 间切换，保留为用例注入缝）；失败时保留 `Error storing ID: <err>（缓存写入失败，消息已发出，回执 message_id=0）` 日志，`message_id` 以 `0` 兜底后继续走成功分支
+- **修改**：`SendGuildResponse` 的 `channel_id`（`idmap.StoreIDv2`）写失败同样不再裸返回——降级为 `channel_id:0`（字段 `omitempty`，回执中省略）后照常回成功
+- **修改**：`SendResponse` 的自动撤回增加 `messageID64 > 0` 守卫——缓存失败时没有真实可撤回 id，不再发出 `delete_msg`（`message_id=0` 的无效请求）
+- **影响**：这 9 个分支的回执统一为 `retcode:0` / `status:"ok"` / `data:{"message_id":0}` / `message:""` / `echo` 原样。**刻意不回 `status:"failed"`**：消息确已发出，报失败会误导插件重发；上游发送失败（`err != nil`）仍按 1500 失败回执
+- **确认为设计行为（无需改动）**：`[CQ:group_info]` 的 `group_id` 反查失败（`handlers/cqparse/handlers_groupinfo.go:114`）在 `ResolveBatch` 内即被降级为 `fallback` 文本（默认空串）+ 日志，不向 action handler 上抛 error；外层发送照常回成功回执，客户端不会超时。该「失败替换 fallback」是既定设计（见 `docs/cq码/扩展CQ码/扩展cq码-cq_group_info.md`「失败分级」），改成 1400 失败回执会与文档及「不泄漏码原文」的取舍冲突
+- **测试**：`handlers/cache_receipt_test.go` 覆盖四种回执形态（群 / 频道 / C2C / 频道私信）：注入写缓存失败后断言 mock client 收到 `retcode:0`、`status:"ok"`、`data.message_id:0`、`message:""`、`echo` 原样，且返回值不是空串
+
 ### action 回执不再转义 `&`，与 Rust 端逐字节对齐
 
 `get_user_info` 两侧 `data` 内容一致，但 Go 回执把 `&` 转义成 `\u0026`（`"avatar":"https://thirdqq.qlogo.cn/bqqthird?key=…\u0026kti=…\u0026s=640"`），Rust 端原样输出 `&`——凡是带签名的 URL（头像/图床/短链）回执都逐字节不同：
