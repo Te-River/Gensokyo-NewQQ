@@ -25,10 +25,10 @@
 //! | `music` / `qqmusic` | `markdown` + `keyboard` + `msg_type=2` | 取第一首：查 QQ 音乐歌曲详情（Go `FetchSongDetail`，走媒体下载 seam）→ 原生 markdown（封面 `T002R180x180M000{album_mid}.jpg` + 曲名 / 歌手）→ 键盘「立刻播放 / 我也要点歌」（第二个按钮的 `data` 是 `music_prefix` + 空格）；查询失败降级成分享文案并 `warn`（Go 直接丢整条消息） |
 //! | `unknown` / `unknown_image` / `unknown_record` | 不支持 | `1400`（请求侧段类型），不静默丢 |
 //! | `[CQ:member]` / `[CQ:set_group]` / `[CQ:remove]` | 管理动作（[`crate::cq_admin`]，P83） | `depth == 0` 时在判空之前执行：群聊全量（私聊 member / set_group 留字面、remove 走 C2C 撤回）；`cq_admin_actions=off` 整条 `1400`；L2 失败 `1400` / `1500`；纯动作消息执行后回 `EMPTY_MESSAGE_ID` |
-//! | `active` / `wakeup` | 忽略 | 控制型标记，不影响本条合成；`send_private_msg_wakeup` 的
+//! | `active` / `wakeup` | 主动推送标记 | `send_private_msg_wakeup` 的
 //!   召回语义由 [`SendRequest::wakeup`] 承载，[`execute`] 置 `is_wakeup` 并强制不带回复 ID；
-//!   `[CQ:active]` 清空 `msg_id` / `event_id` 强制主动推送（见下节「被动回复身份」）；
-//!   SSM（`code:22009` 入队补发）见下节「SSM 补发」 |
+//!   `[CQ:active]` 连显式 `params.message_id` / `[CQ:reply]` 一起丢弃，`msg_id` / `event_id`
+//!   双清（见下节「被动回复身份」）；SSM（`code:22009` 入队补发）见下节「SSM 补发」 |
 //!
 //! ## 消息体拆分与优先级
 //!
@@ -117,7 +117,8 @@
 //! / `send_private_msg.go:319-355` 的先后顺序一次性定好，主条与后续媒体条共用同一份
 //! （`send_group_msg.go:801` 的媒体循环用同一个 `messageID`）：懒消息池（群有 `user_id`
 //! 上下文查 v2、否则 v1；私聊只有 v1）→ 请求 `echo` 当键查 `msg_id` 表 → 收件人键查表 →
-//! 群「无用户上下文」清空 → `[CQ:active]` 双清 → `"2000"` 回填 `event_id`。`string_ob11`
+//! 群「无用户上下文」清空 → `[CQ:active]` 双清（`compose` 同时不落 `[CQ:reply]` 与显式
+//! `message_id`）→ `"2000"` 回填 `event_id`。`string_ob11`
 //! 决定 `event_id` 查虚拟号键还是真实 OpenID 键（群；私聊恒用真实 OpenID）。未装配
 //! [`EchoStore`] 时整段跳过，行为与接线前一致。
 //!
@@ -930,6 +931,12 @@ struct Passive {
     event_id: Option<String>,
 }
 
+/// 计划里的 `[CQ:active]` 存在位（Go `foundItems["active"]`；只有 `active_type` /
+/// `active_sub_type` 时不算）。
+fn active_marker(plan: &OutboundPlan) -> bool {
+    plan.active.as_ref().is_some_and(|active| active.active)
+}
+
 /// 按 Go 的先后顺序确定本次发送的 `msg_id` / `event_id`（语义见 [`Passive`]）。
 ///
 /// 顺序（群 / 私聊同构，差异逐条标注）：
@@ -939,7 +946,8 @@ struct Passive {
 ///    `GetMessageIDByUseridOrGroupid`）。
 /// 4. 群特例：没有 `user_id` 上下文（Rust 侧也没有 CQ 派生的 `event_id`）时，缓存里的
 ///    `msg_id` 已过期 → 清空走主动推送（Go `send_group_msg.go:308-312`）。
-/// 5. `[CQ:active]` 标记：`msg_id` / `event_id` 双清（强制主动推送）。
+/// 5. `[CQ:active]` 标记：`msg_id` / `event_id` 双清（强制主动推送），显式 `message_id` /
+///    `[CQ:reply]` 也不落体（见 [`compose`]）。
 /// 6. 结果是 `"2000"`：`msg_id` 清空、回填可用的 `event_id`，尽量不消耗主动次数。
 ///
 /// 未装配 echo（[`DeferredDeps::echo`] 为 `None`）时整段跳过，行为与接线前一致。
@@ -989,12 +997,7 @@ fn resolve_passive(
 
     // `[CQ:active]`：强制主动推送。Go 私聊把这一步放在 "2000" 分支之后，但主动标记本来就会
     // 连 `event_id` 一起清空，先后顺序的最终结果相同。
-    let active = plan
-        .message
-        .plan
-        .active
-        .as_ref()
-        .is_some_and(|active| active.active);
+    let active = active_marker(&plan.message.plan);
     let mut event_id = String::new();
     if active {
         msg_id.clear();
@@ -1117,7 +1120,14 @@ pub async fn compose(
     }
     let mut out = MessageToCreate::default();
     // Go：`[CQ:reply]` → `msg_id`（被动回复）。事件 ID 不在计划里，不必与 `event_id` 互斥。
-    if let Some(reply) = &message.plan.reply_msg_id {
+    //
+    // `[CQ:active]` 例外：Go 在被动身份定稿后**无条件**清 `messageID` / `eventID`
+    // （`send_private_msg.go:360-365`、`send_group_msg.go:313-317`），显式 `params.message_id`
+    // 一并丢弃 ⇒ 这里连 reply 的 `msg_id` / `message_reference` 都不落体，让后面
+    // [`stamp_message`] 拿不到凭据（主动推送）。
+    if !active_marker(&message.plan)
+        && let Some(reply) = &message.plan.reply_msg_id
+    {
         let ref_id = resolve_reply(context, deps.echo, reply)?;
         // Go `handlers/reply_helpers.go:21-26` + `send_group_msg.go:415-419`：被引用消息登记过
         // REFIDX 时 `message_reference.message_id` 用它（引用非机器人消息只认它），`msg_id`
@@ -2618,6 +2628,7 @@ mod tests {
     use gensokyo_actions::{
         ActionContext, EchoContext, ForwardParseFailure, ForwardPlan, ForwardRequest, MessageOut,
         QqApi, QqFuture, SendRequest, SendTarget, SseRequest, plan_send_group_msg_raw,
+        plan_send_private_msg,
     };
     use gensokyo_config::ConfigManager;
     use gensokyo_core::{Error, Ob11Id, Result};
@@ -2647,8 +2658,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        DeferredDeps, execute, execute_forward, execute_sse, is_event_expired, is_ssm_retry,
-        render_plain, resolve_markdown_images, send_body,
+        DeferredDeps, compose, execute, execute_forward, execute_sse, is_event_expired,
+        is_ssm_retry, render_plain, resolve_markdown_images, send_body,
     };
     use crate::at_everyone::SECTION;
     use crate::event_hub::EventHub;
@@ -6627,6 +6638,76 @@ mod tests {
 
         let sent = api.sent();
         assert_eq!(sent[0].msg_id, None, "[CQ:active] 必须清 msg_id");
+        assert_eq!(sent[0].event_id, None, "[CQ:active] 必须清 event_id");
+    }
+
+    /// Go `send_private_msg.go:360-365`：`[CQ:active]` 在被动身份定稿后**无条件**清
+    /// `messageID` / `eventID`，显式 `params.message_id` 也一并丢弃。
+    #[tokio::test]
+    async fn active_marker_drops_explicit_message_id_in_private_compose() {
+        let api = Arc::new(FakeQqApi::default().with_send("OUT-1"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let plan = plan_send_private_msg(&json!({
+            "user_id": OPENID,
+            "message": "[CQ:active]强制主动",
+            "message_id": "ROBOT1.0_EXPLICIT"
+        }))
+        .expect("显式 msg_id + [CQ:active] 应规划成功");
+        assert!(
+            plan.message
+                .plan
+                .active
+                .as_ref()
+                .is_some_and(|active| active.active),
+            "消息体里的 [CQ:active] 应置存在位"
+        );
+        assert!(
+            plan.message.plan.reply_msg_id.is_some(),
+            "显式 message_id 应落成 reply"
+        );
+
+        let (body, extras) = compose(
+            &context,
+            &plan.target,
+            OPENID,
+            &plan.message,
+            &deps(&no_media(), None),
+        )
+        .await
+        .expect("compose 应成功");
+
+        assert!(extras.is_empty(), "纯文本只有一条");
+        assert_eq!(body.msg_id, None, "[CQ:active] 必须丢弃显式 message_id");
+        assert_eq!(body.event_id, None, "[CQ:active] 必须清 event_id");
+        assert!(
+            body.message_reference.is_none(),
+            "[CQ:active] 时 reply 的引用块同样不落体"
+        );
+    }
+
+    /// 群聊同构（Go `send_group_msg.go:313-317`）：显式 `message_id` + `[CQ:active]` ⇒ 出站体
+    /// 不带 `msg_id` / `event_id`，即使 echo 里有可用的 `event_id`。
+    #[tokio::test]
+    async fn active_marker_drops_explicit_message_id_on_group_send() {
+        let api = Arc::new(FakeQqApi::default().with_send("OUT-1"));
+        let (_dir, context) = echo_context(Arc::clone(&api), "");
+        let echo = EchoStore::new();
+        echo.add_event_id_v2("10001", OPENID, "EV-1");
+        let plan = plan_send_group_msg_raw(&json!({
+            "group_id": OPENID,
+            "message": "[CQ:active]强制主动",
+            "message_id": "ROBOT1.0_GROUP"
+        }))
+        .expect("显式 msg_id 的群消息应规划成功");
+        assert_eq!(plan.target, SendTarget::Group(OPENID.to_owned()));
+
+        execute(&context, &plan, &deps(&no_media(), Some(&echo)))
+            .await
+            .expect("应发送成功");
+
+        let sent = api.sent();
+        assert_eq!(sent.len(), 1, "纯文本只发一条");
+        assert_eq!(sent[0].msg_id, None, "[CQ:active] 必须丢弃显式 message_id");
         assert_eq!(sent[0].event_id, None, "[CQ:active] 必须清 event_id");
     }
 

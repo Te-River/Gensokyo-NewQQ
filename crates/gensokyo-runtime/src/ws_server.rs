@@ -33,6 +33,7 @@ use tokio::time::MissedTickBehavior;
 
 use crate::auth::{incorrect_token, is_authorized, missing_token, provided_token};
 use crate::dispatcher::{Dispatcher, dispatch_json};
+use crate::event_hub::event_json;
 use crate::inbound::Inbound;
 use crate::state::AppState;
 use crate::ws_client::{RECEIPT_CAPACITY, heartbeat_interval};
@@ -250,7 +251,7 @@ async fn send_event<S>(sink: &mut S, event: &Event) -> bool
 where
     S: Sink<Message> + Unpin,
 {
-    match serde_json::to_string(event) {
+    match event_json(event) {
         Ok(text) => send_payload(sink, &text).await,
         Err(err) => {
             tracing::error!(error = %err, "事件序列化失败，跳过该事件");

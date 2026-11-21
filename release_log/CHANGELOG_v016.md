@@ -221,6 +221,15 @@ Go 在 `global_group_msg_rre_to_message` / `global_c2c_msg_switch_to_message` / 
 
 ## 🐛 修复
 
+### 事件帧与 `[CQ:active]` 的逐字节对齐（2026-11-21）
+
+活体对打把入站字段补齐后还剩两处差异：`[CQ:active]` 的被动凭据优先级与 Go 相反，事件帧的 JSON 键序与 Go 不同。
+
+- **修复（`[CQ:active]` 覆盖显式 `msg_id`）**：Go 在被动身份定稿后**无条件**清 `messageID` / `eventID`（`handlers/send_private_msg.go:360-365`、`send_group_msg.go:313-317`），显式 `params.message_id` 一并丢弃。Rust 原先只清 echo 池值，`compose` 随后又把计划里的显式 `reply_msg_id` 盖章进 `out.msg_id`，而 `stamp_message` 不覆盖已存在的 `msg_id` ⇒ 显式凭据胜出。现在 `compose`（`crates/gensokyo-runtime/src/deferred.rs`）在 `[CQ:active]` 时不落 reply 的 `msg_id` / `message_reference`，`resolve_passive` 与它共用同一个 `active_marker` 判定，`event_id` 照旧双清；私聊 / 群聊两条路径同构，`gensokyo-actions` 的规划侧不加第二份 active 判断
+- **修复（事件帧键序）**：Go 的事件帧走 `map[string]interface{}`（`Processor/Processor.go:294` `SendMessageToAllClients`），`encoding/json` 对 map 按键字母序输出（实测事件层与 `sender` 层都是字母序）；Rust 的 `serde_json::to_string` 走 struct 声明序。新增 `event_hub::event_json`（`serde_json::to_value` → `to_string`：未开 `preserve_order` 时 `Map` 即 `BTreeMap`，天然升序），`event_hub` 发布、`ws_client` 与 `ws_server` 的本地 connect / 心跳三处序列化点全部改用它；struct 字段声明序一行没动
+- **影响**：`[CQ:active]` + 显式 `message_id` 由「被动回复」变成真正的主动推送；事件帧的字节形态与 Go 一致（`sender` / `data` 等嵌套对象同样升序）。action 回执的序列化口径不变（实测已逐字节一致）
+- **测试**：`deferred::tests::active_marker_drops_explicit_message_id_in_private_compose`（`plan_send_private_msg` 带 `message_id` + 消息体含 `[CQ:active]` → compose 产物 `msg_id` / `event_id` / `message_reference` 全为空）与 `..._on_group_send`（群聊同构，走完整 `execute` 断言出站体）；`event_hub::tests::event_json_keys_are_sorted_like_go_maps`（真实群消息事件逐层抽 key 校验严格升序，递归到 `sender`）；`golden_inbound` 按解析后的 JSON 元素比较，键序变化不影响
+
 ### `cargo xtask build --all` 的 i686-pc-windows-gnu 稳定挂 dlltool（2026-11-21）
 
 矩阵里的两个 windows-gnu 目标此前走 plain `cargo build` + 注入 mingw gcc：`windows-sys` 这类带导入库的 crate 一旦需要重编，rustc 就用 MSYS2 的 `dlltool.exe` 造 `.lib`，于是稳定失败（两种风味各一次，exit code 101）：

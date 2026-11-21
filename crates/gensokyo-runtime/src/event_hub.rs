@@ -25,7 +25,7 @@ pub const DEFAULT_HUB_CAPACITY: usize = 1024;
 /// 一条已发布的事件：反序列化结果 + 发布时序列化好的 OneBot JSON。
 ///
 /// 所有订阅者共享同一个 `Arc<PublishedEvent>`，因此 JSON 只序列化一次；
-/// [`PublishedEvent::json`] 与 `serde_json::to_string(&event)` 逐字节相同。
+/// [`PublishedEvent::json`] 与 [`event_json`] 逐字节相同。
 #[derive(Debug)]
 pub struct PublishedEvent {
     event: Arc<Event>,
@@ -46,6 +46,21 @@ impl std::ops::Deref for PublishedEvent {
     fn deref(&self) -> &Event {
         &self.event
     }
+}
+
+/// 事件帧的 OneBot JSON：**所有对象按键升序**（Go 口径）。
+///
+/// Go 的事件帧走 `map[string]interface{}`（`Processor/Processor.go:294`
+/// `SendMessageToAllClients`），`encoding/json` 对 map 按键字母序输出；`serde_json::to_string`
+/// 默认走 struct 声明序。这里先 `to_value` 折成 `Map` 再输出——未开 `preserve_order` 时
+/// `Map` 就是 `BTreeMap`，天然升序，嵌套对象（`sender` / `data`）同样生效。
+///
+/// 只用于**事件**帧：action 回执的序列化口径已与 Go 逐字节一致，不要改成这条路径。
+///
+/// # Errors
+/// 事件含无法表示的数值（`f32` / `f64` 的 NaN、无穷）时返回序列化错误。
+pub(crate) fn event_json(event: &Event) -> serde_json::Result<String> {
+    serde_json::to_string(&serde_json::to_value(event)?)
 }
 
 /// 进程内事件总线；克隆只复制发送端句柄。
@@ -143,7 +158,7 @@ impl EventHub {
         if self.sender.receiver_count() == 0 {
             return 0;
         }
-        let json = match serde_json::to_string(&*event) {
+        let json = match event_json(&event) {
             Ok(json) => json,
             Err(err) => {
                 tracing::error!(error = %err, "事件序列化失败，丢弃该事件");
@@ -228,7 +243,7 @@ mod tests {
         let hub = EventHub::default();
         let mut first = hub.subscribe();
         let mut second = hub.subscribe();
-        let expected = serde_json::to_string(&event).expect("序列化失败");
+        let expected = super::event_json(&event).expect("序列化失败");
         assert_eq!(hub.publish(event), 2);
 
         let first = first.try_recv().expect("订阅者 A 应收到事件");
@@ -251,6 +266,78 @@ mod tests {
             "sender":{"user_id":12345,"nickname":"阿求","card":"","role":"member","sex":"unknown","age":0},
             "real_user_id":"A1B2C3","to_me":true}"#;
         assert_published_bytes_match(serde_json::from_str(raw).expect("真实事件应可反序列化"));
+    }
+
+    /// 从序列化文本里按出现顺序抽 key，逐层断言升序（递归到 `sender` / `data` 等嵌套对象）。
+    ///
+    /// `to_string` 输出不带空白，`"key":` 是最简判别形态；`{` / `}` 维护对象作用域栈，数组里
+    /// 的对象同样入栈。字符串值里的括号 / 冒号由 `in_string` 跳过。
+    fn assert_keys_ascending(json: &str) {
+        let mut scopes: Vec<Vec<String>> = Vec::new();
+        let mut pending: Option<String> = None;
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut start = 0;
+        for (index, byte) in json.as_bytes().iter().enumerate() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if *byte == b'\\' {
+                    escaped = true;
+                } else if *byte == b'"' {
+                    in_string = false;
+                    pending = Some(json[start..index].to_owned());
+                }
+                continue;
+            }
+            match *byte {
+                b'"' => {
+                    in_string = true;
+                    start = index + 1;
+                }
+                b':' => {
+                    if let Some(key) = pending.take()
+                        && let Some(keys) = scopes.last_mut()
+                    {
+                        keys.push(key);
+                    }
+                }
+                b'{' => scopes.push(Vec::new()),
+                b'}' => {
+                    let keys = scopes.pop().expect("花括号应成对");
+                    assert!(
+                        keys.windows(2).all(|pair| pair[0] < pair[1]),
+                        "对象 key 未按升序输出: {keys:?}"
+                    );
+                    pending = None;
+                }
+                _ => pending = None,
+            }
+        }
+        assert!(scopes.is_empty(), "花括号应成对");
+    }
+
+    /// 事件帧的 key 按升序（Go 的 `map[string]interface{}` 走 `encoding/json` 字母序），
+    /// 字段全同也要与非 struct 声明序的帧逐字节一致。
+    #[test]
+    fn event_json_keys_are_sorted_like_go_maps() {
+        let raw = r#"{"post_type":"message","message_type":"group","sub_type":"normal",
+            "time":1700000000,"self_id":10000,"message_id":8888,"user_id":12345,
+            "group_id":99999,"raw_message":"你好[CQ:at,qq=10000]",
+            "message":"你好[CQ:at,qq=10000]","font":0,
+            "sender":{"user_id":12345,"nickname":"阿求","card":"","role":"member","sex":"unknown","age":0},
+            "real_user_id":"A1B2C3","to_me":true}"#;
+        let event: Event = serde_json::from_str(raw).expect("真实事件应可反序列化");
+        let json = super::event_json(&event).expect("序列化失败");
+
+        assert_keys_ascending(&json);
+        // 声明序里 `message_type` 在 `message_id` 之前；升序输出必须反过来，才能证明走的
+        // 不是 struct 声明序。
+        assert!(
+            json.find("\"message_id\":").expect("应有 message_id")
+                < json.find("\"message_type\":").expect("应有 message_type"),
+            "升序输出里 message_id 应排在 message_type 之前: {json}"
+        );
     }
 
     /// notice 事件（`c2c_wakeup_resp` 这类只由本地构造的终局通知）。

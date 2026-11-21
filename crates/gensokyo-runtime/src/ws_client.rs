@@ -57,6 +57,7 @@ use tokio_tungstenite::{
 };
 
 use crate::dispatcher::dispatch_json;
+use crate::event_hub::event_json;
 use crate::inbound::Inbound;
 use crate::state::AppState;
 
@@ -364,7 +365,7 @@ async fn send_event<S>(
 where
     S: futures::Sink<Message> + Unpin,
 {
-    match serde_json::to_string(event) {
+    match event_json(event) {
         Ok(text) => send_payload(sink, &text, failed, disable_error_chan).await,
         Err(err) => {
             tracing::error!(error = %err, "事件序列化失败，跳过该事件");
@@ -928,7 +929,7 @@ mod tests {
     #[tokio::test]
     async fn write_failure_is_buffered_and_resent_after_heartbeat() {
         let event = heartbeat_event();
-        let expected = serde_json::to_string(&event).expect("序列化失败");
+        let expected = crate::event_hub::event_json(&event).expect("序列化失败");
         let mut sink = FakeSink {
             fail: true,
             ..FakeSink::default()
