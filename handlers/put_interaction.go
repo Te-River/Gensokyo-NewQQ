@@ -30,7 +30,7 @@ func HandlePutInteraction(client callapi.Client, api openapi.OpenAPI, apiv2 open
 	// 解析 ActionMessage 中的 Echo 字段获取 interactionID
 	interactionID, ok := message.Echo.(string)
 	if !ok {
-		return "", fmt.Errorf("echo is not a string")
+		return sendActionResult(client, message, "echo 必须为字符串(interaction_id)", sendParamRetCode)
 	}
 
 	// 检查字符串是否仅包含数字 将数字形式的interactionID转换为真实的形式
@@ -74,7 +74,7 @@ func HandlePutInteraction(client callapi.Client, api openapi.OpenAPI, apiv2 open
 		code = 5 // 仅管理员操作
 	default:
 		// 如果 PostType 不在预期范围内，可以设置一个默认值或返回错误
-		return "", fmt.Errorf("invalid post type: %s", message.PostType)
+		return sendActionResult(client, message, "无效的 post_type: "+message.PostType, sendParamRetCode)
 	}
 
 	// 构造请求体，包括 code
@@ -84,7 +84,7 @@ func HandlePutInteraction(client callapi.Client, api openapi.OpenAPI, apiv2 open
 	ctx := context.Background()
 	err := api.PutInteraction(ctx, interactionID, requestBody)
 	if err != nil {
-		return "", err
+		return sendActionResult(client, message, "处理互动失败: "+err.Error(), sendFailRetCode)
 	}
 
 	var response InteractionResponse
@@ -110,7 +110,7 @@ func HandlePutInteraction(client callapi.Client, api openapi.OpenAPI, apiv2 open
 	result, err := callapi.MarshalNoEscape(response)
 	if err != nil {
 		mylog.Printf("Error marshaling data: %v", err)
-		//todo 符合onebotv11 ws返回的错误码
+		// 已回执（上方 SendMessage）
 		return "", nil
 	}
 	return string(result), nil

@@ -39,10 +39,10 @@ type GroupString struct {
 }
 
 type GroupList struct {
-	Data    []Group `json:"data"`
-	Message string  `json:"message"`
-	RetCode int     `json:"retcode"`
-	Status  string  `json:"status"`
+	Data    []Group     `json:"data"`
+	Message string      `json:"message"`
+	RetCode int         `json:"retcode"`
+	Status  string      `json:"status"`
 	Echo    interface{} `json:"echo"`
 }
 
@@ -165,12 +165,14 @@ func GetGroupList(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.Open
 		result, err = callapi.MarshalNoEscape(groupList)
 		if err != nil {
 			mylog.Printf("Error marshaling data: %v", err)
+			// 已回执（上方 SendMessage）
 			return "", nil
 		}
 	} else {
 		result, err = callapi.MarshalNoEscape(groupListString)
 		if err != nil {
 			mylog.Printf("Error marshaling data: %v", err)
+			// 已回执（上方 SendMessage）
 			return "", nil
 		}
 	}

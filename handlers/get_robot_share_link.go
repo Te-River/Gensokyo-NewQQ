@@ -45,8 +45,7 @@ func GetRobotShareLink(client callapi.Client, api openapi.OpenAPI, apiv2 openapi
 	resultData, err := apiv2.GenerateURLLink(context.Background(), req)
 	if err != nil {
 		mylog.Printf("Error generating robot share link: %v", err)
-		// 如果出错，也可以选择发送一个 notice_type: "share_link_failed"
-		return "", nil // 返回空，不做处理
+		return sendActionResult(client, message, "生成分享链接失败: "+err.Error(), sendFailRetCode)
 	}
 
 	// 3. 【关键步骤】构建伪造的 Notice 事件

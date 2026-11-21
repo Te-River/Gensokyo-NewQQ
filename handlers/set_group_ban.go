@@ -20,11 +20,11 @@ func SetGroupBan(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenA
 	msgType, err := idmap.ReadConfigv2(groupID, "type")
 	if err != nil {
 		mylog.Printf("set_group_ban: 读取群类型失败: %v", err)
-		return "", nil
+		return sendActionResult(client, message, "无法读取群类型(群号未映射): "+err.Error(), sendParamRetCode)
 	}
 	if msgType != "group" {
 		mylog.Printf("set_group_ban: 仅支持群聊场景, 当前类型 %s", msgType)
-		return "", nil
+		return sendActionResult(client, message, "仅支持群聊场景, 当前类型 "+msgType, sendParamRetCode)
 	}
 
 	// 反查真实 OpenID（32 位原生 OpenID 直接使用）

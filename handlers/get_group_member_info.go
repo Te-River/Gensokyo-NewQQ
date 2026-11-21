@@ -88,7 +88,7 @@ func GetGroupMemberInfo(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 	result, err := ConvertMapToJSONString(responseJSON)
 	if err != nil {
 		mylog.Printf("Error marshaling data: %v", err)
-		//todo 符合onebotv11 ws返回的错误码
+		// 已回执（上方 SendMessage）
 		return "", nil
 	}
 	return string(result), nil

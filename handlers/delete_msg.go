@@ -25,7 +25,7 @@ func DeleteMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI
 	msgID, ok := message.Params.MessageID.(string)
 	if !ok || msgID == "" {
 		mylog.Printf("delete_msg: message_id 缺失或类型错误，跳过撤回: %#v", message.Params.MessageID)
-		return "", fmt.Errorf("delete_msg: message_id 缺失或类型错误")
+		return sendActionResult(client, message, "message_id 缺失或类型错误", sendParamRetCode)
 	}
 
 	// 不是stringob才需要转换
@@ -77,7 +77,7 @@ func DeleteMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI
 		UserID, err := idmap.RetrieveRowByIDv2(message.Params.UserID.(string))
 		if err != nil {
 			mylog.Printf("Error reading config: %v", err)
-			return "", nil
+			return sendActionResult(client, message, "无法反查用户 OpenID: "+err.Error(), sendParamRetCode)
 		}
 		message.Params.UserID = UserID
 		err = api.RetractC2CMessage(context.TODO(), message.Params.UserID.(string), message.Params.MessageID.(string), openapi.RetractMessageOptionHidetip)
@@ -105,7 +105,7 @@ func DeleteMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI
 	result, err := callapi.MarshalNoEscape(response)
 	if err != nil {
 		mylog.Printf("Error marshaling data: %v", err)
-		//todo 符合onebotv11 ws返回的错误码
+		// 已回执（上方 SendMessage）
 		return "", nil
 	}
 	return string(result), nil

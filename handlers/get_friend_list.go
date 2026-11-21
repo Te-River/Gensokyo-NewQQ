@@ -58,7 +58,7 @@ func HandleGetFriendList(client callapi.Client, api openapi.OpenAPI, apiv2 opena
 	result, err := callapi.MarshalNoEscape(output)
 	if err != nil {
 		mylog.Printf("Error marshaling data: %v", err)
-		//todo 符合onebotv11 ws返回的错误码
+		// 已回执（上方 SendMessage）
 		return "", nil
 	}
 

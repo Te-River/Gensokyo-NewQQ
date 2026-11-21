@@ -103,6 +103,17 @@ QQ 官方 2026-11-16 新增 `GET /v2/users/{user_openid}/info`，返回用户昵
 - **影响**：可发送路径行为不变；原先静默返回的分支现在都会下发一条 `{"status":"failed","retcode":1400|1500,"data":null,"echo":<原样>}`，HTTP 模式返回体同步带上 `data: null`
 - **测试**：`handlers/send_action_receipt_test.go` 覆盖「未映射 `user_id`」「未映射 `group_id`」两条路径——断言 mock client 至少收到一次 `SendMessage`（不静默无响应）、`retcode=1400`、`status=failed`、`echo` 原样、`data` 为 `null`；群聊用例额外断言未调用 `PostGroupMessage`
 
+### 查询类 action 未映射 id 时同样无回执（同一病根，一并收口）
+
+`get_group_member_list` 传入未映射的 `group_id` 时，`idmap.ReadConfigv2` 失败分支直接 `return "", nil`——与上一节发送类 action 同一病根：实测客户端 20 秒无响应后断开。对 `handlers/`（含子目录）的 `return "", nil` / `return "", <err>` 逐处普查后，其余未回执分支一并收口。
+
+- **修改**：`handlers/get_group_member_list.go` —— `group_id` 缺失、`ReadConfigv2` 失败（群号未映射）、私聊虚拟群场景、未知群类型四处改为 `sendActionResult` 回执（1400）；入口改为安全的类型断言，缺参不再 panic
+- **修改**：`handlers/get_avatar.go` —— `user_id` 反查失败此前仍回 `retcode 0` + 空 openid 拼出的无效头像 URL，改为 1400 失败回执
+- **修改**：`delete_msg`（`message_id` 缺失、`user_id` 反查失败）、`put_interaction`（`echo` 非字符串、`post_type` 非法、上游失败）、`get_robot_share_link`（上游失败 1500）、`set_group_ban` / `set_group_whole_ban`（群类型读取失败 / 非群聊场景）改走 `sendActionResult`
+- **修改**：`get_user_info` 反查失败口径由 1500 归一到 1400（参数 / id 反查失败），上游失败仍为 1500；历史 handler 的既有回执（如 `get_group_info` 的 `retcode 100`）按 `set_group_add_request.go` 常量注释保留旧口径
+- **已回执**：`get_status` / `get_login_info` / `get_online_clients` / `get_version_info` / `mark_msg_as_read` / `get_friend_list` / `get_group_info` / `get_group_list` / `get_group_member_info` / `get_group_member_list` / `delete_msg` / `put_interaction` 的序列化失败分支在 `SendMessage` 之后，保留并注明「已回执」
+- **测试**：`handlers/query_action_receipt_test.go` 覆盖未映射 `group_id` 的 `get_group_member_list`（1400）、未映射 `group_id` 的 `get_group_info`（失败回执 + `echo` 原样）、未映射 `user_id` 的 `get_avatar`（1400）
+
 ### action 回执不再转义 `&`，与 Rust 端逐字节对齐
 
 `get_user_info` 两侧 `data` 内容一致，但 Go 回执把 `&` 转义成 `\u0026`（`"avatar":"https://thirdqq.qlogo.cn/bqqthird?key=…\u0026kti=…\u0026s=640"`），Rust 端原样输出 `&`——凡是带签名的 URL（头像/图床/短链）回执都逐字节不同：

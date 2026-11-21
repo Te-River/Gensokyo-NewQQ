@@ -83,6 +83,7 @@ func HandleGetGroupInfo(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 	result, err := callapi.MarshalNoEscape(groupInfo)
 	if err != nil {
 		mylog.Printf("get_group_info: 序列化响应失败: %v", err)
+		// 已回执（上方 SendMessage）
 		return "", nil
 	}
 	return string(result), nil

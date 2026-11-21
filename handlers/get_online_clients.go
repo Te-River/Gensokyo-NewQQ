@@ -51,7 +51,7 @@ func GetOnlineClients(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.
 	result, err := callapi.MarshalNoEscape(response)
 	if err != nil {
 		mylog.Printf("Error marshaling data: %v", err)
-		//todo 符合onebotv11 ws返回的错误码
+		// 已回执（上方 SendMessage）
 		return "", nil
 	}
 	return string(result), nil

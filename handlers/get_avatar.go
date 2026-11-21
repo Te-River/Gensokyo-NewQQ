@@ -52,6 +52,10 @@ func GetAvatar(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI
 	}
 
 	avatarurl, _ := GenerateAvatarURLV2(originalUserID)
+	if err != nil || originalUserID == "" {
+		mylog.Printf("get_avatar: 无法反查 user_openid: %v", err)
+		return sendActionResult(client, message, "无法反查用户 OpenID", sendParamRetCode)
+	}
 
 	userid64, _ := strconv.ParseInt(message.Params.UserID.(string), 10, 64)
 
@@ -76,7 +80,7 @@ func GetAvatar(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI
 	result, err := callapi.MarshalNoEscape(response)
 	if err != nil {
 		mylog.Printf("Error marshaling data: %v", err)
-		//todo 符合onebotv11 ws返回的错误码
+		// 已回执（上方 SendMessage）
 		return "", nil
 	}
 	return string(result), nil

@@ -42,7 +42,7 @@ func GetUserInfo(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenA
 	userOpenID, err := resolveUserOpenID(userID)
 	if err != nil {
 		mylog.Printf("get_user_info: 反查 user_openid 失败: %v", err)
-		return sendUserInfoResult(client, message, nil, err.Error(), 1500)
+		return sendUserInfoResult(client, message, nil, err.Error(), sendParamRetCode)
 	}
 
 	info, err := apiv2.UserInfo(context.TODO(), userOpenID)

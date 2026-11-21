@@ -48,15 +48,20 @@ func init() {
 
 func GetGroupMemberList(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, message callapi.ActionMessage) (string, error) {
 
-	msgType, err := idmap.ReadConfigv2(message.Params.GroupID.(string), "type")
+	groupIDStr, _ := message.Params.GroupID.(string)
+	if groupIDStr == "" {
+		mylog.Printf("get_group_member_list: group_id 参数缺失")
+		return sendActionResult(client, message, "group_id 参数缺失", sendParamRetCode)
+	}
+
+	msgType, err := idmap.ReadConfigv2(groupIDStr, "type")
 	if err != nil {
 		mylog.Printf("Error reading config: %v", err)
-		return "", nil
+		return sendActionResult(client, message, "无法读取群类型(群号未映射): "+err.Error(), sendParamRetCode)
 	}
 
 	switch msgType {
 	case "group":
-		groupIDStr := message.Params.GroupID.(string)
 		var members []MemberList
 
 		// 反查真实群 OpenID，调用官方成员列表分页接口
@@ -80,17 +85,17 @@ func GetGroupMemberList(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		result, err := ConvertMapToJSONString(responseJSON)
 		if err != nil {
 			mylog.Printf("Error marshaling data: %v", err)
-			//todo 符合onebotv11 ws返回的错误码
+			// 已回执（上方 SendMessage）
 			return "", nil
 		}
 		return string(result), nil
 	case "private":
 		mylog.Printf("getGroupMemberList(private): 目前暂未适配私聊虚拟群场景获取虚拟群列表能力")
-		return "", nil
+		return sendActionResult(client, message, "暂未适配私聊虚拟群场景获取群成员列表", sendParamRetCode)
 	default:
 		mylog.Printf("Unknown msgType: %s", msgType)
+		return sendActionResult(client, message, "未知的群类型: "+msgType, sendParamRetCode)
 	}
-	return "", nil
 }
 
 // fetchMembersByAPI 通过官方 v2 成员列表接口游标分页拉取全量成员。
