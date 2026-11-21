@@ -14,13 +14,13 @@
 //! | [`system`] | `set_restart`、`clean_cache`、`get_cookies`、`get_csrf_token`、`get_credentials` | 运行控制 / 凭证：前两个只记审计日志并回 `{"code": 0}`（不重启、不清缓存），后三个回空凭证。 |
 //! | [`unsupported`] | `get_group_at_all_remain`、`set_group_name`、`set_group_admin`、`set_group_special_title`、`set_group_remark`、`set_qq_profile`、`get_qq_profile`、`get_group_system_msg`、`get_online_clients` | 无上游端点的 action：参数照 OneBot 契约校验后回 `1500`；`get_online_clients` 例外，逐字段照抄 Go 的本地回执 `{"clients": [], "tiny_id": 0}`。 |
 //! | [`panels`] | `create_panel`、`set_panel`、`delete_panel`、`get_panel`、`get_panel_list`、`set_panel_target`、`set_custom_menu`、`get_custom_menu`、`join_approval_strategy_*`（6 个） | 面板 / 自定义菜单 / 自动审批策略：全部走官方端点（`/v2/panels*`、`/v2/menu`、`/v2/groups/join_approval_strategy*`），参数错误 `1400` / 上游错误 `1500`。 |
-//! | [`interaction`] | `get_avatar`、`mark_msg_as_read`、`.handle_quick_operation`（+ `_async`）、`get_robot_share_link`、`put_interaction`、`delete_group_msg`、`set_group_add_request`、`get_group_member_blacklist`、`set_group_member_blacklist`、`send_group_forward_msg`、`send_private_forward_msg`、`send_group_msg_raw`、`send_private_msg_sse`、`send_private_msg_wakeup`、`get_group_honor_info`、`set_group_anonymous_ban` | 三项本地实现（头像 URL / 已读空回执 / 快速操作转 deferred 计划）；分享链接 / 互动 / 撤回 / 入群审批 / 黑名单走官方端点；合并转发（逐条重发）/ 原始直发 / SSE / `IsWakeup` 产出 deferred 发送计划，由 runtime 发送链接管执行；群荣誉 / 匿名禁言回 `1500`。 |
+//! | [`interaction`] | `get_avatar`、`get_user_info`、`mark_msg_as_read`、`.handle_quick_operation`（+ `_async`）、`get_robot_share_link`、`put_interaction`、`delete_group_msg`、`set_group_add_request`、`get_group_member_blacklist`、`set_group_member_blacklist`、`send_group_forward_msg`、`send_private_forward_msg`、`send_group_msg_raw`、`send_private_msg_sse`、`send_private_msg_wakeup`、`get_group_honor_info`、`set_group_anonymous_ban` | 三项本地实现（头像 URL / 已读空回执 / 快速操作转 deferred 计划）；分享链接 / 互动 / 撤回 / 入群审批 / 黑名单 / 用户资料走官方端点；合并转发（逐条重发）/ 原始直发 / SSE / `IsWakeup` 产出 deferred 发送计划，由 runtime 发送链接管执行；群荣誉 / 匿名禁言回 `1500`。 |
 //! | [`capability`] | `can_send_image`、`can_send_record` | 纯本地判断，固定 `{"yes": true}`。 |
 //!
 //! # KNOWN_ACTIONS 覆盖率
 //!
-//! [`gensokyo_protocol::registry::KNOWN_ACTIONS`] 是 Go `callapi.RegisterHandler` 的全集（56 项）。
-//! 本 crate 覆盖其中 **53 项**：50 个注册名（[`IMPLEMENTED_ACTIONS`] 与 KNOWN_ACTIONS 的交集）
+//! [`gensokyo_protocol::registry::KNOWN_ACTIONS`] 是 Go `callapi.RegisterHandler` 的全集（57 项）。
+//! 本 crate 覆盖其中 **54 项**：51 个注册名（[`IMPLEMENTED_ACTIONS`] 与 KNOWN_ACTIONS 的交集）
 //! 加 3 个 Go 别名（`send_to_group` / `get_group_ban` / `get_group_whole_ban`，由
 //! [`gensokyo_protocol::registry::ACTION_ALIASES`] 指向对应 handler）。
 //!
@@ -37,7 +37,7 @@
 //!
 //! # deferred 执行链路
 //!
-//! 1. [`register::register_all`] 把 75 个 handler 装进 `gensokyo_protocol::Registry`（runtime 装配，
+//! 1. [`register::register_all`] 把 76 个 handler 装进 `gensokyo_protocol::Registry`（runtime 装配，
 //!    见 `gensokyo-runtime::AppState::with_actions`）。
 //! 2. 客户端调 `send_group_msg` / `send_private_msg` / `send_msg`（含 `*_async`）：handler 只做参数
 //!    解析，`data` = [`send::SendRequest`] JSON + `"deferred": true`，**不触达上游**。
@@ -102,7 +102,7 @@ pub mod messages;
 /// 面板 / 自定义菜单 / 自动审批策略 action（Go 的官方 v2 管理扩展）。
 pub mod panels;
 pub mod qqapi;
-/// 统一注册入口：75 个 handler + Go 兼容别名。
+/// 统一注册入口：76 个 handler + Go 兼容别名。
 pub mod register;
 pub mod send;
 /// 运行控制与凭证 action（重启 / 清缓存 / cookies / csrf）。
@@ -213,6 +213,7 @@ pub const IMPLEMENTED_ACTIONS: &[&str] = &[
     "get_record",
     "get_robot_share_link",
     "get_stranger_info",
+    "get_user_info",
     "join_approval_strategy_create",
     "join_approval_strategy_delete",
     "join_approval_strategy_execute",
@@ -391,11 +392,11 @@ mod tests {
         };
         use crate::interaction::{
             DeleteGroupMsgHandler, GetAvatarHandler, GetGroupHonorInfoHandler,
-            GetGroupMemberBlacklistHandler, GetRobotShareLinkHandler, MarkMsgAsReadHandler,
-            PutInteractionHandler, QuickOperationAsyncHandler, QuickOperationHandler,
-            SendGroupForwardMsgHandler, SendGroupMsgRawHandler, SendPrivateForwardMsgHandler,
-            SendPrivateMsgSseHandler, SendPrivateMsgWakeupHandler, SetGroupAddRequestHandler,
-            SetGroupAnonymousBanHandler, SetGroupMemberBlacklistHandler,
+            GetGroupMemberBlacklistHandler, GetRobotShareLinkHandler, GetUserInfoHandler,
+            MarkMsgAsReadHandler, PutInteractionHandler, QuickOperationAsyncHandler,
+            QuickOperationHandler, SendGroupForwardMsgHandler, SendGroupMsgRawHandler,
+            SendPrivateForwardMsgHandler, SendPrivateMsgSseHandler, SendPrivateMsgWakeupHandler,
+            SetGroupAddRequestHandler, SetGroupAnonymousBanHandler, SetGroupMemberBlacklistHandler,
         };
         use crate::media::{GetImageHandler, GetRecordHandler};
         use crate::media_image::{
@@ -460,6 +461,7 @@ mod tests {
             Arc::new(GetRecordHandler::new()),
             Arc::new(GetRobotShareLinkHandler::new(context.clone())),
             Arc::new(GetStrangerInfoHandler::new(context.clone())),
+            Arc::new(GetUserInfoHandler::new(context.clone())),
             Arc::new(JoinApprovalStrategyCreateHandler::new(context.clone())),
             Arc::new(JoinApprovalStrategyDeleteHandler::new(context.clone())),
             Arc::new(JoinApprovalStrategyExecuteHandler::new(context.clone())),

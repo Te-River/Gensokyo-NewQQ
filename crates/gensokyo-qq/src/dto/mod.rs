@@ -38,4 +38,4 @@ pub use panel::{
     PanelItem, PanelList, PanelRecord, PanelRecordDetail, PanelTargetRequest, PutMenuRequest,
     SubMenuItem, UpdatePanelRequest, VersionResponse,
 };
-pub use user::BotUser;
+pub use user::{BotUser, UserInfo};

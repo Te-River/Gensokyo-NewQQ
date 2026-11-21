@@ -1,6 +1,6 @@
-//! 机器人身份结构（`botgo/dto/user.go` 的最小子集）。
+//! 用户结构（`botgo/dto/user.go` 的最小子集 + 官方 2026-11-16 的用户资料）。
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// `GET /users/@me` 响应：只保留机器人自身 ID。
 ///
@@ -11,4 +11,21 @@ use serde::Deserialize;
 pub struct BotUser {
     /// 机器人真实 ID（AppID→BotID 文本替换的目标）。
     pub id: String,
+}
+
+/// `GET /v2/users/{user_openid}/info` 响应（官方 2026-11-16 新增）。
+///
+/// 三个字段都可能缺省：`allow_proactive_msg` 缺省时按 `false`（Go 的零值），
+/// `username` / `avatar` 缺省按空串。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserInfo {
+    /// 用户昵称。
+    #[serde(default)]
+    pub username: String,
+    /// 是否允许机器人主动发消息。
+    #[serde(default)]
+    pub allow_proactive_msg: bool,
+    /// 头像直链。
+    #[serde(default)]
+    pub avatar: String,
 }

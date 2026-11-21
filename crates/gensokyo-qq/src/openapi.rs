@@ -19,8 +19,8 @@ use crate::dto::{
     JoinApprovalStrategyList, MediaResponse, MemberBlacklistList, MemberBlacklistRequest,
     MemberBlacklistResponse, MenuResponse, MessageResponse, MessageToCreate, PanelList,
     PanelRecordDetail, PanelTargetRequest, PutMenuRequest, UpdateJoinApprovalStrategyRequest,
-    UpdateJoinApprovalStrategyResponse, UpdatePanelRequest, VersionResponse, WhitelistUsersRequest,
-    WhitelistUsersResponse,
+    UpdateJoinApprovalStrategyResponse, UpdatePanelRequest, UserInfo, VersionResponse,
+    WhitelistUsersRequest, WhitelistUsersResponse,
 };
 use crate::error::{ApiError, Error, Result};
 use crate::http::{HttpMethod, HttpRequest, HttpResponse, HttpTransport, encode_path_segment};
@@ -116,6 +116,12 @@ impl<T: HttpTransport> OpenApiClient<T> {
     /// 同一个基址与鉴权头，不另开客户端。
     pub async fn me(&self) -> Result<BotUser> {
         self.get_json("/users/@me").await
+    }
+
+    /// 用户资料（`GET /v2/users/{user_openid}/info`，官方 2026-11-16 新增）。
+    pub async fn user_info(&self, user_openid: &str) -> Result<UserInfo> {
+        let path = format!("/v2/users/{}/info", encode_path_segment(user_openid));
+        self.get_json(&path).await
     }
 
     /// 发送群消息（`POST /v2/groups/{group_openid}/messages`）。

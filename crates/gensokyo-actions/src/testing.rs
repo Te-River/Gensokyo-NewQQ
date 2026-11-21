@@ -24,8 +24,8 @@ use gensokyo_qq::dto::{
     JoinRequestList, MemberBlacklistList, MemberBlacklistRequest, MemberBlacklistResponse,
     MenuResponse, MessageResponse, MessageToCreate, PanelList, PanelRecordDetail,
     PanelTargetRequest, PutMenuRequest, UpdateJoinApprovalStrategyRequest,
-    UpdateJoinApprovalStrategyResponse, UpdatePanelRequest, VersionResponse, WhitelistUsersRequest,
-    WhitelistUsersResponse,
+    UpdateJoinApprovalStrategyResponse, UpdatePanelRequest, UserInfo, VersionResponse,
+    WhitelistUsersRequest, WhitelistUsersResponse,
 };
 use gensokyo_storage::IdMapStore;
 
@@ -94,6 +94,8 @@ pub(crate) enum Call {
     Interaction(String, u32),
     /// `generate_url_link(request)`
     ShareLink(GenerateUrlLinkRequest),
+    /// `get_user_info(user_openid)`
+    UserInfo(String),
 }
 
 /// 记录入参、按槽位注入结果的 `QqApi` 替身。
@@ -133,6 +135,7 @@ pub(crate) struct FakeQqApi {
     pub(crate) join_approval: Mutex<Option<Result<()>>>,
     pub(crate) interaction: Mutex<Option<Result<()>>>,
     pub(crate) share_link: Mutex<Option<Result<GenerateUrlLink>>>,
+    pub(crate) user_info: Mutex<Option<Result<UserInfo>>>,
 }
 
 impl FakeQqApi {
@@ -496,6 +499,14 @@ impl QqApi for FakeQqApi {
         Box::pin(async move {
             self.record(Call::ShareLink(request));
             take(&self.share_link)
+        })
+    }
+
+    fn get_user_info(&self, user_openid: &str) -> QqFuture<'_, UserInfo> {
+        let user_openid = user_openid.to_owned();
+        Box::pin(async move {
+            self.record(Call::UserInfo(user_openid));
+            take(&self.user_info)
         })
     }
 }

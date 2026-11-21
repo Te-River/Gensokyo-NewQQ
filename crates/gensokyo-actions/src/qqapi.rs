@@ -77,8 +77,8 @@ use gensokyo_qq::dto::{
     MediaResponse, MemberBlacklistList, MemberBlacklistRequest, MemberBlacklistResponse,
     MemberMuteState, MenuResponse, MessageResponse, MessageToCreate, PanelList, PanelRecordDetail,
     PanelTargetRequest, PutMenuRequest, RestrictChatSetting, UpdateJoinApprovalStrategyRequest,
-    UpdateJoinApprovalStrategyResponse, UpdatePanelRequest, VersionResponse, WhitelistUsersRequest,
-    WhitelistUsersResponse,
+    UpdateJoinApprovalStrategyResponse, UpdatePanelRequest, UserInfo, VersionResponse,
+    WhitelistUsersRequest, WhitelistUsersResponse,
 };
 use gensokyo_qq::{
     BotInGroupState, GroupInfo, GroupMember, GroupMemberList, HttpTransport, JoinRequestList,
@@ -463,6 +463,11 @@ pub trait QqApi: Send + Sync + fmt::Debug {
         _request: &GenerateUrlLinkRequest,
     ) -> QqFuture<'_, GenerateUrlLink> {
         Box::pin(async { unsupported("资料页分享链接") })
+    }
+
+    /// 用户资料（`GET /v2/users/{openid}/info`，官方 2026-11-16 新增）。
+    fn get_user_info(&self, _user_openid: &str) -> QqFuture<'_, UserInfo> {
+        Box::pin(async { unsupported("用户资料") })
     }
 
     /// 批量移出群成员（单批 ≤ 20，`add_blacklist` 同时拉黑）。
@@ -995,6 +1000,15 @@ impl<T: HttpTransport> QqApi for OpenApiClient<T> {
         let request = request.clone();
         Box::pin(async move {
             OpenApiClient::generate_url_link(self, &request)
+                .await
+                .map_err(qq_error)
+        })
+    }
+
+    fn get_user_info(&self, user_openid: &str) -> QqFuture<'_, UserInfo> {
+        let user_openid = user_openid.to_owned();
+        Box::pin(async move {
+            OpenApiClient::user_info(self, &user_openid)
                 .await
                 .map_err(qq_error)
         })

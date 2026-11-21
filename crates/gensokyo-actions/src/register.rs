@@ -3,7 +3,7 @@
 //! 对应 Go 的 `handlers/*.go` 在 `init()` 里逐个 `callapi.RegisterHandler`：Rust 侧没有文件
 //! 自注册，改由 runtime 在装配 [`crate::qqapi::ActionContext`] 后调用 [`register_all`]。
 //!
-//! 覆盖范围 = [`crate::IMPLEMENTED_ACTIONS`]（75 个注册名）+ [`ACTION_ALIASES`] 里指向本 crate
+//! 覆盖范围 = [`crate::IMPLEMENTED_ACTIONS`]（76 个注册名）+ [`ACTION_ALIASES`] 里指向本 crate
 //! 的 3 个 Go 兼容别名（`send_to_group` / `get_group_ban` / `get_group_whole_ban`）。
 //! [`gensokyo_protocol::registry::KNOWN_ACTIONS`] 的剩余 3 项（`get_login_info` / `get_status` /
 //! `get_version_info`）由 runtime 内置注册，见 [`crate::BUILTIN_ACTIONS`]——重复注册会让后装配方
@@ -33,8 +33,8 @@ use crate::handler::{
 };
 use crate::interaction::{
     DeleteGroupMsgHandler, GetAvatarHandler, GetGroupHonorInfoHandler,
-    GetGroupMemberBlacklistHandler, GetRobotShareLinkHandler, MarkMsgAsReadHandler,
-    PutInteractionHandler, QuickOperationAsyncHandler, QuickOperationHandler,
+    GetGroupMemberBlacklistHandler, GetRobotShareLinkHandler, GetUserInfoHandler,
+    MarkMsgAsReadHandler, PutInteractionHandler, QuickOperationAsyncHandler, QuickOperationHandler,
     SendGroupForwardMsgHandler, SendGroupMsgRawHandler, SendPrivateForwardMsgHandler,
     SendPrivateMsgSseHandler, SendPrivateMsgWakeupHandler, SetGroupAddRequestHandler,
     SetGroupAnonymousBanHandler, SetGroupMemberBlacklistHandler,
@@ -63,14 +63,14 @@ use crate::unsupported::{
 };
 use crate::users::{GetFriendListHandler, GetStrangerInfoHandler, SendLikeHandler};
 
-/// 注册本 crate 的全部 action（75 个注册名 + Go 兼容别名）。
+/// 注册本 crate 的全部 action（76 个注册名 + Go 兼容别名）。
 ///
 /// 重复注册时后注册者胜出（[`Registry::register`] 的既有语义）；别名目标缺失会 panic——
 /// 别名表是编译期常量，装配期炸出来比线上 `1404` 更容易定位。
 pub fn register_all(registry: &mut Registry, context: Arc<ActionContext>) {
     // planner 是纯函数、拿不到 context：出站敏感词开关的配置句柄在这里登记一次。
     crate::send::use_change_word_config(context.config_arc());
-    let entries: [(&'static str, Arc<dyn Handler>); 75] = [
+    let entries: [(&'static str, Arc<dyn Handler>); 76] = [
         (
             ".handle_quick_operation",
             Arc::new(QuickOperationHandler::new()),
@@ -191,6 +191,10 @@ pub fn register_all(registry: &mut Registry, context: Arc<ActionContext>) {
         (
             "get_stranger_info",
             Arc::new(GetStrangerInfoHandler::new(Arc::clone(&context))),
+        ),
+        (
+            "get_user_info",
+            Arc::new(GetUserInfoHandler::new(Arc::clone(&context))),
         ),
         (
             "join_approval_strategy_create",
@@ -383,7 +387,7 @@ mod tests {
     /// `KNOWN_ACTIONS` 是 Go `RegisterHandler` 的全集：除 runtime 内置的 3 项外必须全部注册。
     #[test]
     fn known_actions_are_registered_here_or_by_the_runtime() {
-        assert_eq!(KNOWN_ACTIONS.len(), 56, "KNOWN_ACTIONS 是 Go 注册全集");
+        assert_eq!(KNOWN_ACTIONS.len(), 57, "KNOWN_ACTIONS 是 Go 注册全集");
         let registry = registry();
         assert_eq!(
             registry.missing(KNOWN_ACTIONS),

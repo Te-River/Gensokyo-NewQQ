@@ -188,6 +188,25 @@ Go 在 `global_group_msg_rre_to_message` / `global_c2c_msg_switch_to_message` / 
 - **影响**：`white_prefix_mode` 默认 `false`，未启用时行为零变化
 - **测试**：`white_prefix_enabled_drops_unmatched_group_message`、`white_prefix_enabled_keeps_matching_group_message`、`white_prefix_mode_off_keeps_group_message`、`white_enable_scope_off_keeps_group_message`、`white_prefix_c2c_scope_uses_whitelist`
 
+### 新增 `get_user_info` action（官方 2026-11-16 用户资料接口）
+
+官方新增 `GET /v2/users/{user_openid}/info`（返回昵称 / 是否允许主动私信 / 头像），Go 与 Rust 同轮新增同名 action，两侧契约逐字一致：
+
+- **修改**：`crates/gensokyo-qq/src/openapi.rs`（`OpenApiClient::user_info`）、`dto/user.rs`（`UserInfo`）、`crates/gensokyo-actions/src/qqapi.rs`（`QqApi::get_user_info`）、`interaction.rs`（`GetUserInfoHandler` + `UserInfoData`）、`register.rs` / `lib.rs` / `gensokyo-protocol`（注册名 `get_user_info`）
+- **入参**：`{"user_id": <string|number>}`——虚拟号与 32 位 openid 都可用，与 `get_avatar` 同一套 idmap 反查口径；缺失 / 不可解析回 `1400`
+- **成功回执**：`{"retcode":0,"status":"ok","data":{"user_id":"<原样回显>","username":"…","allow_proactive_msg":true,"avatar":"https://…"},"message":""}`
+- **失败回执**：`{"retcode":1500,"status":"failed","data":null,"message":"<上游错误>"}`
+- **测试**：`user_info_echoes_request_id_and_maps_three_fields`、`user_info_maps_bad_params_to_1400_and_upstream_errors_to_1500`、`user_info_reads_the_users_info_endpoint`（断言 `GET /v2/users/{openid}/info` 的 URL / 方法 / 三字段解析）
+
+### 群事件透传 `union_group_openid`（官方 2026-11-16）
+
+2026-11-16 起群相关事件新增 `union_group_openid`（跨应用群标识），Go 与 Rust 同轮在上报 JSON 里原样透传：
+
+- **修改**：`crates/gensokyo-runtime/src/inbound.rs` 的 `QqMessage` / `QqGroupOp` / `QqGroupMember` / `QqJoinRequest` 各加 `union_group_openid: Option<String>`，由 `insert_union_group_openid` 写入事件 `extra`
+- **覆盖事件**：`GROUP_MESSAGE_CREATE`、`GROUP_AT_MESSAGE_CREATE`、`GROUP_ADD_ROBOT`、`GROUP_DEL_ROBOT`、`GROUP_MEMBER_ADD`、`GROUP_MEMBER_REMOVE`、`GROUP_JOIN_REQUEST`
+- **影响**：只在非空时出现（缺失 / 空串不输出该键）；仅作为新增字段透传，**不改写** `group_id` 或任何现有字段；不带该字段的旧事件上报与改动前逐字节一致
+- **测试**：`group_events_pass_union_group_openid_through`（七类事件逐条断言 + 缺失时不出现 + `group_id` 不变）
+
 ---
 
 ## 🐛 修复

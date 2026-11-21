@@ -163,6 +163,9 @@ struct QqMessage {
     id: String,
     #[serde(default)]
     group_id: String,
+    /// 跨应用群标识（官方 2026-11-16 起下发），只透传不上报改写。
+    #[serde(default)]
+    union_group_openid: Option<String>,
     #[serde(default)]
     content: String,
     #[serde(default)]
@@ -277,6 +280,9 @@ struct QqGroupOp {
     event_id: String,
     #[serde(default)]
     group_openid: String,
+    /// 跨应用群标识（官方 2026-11-16 起下发）。
+    #[serde(default)]
+    union_group_openid: Option<String>,
     #[serde(default)]
     op_member_openid: String,
     #[serde(default)]
@@ -314,6 +320,9 @@ struct QqGroupMember {
     event_id: String,
     #[serde(default)]
     group_openid: String,
+    /// 跨应用群标识（官方 2026-11-16 起下发）。
+    #[serde(default)]
+    union_group_openid: Option<String>,
     #[serde(default)]
     member_openid: String,
     #[serde(default)]
@@ -327,6 +336,9 @@ struct QqJoinRequest {
     join_request_id: String,
     #[serde(default)]
     group_openid: String,
+    /// 跨应用群标识（官方 2026-11-16 起下发）。
+    #[serde(default)]
+    union_group_openid: Option<String>,
     #[serde(default)]
     member_openid: String,
     #[serde(default)]
@@ -396,6 +408,17 @@ impl DerivedIds {
             group_id: Ob11Id::Str(group_raw.unwrap_or_default().to_owned()),
             message_id: Ob11Id::Str(message_raw.to_owned()),
         }
+    }
+}
+
+/// 2026-11-16 起群事件新增的 `union_group_openid`（跨应用群标识）：非空才透传，
+/// 不上报时字段整个不出现（不改写 `group_id`）。
+fn insert_union_group_openid(extra: &mut Extra, union_group_openid: Option<&str>) {
+    if let Some(id) = union_group_openid.filter(|id| !id.is_empty()) {
+        extra.insert(
+            "union_group_openid".to_owned(),
+            Value::String(id.to_owned()),
+        );
     }
 }
 
@@ -1037,6 +1060,7 @@ impl Inbound {
         if flavor == GroupFlavor::Full {
             extra.insert("is_full_group_message".to_owned(), Value::Bool(true));
         }
+        insert_union_group_openid(&mut extra, payload.union_group_openid.as_deref());
         // Go `OnebotGroupMessageS` 的 `platform` 非 omitempty：string 形态恒上报；
         // 数字形态的 `OnebotGroupMessage` 根本没有该字段。`union_id` 打开时 Go 报 `unionqq`
         // （`ProcessGroupMessage.go:58-64`）。
@@ -1274,7 +1298,9 @@ impl Inbound {
             }
         }
         let user_id = self.vuid(&payload.op_member_openid);
-        let extra = self.enhanced_extra(settings, &payload.op_member_openid, &payload.group_openid);
+        let mut extra =
+            self.enhanced_extra(settings, &payload.op_member_openid, &payload.group_openid);
+        insert_union_group_openid(&mut extra, payload.union_group_openid.as_deref());
 
         // 对齐 Go `ProcessGroupAddBot`：先 request（方便客户端审批），再 notice。
         let request = Event::Request(RequestEvent {
@@ -1318,7 +1344,9 @@ impl Inbound {
         sub_type: Option<&str>,
     ) -> Result<Vec<Event>, serde_json::Error> {
         let payload = QqGroupOp::deserialize(data)?;
-        let extra = self.enhanced_extra(settings, &payload.op_member_openid, &payload.group_openid);
+        let mut extra =
+            self.enhanced_extra(settings, &payload.op_member_openid, &payload.group_openid);
+        insert_union_group_openid(&mut extra, payload.union_group_openid.as_deref());
         let group_id = self.vuid(&payload.group_openid);
         self.register_group(&group_id);
         Ok(vec![Event::Notice(NoticeEvent {
@@ -1676,6 +1704,7 @@ impl Inbound {
                 Value::String(payload.group_openid.clone()),
             );
         }
+        insert_union_group_openid(&mut extra, payload.union_group_openid.as_deref());
 
         // CQ 码描述与 Go 一致（数字形态 = 虚拟 ID；字符串形态退化为原始 OpenID）。
         let (notice_type, sub_type, cq_type) = match flavor {
@@ -1748,6 +1777,7 @@ impl Inbound {
                 Value::String(payload.group_openid.clone()),
             );
         }
+        insert_union_group_openid(&mut extra, payload.union_group_openid.as_deref());
         if !payload.username.is_empty() {
             extra.insert("username".to_owned(), Value::String(payload.username));
         }
@@ -3792,6 +3822,84 @@ mod tests {
             .convert("GROUP_AT_MESSAGE_CREATE", Some(&group_at_payload()), None)
             .expect("群消息应可转换");
         assert_eq!(events.len(), 1);
+    }
+
+    /// 2026-11-16 起群事件新增 `union_group_openid`：非空时透传到上报 JSON，
+    /// 缺失时该字段整个不出现（不改写 `group_id`）。
+    #[test]
+    fn group_events_pass_union_group_openid_through() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nsettings: {}\n").expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let inbound = Inbound::new(manager, None);
+
+        let payloads = [
+            (
+                "GROUP_MESSAGE_CREATE",
+                json!({"id": "m-1", "group_id": "g-1", "content": "hi",
+                       "author": {"id": "u-1"}, "union_group_openid": "ug-1"}),
+            ),
+            (
+                "GROUP_AT_MESSAGE_CREATE",
+                json!({"id": "m-2", "group_id": "g-1", "content": "<@u-2> hi",
+                       "author": {"id": "u-2"}, "union_group_openid": "ug-1"}),
+            ),
+            (
+                "GROUP_ADD_ROBOT",
+                json!({"event_id": "e-1", "group_openid": "g-1",
+                       "op_member_openid": "u-3", "union_group_openid": "ug-1"}),
+            ),
+            (
+                "GROUP_DEL_ROBOT",
+                json!({"event_id": "e-2", "group_openid": "g-1",
+                       "op_member_openid": "u-3", "union_group_openid": "ug-1"}),
+            ),
+            (
+                "GROUP_MEMBER_ADD",
+                json!({"event_id": "e-3", "group_openid": "g-1",
+                       "member_openid": "u-4", "union_group_openid": "ug-1"}),
+            ),
+            (
+                "GROUP_MEMBER_REMOVE",
+                json!({"event_id": "e-4", "group_openid": "g-1",
+                       "member_openid": "u-4", "union_group_openid": "ug-1"}),
+            ),
+            (
+                "GROUP_JOIN_REQUEST",
+                json!({"join_request_id": "r-1", "group_openid": "g-1",
+                       "member_openid": "u-5", "union_group_openid": "ug-1"}),
+            ),
+        ];
+        for (kind, payload) in payloads {
+            let events = inbound
+                .convert(kind, Some(&payload), None)
+                .expect("群事件应可转换");
+            assert!(!events.is_empty(), "{kind} 应产出事件");
+            for event in &events {
+                let reported = serde_json::to_value(event).expect("事件应可序列化");
+                assert_eq!(
+                    reported["union_group_openid"],
+                    json!("ug-1"),
+                    "{kind} 应透传 union_group_openid"
+                );
+            }
+        }
+
+        // 不带该字段：上报里整个字段不出现；`group_id` 仍是虚拟群号，不被它顶替。
+        let events = inbound
+            .convert(
+                "GROUP_MEMBER_ADD",
+                Some(&json!({"event_id": "e-5", "group_openid": "g-1", "member_openid": "u-6"})),
+                None,
+            )
+            .expect("群成员事件应可转换");
+        let reported = serde_json::to_value(&events[0]).expect("事件应可序列化");
+        assert!(
+            reported.get("union_group_openid").is_none(),
+            "缺失时不应出现 union_group_openid"
+        );
+        assert_eq!(reported["group_id"], json!("g-1"));
     }
 
     /// 只含指定 `settings` 的临时配置 → `(临时目录, Inbound)`；目录需随返回值存活。

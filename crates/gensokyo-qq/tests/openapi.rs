@@ -79,6 +79,26 @@ async fn me_reads_bot_id_from_users_me() {
     assert_eq!(request.header("Authorization"), Some("QQBot tok"));
 }
 
+/// 官方 2026-11-16 新增的用户资料端点（`GET /v2/users/{openid}/info`）。
+#[tokio::test]
+async fn user_info_reads_the_users_info_endpoint() {
+    let (transport, _clock, client) = setup();
+    transport.push_response(token_response("tok", 7200));
+    transport.push_response(ok_json(
+        r#"{"username":"同道中人","allow_proactive_msg":true,"avatar":"https://thirdqq.qlogo.cn/bqqthird?x=1"}"#,
+    ));
+
+    let info = client.user_info("USER1").await.unwrap();
+    assert_eq!(info.username, "同道中人");
+    assert!(info.allow_proactive_msg);
+    assert_eq!(info.avatar, "https://thirdqq.qlogo.cn/bqqthird?x=1");
+
+    let requests = transport.requests();
+    let request = &requests[1];
+    assert_eq!(request.method, HttpMethod::Get);
+    assert_eq!(request.url, "https://api.bot.qq.com/v2/users/USER1/info");
+}
+
 #[tokio::test]
 async fn serializes_markdown_message() {
     let (transport, _clock, client) = setup();

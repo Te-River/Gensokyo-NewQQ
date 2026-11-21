@@ -174,6 +174,7 @@ pub const KNOWN_ACTIONS: &[&str] = &[
     "get_panel_list",
     "get_robot_share_link",
     "get_status",
+    "get_user_info",
     "get_version_info",
     "join_approval_strategy_create",
     "join_approval_strategy_delete",

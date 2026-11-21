@@ -6,6 +6,7 @@
 //! | action | Go 对应 | 上游端点 | 结果 |
 //! |--------|---------|----------|------|
 //! | `get_avatar` | `handlers/get_avatar.go` | 无（`q.qlogo.cn` URL 模板） | 本地拼 URL：`{"message": url, "url": url, "user_id": …}` |
+//! | `get_user_info` | 无（官方 2026-11-16 新增端点） | `GET /v2/users/{openid}/info` | `{"user_id": …, "username": …, "allow_proactive_msg": …, "avatar": …}` |
 //! | `mark_msg_as_read` | `handlers/mark_msg_as_read.go` | 无（官方无已读上报接口） | 本地空实现：`retcode = 0` + 顶层 `msg` / `wording` 空串 |
 //! | `.handle_quick_operation` | `handlers/handle_quick_operation.go` | 无（复用发送链） | deferred 计划（`send_group_msg` / `send_private_msg`） |
 //! | `.handle_quick_operation_async` | `handlers/handle_quick_operation_async.go` | 同上 | 同上 |
@@ -313,6 +314,64 @@ impl GetAvatarHandler {
 impl Handler for GetAvatarHandler {
     fn name(&self) -> &'static str {
         "get_avatar"
+    }
+
+    fn handle<'a>(&'a self, request: &'a ActionRequest<Value>) -> HandlerFuture<'a> {
+        Box::pin(self.run(request))
+    }
+}
+
+/// `get_user_info` 的响应数据（`user_id` 回显请求值，其余三个字段照抄上游）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UserInfoData {
+    /// 请求里的用户虚拟号 / openid（回填请求值）。
+    pub user_id: Ob11Id,
+    /// 用户昵称。
+    pub username: String,
+    /// 是否允许机器人主动发消息。
+    pub allow_proactive_msg: bool,
+    /// 头像直链。
+    pub avatar: String,
+}
+
+/// `get_user_info`：按虚拟号 / openid 查 QQ 用户资料（官方 2026-11-16 新增端点）。
+#[derive(Debug, Clone)]
+pub struct GetUserInfoHandler {
+    context: Arc<ActionContext>,
+}
+
+impl GetUserInfoHandler {
+    /// 构造：需要 `ActionContext`（idmap 反查）。
+    #[must_use]
+    pub fn new(context: Arc<ActionContext>) -> Self {
+        Self { context }
+    }
+
+    async fn run(&self, request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
+        let result = self.execute(request).await;
+        respond(request, result)
+    }
+
+    async fn execute(&self, request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
+        let object = params_object(request)?;
+        let requested = params::required_id(object, "user_id")?;
+        let resolved = resolve_identity_text(&self.context, "user_id", &requested, "user_openid")?;
+        let info = self.context.api().get_user_info(&resolved.openid).await?;
+        ok_data(
+            request,
+            &UserInfoData {
+                user_id: ob11_id(&requested, self.context.string_ob11()),
+                username: info.username,
+                allow_proactive_msg: info.allow_proactive_msg,
+                avatar: info.avatar,
+            },
+        )
+    }
+}
+
+impl Handler for GetUserInfoHandler {
+    fn name(&self) -> &'static str {
+        "get_user_info"
     }
 
     fn handle<'a>(&'a self, request: &'a ActionRequest<Value>) -> HandlerFuture<'a> {
@@ -1003,11 +1062,11 @@ mod tests {
 
     use super::{
         DeleteGroupMsgHandler, GetAvatarHandler, GetGroupHonorInfoHandler,
-        GetGroupMemberBlacklistHandler, GetRobotShareLinkHandler, MarkMsgAsReadHandler,
-        PutInteractionHandler, QuickOperationAsyncHandler, QuickOperationHandler,
-        SendGroupForwardMsgHandler, SendGroupMsgRawHandler, SendPrivateForwardMsgHandler,
-        SendPrivateMsgSseHandler, SendPrivateMsgWakeupHandler, SetGroupAddRequestHandler,
-        SetGroupAnonymousBanHandler, SetGroupMemberBlacklistHandler,
+        GetGroupMemberBlacklistHandler, GetRobotShareLinkHandler, GetUserInfoHandler,
+        MarkMsgAsReadHandler, PutInteractionHandler, QuickOperationAsyncHandler,
+        QuickOperationHandler, SendGroupForwardMsgHandler, SendGroupMsgRawHandler,
+        SendPrivateForwardMsgHandler, SendPrivateMsgSseHandler, SendPrivateMsgWakeupHandler,
+        SetGroupAddRequestHandler, SetGroupAnonymousBanHandler, SetGroupMemberBlacklistHandler,
     };
     use crate::handler::{DEFERRED_FIELD, RETCODE_BAD_REQUEST};
     use crate::send::SendRequest;
@@ -1015,12 +1074,12 @@ mod tests {
         Call, block_on, context, failed, ok_data, request, request_without_params,
     };
     use crate::util::RETCODE_UPSTREAM;
-    use gensokyo_core::Ob11Id;
+    use gensokyo_core::{Error, Ob11Id};
     use gensokyo_protocol::Handler;
     use gensokyo_protocol::Status;
     use gensokyo_qq::dto::{
         ApprovalJoinRequest, GenerateUrlLink, GenerateUrlLinkRequest, MemberBlacklistList,
-        MemberBlacklistRequest, MemberBlacklistResponse,
+        MemberBlacklistRequest, MemberBlacklistResponse, UserInfo,
     };
 
     const GROUP: &str = "0123456789abcdef0123456789abcdef";
@@ -1063,6 +1122,57 @@ mod tests {
 
         assert_bad_request(&handler, json!({}));
         assert_bad_request(&handler, json!({"user_id": "not-a-vuin"}));
+    }
+
+    /// 官方 2026-11-16 的 `get_user_info`：回显请求 ID + 上游三个字段。
+    #[test]
+    fn user_info_echoes_request_id_and_maps_three_fields() {
+        let (ctx, api) = context();
+        *api.user_info.lock().unwrap() = Some(Ok(UserInfo {
+            username: "同道中人".to_owned(),
+            allow_proactive_msg: true,
+            avatar: "https://thirdqq.qlogo.cn/bqqthird?x=1".to_owned(),
+        }));
+        let handler = GetUserInfoHandler::new(ctx);
+
+        let response =
+            block_on(handler.handle(&request("get_user_info", json!({"user_id": MEMBER}))))
+                .expect("查询用户资料不应失败");
+        assert_eq!(response.retcode, 0);
+        let data = ok_data(response);
+        assert_eq!(
+            data,
+            json!({
+                "user_id": MEMBER,
+                "username": "同道中人",
+                "allow_proactive_msg": true,
+                "avatar": "https://thirdqq.qlogo.cn/bqqthird?x=1",
+            })
+        );
+        assert_eq!(api.calls(), vec![Call::UserInfo(MEMBER.to_owned())]);
+        assert_eq!(handler.name(), "get_user_info");
+    }
+
+    /// 缺 `user_id` / 不可解析 → `1400`；上游错误 → `1500`。
+    #[test]
+    fn user_info_maps_bad_params_to_1400_and_upstream_errors_to_1500() {
+        let (ctx, api) = context();
+        let handler = GetUserInfoHandler::new(ctx);
+        assert_bad_request(&handler, json!({}));
+        assert_bad_request(&handler, json!({"user_id": "not-a-vuin"}));
+        assert!(api.calls().is_empty(), "参数错误不应触达上游");
+
+        *api.user_info.lock().unwrap() = Some(Err(Error::Upstream {
+            code: 40034,
+            message: "token invalid".to_owned(),
+        }));
+        let response =
+            block_on(handler.handle(&request("get_user_info", json!({"user_id": MEMBER}))))
+                .expect("上游错误也应是 Ok(失败响应)");
+        let (status, retcode, data) = failed(response);
+        assert_eq!(status, Status::Failed);
+        assert_eq!(retcode, RETCODE_UPSTREAM);
+        assert_eq!(data, None);
     }
 
     #[test]
