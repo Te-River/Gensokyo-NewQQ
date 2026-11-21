@@ -167,6 +167,27 @@ QQ 官方 2026-11-16 起群消息事件的 `author` 新增 `member_nickname`（�
 - **影响**：配置了 `card_nick` 的部署行为不变；未配置时群内 `sender.nickname` / `sender.card` 改用群名片，私聊 `sender.nickname` 由恒定空串变为发送者昵称
 - **测试**：`resolve_nickname_and_card_matches_go_precedence`（7 例表驱动：配置覆盖两者 / 群名片优先于 `username` / 空群名片回落 `username` 且不设 `card` / 两者皆空 / 私聊两例 / 无 `author`）+ 事件级 `group_message_maps_member_nickname_to_sender`、`c2c_message_maps_member_nickname_to_sender`
 
+### 入站 `*_to_message` 三个开关（Rust 侧，2026-11-21）
+
+Go 在 `global_group_msg_rre_to_message` / `global_c2c_msg_switch_to_message` / `global_interaction_to_message` 打开时，把「机器人推送开关」「按钮回调」这类通知**伪装成 message 事件**再上报；Rust 此前不论开关如何都只发 `notice`，客户端按 message 分发的插件收不到这些事件。
+
+- **修改**：`crates/gensokyo-runtime/src/inbound.rs` 新增 `group_payload_message` / `c2c_msg_switch` / `interaction_message`，由 `Inbound::convert` 按开关选形
+- **逐字段对齐**（Go 行号）：群 receive/reject 取 `ProcessGroupMsgReceive.go:104-213` / `ProcessGroupMsgReject.go:105-215`——`post_type=message`、`message_type=group`、`sub_type=normal`、`raw_message` 与 `message` 都取 `global_group_msg_receive_message` / `global_group_msg_reject_message`、`message_id` 分别是 `123` / `-1`（`safeMessageID`，平台事件无真实 msg_id）、`sender{user_id, sex:"0", area:"0", level:"0", nickname/card 按 card_and_nick, role: master_id 命中则 owner 否则 member}`、`font:0`、`message_seq:0`、`time` 取当前秒；`native_ob11=false` 另加 `real_message_type=group_receive|group_reject`、`real_user_id`、`real_group_id`
+- **C2C**：`process_c2c_switch.go:98-171,240-297`——`message_type=private`、`sub_type=friend`、`message_id=-1`、`sender{nickname:"", user_id}`、`real_message_type=c2c_msg_receive|c2c_msg_reject`、`real_user_id`（私聊结构没有 `real_group_id`）
+- **interaction**：`ProcessInlineSearch.go:152-423,424-628` 的四个分支都是**先 message 后 notice 双发**，Rust 按同一顺序输出两条事件；数字/字符串两种形态的 `message_id` 来源不同（数字群聊走 `idmap.store_cache(data.id)`，字符串形态直接用 `event_id`；数字单聊固定 `123`；字符串单聊沿用 Go 的「虚拟群聊」外形 `message_type=group` + `group_id=user_openid`）
+- **影响**：三个开关默认 `false`，关闭时输出与改动前**逐字节一致**；开关打开后对应事件不再出现同名 notice（interaction 例外，message 与 notice 并存）
+- **测试**：`group_receive_switch_off_stays_notice`、`group_receive_switch_on_becomes_group_message`（逐字段断言 message/group）、`group_reject_switch_on_uses_minus_one_and_enhanced_fields`、`c2c_switch_off_stays_notice`、`c2c_receive_switch_on_becomes_private_message`、`interaction_switch_on_emits_message_then_notice`
+
+### `white_enable` 指令白名单生效（Rust 侧，2026-11-21）
+
+`white_enable` / `white_prefix_mode` / `white_prefixs` 在 Rust 侧此前**零消费者**：配了白名单也不过滤。Go 的真实语义是指令前缀白名单，不是「事件级黑名单」：
+
+- **修改**：`crates/gensokyo-runtime/src/inbound.rs` 新增 `white_list_passes`，在群消息与单聊消息的正文处理之后（`revert_mentions` 之后、媒体码追加之前）判定，未命中直接返回空事件列表
+- **语义**（Go `handlers/message_parser.go:1913-1971`）：`white_prefix_mode=true` **且** `white_enable[4]`（群）/ `white_enable[5]`（单聊，1 基索引经 `get_white_enable_at`）为真时，正文不以 `white_prefixs` 任一项开头 ⇒ Go 把 `messageText` 置空、调用方 `return nil`（`ProcessGroupMessage.go:121-125`、`ProcessC2CMessage.go:104`）⇒ **整条消息不上报**。`white_bypass` 为豁免名单（虚拟数字号），`white_bypass_reverse=true` 时反转
+- **分侧**：Go 未命中会再回一条 `no_white_response` 兜底消息，Rust 入站转换层没有出站通道，只丢弃；Go 的 `TemporaryCommands` 在 Rust 无对应存储
+- **影响**：`white_prefix_mode` 默认 `false`，未启用时行为零变化
+- **测试**：`white_prefix_enabled_drops_unmatched_group_message`、`white_prefix_enabled_keeps_matching_group_message`、`white_prefix_mode_off_keeps_group_message`、`white_enable_scope_off_keeps_group_message`、`white_prefix_c2c_scope_uses_whitelist`
+
 ---
 
 ## 🐛 修复

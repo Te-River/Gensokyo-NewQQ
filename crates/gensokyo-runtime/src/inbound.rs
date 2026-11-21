@@ -87,17 +87,30 @@
 //! 金样（`Processor/testdata/inbound/`）是这些字段口径的回归保险：改动事件形态时先跑
 //! `tests/golden_inbound.rs`。
 //!
+//! # 指令白名单（`white_prefix_mode` + `white_enable`）
+//!
+//! Go `RevertTransformedText`（`handlers/message_parser.go:1913-1971`）在 `white_prefix_mode`
+//! 打开且对应范围开关为真时做前缀白名单：正文不以 `white_prefixs` 任一项开头就把正文置空，
+//! 调用方（`ProcessGroupMessage.go:121-125`、`ProcessC2CMessage.go:104`）随即 `return nil`，
+//! **整条消息不上报**（不是丢正文、也不是丢事件级 notice）。范围开关是 1 基索引
+//! `GetWhiteEnable(4)`（群）/ `GetWhiteEnable(5)`（单聊），见 [`Inbound::white_list_passes`]。
+//!
+//! # `*_to_message` 开关
+//!
+//! 三个开关打开时 Go 把通知「伪装成 message」上报，这里逐字段对齐：
+//! `global_group_msg_rre_to_message`（`GROUP_MSG_RECEIVE`/`REJECT` → `message/group`，
+//! `ProcessGroupMsgReceive.go:104-213` / `ProcessGroupMsgReject.go:105-215`）、
+//! `global_c2c_msg_switch_to_message`（`C2C_MSG_RECEIVE`/`REJECT` → `message/private`，
+//! `process_c2c_switch.go:98-171,240-297`）、`global_interaction_to_message`
+//! （`INTERACTION_CREATE` **先 message 后 notice**，四个分支见
+//! `ProcessInlineSearch.go:152-423` 与 `:424-628`）。
+//!
 //! # 未做项
 //!
-//! - `global_group_msg_rre_to_message` / `global_c2c_msg_switch_to_message`（`true` 时 Go 把
-//!   这些开关事件「伪装成 message」的业务转换，`ConvertGroupRejectToMessage` 等）未做：
-//!   两个开关打开时这里仍只上报 notice。
-//! - `echo` 的 `app_id/s` 映射、双路 echo、`is_binded_*`、`avatar`、master 角色提升、
+//! - `echo` 的 `app_id/s` 映射、双路 echo、`is_binded_*`、`avatar`、
 //!   idmap-pro（`StoreIDv2Pro`）；`GROUP_MEMBER_ADD` / `GROUP_JOIN_REQUEST` 的 `event_id`
 //!   只落在 `extra`，Go 侧 `echo.AddEvnetIDv2` 的被动回复缓存未做。
 //! - `message_sent`、`request` 的 `flag` 审批链路（Go 侧 `GROUP_ADD_ROBOT` 的 `flag` 也是空串）。
-//! - `global_interaction_to_message`（`true` 时 Go `ConvertInteractionToMessage` 把按钮回调
-//!   「伪装成 message」）：`INTERACTION_CREATE` 只走上报 `notice.interaction` 的主路径。
 //! - `auto_put_interaction` / `put_interaction_except`（自动回 `PutInteraction`）与
 //!   idmap-pro：回调的 `id` 原样留在 `data.id`，由客户端自己回应。
 //! - `MESSAGE_AUDIT_*`、`FORUM_*`、`AUDIO_*` 与频道 `GUILD_*`。
@@ -509,19 +522,25 @@ impl Inbound {
         let data = filtered.as_ref().unwrap_or(data);
         match kind {
             "GROUP_AT_MESSAGE_CREATE" => {
-                let event = self.group_message(&settings, data, GroupFlavor::At)?;
-                self.record_message_received(&settings);
-                Ok(vec![event])
+                let events = self.group_message(&settings, data, GroupFlavor::At)?;
+                if !events.is_empty() {
+                    self.record_message_received(&settings);
+                }
+                Ok(events)
             }
             "GROUP_MESSAGE_CREATE" => {
-                let event = self.group_message(&settings, data, GroupFlavor::Full)?;
-                self.record_message_received(&settings);
-                Ok(vec![event])
+                let events = self.group_message(&settings, data, GroupFlavor::Full)?;
+                if !events.is_empty() {
+                    self.record_message_received(&settings);
+                }
+                Ok(events)
             }
             "C2C_MESSAGE_CREATE" => {
-                let event = self.private_message(&settings, data)?;
-                self.record_message_received(&settings);
-                Ok(vec![event])
+                let events = self.private_message(&settings, data)?;
+                if !events.is_empty() {
+                    self.record_message_received(&settings);
+                }
+                Ok(events)
             }
             "GROUP_ADD_ROBOT" => self.group_add_robot(&settings, data),
             "GROUP_DEL_ROBOT" => {
@@ -531,8 +550,8 @@ impl Inbound {
             "GROUP_MSG_RECEIVE" => self.group_payload_notice(&settings, data, "group_receive"),
             "FRIEND_ADD" => self.friend_add(&settings, data, envelope_id),
             "FRIEND_DEL" => self.user_op_notice(&settings, data, "friend_decrease"),
-            "C2C_MSG_REJECT" => self.user_op_notice(&settings, data, "c2c_msg_reject"),
-            "C2C_MSG_RECEIVE" => self.user_op_notice(&settings, data, "c2c_msg_receive"),
+            "C2C_MSG_REJECT" => self.c2c_msg_switch(&settings, data, "c2c_msg_reject"),
+            "C2C_MSG_RECEIVE" => self.c2c_msg_switch(&settings, data, "c2c_msg_receive"),
             "GROUP_MEMBER_ADD" => {
                 self.group_member(&settings, data, envelope_id, GroupMemberFlavor::Add)
             }
@@ -978,7 +997,7 @@ impl Inbound {
         settings: &Settings,
         data: &Value,
         flavor: GroupFlavor,
-    ) -> Result<Event, serde_json::Error> {
+    ) -> Result<Vec<Event>, serde_json::Error> {
         let payload = QqMessage::deserialize(data)?;
         let author = payload.author.as_ref();
         let raw_user = author.map_or("", |author| author.id.as_str());
@@ -1095,6 +1114,13 @@ impl Inbound {
         let media = media_cq_text(&payload);
         let content = bot_id_to_app_id(settings, &payload.content, self.bot_id.as_deref());
         let text = self.revert_mentions(settings, &content, &ctx, true).text;
+        if !white_list_passes(settings, &text, true, Some(&group_id), &user_id) {
+            tracing::info!(
+                target: "gensokyo_runtime::message",
+                "信息被指令白名单拦截（white_prefix_mode）"
+            );
+            return Ok(Vec::new());
+        }
         let string_form = format!("{text}{media}");
         let raw_message = reported_group_content(settings, &string_form, flavor);
         // 段数组形态与字符串形态不同源：Go `ConvertToSegmentedMessage` 从 `data.Content`
@@ -1106,7 +1132,7 @@ impl Inbound {
             RevertedText::EMPTY
         };
         let message = reported_message(settings, &segment_source, &raw_message, &payload);
-        Ok(Event::Message(MessageEvent {
+        Ok(vec![Event::Message(MessageEvent {
             time: timestamp_of(payload.timestamp.as_ref()),
             self_id: Ob11Id::num(self.self_id_of(settings)),
             message_type: MessageType::Group,
@@ -1123,14 +1149,14 @@ impl Inbound {
             // Go `ToMe` 是 omitempty：只有 @ 机器人的 AT 事件才出现。
             to_me: (flavor == GroupFlavor::At).then_some(true),
             extra,
-        }))
+        })])
     }
 
     fn private_message(
         &self,
         settings: &Settings,
         data: &Value,
-    ) -> Result<Event, serde_json::Error> {
+    ) -> Result<Vec<Event>, serde_json::Error> {
         let payload = QqMessage::deserialize(data)?;
         let author = payload.author.as_ref();
         let user_raw = author.map_or("", |author| author.id.as_str());
@@ -1194,6 +1220,13 @@ impl Inbound {
         // 单聊在 Go 里同样走 `RevertTransformedText`（`ProcessC2CMessage.go:104`），
         // 只是没有 `mentions`、也不算全量群消息；媒体码同样接在正文之后。
         let text = self.revert_mentions(settings, &content, &ctx, true).text;
+        if !white_list_passes(settings, &text, false, None, &user_id) {
+            tracing::info!(
+                target: "gensokyo_runtime::message",
+                "信息被指令白名单拦截（white_prefix_mode）"
+            );
+            return Ok(Vec::new());
+        }
         let string_form = format!("{text}{media}");
         let segment_source = if settings.get_array_value() {
             self.revert_mentions(settings, &content, &ctx, false)
@@ -1201,7 +1234,7 @@ impl Inbound {
             RevertedText::EMPTY
         };
         let message = reported_message(settings, &segment_source, &string_form, &payload);
-        Ok(Event::Message(MessageEvent {
+        Ok(vec![Event::Message(MessageEvent {
             time: timestamp_of(payload.timestamp.as_ref()),
             self_id: Ob11Id::num(self.self_id_of(settings)),
             message_type: MessageType::Private,
@@ -1217,7 +1250,7 @@ impl Inbound {
             message_seq: Some(0),
             to_me: None,
             extra,
-        }))
+        })])
     }
 
     fn group_add_robot(
@@ -1311,6 +1344,10 @@ impl Inbound {
 
     /// `GROUP_MSG_REJECT` / `GROUP_MSG_RECEIVE`：Go 用 `OnebotGroupRejectNotice` /
     /// `OnebotGroupReceiveNotice` 上报——**没有** `operator_id`，整块 dto 落在 `data`。
+    ///
+    /// `global_group_msg_rre_to_message` 打开时改走
+    /// [`Inbound::group_payload_message`]（Go `ProcessGroupMsgReceive.go:104-213` /
+    /// `ProcessGroupMsgReject.go:105-215`）。
     fn group_payload_notice(
         &self,
         settings: &Settings,
@@ -1318,6 +1355,12 @@ impl Inbound {
         notice_type: &str,
     ) -> Result<Vec<Event>, serde_json::Error> {
         let payload = QqGroupOp::deserialize(data)?;
+        if settings.get_global_group_msg_reject_recive_event_to_message() {
+            return Ok(self
+                .group_payload_message(settings, &payload, notice_type)
+                .into_iter()
+                .collect());
+        }
         let mut extra =
             self.enhanced_extra(settings, &payload.op_member_openid, &payload.group_openid);
         // Go 的 `Data` 就是该事件的 dto：四个字段非 omitempty，缺失时上报 null。
@@ -1356,6 +1399,144 @@ impl Inbound {
             honor_type: None,
             online: None,
             client: None,
+            extra,
+        })])
+    }
+
+    /// `global_group_msg_rre_to_message` 打开后的 `message/group` 形态
+    /// （Go `ProcessGroupMsgReceive.go:134-204` / `ProcessGroupMsgReject.go:136-206`）。
+    ///
+    /// 正文取配置里的固定话术，`message_id` 是平台事件的占位值：receive 用 `123`、
+    /// reject 用 `-1`（Go `safeMessageID`，`processor_convert.go:13-19`）。`group_openid`
+    /// 为空时 Go 整条不报（`if data.GroupOpenID != ""`），这里同样返回 `None`。
+    fn group_payload_message(
+        &self,
+        settings: &Settings,
+        payload: &QqGroupOp,
+        notice_type: &str,
+    ) -> Option<Event> {
+        if payload.group_openid.is_empty() {
+            return None;
+        }
+        let content = if notice_type == "group_receive" {
+            settings.get_global_group_msg_receive_message()
+        } else {
+            settings.get_global_group_msg_reject_message()
+        };
+        let group_id = self.vuid(&payload.group_openid);
+        self.register_group(&group_id);
+        let user_id = self.vuid(&payload.op_member_openid);
+        // Go `:143-149` 的 Sender 只有这几个字段非零；`age` 为 0 且 omitempty，不上报。
+        let (nickname, card) = resolve_nickname_and_card(None, settings.get_card_and_nick());
+        let role = if master_role(settings, &user_id) {
+            "owner"
+        } else {
+            "member"
+        };
+        let mut extra = Extra::new();
+        if !settings.get_native_ob11() {
+            extra.insert(
+                "real_user_id".to_owned(),
+                Value::String(payload.op_member_openid.clone()),
+            );
+            extra.insert(
+                "real_group_id".to_owned(),
+                Value::String(payload.group_openid.clone()),
+            );
+            extra.insert(
+                "real_message_type".to_owned(),
+                Value::String(notice_type.to_owned()),
+            );
+        }
+        Some(Event::Message(MessageEvent {
+            // Go 用 `time.Now()`，不读事件负载里的 timestamp
+            time: now_unix(),
+            self_id: Ob11Id::num(self.self_id_of(settings)),
+            message_type: MessageType::Group,
+            sub_type: Some("normal".to_owned()),
+            message_id: Ob11Id::num(if notice_type == "group_receive" {
+                123
+            } else {
+                -1
+            }),
+            user_id: user_id.clone(),
+            group_id: Some(group_id),
+            message: plain_content(settings, content),
+            raw_message: content.to_owned(),
+            font: Some(0),
+            sender: Some(Sender {
+                user_id: Some(user_id),
+                nickname: Some(nickname),
+                card,
+                role: Some(role.to_owned()),
+                sex: Some("0".to_owned()),
+                area: Some("0".to_owned()),
+                level: Some("0".to_owned()),
+                tiny_id: Some(String::new()),
+                ..Sender::default()
+            }),
+            anonymous: None,
+            message_seq: Some(0),
+            to_me: None,
+            extra,
+        }))
+    }
+
+    /// `C2C_MSG_RECEIVE` / `C2C_MSG_REJECT`：开关关闭时是 `FriendNoticeEvent` notice
+    /// （[`Inbound::user_op_notice`]），打开时是 `message/private`
+    /// （Go `process_c2c_switch.go:98-171,240-297`）。
+    fn c2c_msg_switch(
+        &self,
+        settings: &Settings,
+        data: &Value,
+        notice_type: &str,
+    ) -> Result<Vec<Event>, serde_json::Error> {
+        if !settings.get_global_c2c_msg_switch_event_to_message() {
+            return self.user_op_notice(settings, data, notice_type);
+        }
+        let payload = QqUserOp::deserialize(data)?;
+        if payload.openid.is_empty() {
+            return Ok(Vec::new());
+        }
+        let content = if notice_type == "c2c_msg_receive" {
+            settings.get_global_c2c_msg_receive_message()
+        } else {
+            settings.get_global_c2c_msg_reject_message()
+        };
+        let user_id = self.vuid(&payload.openid);
+        let mut extra = Extra::new();
+        if !settings.get_native_ob11() {
+            // Go `:141-146` / `:277-282`：只有 `real_user_id` 与 `real_message_type`
+            // （私聊消息结构没有 `real_group_id`）。
+            extra.insert(
+                "real_user_id".to_owned(),
+                Value::String(payload.openid.clone()),
+            );
+            extra.insert(
+                "real_message_type".to_owned(),
+                Value::String(notice_type.to_owned()),
+            );
+        }
+        Ok(vec![Event::Message(MessageEvent {
+            time: now_unix(),
+            self_id: Ob11Id::num(self.self_id_of(settings)),
+            message_type: MessageType::Private,
+            sub_type: Some("friend".to_owned()),
+            message_id: Ob11Id::num(-1),
+            user_id: user_id.clone(),
+            group_id: None,
+            message: plain_content(settings, content),
+            raw_message: content.to_owned(),
+            font: Some(0),
+            // Go `PrivateSender` 只有 `nickname` / `user_id`（都有值、非 omitempty）
+            sender: Some(Sender {
+                user_id: Some(user_id),
+                nickname: Some(String::new()),
+                ..Sender::default()
+            }),
+            anonymous: None,
+            message_seq: Some(0),
+            to_me: None,
             extra,
         })])
     }
@@ -1621,7 +1802,7 @@ impl Inbound {
         }
         extra.insert("data".to_owned(), echoed);
 
-        Ok(vec![Event::Notice(NoticeEvent {
+        let notice = Event::Notice(NoticeEvent {
             time: now_unix(),
             self_id: Ob11Id::num(self.self_id_of(settings)),
             notice_type: "interaction".to_owned(),
@@ -1639,7 +1820,192 @@ impl Inbound {
             online: None,
             client: None,
             extra,
-        })])
+        });
+        // Go 四个分支都是「先 message 后 notice」双发（`ProcessInlineSearch.go:267-302`、
+        // `:387-422`、`:495-532`、`:589-626`），开关关闭时只有 notice。
+        let mut events = Vec::new();
+        if settings.get_global_interaction_to_message()
+            && let Some(message) = self.interaction_message(settings, &payload)
+        {
+            events.push(message);
+        }
+        events.push(notice);
+        Ok(events)
+    }
+
+    /// `global_interaction_to_message` 打开后的按钮回调 message 形态
+    /// （Go `ProcessInlineSearch.go:152-423` 群聊 / `:424-628` 单聊）。
+    ///
+    /// 两种上报形态的字段口径不同：数字形态群聊的 `message_id` 来自
+    /// `idmap.StoreCachev2(data.ID)`（`idmap.store_cache`），字符串形态群聊用 `event_id`；
+    /// 单聊数字形态固定 `123`，字符串形态沿用 Go 的「虚拟群聊」外形
+    /// （`message_type = group`、`group_id = user_openid`）。
+    fn interaction_message(&self, settings: &Settings, payload: &Interaction) -> Option<Event> {
+        let button = payload
+            .data
+            .as_ref()
+            .map_or("", |data| data.resolved.button_data.as_str());
+        let group_openid = payload.group_openid.as_str();
+        let group = !group_openid.is_empty();
+        if !group && payload.user_openid.is_empty() {
+            // Go 的两个 `if data.GroupOpenID != "" / if data.UserOpenID != ""` 都不进
+            return None;
+        }
+        let user_raw = if group {
+            payload.group_member_openid.as_str()
+        } else {
+            payload.user_openid.as_str()
+        };
+        let user_id = self.vuid(user_raw);
+        // 字符串形态的 `Sender.user_id` 仍是数字虚拟号（Go `OnebotGroupMessageS` 复用 `Sender`）
+        let sender_id = Ob11Id::num(user_id.as_i64().unwrap_or(0));
+        let (nickname, card) = resolve_nickname_and_card(None, settings.get_card_and_nick());
+        let role = if master_role(settings, &user_id) {
+            "owner"
+        } else {
+            "member"
+        };
+        let string_form = settings.get_string_ob11();
+        let platform = if settings.get_union_id() {
+            "unionqq"
+        } else {
+            "qq"
+        };
+
+        let mut extra = Extra::new();
+        if !settings.get_native_ob11() {
+            extra.insert(
+                "real_user_id".to_owned(),
+                Value::String(user_raw.to_owned()),
+            );
+        }
+
+        let (message_type, sub_type, message_id, group_id, user_id_out, sender) =
+            match (group, string_form) {
+                // 数字群聊：`OnebotGroupMessage`
+                (true, false) => {
+                    extra.insert(
+                        "real_group_id".to_owned(),
+                        Value::String(group_openid.to_owned()),
+                    );
+                    extra.insert(
+                        "real_message_type".to_owned(),
+                        Value::String("interaction".to_owned()),
+                    );
+                    let message_id = self
+                        .idmap
+                        .as_deref()
+                        .and_then(|idmap| idmap.store_cache(&payload.id).ok())
+                        .map_or_else(|| Ob11Id::Str(payload.id.clone()), Ob11Id::num);
+                    (
+                        MessageType::Group,
+                        "normal",
+                        message_id,
+                        Some(self.vuid(group_openid)),
+                        user_id.clone(),
+                        Sender {
+                            user_id: Some(user_id.clone()),
+                            nickname: Some(nickname),
+                            card,
+                            role: Some(role.to_owned()),
+                            sex: Some("0".to_owned()),
+                            area: Some("0".to_owned()),
+                            level: Some("0".to_owned()),
+                            tiny_id: Some(String::new()),
+                            ..Sender::default()
+                        },
+                    )
+                }
+                // 字符串群聊：`OnebotGroupMessageS`
+                (true, true) => {
+                    extra.insert(
+                        "real_group_id".to_owned(),
+                        Value::String(group_openid.to_owned()),
+                    );
+                    // Go 这一支写的是 `"group"`，不是 `"interaction"`（`:343`）
+                    extra.insert(
+                        "real_message_type".to_owned(),
+                        Value::String("group".to_owned()),
+                    );
+                    extra.insert("platform".to_owned(), Value::String(platform.to_owned()));
+                    (
+                        MessageType::Group,
+                        "normal",
+                        Ob11Id::Str(payload.event_id.clone()),
+                        Some(Ob11Id::Str(group_openid.to_owned())),
+                        Ob11Id::Str(user_raw.to_owned()),
+                        Sender {
+                            user_id: Some(sender_id),
+                            nickname: Some(nickname),
+                            card,
+                            role: Some(role.to_owned()),
+                            sex: Some("0".to_owned()),
+                            area: Some("0".to_owned()),
+                            level: Some("0".to_owned()),
+                            tiny_id: Some(String::new()),
+                            ..Sender::default()
+                        },
+                    )
+                }
+                // 数字单聊：`OnebotPrivateMessage`
+                (false, false) => {
+                    extra.insert(
+                        "real_message_type".to_owned(),
+                        Value::String("interaction".to_owned()),
+                    );
+                    (
+                        MessageType::Private,
+                        "friend",
+                        Ob11Id::num(123),
+                        None,
+                        user_id.clone(),
+                        Sender {
+                            user_id: Some(user_id.clone()),
+                            nickname: Some(String::new()),
+                            ..Sender::default()
+                        },
+                    )
+                }
+                // 字符串单聊：Go 套 `OnebotGroupMessageS` 的「虚拟群聊」外形（`:550-565`）
+                (false, true) => {
+                    extra.insert(
+                        "real_message_type".to_owned(),
+                        Value::String("group_private".to_owned()),
+                    );
+                    extra.insert("platform".to_owned(), Value::String(platform.to_owned()));
+                    (
+                        MessageType::Group,
+                        "normal",
+                        Ob11Id::Str(payload.event_id.clone()),
+                        Some(Ob11Id::Str(payload.user_openid.clone())),
+                        Ob11Id::Str(payload.user_openid.clone()),
+                        Sender {
+                            user_id: Some(sender_id),
+                            nickname: Some(String::new()),
+                            tiny_id: Some(String::new()),
+                            ..Sender::default()
+                        },
+                    )
+                }
+            };
+
+        Some(Event::Message(MessageEvent {
+            time: now_unix(),
+            self_id: Ob11Id::num(self.self_id_of(settings)),
+            message_type,
+            sub_type: Some(sub_type.to_owned()),
+            message_id,
+            user_id: user_id_out,
+            group_id,
+            message: plain_content(settings, button),
+            raw_message: button.to_owned(),
+            font: Some(0),
+            sender: Some(sender),
+            anonymous: None,
+            message_seq: Some(0),
+            to_me: None,
+            extra,
+        }))
     }
 
     /// `!native_ob11` 时补齐 Go 的「增强配置」字段。
@@ -2136,17 +2502,75 @@ fn resolve_nickname_and_card(
     author: Option<&QqAuthor>,
     card_and_nick: &str,
 ) -> (String, Option<String>) {
+    // Go 先判 `cardAndNick != ""`、后判 `author == nil`（`Processor/nickname.go:14-27`）：
+    // 群开关事件（`ProcessGroupMsgReceive.go:163`）就是「无 author + 配了 card_and_nick」。
+    if !card_and_nick.is_empty() {
+        return (card_and_nick.to_owned(), Some(card_and_nick.to_owned()));
+    }
     let Some(author) = author else {
         return (String::new(), None);
     };
     let member_nickname = author.member_nickname.as_deref().unwrap_or_default();
-    if !card_and_nick.is_empty() {
-        return (card_and_nick.to_owned(), Some(card_and_nick.to_owned()));
-    }
     if !member_nickname.is_empty() {
         return (member_nickname.to_owned(), Some(member_nickname.to_owned()));
     }
     (author.username.clone(), None)
+}
+
+/// 指令白名单判定（Go `RevertTransformedText` `handlers/message_parser.go:1913-1971`）。
+///
+/// 只有 `white_prefix_mode` 打开**且**对应范围开关为真时才过滤：群聊看 1 基索引
+/// `white_enable[4]`、单聊看 `white_enable[5]`（Go `ProcessGroupMessage.go:121` /
+/// `ProcessC2CMessage.go:104`）。`white_bypass` 是豁免名单，`white_bypass_reverse`
+/// 打开时语义反转——只有名单内的群/用户才受白名单约束。
+///
+/// 未命中时 Go 把正文置空、调用方 `return nil`，即**整条消息不上报**；Go 另外会回一条
+/// `no_white_response` 兜底消息，本层没有出站通道，不做。
+fn white_list_passes(
+    settings: &Settings,
+    text: &str,
+    group: bool,
+    group_id: Option<&Ob11Id>,
+    user_id: &Ob11Id,
+) -> bool {
+    let enabled = if group {
+        settings.get_white_enable_at(4)
+    } else {
+        settings.get_white_enable_at(5)
+    };
+    if !settings.get_white_prefix_mode() || !enabled {
+        return true;
+    }
+    let listed = settings.get_white_bypass().iter().any(|id| {
+        [group_id.and_then(Ob11Id::as_i64), user_id.as_i64()]
+            .into_iter()
+            .flatten()
+            .any(|virtual_id| virtual_id == *id)
+    });
+    if listed != settings.get_white_bypass_reverse() {
+        return true;
+    }
+    settings
+        .get_white_prefixs()
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
+}
+
+/// 伪装消息的 `sender.role`：虚拟用户号在 `master_id` 名单里即 `owner`
+/// （Go `ProcessGroupMsgReceive.go:170-187` 等处的 `isMaster` 判定）。
+fn master_role(settings: &Settings, user_id: &Ob11Id) -> bool {
+    let id = user_id.to_string();
+    settings.get_master_id().contains(&id)
+}
+
+/// 伪装消息的正文形态：`array_value` 打开时段数组（Go `ConvertToSegmentedMessage`），
+/// 否则字符串。
+fn plain_content(settings: &Settings, content: &str) -> MessageContent {
+    if settings.get_array_value() {
+        MessageContent::Array(cqcode::parse(content))
+    } else {
+        MessageContent::Text(content.to_owned())
+    }
 }
 
 fn timestamp_of(value: Option<&Value>) -> i64 {
@@ -3024,8 +3448,8 @@ mod tests {
 
         assert_eq!(
             resolve_nickname_and_card(None, "配置昵称"),
-            (String::new(), None),
-            "缺 author 时昵称空串、名片不设置"
+            ("配置昵称".to_owned(), Some("配置昵称".to_owned())),
+            "缺 author 时 card_and_nick 仍生效（Go 先判配置）"
         );
     }
 
@@ -3367,6 +3791,309 @@ mod tests {
         let events = inbound
             .convert("GROUP_AT_MESSAGE_CREATE", Some(&group_at_payload()), None)
             .expect("群消息应可转换");
+        assert_eq!(events.len(), 1);
+    }
+
+    /// 只含指定 `settings` 的临时配置 → `(临时目录, Inbound)`；目录需随返回值存活。
+    fn parity_inbound(settings: &str) -> (tempfile::TempDir, Inbound) {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        let yaml = format!("version: 1\nsettings:\n{settings}");
+        std::fs::write(&path, yaml).expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        (dir, Inbound::new(manager, None))
+    }
+
+    /// `GROUP_MSG_RECEIVE` / `GROUP_MSG_REJECT` 的 `d` 负载。
+    fn group_switch_payload() -> serde_json::Value {
+        json!({
+            "event_id": "ev-1",
+            "group_openid": "g-openid",
+            "op_member_openid": "u-openid",
+            "timestamp": 1_700_000_000
+        })
+    }
+
+    /// A（关）：`global_group_msg_rre_to_message` 关闭时保持 notice（现有行为不变）。
+    #[test]
+    fn group_receive_switch_off_stays_notice() {
+        use gensokyo_protocol::Event;
+
+        let (_dir, inbound) = parity_inbound("  global_group_msg_rre_to_message: false\n");
+        let events = inbound
+            .convert("GROUP_MSG_RECEIVE", Some(&group_switch_payload()), None)
+            .expect("开关事件应可转换");
+        assert_eq!(events.len(), 1);
+        let Event::Notice(notice) = &events[0] else {
+            panic!("开关关闭时应仍为 notice");
+        };
+        assert_eq!(notice.notice_type, "group_receive");
+        assert_eq!(notice.sub_type.as_deref(), Some("create"));
+        assert!(notice.extra.get("data").is_some(), "notice 带整块 dto");
+    }
+
+    /// A（开·receive）：Go `ProcessGroupMsgReceive.go:134-204` 的 `message/group` 形状。
+    #[test]
+    fn group_receive_switch_on_becomes_group_message() {
+        use gensokyo_core::Ob11Id;
+        use gensokyo_protocol::Event;
+
+        let (_dir, inbound) = parity_inbound(
+            "  global_group_msg_rre_to_message: true\n  native_ob11: true\n  card_nick: 卡片\n  global_group_msg_receive_message: 机器人主动消息已开启\n",
+        );
+        let events = inbound
+            .convert("GROUP_MSG_RECEIVE", Some(&group_switch_payload()), None)
+            .expect("开关事件应可转换");
+        assert_eq!(events.len(), 1, "开关打开后只产出 message，不再发 notice");
+        let Event::Message(message) = &events[0] else {
+            panic!("开关打开时应为 message");
+        };
+        assert_eq!(message.message_type.as_str(), "group");
+        assert_eq!(message.sub_type.as_deref(), Some("normal"));
+        assert_eq!(
+            message.message_id,
+            Ob11Id::num(123),
+            "receive 用 Go 的占位 123"
+        );
+        assert_eq!(message.raw_message, "机器人主动消息已开启");
+        assert_eq!(message.message.as_str(), Some("机器人主动消息已开启"));
+        assert_eq!(message.group_id, Some(Ob11Id::Str("g-openid".to_owned())));
+        assert_eq!(message.user_id, Ob11Id::Str("u-openid".to_owned()));
+        assert_eq!(message.font, Some(0));
+        assert_eq!(message.message_seq, Some(0));
+        let sender = message.sender.as_ref().expect("应带 sender");
+        assert_eq!(
+            sender.nickname.as_deref(),
+            Some("卡片"),
+            "card_and_nick 覆盖"
+        );
+        assert_eq!(sender.card.as_deref(), Some("卡片"));
+        assert_eq!(sender.role.as_deref(), Some("member"));
+        assert_eq!(sender.sex.as_deref(), Some("0"));
+        assert_eq!(sender.area.as_deref(), Some("0"));
+        assert_eq!(sender.level.as_deref(), Some("0"));
+        assert_eq!(sender.tiny_id.as_deref(), Some(""));
+        assert!(
+            message.extra.get("real_message_type").is_none(),
+            "native_ob11 时不报增强字段"
+        );
+    }
+
+    /// A（开·reject）：`-1` 占位 + 增强字段 + master 角色提升（Go `:127,157-188`）。
+    #[test]
+    fn group_reject_switch_on_uses_minus_one_and_enhanced_fields() {
+        use gensokyo_core::Ob11Id;
+        use gensokyo_protocol::Event;
+
+        let (_dir, inbound) = parity_inbound(
+            "  global_group_msg_rre_to_message: true\n  master_id: [\"u-openid\"]\n  global_group_msg_reject_message: 机器人主动消息被关闭\n",
+        );
+        let events = inbound
+            .convert("GROUP_MSG_REJECT", Some(&group_switch_payload()), None)
+            .expect("开关事件应可转换");
+        let Event::Message(message) = &events[0] else {
+            panic!("开关打开时应为 message");
+        };
+        assert_eq!(message.message_id, Ob11Id::num(-1), "reject 用 Go 的 -1");
+        assert_eq!(message.raw_message, "机器人主动消息被关闭");
+        assert_eq!(
+            message.extra.get("real_message_type"),
+            Some(&json!("group_reject"))
+        );
+        assert_eq!(message.extra.get("real_user_id"), Some(&json!("u-openid")));
+        assert_eq!(message.extra.get("real_group_id"), Some(&json!("g-openid")));
+        let sender = message.sender.as_ref().expect("应带 sender");
+        assert_eq!(
+            sender.role.as_deref(),
+            Some("owner"),
+            "master_id 命中即 owner"
+        );
+    }
+
+    /// A（关·C2C）：开关关闭时保持 `c2c_msg_reject` notice。
+    #[test]
+    fn c2c_switch_off_stays_notice() {
+        use gensokyo_protocol::Event;
+
+        let (_dir, inbound) = parity_inbound("  global_c2c_msg_switch_to_message: false\n");
+        let events = inbound
+            .convert(
+                "C2C_MSG_REJECT",
+                Some(&json!({"openid": "u-c2c", "timestamp": 1_700_000_000})),
+                None,
+            )
+            .expect("开关事件应可转换");
+        assert_eq!(events.len(), 1);
+        let Event::Notice(notice) = &events[0] else {
+            panic!("开关关闭时应仍为 notice");
+        };
+        assert_eq!(notice.notice_type, "c2c_msg_reject");
+    }
+
+    /// A（开·C2C）：Go `process_c2c_switch.go:261-295` 的 `message/private` 形状。
+    #[test]
+    fn c2c_receive_switch_on_becomes_private_message() {
+        use gensokyo_core::Ob11Id;
+        use gensokyo_protocol::Event;
+
+        let (_dir, inbound) = parity_inbound(
+            "  global_c2c_msg_switch_to_message: true\n  native_ob11: true\n  global_c2c_msg_receive_message: 机器人C2C推送已开启\n",
+        );
+        let events = inbound
+            .convert(
+                "C2C_MSG_RECEIVE",
+                Some(&json!({"openid": "u-c2c", "timestamp": 1_700_000_000})),
+                None,
+            )
+            .expect("开关事件应可转换");
+        assert_eq!(events.len(), 1);
+        let Event::Message(message) = &events[0] else {
+            panic!("开关打开时应为 message");
+        };
+        assert_eq!(message.message_type.as_str(), "private");
+        assert_eq!(message.sub_type.as_deref(), Some("friend"));
+        assert_eq!(message.message_id, Ob11Id::num(-1));
+        assert!(message.group_id.is_none(), "私聊没有 group_id");
+        assert_eq!(message.user_id, Ob11Id::Str("u-c2c".to_owned()));
+        assert_eq!(message.raw_message, "机器人C2C推送已开启");
+        let sender = message.sender.as_ref().expect("应带 sender");
+        assert_eq!(sender.user_id, Some(Ob11Id::Str("u-c2c".to_owned())));
+        assert_eq!(
+            sender.nickname.as_deref(),
+            Some(""),
+            "Go PrivateSender 昵称恒空"
+        );
+        assert!(sender.tiny_id.is_none(), "Go PrivateSender 没有 tiny_id");
+    }
+
+    /// A（开·interaction）：Go 四个分支都是**先 message 后 notice** 双发。
+    #[test]
+    fn interaction_switch_on_emits_message_then_notice() {
+        use gensokyo_core::Ob11Id;
+        use gensokyo_protocol::Event;
+
+        let (_dir, inbound) =
+            parity_inbound("  global_interaction_to_message: true\n  string_ob11: true\n");
+        let data = json!({
+            "id": "i-1",
+            "event_id": "e-1",
+            "type": 11,
+            "chat_type": 1,
+            "group_openid": "G",
+            "group_member_openid": "M",
+            "data": {
+                "name": "按钮",
+                "type": 9,
+                "resolved": {"button_data": "/菜单", "button_id": "b-1"}
+            },
+            "version": 1
+        });
+        let events = inbound
+            .convert("INTERACTION_CREATE", Some(&data), None)
+            .expect("互动事件应可转换");
+        assert_eq!(events.len(), 2, "Go 先 message 后 notice 双发");
+        let Event::Message(message) = &events[0] else {
+            panic!("第一条应为 message");
+        };
+        assert_eq!(message.message_type.as_str(), "group");
+        assert_eq!(message.sub_type.as_deref(), Some("normal"));
+        assert_eq!(
+            message.message_id,
+            Ob11Id::Str("e-1".to_owned()),
+            "字符串群聊形态用 event_id 当 message_id"
+        );
+        assert_eq!(message.group_id, Some(Ob11Id::Str("G".to_owned())));
+        assert_eq!(message.user_id, Ob11Id::Str("M".to_owned()));
+        assert_eq!(message.raw_message, "/菜单");
+        assert_eq!(
+            message.extra.get("real_message_type"),
+            Some(&json!("group"))
+        );
+        assert_eq!(message.extra.get("platform"), Some(&json!("qq")));
+        let Event::Notice(notice) = &events[1] else {
+            panic!("第二条应为 notice");
+        };
+        assert_eq!(notice.notice_type, "interaction");
+        assert_eq!(notice.sub_type.as_deref(), Some("create"));
+    }
+
+    /// B：白名单启用 + 未命中 → 整条消息不上报（Go 调用方 `return nil`）。
+    #[test]
+    fn white_prefix_enabled_drops_unmatched_group_message() {
+        let (_dir, inbound) = parity_inbound(
+            "  white_prefix_mode: true\n  remove_prefix: false\n  white_enable: [false, false, false, true, false]\n  white_prefixs: [\"/\"]\n",
+        );
+        let events = inbound
+            .convert("GROUP_AT_MESSAGE_CREATE", Some(&group_at_payload()), None)
+            .expect("群消息应可转换");
+        assert!(events.is_empty(), "未命中白名单的消息不产出任何事件");
+    }
+
+    /// B：白名单启用 + 命中 → 正常上报。
+    #[test]
+    fn white_prefix_enabled_keeps_matching_group_message() {
+        use gensokyo_protocol::Event;
+
+        let (_dir, inbound) = parity_inbound(
+            "  white_prefix_mode: true\n  remove_prefix: false\n  white_enable: [false, false, false, true, false]\n  white_prefixs: [\"/\"]\n",
+        );
+        let mut payload = group_at_payload();
+        payload["content"] = json!("/help");
+        let events = inbound
+            .convert("GROUP_AT_MESSAGE_CREATE", Some(&payload), None)
+            .expect("群消息应可转换");
+        assert_eq!(events.len(), 1, "命中白名单应正常上报");
+        let Event::Message(message) = &events[0] else {
+            panic!("应为群消息");
+        };
+        assert_eq!(message.raw_message, "/help");
+    }
+
+    /// B：`white_prefix_mode` 关闭时不受 `white_enable` 影响（行为不变）。
+    #[test]
+    fn white_prefix_mode_off_keeps_group_message() {
+        let (_dir, inbound) = parity_inbound(
+            "  white_prefix_mode: false\n  white_enable: [false, false, false, true, false]\n  white_prefixs: [\"/\"]\n",
+        );
+        let events = inbound
+            .convert("GROUP_AT_MESSAGE_CREATE", Some(&group_at_payload()), None)
+            .expect("群消息应可转换");
+        assert_eq!(events.len(), 1, "白名单模式未开启时不过滤");
+    }
+
+    /// B：`white_enable[4]` 为 false 时该范围不过滤（Go `GetWhiteEnable(4)`）。
+    #[test]
+    fn white_enable_scope_off_keeps_group_message() {
+        let (_dir, inbound) = parity_inbound(
+            "  white_prefix_mode: true\n  white_enable: [false, false, false, false, true]\n  white_prefixs: [\"/\"]\n",
+        );
+        let events = inbound
+            .convert("GROUP_AT_MESSAGE_CREATE", Some(&group_at_payload()), None)
+            .expect("群消息应可转换");
+        assert_eq!(events.len(), 1, "群范围开关关闭时不过滤");
+    }
+
+    /// B：单聊走 `white_enable[5]`（Go `GetWhiteEnable(5)`）。
+    #[test]
+    fn white_prefix_c2c_scope_uses_whitelist() {
+        let (_dir, inbound) = parity_inbound(
+            "  white_prefix_mode: true\n  remove_prefix: false\n  white_enable: [false, false, false, false, true]\n  white_prefixs: [\"/\"]\n",
+        );
+        let payload = json!({
+            "id": "m-1",
+            "content": "hello",
+            "author": {"id": "u0123456789abcdef0123456789abcdef"}
+        });
+        let events = inbound
+            .convert("C2C_MESSAGE_CREATE", Some(&payload), None)
+            .expect("单聊消息应可转换");
+        assert!(events.is_empty(), "单聊未命中白名单同样整条不上报");
+
+        let mut matched = payload.clone();
+        matched["content"] = json!("/help");
+        let events = inbound
+            .convert("C2C_MESSAGE_CREATE", Some(&matched), None)
+            .expect("单聊消息应可转换");
         assert_eq!(events.len(), 1);
     }
 }
