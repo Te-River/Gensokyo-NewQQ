@@ -27,6 +27,7 @@ import (
 	"github.com/hoshinonyaruko/gensokyo/handlers/cqparse"
 	"github.com/hoshinonyaruko/gensokyo/idmap"
 	"github.com/hoshinonyaruko/gensokyo/images"
+	"github.com/hoshinonyaruko/gensokyo/internal/domain/identity"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/hoshinonyaruko/gensokyo/structs"
 	"github.com/hoshinonyaruko/gensokyo/url"
@@ -219,6 +220,41 @@ func sendFailureMessage(err error) string {
 	return err.Error() + sendFailReviewTip
 }
 
+// receiptVirtualID 把 action 入参归一为回执里的虚拟号。
+//
+// 入参已是纯数字虚拟号时原样返回，绝不再走 StoreIDv2：虚拟号是入站时分配的映射结果，
+// 再存一次会把它当成新的 OpenID 另分配一个号——回执回错号，idmap 还凭空多一行脏映射。
+// 只有入参不是虚拟号（真实 OpenID 等）时才建立/查询映射换回虚拟号；返回 0 表示回执省略该字段。
+// usePro 为真时按 idmap_pro 语义用 proSubID 作为子键（子键为空则无法换算）。
+func receiptVirtualID(value, proSubID string, usePro bool) int64 {
+	if value == "" {
+		return 0
+	}
+	if identity.IsVirtualID(value) {
+		id, err := strconv.ParseInt(value, 10, 64)
+		if err == nil {
+			return id
+		}
+	}
+	if usePro {
+		if proSubID == "" {
+			return 0
+		}
+		id, _, err := idmap.StoreIDv2Pro(value, proSubID)
+		if err != nil {
+			mylog.Printf("receiptVirtualID: idmap_pro 映射 %q 失败: %v", value, err)
+			return 0
+		}
+		return id
+	}
+	id, err := idmap.StoreIDv2(value)
+	if err != nil {
+		mylog.Printf("receiptVirtualID: 映射 %q 失败: %v", value, err)
+		return 0
+	}
+	return id
+}
+
 // storeVirtualMessageID 缓存真实 message_id → 虚拟 ID（按 GetMemoryMsgid 切换内存/idmap）。
 // 注入缝：handlers 套件用例替换为返回错误，覆盖"消息已发出但写缓存失败"的回执分支（用例禁止 t.Parallel()）。
 var storeVirtualMessageID = func(realID string) (int64, error) {
@@ -262,21 +298,8 @@ func SendResponse(client callapi.Client, err error, message *callapi.ActionMessa
 	var errr error
 	var GroupID64 int64
 	if groupID, ok := message.Params.GroupID.(string); ok && groupID != "" {
-		if config.GetIdmapPro() {
-			//将真实id转为int userid64
-			if userID, ok := message.Params.UserID.(string); ok {
-				GroupID64, _, errr = idmap.StoreIDv2Pro(groupID, userID)
-				if errr != nil {
-					mylog.Errorf("Error storing ID: %v", err)
-				}
-			}
-		} else {
-			// 映射str的GroupID到int
-			GroupID64, errr = idmap.StoreIDv2(groupID)
-			if errr != nil {
-				mylog.Errorf("failed to convert GroupID64 to int: %v", err)
-			}
-		}
+		userIDStr, _ := message.Params.UserID.(string)
+		GroupID64 = receiptVirtualID(groupID, userIDStr, config.GetIdmapPro())
 	}
 
 	var channelID64 int64
@@ -319,19 +342,7 @@ func SendResponse(client callapi.Client, err error, message *callapi.ActionMessa
 
 	var userID64 int64
 	if userID, ok := message.Params.UserID.(string); ok && userID != "" {
-		if config.GetIdmapPro() {
-			//将真实id转为int userid64
-			userID64, _, errr = idmap.StoreIDv2Pro("group_private", message.Params.UserID.(string))
-			if errr != nil {
-				mylog.Errorf("Error storing ID: %v", err)
-			}
-		} else {
-			// 映射str的GroupID到int
-			userID64, errr = idmap.StoreIDv2(message.Params.UserID.(string))
-			if errr != nil {
-				mylog.Errorf("failed to convert GroupID64 to int: %v", err)
-			}
-		}
+		userID64 = receiptVirtualID(userID, "group_private", config.GetIdmapPro())
 	}
 
 	// 设置响应值
@@ -584,12 +595,9 @@ func SendC2CResponse(client callapi.Client, err error, message *callapi.ActionMe
 		// 无真实 message_id 不再伪造固定假值,诚实置 0
 		response.Data.MessageID = 0
 	}
-	//将真实id转为int userid64
-	userid64, errr := idmap.StoreIDv2(message.Params.UserID.(string))
-	if errr != nil {
-		mylog.Errorf("Error storing ID: %v", err)
-	}
-	response.UserID = userid64
+	// user_id 原样回显调用方传入的虚拟号：虚拟号不再进 StoreIDv2（会回执改号 + idmap 脏映射）
+	userIDStr, _ := message.Params.UserID.(string)
+	response.UserID = receiptVirtualID(userIDStr, "", false)
 	response.Echo = message.Echo
 	if err != nil {
 		response.Message = sendFailureMessage(err)

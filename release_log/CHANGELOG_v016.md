@@ -100,6 +100,28 @@ QQ 官方自 2026-11-17 起允许群消息事件的 `msg_id` 直接用于私聊�
 
 ## 🐛 修复
 
+### `delete_msg` 撤回谎报成功：虚拟号被当 `group_openid` 发给上游（404 11001）且无条件回 `retcode:0`（2026-11-21）
+
+活体对照（同一群、同一条消息）：Rust 侧用反查后的 `group_openid` 调 `DELETE /v2/groups/31AB82CE7526BBFE4B1002C4B258FD0E/messages/ROBOT1.0_…` 得 `200 OK`；Go 侧把虚拟群号 `499967395` 直接当 `group_openid` 发出，上游回 `404 code:11001 不支持的调用`，而回执仍是 `{"retcode":0,"status":"ok"}`，`data` 里还带着 `get_status` 的 `app_enabled`/`stat` 字段。
+
+- **修改**：`handlers/delete_msg.go` —— 群聊路径改用反查后的 `group_openid` 调 `RetractGroupMessage`（原代码算出了 `originalGroupID` 却仍把虚拟号传给上游），C2C 路径同口径经 `resolveRetractOpenID` 还原 `user_openid`；入参本身已是 OpenID（`identity.IsOpenID`）时免反查直传
+- **修改**：`group_id` / `user_id` 反查失败回 `1400`（参数/映射问题），不再拿空 OpenID 去打上游
+- **修改**：`group_id` 与 `user_id` 都没有（或缺参/类型错）→ `1400` + `message:"delete_msg 需要 group_id 或 user_id"`，不再什么都不做却回 ok
+- **修改**：撤回失败 → `1500` + `status:"failed"`，`message` 带上游真实错误（复用 `sendFailRetCode`；不追加 `sendFailureMessage` 的「审核中可能已发出」提示——那是发送语义，与撤回无关）
+- **修改**：成功回执改走 `sendActionResult`（`data:null`），不再复用 `GetStatusResponse`
+- **影响**：成功回执为 `{"data":null,"echo":"del-…","message":"","retcode":0,"status":"ok"}`，与 Rust 侧逐字段一致；同时给了 `group_id` 又给 `user_id` 的请求按群撤回处理（不再先撤群、再因 `user_id` 反查失败把成功覆盖成 1400）
+- **测试**：`handlers/delete_msg_test.go` —— 断言 `RetractGroupMessage` / `RetractC2CMessage` 收到的是反查后的 OpenID（不是虚拟号）、`message_id` 为反查后的真实 ID、缺目标 1400、上游报错 1500、成功回执 `data` 为 `null`
+
+### `send_private_msg` 的 C2C 回执把虚拟号当 OpenID 再分配：回执改号 + idmap 凭空多一条映射（2026-11-21）
+
+请求 `{"action":"send_private_msg","params":{"user_id":"610636458"}}`（该号是入站时分配的虚拟号）时，回执回的是 `"user_id":813412877`：`SendC2CResponse` 把已分配的虚拟号又喂给 `idmap.StoreIDv2`，后者把它当成新 OpenID 另分配一个号，既改错了回执，又在 idmap 里凭空多出一条映射。
+
+- **修改**：`handlers/message_parser.go` 新增 `receiptVirtualID` —— 入参已是纯数字虚拟号（`identity.IsVirtualID`）就原样回显，不再 `StoreIDv2`；只有非虚拟号（真实 OpenID）才建立/查询映射换回虚拟号，`idmap_pro` 语义（`StoreIDv2Pro` + 子键）保留
+- **修改**：`SendC2CResponse` 的 `user_id` 与 `SendResponse` 的 `group_id` / `user_id` 三处同款写法统一改走该函数（`SendResponse` 的群号分支同样会对虚拟群号二次 Store）
+- **确认为设计行为（无需改动）**：`SendGuildPrivateResponse` 不调用 `StoreIDv2`；`SendGuildResponse` 的 `channel_id` 与 `SendResponse` 的 `channel_id` / `guild_id` 入参是 QQ 侧真实 id（非虚拟号），不属本缺陷；`SendResponseSB` 本就原样回显字符串
+- **影响**：回执 `user_id` / `group_id` 与调用方传入的虚拟号一致，idmap 不再新增脏行；真实 OpenID 入参仍换算为虚拟号回执
+- **测试**：`handlers/send_c2c_receipt_test.go` —— 同一虚拟号连续两次 `SendC2CResponse`，回执 `user_id` 均为 `610636458`，且 `RetrieveRowByIDv2("610636458")` 仍无映射；另一用例断言真实 OpenID 入参仍换算为虚拟号
+
 ### `send_group_msg` 缺参导致无限递归 → `fatal error: stack overflow` 进程退出（1400 回执替代）
 
 直接向实例发 `{"action":"send_group_msg","params":{"message":"x"}}`（不带 `group_id`/`user_id`，或 `group_id` 传空串 / `0`）会让整个进程退出。`ParamsContent.UnmarshalJSON` 把缺失字段归一为空串 `""`，而参数守卫把空串判为「有效 id」（空串既不等于 `nil` 也不等于 `"0"`）→ 不返回 1400；随后递归分支在 `idInt64 == 0` 时无条件自调用，注入的 msgType 写入 echo 键 `appID_0`，探测读的却是 `appID_`，永远读不回 → 无限递归 → `fatal error: stack overflow`（Go 无法 recover）。实例日志表现为 `send_group_msg获取到信息类型:` 重复上万次后进程消失。
