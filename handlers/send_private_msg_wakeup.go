@@ -41,7 +41,7 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 	userID, ok := message.Params.UserID.(string)
 	if !ok || userID == "" {
 		mylog.Printf("send_private_msg_wakeup 错误: UserID 为空")
-		return "", nil
+		return sendActionResult(client, message, "缺少 user_id 参数", sendParamRetCode)
 	}
 
 	// 如果不是 OpenID，尝试从 idmap 转换（虚拟数字 ID → 真实 OpenID）
@@ -52,7 +52,7 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 			userID = realID
 		} else {
 			mylog.Printf("send_private_msg_wakeup 错误: UserID 不是32位OpenID且无法转换: %s", userID)
-			return "", nil
+			return sendActionResult(client, message, "无法反查用户 OpenID", sendParamRetCode)
 		}
 	}
 
@@ -128,7 +128,7 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 		richMediaMessage, ok := groupReply.(*dto.RichMediaMessage)
 		if !ok {
 			mylog.Printf("Error: Expected RichMediaMessage type for key")
-			return "", nil
+			return sendActionResult(client, message, "图文消息生成失败: 消息类型不匹配", sendFailRetCode)
 		}
 
 		// 上传图片 (不需要 IsWakeup，只是为了拿 FileInfo)
@@ -136,7 +136,7 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 		if err != nil {
 			mylog.Printf("上传图片失败: %v", err)
 			sendWakeupNotice(client, userID, nil, err, selfID)
-			return "", nil
+			return sendActionResult(client, message, "上传图片失败: "+err.Error(), sendFailRetCode)
 		}
 
 		// 构造 MessageToCreate

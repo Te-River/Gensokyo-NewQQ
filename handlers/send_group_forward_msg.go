@@ -18,7 +18,7 @@ func HandleSendGroupForwardMsg(client callapi.Client, api openapi.OpenAPI, apiv2
 	nodes, ok := message.Params.Messages.([]interface{})
 	if !ok {
 		mylog.Printf("send_group_forward_msg: Messages 不是 []interface{} 类型")
-		return "", nil
+		return sendActionResult(client, message, "messages 参数必须是消息段数组", sendParamRetCode)
 	}
 	var retmsg string
 	forwardMsgLimit := config.GetForwardMsgLimit() // 获取消息发送条数上限

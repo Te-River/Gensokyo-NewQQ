@@ -73,7 +73,7 @@ func HandleSendMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.Ope
 	if (message.Params.UserID == nil || !checkZeroUserID(message.Params.UserID)) &&
 		(message.Params.GroupID == nil || !checkZeroGroupID(message.Params.GroupID)) {
 		mylog.Printf("send_group_msgs接收到错误action: %v", message)
-		return "", nil
+		return sendActionResult(client, message, "user_id 或 group_id 至少提供一个有效值", sendParamRetCode)
 	}
 
 	var idInt64 int64

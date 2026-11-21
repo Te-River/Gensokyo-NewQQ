@@ -75,7 +75,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 	if (message.Params.UserID == nil || !checkZeroUserID(message.Params.UserID)) &&
 		(message.Params.GroupID == nil || !checkZeroGroupID(message.Params.GroupID)) {
 		mylog.Printf("send_group_msgs接收到错误action: %v", message)
-		return "", nil
+		return sendActionResult(client, message, "user_id 或 group_id 至少提供一个有效值", sendParamRetCode)
 	}
 
 	mylog.Printf("send_group_msg获取到信息类型:%v", msgType)
@@ -144,7 +144,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 					originalGroupID, err = idmap.RetrieveRowByIDv2(message.Params.GroupID.(string))
 					if err != nil {
 						mylog.Printf("Error2 retrieving original GroupID: %v", err)
-						return "", nil
+						return sendActionResult(client, message, "无法反查群 OpenID: "+err.Error(), sendParamRetCode)
 					}
 					mylog.Printf("测试,通过idmaps获取的originalGroupID:%v", originalGroupID)
 				}
@@ -243,7 +243,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 			richMediaMessage, ok := groupReply.(*dto.RichMediaMessage)
 			if !ok {
 				mylog.Printf("Error: Expected RichMediaMessage type for key ")
-				return "", nil
+				return sendActionResult(client, message, "图文消息生成失败: 消息类型不匹配", sendFailRetCode)
 			}
 			var groupMessage *dto.MessageToCreate
 			var transmd bool
@@ -260,7 +260,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 				fileInfo, err := uploadMedia(context.TODO(), message.Params.GroupID.(string), richMediaMessage, apiv2)
 				if err != nil {
 					mylog.Printf("上传图片失败: %v", err)
-					return "", nil // 或其他错误处理
+					return sendActionResult(client, message, "上传图片失败: "+err.Error(), sendFailRetCode)
 				}
 				// 图文混合消息同样需要转换 [CQ:at] 为 @用户名，与纯文本路径对齐
 				// 否则 QQ 官方 API 不识别 CQ 码，会原文显示 [CQ:at,qq=数字]
@@ -334,7 +334,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 			groupMessage, ok := groupReply.(*dto.MessageToCreate)
 			if !ok {
 				mylog.Println("Error: Expected MessageToCreate type.")
-				return "", nil // 或其他错误处理
+				return sendActionResult(client, message, "文本消息生成失败: 消息类型不匹配", sendFailRetCode)
 			}
 
 			// 处理独立 [CQ:keyboard] → 文本消息附加内嵌键盘
@@ -398,7 +398,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 						groupMessage, ok := groupReply.(*dto.MessageToCreate)
 						if !ok {
 							mylog.Println("Error: Expected MessageToCreate type.")
-							return "", nil // 或其他错误处理
+							return sendActionResult(client, message, "富媒体消息生成失败: 消息类型不匹配", sendFailRetCode)
 						}
 						//重新为err赋值
 						resp, err := apiv2.PostGroupMessage(context.TODO(), message.Params.GroupID.(string), groupMessage)

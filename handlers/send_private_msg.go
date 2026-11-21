@@ -232,7 +232,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 	if (message.Params.UserID == nil || !checkZeroUserID(message.Params.UserID)) &&
 		(message.Params.GroupID == nil || !checkZeroGroupID(message.Params.GroupID)) {
 		mylog.Printf("send_group_msgs接收到错误action: %v", message)
-		return "", nil
+		return sendActionResult(client, message, "user_id 或 group_id 至少提供一个有效值", sendParamRetCode)
 	}
 
 	var idInt64 int64
@@ -243,9 +243,10 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 		// 临时的
 		msgType = "group_private"
 	} else {
-		if message.Params.GroupID != "" {
+		// Params 是 interface{}：缺省字段为 nil，nil != "" 成立，需显式判空否则会走进错误分支
+		if message.Params.GroupID != nil && message.Params.GroupID != "" {
 			idInt64, err = ConvertToInt64(message.Params.GroupID)
-		} else if message.Params.UserID != "" {
+		} else if message.Params.UserID != nil && message.Params.UserID != "" {
 			idInt64, err = ConvertToInt64(message.Params.UserID)
 		}
 	}
@@ -280,7 +281,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 				_, UserID, err = idmap.RetrieveRowByIDv2Pro("690426430", message.Params.UserID.(string))
 				if err != nil {
 					mylog.Printf("Error reading config: %v", err)
-					return "", nil
+					return sendActionResult(client, message, "无法反查用户 OpenID: "+err.Error(), sendParamRetCode)
 				}
 				mylog.Printf("测试,通过Proid获取的UserID:%v", UserID)
 			} else {
@@ -288,7 +289,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 				UserID, err = idmap.RetrieveRowByIDv2(message.Params.UserID.(string))
 				if err != nil {
 					mylog.Printf("Error reading config: %v", err)
-					return "", nil
+					return sendActionResult(client, message, "无法反查用户 OpenID: "+err.Error(), sendParamRetCode)
 				}
 			}
 		} else {
@@ -398,7 +399,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 				groupMessage, ok = groupReply.(*dto.MessageToCreate)
 				if !ok {
 					mylog.Printf("Error: Expected RichMediaMessage type for key,value:%v", groupReply)
-					return "", nil // 或其他错误处理
+					return sendActionResult(client, message, "图文消息生成失败: 消息类型不匹配", sendFailRetCode)
 				}
 			}
 			// 如果groupMessage是nil 说明groupReply是richMediaMessage类型 如果groupMessage不是nil 说明groupReply是MessageToCreate
@@ -407,7 +408,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 				fileInfo, err := uploadMediaPrivate(context.TODO(), UserID, richMediaMessage, apiv2)
 				if err != nil {
 					mylog.Printf("上传图片失败: %v", err)
-					return "", nil // 或其他错误处理
+					return sendActionResult(client, message, "上传图片失败: "+err.Error(), sendFailRetCode)
 				}
 				// 图文混合消息同样需要转换 [CQ:at] 为 @用户名，与纯文本路径对齐
 				// 否则 QQ 官方 API 不识别 CQ 码，会原文显示 [CQ:at,qq=数字]
@@ -453,6 +454,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 				if IsQQError(err, 22009) {
 					mylog.Printf("私聊主动消息受限(code:22009)，消息被丢弃")
 					retmsg, _ = SendC2CResponse(client, err, &message, resp)
+					// 已回执：SendC2CResponse 内已 client.SendMessage
 					return "", nil
 				}
 				// 请求参数 event_id 无效，清空后重试一次
@@ -495,7 +497,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 			groupMessage, ok := groupReply.(*dto.MessageToCreate)
 			if !ok {
 				mylog.Println("Error: Expected MessageToCreate type.")
-				return "", nil
+				return sendActionResult(client, message, "文本消息生成失败: 消息类型不匹配", sendFailRetCode)
 			}
 
 			groupMessage.Timestamp = time.Now().Unix() // 设置时间戳
@@ -572,7 +574,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 						mylog.ErrLogToFile("error", err.Error())
 					}
 					//如果失败 防止进入递归
-					return "", nil
+					return sendActionResult(client, message, "私聊主动消息受限(code:22009): "+err.Error(), sendFailRetCode)
 				}
 				// 请求参数 event_id 无效，清空后重试一次
     if IsQQError(err, 40034025) {
@@ -580,14 +582,14 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 					resp, err = apiv2.PostC2CMessage(context.TODO(), UserID, groupMessage)
 					if err != nil {
 						mylog.Printf("发送文本私聊信息失败 on code 40034025: %v", err)
-						return "", nil
+						return sendActionResult(client, message, "私聊发送失败(40034025 重试): "+err.Error(), sendFailRetCode)
 					}
 				}
 				// 超时重试
     if IsDeliveryTimeout(err) {
 					resp, err = postC2CMessageWithRetry(apiv2, UserID, groupMessage)
 					if err != nil {
-						return "", nil
+						return sendActionResult(client, message, "私聊发送失败(超时重试): "+err.Error(), sendFailRetCode)
 					}
 				}
 			}
@@ -621,7 +623,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 						groupMessage, ok := groupReply.(*dto.MessageToCreate)
 						       if !ok {
 						        mylog.Println("Error: Expected MessageToCreate type.")
-						        return "", nil // 或其他错误处理
+						        return sendActionResult(client, message, "富媒体消息生成失败: 消息类型不匹配", sendFailRetCode)
 						       }
 
 						       // 将 reply 引用合并到 markdown 消息中（私聊场景校验避免越权）

@@ -48,18 +48,24 @@ func SetGroupAddRequest(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 	return sendActionResult(client, message, "", 0)
 }
 
-// sendActionResult 构造并回传 OneBot action 结果响应（retcode 0=成功）
+// 回执码口径（与 Rust 侧对齐）：1400 参数/协议错误（含 id 反查失败），1500 上游/内部失败。
+// 上游失败复用 message_parser.go 的 sendFailRetCode；历史 handler 仍沿用旧口径 100，新增分支请用这两个常量。
+const sendParamRetCode = 1400
+
+// sendActionResult 构造并回传 OneBot action 结果响应（retcode 0=成功；失败时 data 序列化为 null）
 func sendActionResult(client callapi.Client, message callapi.ActionMessage, errMsg string, retCode int) (string, error) {
 	status := "ok"
 	if retCode != 0 {
 		status = "failed"
 	}
 	response := struct {
+		Data    interface{} `json:"data"`
 		Message string      `json:"message"`
 		RetCode int         `json:"retcode"`
 		Status  string      `json:"status"`
-		Echo    interface{} `json:"echo,omitempty"`
+		Echo    interface{} `json:"echo"`
 	}{
+		Data:    nil,
 		Message: errMsg,
 		RetCode: retCode,
 		Status:  status,
@@ -68,12 +74,12 @@ func sendActionResult(client callapi.Client, message callapi.ActionMessage, errM
 	outputMap := structToMap(response)
 	if client != nil {
 		if err := client.SendMessage(outputMap); err != nil {
-			mylog.Printf("set_group_add_request: 发送响应失败: %v", err)
+			mylog.Printf("sendActionResult: 发送响应失败: %v", err)
 		}
 	}
 	result, err := callapi.MarshalNoEscape(response)
 	if err != nil {
-		mylog.Printf("set_group_add_request: 序列化响应失败: %v", err)
+		mylog.Printf("sendActionResult: 序列化响应失败: %v", err)
 		return "", err
 	}
 	return string(result), nil

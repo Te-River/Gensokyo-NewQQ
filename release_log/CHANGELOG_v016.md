@@ -91,6 +91,18 @@ QQ 官方 2026-11-16 新增 `GET /v2/users/{user_openid}/info`，返回用户昵
 
 ## 🐛 修复
 
+### 发送类 action 未映射 id 时无回执，客户端只能等超时
+
+`send_private_msg` 传入未在 idmap 中映射的 `user_id` 时，Go 侧在 id 反查失败分支直接 `return "", nil`，反向 WS 客户端收不到任何 action 回执，实测 15 秒后超时断开（日志只有 `Error reading config: key not found` → `Unknown message type:`）。
+
+- **修改**：`handlers/send_private_msg.go` 11 处裸 `return "", nil` 逐个审阅——参数错误 / id 反查失败 / 上游发送失败 / 消息类型断言失败改走 `sendActionResult`（参数与协议错误 1400，上游与内部失败 1500）；已由 `SendC2CResponse` 回执的分支保留并注明「已回执」
+- **修改**：同类分支一并处理——`handlers/send_group_msg.go`（7 处）、`send_group_msg_raw.go`（6 处）、`send_msg.go`、`send_group_forward_msg.go`、`send_private_msg_wakeup.go`（4 处）、`send_private_msg_sse.go`（6 处）
+- **修改**：`send_group_msg` 非 Pro 分支反查群 OpenID 失败此前只记日志继续执行（群号被覆盖为空串，发送必然失败且无回执），改为返回 1400 回执
+- **修改**：`sendActionResult`（`handlers/set_group_add_request.go`）补齐 OneBot V11 回执字段——新增 `data`（失败时 `null`），`echo` 去掉 `omitempty` 恒存在；新增 `sendParamRetCode = 1400` 常量，上游失败复用 `sendFailRetCode`（1500）
+- **修改**：`Params` 字段为 `interface{}`，缺省时为 `nil` 而 `nil != ""` 成立——`send_private_msg` / `send_group_msg` 的 ID 转换分支补 `nil` 判空，避免只传 `user_id` 时走进 `group_id` 分支、消息类型枚举递归被跳过（同样表现为无回执）
+- **影响**：可发送路径行为不变；原先静默返回的分支现在都会下发一条 `{"status":"failed","retcode":1400|1500,"data":null,"echo":<原样>}`，HTTP 模式返回体同步带上 `data: null`
+- **测试**：`handlers/send_action_receipt_test.go` 覆盖「未映射 `user_id`」「未映射 `group_id`」两条路径——断言 mock client 至少收到一次 `SendMessage`（不静默无响应）、`retcode=1400`、`status=failed`、`echo` 原样、`data` 为 `null`；群聊用例额外断言未调用 `PostGroupMessage`
+
 ### action 回执不再转义 `&`，与 Rust 端逐字节对齐
 
 `get_user_info` 两侧 `data` 内容一致，但 Go 回执把 `&` 转义成 `\u0026`（`"avatar":"https://thirdqq.qlogo.cn/bqqthird?key=…\u0026kti=…\u0026s=640"`），Rust 端原样输出 `&`——凡是带签名的 URL（头像/图床/短链）回执都逐字节不同：

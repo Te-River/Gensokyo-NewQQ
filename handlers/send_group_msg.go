@@ -129,7 +129,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 	if (message.Params.UserID == nil || !checkZeroUserID(message.Params.UserID)) &&
 		(message.Params.GroupID == nil || !checkZeroGroupID(message.Params.GroupID)) {
 		mylog.Printf("send_group_msgs接收到错误action: %v", message)
-		return "", nil
+		return sendActionResult(client, message, "user_id 或 group_id 至少提供一个有效值", sendParamRetCode)
 	}
 
 	// 内部逻辑 ProcessGroupAddBot.go 中定义的 通过http和ws无法触发 锁定类型
@@ -147,9 +147,10 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 	} else if message.Params.UserID != nil && identity.IsOpenID(message.Params.UserID.(string)) {
 		msgType = "group_private"
 	} else {
-		if message.Params.GroupID != "" {
+		// Params 是 interface{}：缺省字段为 nil，nil != "" 成立，需显式判空否则会走进错误分支
+		if message.Params.GroupID != nil && message.Params.GroupID != "" {
 			idInt64, err = ConvertToInt64(message.Params.GroupID)
-		} else if message.Params.UserID != "" {
+		} else if message.Params.UserID != nil && message.Params.UserID != "" {
 			idInt64, err = ConvertToInt64(message.Params.UserID)
 		}
 	}
@@ -248,7 +249,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 					originalGroupID, err = idmap.RetrieveRowByIDv2(message.Params.GroupID.(string))
 					if err != nil {
 						mylog.Printf("Error2 retrieving original GroupID: %v", err)
-						return "", nil
+						return sendActionResult(client, message, "无法反查群 OpenID: "+err.Error(), sendParamRetCode)
 					}
 					mylog.Printf("测试,通过idmaps获取的originalGroupID:%v", originalGroupID)
 				}
@@ -257,6 +258,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				originalGroupID, err = idmap.RetrieveRowByIDv2(message.Params.GroupID.(string))
 				if err != nil {
 					mylog.Printf("Error retrieving original GroupID: %v", err)
+					return sendActionResult(client, message, "无法反查群 OpenID: "+err.Error(), sendParamRetCode)
 				}
 				// 检查 message.Params.UserID 是否为 nil
 				if message.Params.UserID == nil {
@@ -368,7 +370,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				groupMessage, ok = groupReply.(*dto.MessageToCreate)
 				if !ok {
 					mylog.Printf("Error: Expected RichMediaMessage type for key,value:%v", groupReply)
-					return "", nil
+					return sendActionResult(client, message, "图文消息生成失败: 消息类型不匹配", sendFailRetCode)
 				}
 			}
 			var transmd bool
@@ -386,7 +388,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			  fileInfo, err := uploadMedia(context.TODO(), message.Params.GroupID.(string), richMediaMessage, apiv2)
 			  if err != nil {
 			   mylog.Printf("上传图片失败: %v", err)
-			   return "", nil // 或其他错误处理
+			   return sendActionResult(client, message, "上传图片失败: "+err.Error(), sendFailRetCode) // 或其他错误处理
 			  }
 			  // 图文混合消息同样需要转换 [CQ:at] 为 @用户名，与纯文本路径对齐
 			  // 否则 QQ 官方 API 不识别 CQ 码，会原文显示 [CQ:at,qq=数字]
@@ -558,6 +560,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			if strings.TrimSpace(messageText) == "" && len(foundItems) == 0 {
 				mylog.Printf("[CQ:action] 纯 CQ 码消息，不发送到 QQ 群聊")
 				SendResponse(client, nil, &message, nil, api, apiv2)
+				// 已回执：SendResponse 内已 client.SendMessage
 				return "", nil
 			}
 
@@ -599,7 +602,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			groupMessage, ok := groupReply.(*dto.MessageToCreate)
 			if !ok {
 				mylog.Println("Error: Expected MessageToCreate type.")
-				return "", nil // 或其他错误处理
+				return sendActionResult(client, message, "文本消息生成失败: 消息类型不匹配", sendFailRetCode)
 			}
 
 			// 如果有 markdown，改为 markdown 消息
@@ -809,7 +812,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 						groupMessage, ok := groupReply.(*dto.MessageToCreate)
 						if !ok {
 							mylog.Println("Error: Expected MessageToCreate type.")
-							return "", nil // 或其他错误处理
+							return sendActionResult(client, message, "富媒体消息生成失败: 消息类型不匹配", sendFailRetCode)
 						}
 						// 将 reply 引用合并到 markdown 消息中
 						       if replyIDs, ok := foundItems["reply_msg_id"]; ok && len(replyIDs) > 0 && key == "markdown" {

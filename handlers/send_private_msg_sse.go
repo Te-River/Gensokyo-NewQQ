@@ -65,7 +65,7 @@ func HandleSendPrivateMsgSSE(client callapi.Client, api openapi.OpenAPI, apiv2 o
 	// New checks for UserID and GroupID being nil or 0
 	if message.Params.UserID == nil || !checkZeroUserID(message.Params.UserID) {
 		mylog.Printf("send_group_msg_sse接收到错误action: %v", message)
-		return "", nil
+		return sendActionResult(client, message, "缺少 user_id 参数", sendParamRetCode)
 	}
 
 	var err error
@@ -82,7 +82,7 @@ func HandleSendPrivateMsgSSE(client callapi.Client, api openapi.OpenAPI, apiv2 o
 			_, UserID, err = idmap.RetrieveRowByIDv2Pro("690426430", message.Params.UserID.(string))
 			if err != nil {
 				mylog.Printf("Error reading config: %v", err)
-				return "", nil
+				return sendActionResult(client, message, "无法反查用户 OpenID: "+err.Error(), sendParamRetCode)
 			}
 			mylog.Printf("测试,通过Proid获取的UserID:%v", UserID)
 		} else {
@@ -90,7 +90,7 @@ func HandleSendPrivateMsgSSE(client callapi.Client, api openapi.OpenAPI, apiv2 o
 			UserID, err = idmap.RetrieveRowByIDv2(message.Params.UserID.(string))
 			if err != nil {
 				mylog.Printf("Error reading config: %v", err)
-				return "", nil
+				return sendActionResult(client, message, "无法反查用户 OpenID: "+err.Error(), sendParamRetCode)
 			}
 		}
 	} else {
@@ -101,7 +101,7 @@ func HandleSendPrivateMsgSSE(client callapi.Client, api openapi.OpenAPI, apiv2 o
 	messageJSON, err := json.Marshal(message.Params.Message)
 	if err != nil {
 		mylog.Printf("Error marshalling message: %v", err)
-		return "", nil
+		return sendActionResult(client, message, "message 参数格式无效: "+err.Error(), sendParamRetCode)
 	}
 
 	// 然后，将这个JSON字符串反序列化到InterfaceBody类型的对象中
@@ -109,7 +109,7 @@ func HandleSendPrivateMsgSSE(client callapi.Client, api openapi.OpenAPI, apiv2 o
 	err = json.Unmarshal(messageJSON, &messageBody)
 	if err != nil {
 		mylog.Printf("Error unmarshalling to InterfaceBody: %v", err)
-		return "", nil
+		return sendActionResult(client, message, "message 参数格式无效: "+err.Error(), sendParamRetCode)
 	}
 
 	// 输出反序列化后的对象，确认是否成功转换
@@ -139,7 +139,7 @@ func HandleSendPrivateMsgSSE(client callapi.Client, api openapi.OpenAPI, apiv2 o
 	if err != nil {
 		mylog.Errorf("发送文本私聊信息失败: %v", err)
 		//如果失败 防止进入递归
-		return "", nil
+		return sendActionResult(client, message, "私聊流式消息发送失败: "+err.Error(), sendFailRetCode)
 	}
 
 	// 更新或刷新映射关系
