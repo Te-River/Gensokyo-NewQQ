@@ -84,8 +84,8 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 	}
 	// ParamsContent.UnmarshalJSON 会把缺失字段归一为 ""（非 nil），空串既不是 nil
 	// 也不等于 "0"，所以「有效 id」必须显式排除空串，否则缺参 action 会绕过下面的守卫。
-	groupIDStr, _ := message.Params.GroupID.(string)
-	userIDStr, _ := message.Params.UserID.(string)
+	groupIDStr := paramsID(message.Params.GroupID)
+	userIDStr := paramsID(message.Params.UserID)
 	hasUsableID := func(id string) bool { return id != "" && id != "0" }
 
 	if !identity.IsOpenID(groupIDStr) {
@@ -171,7 +171,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				realGroupID = pickLastRealGroupID(outs)
 				eventID, eventIDSet = pickCQEventID(outs, eventID)
 			} else {
-				messageText, realGroupID, eventIDSet = ProcessOutboundCQCodesWithEventFlag(messageText, message.Params.GroupID.(string), &eventID, apiv2)
+				messageText, realGroupID, eventIDSet = ProcessOutboundCQCodesWithEventFlag(messageText, groupIDStr, &eventID, apiv2)
 			}
 			cqPreExecuted = true
 		}
@@ -184,16 +184,15 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		// 使用 echo 获取消息ID
 		var messageID string
 		if config.GetLazyMessageId() {
-			//由于实现了Params的自定义unmarshell 所以可以类型安全的断言为string
-			messageID = echo.GetLazyMessagesId(message.Params.GroupID.(string))
+			messageID = echo.GetLazyMessagesId(groupIDStr)
 			mylog.Printf("GetLazyMessagesId: %v", messageID)
 			//如果应用端传递了user_id 就让at不要顺序乱套
-			if message.Params.UserID != nil && message.Params.UserID.(string) != "" && message.Params.UserID.(string) != "0" {
-				messageID = echo.GetLazyMessagesIdv2(message.Params.GroupID.(string), message.Params.UserID.(string))
+			if userIDStr != "" && userIDStr != "0" {
+				messageID = echo.GetLazyMessagesIdv2(groupIDStr, userIDStr)
 				mylog.Printf("GetLazyMessagesIdv2: %v", messageID)
 			} else {
 				//如果应用端没有传递userid 那就用群号模式的lazyid 但是不保证顺序是对的
-				messageID = echo.GetLazyMessagesId(message.Params.GroupID.(string))
+				messageID = echo.GetLazyMessagesId(groupIDStr)
 				mylog.Printf("GetLazyMessagesIdv1: %v", messageID)
 			}
 			//2000是群主动 此时不能被动转主动
@@ -211,17 +210,17 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		}
 
 		var originalGroupID, originalUserID string
-		if !identity.IsOpenID(message.Params.GroupID.(string)) {
+		if !identity.IsOpenID(groupIDStr) {
 			// 检查UserID是否为nil
-			if message.Params.UserID != nil && config.GetIdmapPro() && message.Params.UserID.(string) != "" && message.Params.UserID.(string) != "0" {
-				// 如果UserID不是nil且配置为使用Pro版本，则调用RetrieveRowByIDv2Pro
-				originalGroupID, originalUserID, err = idmap.RetrieveRowByIDv2Pro(message.Params.GroupID.(string), message.Params.UserID.(string))
+			if config.GetIdmapPro() && userIDStr != "" && userIDStr != "0" {
+				// 如果user_id可用且配置为使用Pro版本，则调用RetrieveRowByIDv2Pro
+				originalGroupID, originalUserID, err = idmap.RetrieveRowByIDv2Pro(groupIDStr, userIDStr)
 				if err != nil {
 					mylog.Printf("Error1 retrieving original GroupID: %v", err)
 				}
 				mylog.Printf("测试,通过idmaps-pro获取的originalGroupID:%v", originalGroupID)
 				if originalGroupID == "" {
-					originalGroupID, err = idmap.RetrieveRowByIDv2(message.Params.GroupID.(string))
+					originalGroupID, err = idmap.RetrieveRowByIDv2(groupIDStr)
 					if err != nil {
 						mylog.Printf("Error2 retrieving original GroupID: %v", err)
 						return sendActionResult(client, message, "无法反查群 OpenID: "+err.Error(), sendParamRetCode)
@@ -230,7 +229,7 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 				}
 			} else {
 				// 如果UserID是nil或配置不使用Pro版本，则调用RetrieveRowByIDv2
-				originalGroupID, err = idmap.RetrieveRowByIDv2(message.Params.GroupID.(string))
+				originalGroupID, err = idmap.RetrieveRowByIDv2(groupIDStr)
 				if err != nil {
 					mylog.Printf("Error retrieving original GroupID: %v", err)
 					return sendActionResult(client, message, "无法反查群 OpenID: "+err.Error(), sendParamRetCode)
@@ -257,31 +256,34 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 			message.Params.UserID = originalUserID
 		}
 
+		// 上面的反查已就地改写 Params，入口处的 groupIDStr/userIDStr 从这里起可能过期
+		groupIDNow := paramsID(message.Params.GroupID)
+		userIDNow := paramsID(message.Params.UserID)
+
 		//2000是群主动 此时不能被动转主动
 		if SSM {
 			//mylog.Printf("正在使用Msgid:%v 补发之前失败的主动信息,请注意AtoP不要设置超过3,否则可能会影响正常信息发送", messageID)
 			//mylog.Printf("originalGroupID:%v ", originalGroupID)
-			SendStackMessages(apiv2, messageID, message.Params.GroupID.(string))
+			SendStackMessages(apiv2, messageID, groupIDNow)
 		}
 		mylog.Println("群组发信息messageText:", messageText)
 		//mylog.Println("foundItems:", foundItems)
 		if messageID == "" {
-			// 检查 UserID 是否为 nil
-			if message.Params.UserID != nil && message.Params.UserID.(string) != "" && message.Params.UserID.(string) != "0" {
-				messageID = GetMessageIDByUseridAndGroupid(config.GetAppIDStr(), message.Params.UserID, message.Params.GroupID)
-				mylog.Println("通过GetMessageIDByUseridAndGroupid函数获取的message_id:", message.Params.GroupID, messageID)
+			// user_id 为 nil/非 string 时安全视为空串，跳过该路反查
+			if userIDNow != "" && userIDNow != "0" {
+				messageID = GetMessageIDByUseridAndGroupid(config.GetAppIDStr(), userIDNow, groupIDNow)
+				mylog.Println("通过GetMessageIDByUseridAndGroupid函数获取的message_id:", groupIDNow, messageID)
 			} else {
-				// 如果 UserID 是 nil，可以在这里处理，例如记录日志或采取其他措施
-				mylog.Println("UserID 为 nil,跳过 GetMessageIDByUseridAndGroupid 调用")
+				mylog.Println("UserID 为 nil 或 0,跳过 GetMessageIDByUseridAndGroupid 调用")
 			}
 		}
 		// 如果messageID为空，通过函数获取
 		if messageID == "" {
-			messageID = GetMessageIDByUseridOrGroupid(config.GetAppIDStr(), message.Params.GroupID)
-			mylog.Println("通过GetMessageIDByUseridOrGroupid函数获取的message_id:", message.Params.GroupID, messageID)
+			messageID = GetMessageIDByUseridOrGroupid(config.GetAppIDStr(), groupIDNow)
+			mylog.Println("通过GetMessageIDByUseridOrGroupid函数获取的message_id:", groupIDNow, messageID)
 		}
 		// 主动推送：没有用户上下文时，缓存的 msg_id 已过期，清掉
-		if messageID != "" && (message.Params.UserID == nil || message.Params.UserID.(string) == "" || message.Params.UserID.(string) == "0") && eventID == "" {
+		if messageID != "" && (userIDNow == "" || userIDNow == "0") && eventID == "" {
 			messageID = ""
 			mylog.Println("主动推送模式，清空缓存的 msg_id")
 		}
@@ -986,8 +988,8 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 		}
 	case "group_private":
 		//用userid还原出openid 这是虚拟成群的群聊私聊信息
-		if message.Params.GroupID != nil && message.Params.GroupID.(string) != "" {
-			message.Params.UserID = message.Params.GroupID.(string)
+		if groupID := paramsID(message.Params.GroupID); groupID != "" {
+			message.Params.UserID = groupID
 		}
 		retmsg, _ = HandleSendPrivateMsg(client, api, apiv2, message)
 	default:

@@ -35,7 +35,11 @@ type GroupInfo struct {
 }
 
 func HandleGetGroupInfo(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, message callapi.ActionMessage) (string, error) {
-	groupID := message.Params.GroupID.(string)
+	groupID := paramsID(message.Params.GroupID)
+	if groupID == "" {
+		mylog.Printf("get_group_info: 缺少 group_id")
+		return sendActionResult(client, message, "group_id 不能为空", sendParamRetCode)
+	}
 
 	// 反查真实 OpenID（32 位原生 OpenID 直接使用）
 	groupOpenID := groupID

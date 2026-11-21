@@ -46,7 +46,11 @@ func parseBotJoinedAt(value string) int64 {
 // GetGroupBotState 获取机器人在群内的状态
 // params: group_id(虚拟/真实群ID)
 func GetGroupBotState(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, message callapi.ActionMessage) (string, error) {
-	groupID := message.Params.GroupID.(string)
+	groupID := paramsID(message.Params.GroupID)
+	if groupID == "" {
+		mylog.Printf("get_group_bot_state: 缺少 group_id")
+		return sendActionResult(client, message, "group_id 不能为空", sendParamRetCode)
+	}
 
 	// 反查真实 OpenID（32 位原生 OpenID 直接使用）
 	groupOpenID := groupID

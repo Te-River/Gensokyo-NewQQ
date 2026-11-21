@@ -34,18 +34,22 @@ func GetAvatar(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI
 	var originalUserID string
 	var err error
 
+	// 内部直接构造的 action 可能不带 id（nil）或带非 string：统一安全取值，避免类型断言 panic
+	groupIDStr := paramsID(message.Params.GroupID)
+	userIDStr := paramsID(message.Params.UserID)
+
 	if config.GetIdmapPro() {
-		// 如果UserID不是nil且配置为使用Pro版本，则调用RetrieveRowByIDv2Pro
-		_, originalUserID, err = idmap.RetrieveRowByIDv2Pro(message.Params.GroupID.(string), message.Params.UserID.(string))
+		// 如果user_id可用且配置为使用Pro版本，则调用RetrieveRowByIDv2Pro
+		_, originalUserID, err = idmap.RetrieveRowByIDv2Pro(groupIDStr, userIDStr)
 		if err != nil {
 			mylog.Printf("Error1 retrieving original GroupID: %v", err)
-			_, originalUserID, err = idmap.RetrieveRowByIDv2Pro("690426430", message.Params.UserID.(string))
+			_, originalUserID, err = idmap.RetrieveRowByIDv2Pro("690426430", userIDStr)
 			if err != nil {
 				mylog.Printf("Error reading private originalUserID: %v", err)
 			}
 		}
 	} else {
-		originalUserID, err = idmap.RetrieveRowByIDv2(message.Params.UserID.(string))
+		originalUserID, err = idmap.RetrieveRowByIDv2(userIDStr)
 		if err != nil {
 			mylog.Printf("Error retrieving original UserID: %v", err)
 		}
@@ -57,7 +61,7 @@ func GetAvatar(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI
 		return sendActionResult(client, message, "无法反查用户 OpenID", sendParamRetCode)
 	}
 
-	userid64, _ := strconv.ParseInt(message.Params.UserID.(string), 10, 64)
+	userid64, _ := strconv.ParseInt(userIDStr, 10, 64)
 
 	response.Data = AvatarData{
 		Message: avatarurl,

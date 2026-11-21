@@ -187,8 +187,8 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 	}
 	// ParamsContent.UnmarshalJSON 会把缺失字段归一为 ""（非 nil），空串既不是 nil
 	// 也不等于 "0"，所以「有效 id」必须显式排除空串，否则缺参 action 会绕过下面的守卫。
-	userIDStr, _ := message.Params.UserID.(string)
-	groupIDStr, _ := message.Params.GroupID.(string)
+	userIDStr := paramsID(message.Params.UserID)
+	groupIDStr := paramsID(message.Params.GroupID)
 	hasUsableID := func(id string) bool { return id != "" && id != "0" }
 
 	// 探测块是递归唯一能推进的途径（注入的 msgType 只写 echo 键 appID_<idInt64>），
@@ -259,11 +259,10 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 	case "group_private", "group":
 		//私聊信息
 		var UserID string
-		if !identity.IsOpenID(message.Params.UserID.(string)) {
+		if !identity.IsOpenID(userIDStr) {
 			if config.GetIdmapPro() {
 				//还原真实的userid
-				//mylog.Printf("group_private:%v", message.Params.UserID.(string))
-				_, UserID, err = idmap.RetrieveRowByIDv2Pro("690426430", message.Params.UserID.(string))
+				_, UserID, err = idmap.RetrieveRowByIDv2Pro("690426430", userIDStr)
 				if err != nil {
 					mylog.Printf("Error reading config: %v", err)
 					return sendActionResult(client, message, "无法反查用户 OpenID: "+err.Error(), sendParamRetCode)
@@ -271,14 +270,14 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 				mylog.Printf("测试,通过Proid获取的UserID:%v", UserID)
 			} else {
 				//还原真实的userid
-				UserID, err = idmap.RetrieveRowByIDv2(message.Params.UserID.(string))
+				UserID, err = idmap.RetrieveRowByIDv2(userIDStr)
 				if err != nil {
 					mylog.Printf("Error reading config: %v", err)
 					return sendActionResult(client, message, "无法反查用户 OpenID: "+err.Error(), sendParamRetCode)
 				}
 			}
 		} else {
-			UserID = message.Params.UserID.(string)
+			UserID = userIDStr
 		}
 
 		// 解析消息内容
@@ -335,7 +334,7 @@ func HandleSendPrivateMsg(client callapi.Client, api openapi.OpenAPI, apiv2 open
 		if messageID == "2000" {
 			messageID = ""
 			mylog.Println("通过lazymsgid发送群私聊主动信息,每月可发送1次")
-			if !identity.IsOpenID(message.Params.UserID.(string)) {
+			if !identity.IsOpenID(userIDStr) {
 				eventID = GetEventIDByUseridOrGroupid(config.GetAppIDStr(), message.Params.UserID)
 			} else {
 				eventID = GetEventIDByUseridOrGroupidv2(config.GetAppIDStr(), message.Params.UserID)

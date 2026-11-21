@@ -28,6 +28,9 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 		// 当 message.Echo 是字符串类型时执行此块
 		msgType = echo.GetMsgTypeByKey(echoStr)
 	}
+	// 内部直接构造的 action 可能不带 id（nil）或带非 string：统一安全取值，避免类型断言 panic
+	groupIDStr := paramsID(message.Params.GroupID)
+	userIDStr := paramsID(message.Params.UserID)
 	// 检查GroupID是否为0
 	checkZeroGroupID := func(id interface{}) bool {
 		switch v := id.(type) {
@@ -56,7 +59,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 		}
 	}
 
-	if message.Params.GroupID != nil && !identity.IsOpenID(message.Params.GroupID.(string)) {
+	if message.Params.GroupID != nil && !identity.IsOpenID(groupIDStr) {
 		if msgType == "" && message.Params.GroupID != nil && checkZeroGroupID(message.Params.GroupID) {
 			msgType = GetMessageTypeByGroupid(config.GetAppIDStr(), message.Params.GroupID)
 		}
@@ -83,19 +86,19 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 	var err error
 	var retmsg string
 
-	if identity.IsOpenID(message.Params.GroupID.(string)) {
-		idInt64, err = idmap.GenerateRowID(message.Params.GroupID.(string), 9)
+	if identity.IsOpenID(groupIDStr) {
+		idInt64, err = idmap.GenerateRowID(groupIDStr, 9)
 		// 临时的
 		msgType = "group"
-	} else if message.Params.UserID != nil && identity.IsOpenID(message.Params.UserID.(string)) {
-		idInt64, err = idmap.GenerateRowID(message.Params.UserID.(string), 9)
+	} else if identity.IsOpenID(userIDStr) {
+		idInt64, err = idmap.GenerateRowID(userIDStr, 9)
 		// 临时的
 		msgType = "group_private"
 	} else {
-		if message.Params.GroupID != "" {
-			idInt64, err = ConvertToInt64(message.Params.GroupID)
-		} else if message.Params.UserID != "" {
-			idInt64, err = ConvertToInt64(message.Params.UserID)
+		if groupIDStr != "" {
+			idInt64, err = ConvertToInt64(groupIDStr)
+		} else if userIDStr != "" {
+			idInt64, err = ConvertToInt64(userIDStr)
 		}
 	}
 
@@ -131,17 +134,17 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 		var SSM bool
 
 		var originalGroupID, originalUserID string
-		if !identity.IsOpenID(message.Params.GroupID.(string)) {
+		if !identity.IsOpenID(groupIDStr) {
 			// 检查UserID是否为nil
-			if message.Params.UserID != nil && config.GetIdmapPro() && message.Params.UserID.(string) != "" && message.Params.UserID.(string) != "0" {
-				// 如果UserID不是nil且配置为使用Pro版本，则调用RetrieveRowByIDv2Pro
-				originalGroupID, originalUserID, err = idmap.RetrieveRowByIDv2Pro(message.Params.GroupID.(string), message.Params.UserID.(string))
+			if config.GetIdmapPro() && userIDStr != "" && userIDStr != "0" {
+				// 如果user_id可用且配置为使用Pro版本，则调用RetrieveRowByIDv2Pro
+				originalGroupID, originalUserID, err = idmap.RetrieveRowByIDv2Pro(groupIDStr, userIDStr)
 				if err != nil {
 					mylog.Printf("Error1 retrieving original GroupID: %v", err)
 				}
 				mylog.Printf("测试,通过idmaps-pro获取的originalGroupID:%v", originalGroupID)
 				if originalGroupID == "" {
-					originalGroupID, err = idmap.RetrieveRowByIDv2(message.Params.GroupID.(string))
+					originalGroupID, err = idmap.RetrieveRowByIDv2(groupIDStr)
 					if err != nil {
 						mylog.Printf("Error2 retrieving original GroupID: %v", err)
 						return sendActionResult(client, message, "无法反查群 OpenID: "+err.Error(), sendParamRetCode)
@@ -150,7 +153,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 				}
 			} else {
 				// 如果UserID是nil或配置不使用Pro版本，则调用RetrieveRowByIDv2
-				originalGroupID, err = idmap.RetrieveRowByIDv2(message.Params.GroupID.(string))
+				originalGroupID, err = idmap.RetrieveRowByIDv2(groupIDStr)
 				if err != nil {
 					mylog.Printf("Error retrieving original GroupID: %v", err)
 				}
@@ -180,7 +183,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 			return regexp.MustCompile(`^\d+$`).MatchString(s)
 		}
 
-		messageID := message.Params.MessageID.(string)
+		messageID := paramsID(message.Params.MessageID)
 
 		if isNumeric(messageID) && messageID != "0" {
 			// 当messageID是字符串形式的数字时，执行转换
@@ -205,7 +208,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 		if SSM {
 			//mylog.Printf("正在使用Msgid:%v 补发之前失败的主动信息,请注意AtoP不要设置超过3,否则可能会影响正常信息发送", messageID)
 			//mylog.Printf("originalGroupID:%v ", originalGroupID)
-			SendStackMessages(apiv2, messageID, message.Params.GroupID.(string))
+			SendStackMessages(apiv2, messageID, paramsID(message.Params.GroupID))
 		}
 		mylog.Println("群组发信息messageText:", messageText)
 
@@ -238,7 +241,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 			// 创建包含单个图片的 singleItem
 			singleItem[imageType] = []string{imageUrl}
 			msgseq := echo.NextMappingSeq(messageID)
-			groupReply := generateGroupMessage(messageID, "", singleItem, "", msgseq, apiv2, message.Params.GroupID.(string))
+			groupReply := generateGroupMessage(messageID, "", singleItem, "", msgseq, apiv2, paramsID(message.Params.GroupID))
 			// 进行类型断言
 			richMediaMessage, ok := groupReply.(*dto.RichMediaMessage)
 			if !ok {
@@ -388,7 +391,7 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 				singleItem[key] = []string{url} // 创建一个只包含一个 URL 的 singleItem
 				//mylog.Println("singleItem:", singleItem)
 				msgseq := echo.NextMappingSeq(messageID)
-				groupReply := generateGroupMessage(messageID, "", singleItem, "", msgseq, apiv2, message.Params.GroupID.(string))
+				groupReply := generateGroupMessage(messageID, "", singleItem, "", msgseq, apiv2, paramsID(message.Params.GroupID))
 				// 进行类型断言
 				richMediaMessage, ok := groupReply.(*dto.RichMediaMessage)
 				if !ok {
@@ -489,8 +492,8 @@ func HandleSendGroupMsgRaw(client callapi.Client, api openapi.OpenAPI, apiv2 ope
 		}
 	case "group_private":
 		//用userid还原出openid 这是虚拟成群的群聊私聊信息
-		if message.Params.GroupID != nil && message.Params.GroupID.(string) != "" {
-			message.Params.UserID = message.Params.GroupID.(string)
+		if groupID := paramsID(message.Params.GroupID); groupID != "" {
+			message.Params.UserID = groupID
 		}
 		retmsg, _ = HandleSendPrivateMsg(client, api, apiv2, message)
 	default:

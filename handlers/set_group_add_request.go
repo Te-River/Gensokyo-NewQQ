@@ -52,6 +52,21 @@ func SetGroupAddRequest(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 // 上游失败复用 message_parser.go 的 sendFailRetCode；历史 handler 仍沿用旧口径 100，新增分支请用这两个常量。
 const sendParamRetCode = 1400
 
+// paramsID 安全读取 Params 里的 id 字段（user_id / group_id / message_id）：nil 与非 string 一律视为空串。
+//
+// JSON 入参路径本来就是安全的——ParamsContent.UnmarshalJSON 会把缺失字段归一为 ""（非 nil），
+// 所以解码出来的 id 一定是 string。但内部代码（CQ 解析、事件转 action、webhook 转发）会直接
+// 构造 callapi.ActionMessage，此时这些字段可能仍是 nil 或其他类型；旧写法
+// message.Params.UserID.(string) 在这种输入上直接 panic，RecoverPanic 只兜住不至于崩溃，
+// 却不回执，客户端只能等到超时。发送/撤回类入口统一走这里取 id。
+func paramsID(v interface{}) string {
+	s, ok := v.(string)
+	if !ok {
+		return ""
+	}
+	return s
+}
+
 // sendActionResult 构造并回传 OneBot action 结果响应（retcode 0=成功；失败时 data 序列化为 null）
 func sendActionResult(client callapi.Client, message callapi.ActionMessage, errMsg string, retCode int) (string, error) {
 	status := "ok"

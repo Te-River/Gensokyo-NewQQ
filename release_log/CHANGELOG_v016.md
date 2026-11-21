@@ -263,6 +263,16 @@ C2C 单聊只支持按钮 `permission.type=2`（所有人）：此前的兜底�
 - **影响**：Markdown 图片不再依赖任何外部 URL，平台侧直接引用素材；Refactor 分支此前已实现同一链路，本次为 main/hotfix 补齐
 - **测试**：`handlers/media_asset_test.go` 覆盖 PUT body 一致性、ETag 缺失回退本地 md5、ETag 覆盖、PUT 非 2xx、>10MB 跳过；Markdown/keyboard 端到端断言产出 `qqbot-media://`
 
+### 内部构造的 action 缺 id 时类型断言 panic、无回执（统一安全取值 + 1400，2026-11-21）
+
+`handlers/send_private_msg.go`、`send_group_msg.go`、`send_msg.go`、`send_group_msg_raw.go` 等发送/撤回入口直接写 `message.Params.UserID.(string)` 取值。JSON 入参路径本是安全的（`callapi.ParamsContent.UnmarshalJSON` 把缺失字段归一为 `""`），但内部代码（CQ 解析、事件转 action、webhook 转发）直接构造 `callapi.ActionMessage` 时这些字段可能仍是 `nil`，断言即 panic；`RecoverPanic` 只兜住进程不崩，**不回执**，客户端只能等到超时：
+
+- **修改**：`handlers/set_group_add_request.go` 新增共享助手 `paramsID(v interface{}) string`——`nil`/非 `string` 一律视为空串（严格语义：内部传入的 int 不会被串化后当成有效 id）
+- **修改**：发送/撤回类入口统一改用它——`send_private_msg`（含 `send_private_msg_sse`）、`send_group_msg`（含 lazy msg_id、idmap-pro 反查、群号反查、主动推送判断等分支）、`send_msg`、`send_group_msg_raw`（含 `Params.MessageID` 与 `group_private` 分支回填），以及回执 `SendResponseSB` 的 `group_id` 回显
+- **修改**：查询类同类断言一并收口——`get_avatar` 改安全取值（缺 `user_id` 走既有 1400），`get_group_info` / `get_group_bot_state` / `get_group_join_request_list` 缺 `group_id` 显式回 1400（此前是断言 panic，或落到「无法反查群 OpenID」的 100）
+- **影响**：缺失 id 的 action 一律走既有 1400 参数错误路径并带回复执，不再 panic、不再让客户端空等；id 齐全时行为不变
+- **测试**：新增 `handlers/send_params_guard_test.go`——直接构造 `callapi.ActionMessage`（不经 JSON）：`UserID=nil` 调 `HandleSendPrivateMsg`、`GroupID=nil` 调 `HandleSendGroupMsg`、`Params` 零值调两个入口，均断言 `retcode:1400` + `status:"failed"` + 客户端收到同一回执且不 panic；另附 `paramsID` 对 nil/string/int/float64 的取值表
+
 ---
 
 ## 📝 工程与文档变更

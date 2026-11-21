@@ -54,7 +54,11 @@ func HandleSendMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.Ope
 		}
 	}
 
-	if !identity.IsOpenID(message.Params.GroupID.(string)) {
+	// 内部直接构造的 action 可能不带 id（nil）或带非 string：统一安全取值，避免类型断言 panic
+	groupIDStr := paramsID(message.Params.GroupID)
+	userIDStr := paramsID(message.Params.UserID)
+
+	if !identity.IsOpenID(groupIDStr) {
 		if msgType == "" && message.Params.GroupID != nil && checkZeroGroupID(message.Params.GroupID) {
 			msgType = GetMessageTypeByGroupid(config.GetAppIDStr(), message.Params.GroupID)
 		}
@@ -79,19 +83,19 @@ func HandleSendMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.Ope
 	var idInt64 int64
 	var err error
 
-	if identity.IsOpenID(message.Params.GroupID.(string)) {
-		if message.Params.GroupID != "" {
-			idInt64, err = idmap.GenerateRowID(message.Params.GroupID.(string), 9)
-		} else if message.Params.UserID != "" {
-			idInt64, err = idmap.GenerateRowID(message.Params.UserID.(string), 9)
+	if identity.IsOpenID(groupIDStr) {
+		if groupIDStr != "" {
+			idInt64, err = idmap.GenerateRowID(groupIDStr, 9)
+		} else if userIDStr != "" {
+			idInt64, err = idmap.GenerateRowID(userIDStr, 9)
 		}
 		// 临时的
 		msgType = "group"
 	} else {
-		if message.Params.GroupID != "" {
-			idInt64, err = ConvertToInt64(message.Params.GroupID)
-		} else if message.Params.UserID != "" {
-			idInt64, err = ConvertToInt64(message.Params.UserID)
+		if groupIDStr != "" {
+			idInt64, err = ConvertToInt64(groupIDStr)
+		} else if userIDStr != "" {
+			idInt64, err = ConvertToInt64(userIDStr)
 		}
 	}
 

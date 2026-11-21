@@ -451,7 +451,7 @@ func SendResponseSB(client callapi.Client, err error, message *callapi.ActionMes
 		response.Data.MessageID = ""
 	}
 
-	response.GroupID = message.Params.GroupID.(string)
+	response.GroupID = paramsID(message.Params.GroupID)
 	response.Echo = message.Echo
 	if err != nil {
 		response.Message = sendFailureMessage(err)

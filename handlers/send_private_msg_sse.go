@@ -73,13 +73,14 @@ func HandleSendPrivateMsgSSE(client callapi.Client, api openapi.OpenAPI, apiv2 o
 	var resp *dto.C2CMessageResponse
 
 	var UserID string
+	// user_id 可能来自内部构造的 action：nil/非 string 安全视为空串，避免类型断言 panic
+	userIDStr := paramsID(message.Params.UserID)
 
-	if message.Params.UserID != nil && !identity.IsOpenID(message.Params.UserID.(string)) {
+	if !identity.IsOpenID(userIDStr) {
 		//私聊信息
 		if config.GetIdmapPro() {
 			//还原真实的userid
-			//mylog.Printf("group_private:%v", message.Params.UserID.(string))
-			_, UserID, err = idmap.RetrieveRowByIDv2Pro("690426430", message.Params.UserID.(string))
+			_, UserID, err = idmap.RetrieveRowByIDv2Pro("690426430", userIDStr)
 			if err != nil {
 				mylog.Printf("Error reading config: %v", err)
 				return sendActionResult(client, message, "无法反查用户 OpenID: "+err.Error(), sendParamRetCode)
@@ -87,14 +88,14 @@ func HandleSendPrivateMsgSSE(client callapi.Client, api openapi.OpenAPI, apiv2 o
 			mylog.Printf("测试,通过Proid获取的UserID:%v", UserID)
 		} else {
 			//还原真实的userid
-			UserID, err = idmap.RetrieveRowByIDv2(message.Params.UserID.(string))
+			UserID, err = idmap.RetrieveRowByIDv2(userIDStr)
 			if err != nil {
 				mylog.Printf("Error reading config: %v", err)
 				return sendActionResult(client, message, "无法反查用户 OpenID: "+err.Error(), sendParamRetCode)
 			}
 		}
 	} else {
-		UserID = message.Params.UserID.(string)
+		UserID = userIDStr
 	}
 
 	// 首先，将message.Params.Message序列化成JSON字符串

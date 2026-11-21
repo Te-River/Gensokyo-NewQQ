@@ -76,7 +76,11 @@ func resolveJoinRequestLimit(limit int) int {
 // GetGroupJoinRequestList 拉取入群申请列表
 // params: group_id(虚拟/真实群ID), cursor(官方分页游标, 优先) / next_index(旧字段, cursor 为空时回退), limit(单页数量, 默认20 最大50)
 func GetGroupJoinRequestList(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI, message callapi.ActionMessage) (string, error) {
-	groupID := message.Params.GroupID.(string)
+	groupID := paramsID(message.Params.GroupID)
+	if groupID == "" {
+		mylog.Printf("get_group_join_request_list: 缺少 group_id")
+		return sendActionResult(client, message, "group_id 不能为空", sendParamRetCode)
+	}
 
 	// 反查真实 OpenID（32 位原生 OpenID 直接使用）
 	groupOpenID := groupID
