@@ -759,19 +759,18 @@ func InteractionHandler() event.InteractionEventHandler {
 // GroupATMessageEventHandler 实现处理 群at 消息的回调
 func GroupATMessageEventHandler() event.GroupATMessageEventHandler {
 	return func(event *dto.WSPayload, data *dto.WSGroupATMessageData) error {
+		// 敏感词过滤必须先于 ProcessGroupMessage：nickname/card 由 author 合成，过滤晚于合成等于没过滤
+		if config.GetEnableChangeWord() {
+			data.Content = acnode.CheckWordIN(data.Content)
+		}
+		Processor.FilterAuthorFields(data.Author)
+
 		runWithTimer("GroupATMessage", func() {
 			p.ProcessGroupMessage(data)
 		})
 
 		if !config.GetDisableErrorChan() {
 			botstats.RecordMessageReceived()
-		}
-
-		if config.GetEnableChangeWord() {
-			data.Content = acnode.CheckWordIN(data.Content)
-			if data.Author != nil && data.Author.Username != "" {
-				data.Author.Username = acnode.CheckWordIN(data.Author.Username)
-			}
 		}
 
 		return nil
@@ -781,19 +780,18 @@ func GroupATMessageEventHandler() event.GroupATMessageEventHandler {
 // C2CMessageEventHandler 实现处理 群私聊 消息的回调
 func C2CMessageEventHandler() event.C2CMessageEventHandler {
 	return func(event *dto.WSPayload, data *dto.WSC2CMessageData) error {
+		// 敏感词过滤必须先于 ProcessC2CMessage：nickname 由 author 合成，过滤晚于合成等于没过滤
+		if config.GetEnableChangeWord() {
+			data.Content = acnode.CheckWordIN(data.Content)
+		}
+		Processor.FilterAuthorFields(data.Author)
+
 		runWithTimer("C2CMessage", func() {
 			p.ProcessC2CMessage(data)
 		})
 
 		if !config.GetDisableErrorChan() {
 			botstats.RecordMessageReceived()
-		}
-
-		if config.GetEnableChangeWord() {
-			data.Content = acnode.CheckWordIN(data.Content)
-			if data.Author != nil && data.Author.Username != "" {
-				data.Author.Username = acnode.CheckWordIN(data.Author.Username)
-			}
 		}
 
 		return nil
@@ -1128,10 +1126,8 @@ func GroupMessageEventHandler() event.GroupMessageEventHandler {
 		}
 		if config.GetEnableChangeWord() {
 			data.Content = acnode.CheckWordIN(data.Content)
-			if data.Author != nil && data.Author.Username != "" {
-				data.Author.Username = acnode.CheckWordIN(data.Author.Username)
-			}
 		}
+		Processor.FilterAuthorFields(data.Author)
 		runWithTimer("GroupMessage", func() {
 			p.ProcessGroupNormalMessage(data)
 		})

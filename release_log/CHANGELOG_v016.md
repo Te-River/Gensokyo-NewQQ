@@ -61,9 +61,27 @@ QQ 官方 2026-11-16 起群消息事件的 `author` 新增 `member_nickname`（�
 - **影响**：群内 `sender.card` 现在可能是群名片而非空；`card_and_nick` 配置的优先级与取值不变，配置为空且事件无 `member_nickname` 时行为与旧版一致
 - **测试**：`Processor/nickname_test.go` 表驱动覆盖群聊三档优先级、私聊回退、双空与 `author` 为 nil
 
+### 发送类 action 上游失败改回 `retcode:1500` / `status:"failed"`（对外行为变更，2026-11-21）
+
+发送类 action（`send_group_msg` / `send_private_msg` / 频道与 C2C 各变体，回执统一由 `handlers/message_parser.go` 的 `SendResponse`、`SendResponseSB`、`SendGuildResponse`、`SendC2CResponse`、`SendGuildPrivateResponse` 构造）上游调用失败时，此前恒回 `retcode:0` + `status:"ok"`，只在 `message` 里塞错误文本，调用方无法进入错误分支；活体差分显示 Rust 侧同类失败回非零码。现改为失败回 `retcode:1500` + `status:"failed"`，与 Rust 侧约定对齐（`1400` 参数/协议、`1404` 未知 action、`1500` 上游/存储/IO 失败、`100` 管理类失败）：
+
+- **修改**：五处回执构造统一使用包级常量 `sendFailRetCode = 1500` 与 `sendFailureMessage(err)`（`handlers/message_parser.go`）；成功分支仍为 `retcode:0` / `status:"ok"`，`message` 为空
+- **异步审核提示保留**：`message` 为上游原始错误文本 + 「（QQ 官方审核为异步流程：若为审核中，消息可能已发出）」——既让调用方能识别失败，也不会让人误判消息一定没发出
+- **影响**：**对外行为变更**。依赖"发送恒成功"的下游（如只判 `retcode` 就认为已发出的插件）在审核中/频控/事件过期等场景会看到 `failed`，需自行决定是否重试；`data.message_id` 语义不变
+- **文档**：`docs/本版新增功能.md` 的 API 段补充该回执约定
+
 ---
 
 ## 🐛 修复
+
+### 群名片 `member_nickname` 绕过入站敏感词过滤，`sender.nickname` / `sender.card` 原样上报敏感词
+
+入站敏感词过滤只处理 `author.username`，而 `sender.nickname` / `sender.card` 自 2026-11-16 起优先取 `member_nickname`（`Processor/nickname.go` 的 `resolveNicknameAndCard`），群名片含敏感词时会绕过过滤被原样上报：
+
+- **修改**：`Processor/nickname.go` 新增 `FilterAuthorFields(author)`，对 `username` 与 `member_nickname`（非空时）应用同一个 `acnode.CheckWordIN`；`main.go` 三条入站路径（`GROUP_AT_MESSAGE_CREATE`、`C2C_MESSAGE_CREATE`、`GROUP_MESSAGE_CREATE` 全量群消息）统一改调该函数
+- **修改**：`GROUP_AT_MESSAGE_CREATE` / `C2C_MESSAGE_CREATE` 的过滤块由「`runWithTimer` 之后」**前移到启动处理器之前**——此前过滤与 `Process*` 并发执行，`nickname` / `card` 可能已用未过滤的值合成；`GROUP_MESSAGE_CREATE` 原本就在处理器之前，仅替换调用
+- **影响**：`enable_change_word` 开启时 `sender.nickname` / `sender.card` 与 `username` 口径一致，群名片敏感词不再泄露；过滤关闭时两个字段行为不变
+- **测试**：`Processor/nickname_test.go` 新增四组用例——群消息两字段都含敏感词、仅群名片含敏感词、私聊群名片含敏感词、过滤关闭四场景，断言过滤后 `resolveNicknameAndCard` 取到的是替换值
 
 ### 私聊 keyboard 按钮权限全类型归一化（`type=1`/`3` 与空名单同样是死按钮）+ 群聊合法 `permission.type` 不再误转
 

@@ -208,6 +208,17 @@ type ServerResponseSB struct {
 	Echo      interface{} `json:"echo"`
 }
 
+// sendFailRetCode 发送类 action 上游失败时的回执码，与 Rust 侧对齐（1500 = 上游/存储/IO 失败）。
+const sendFailRetCode = 1500
+
+// sendFailReviewTip 官方审核是异步流程：失败回执保留该提示，避免调用方误判"消息一定没发出"。
+const sendFailReviewTip = "（QQ 官方审核为异步流程：若为审核中，消息可能已发出）"
+
+// sendFailureMessage 保留上游原始错误文本，并追加异步审核提示。
+func sendFailureMessage(err error) string {
+	return err.Error() + sendFailReviewTip
+}
+
 // 定义了一个符合 Client 接口的 HttpAPIClient 结构体
 type HttpAPIClient struct {
 	// 可添加所需字段
@@ -371,7 +382,7 @@ func SendResponse(client callapi.Client, err error, message *callapi.ActionMessa
 		}
 	} else {
 		// Default ID handling
-		// 无真实 message_id 不再伪造固定假值,诚实置 0;RetCode/Status 保持现状(官方审核异步假失败但消息可能已发)
+		// 无真实 message_id 不再伪造固定假值,诚实置 0
 		response.Data.MessageID = 0
 	}
 
@@ -380,11 +391,9 @@ func SendResponse(client callapi.Client, err error, message *callapi.ActionMessa
 	response.GroupID = GroupID64
 	response.Echo = message.Echo
 	if err != nil {
-		response.Message = err.Error() // 可选：在响应中添加错误消息
-		//response.RetCode = -1          // 可以是任何非零值，表示出错
-		//response.Status = "failed"
-		response.RetCode = 0 //官方api审核异步的 审核中默认返回失败,但其实信息发送成功了
-		response.Status = "ok"
+		response.Message = sendFailureMessage(err)
+		response.RetCode = sendFailRetCode
+		response.Status = "failed"
 	} else {
 		response.Message = ""
 		response.RetCode = 0
@@ -426,11 +435,9 @@ func SendResponseSB(client callapi.Client, err error, message *callapi.ActionMes
 	response.GroupID = message.Params.GroupID.(string)
 	response.Echo = message.Echo
 	if err != nil {
-		response.Message = err.Error() // 可选：在响应中添加错误消息
-		//response.RetCode = -1          // 可以是任何非零值，表示出错
-		//response.Status = "failed"
-		response.RetCode = 0 //官方api审核异步的 审核中默认返回失败,但其实信息发送成功了
-		response.Status = "ok"
+		response.Message = sendFailureMessage(err)
+		response.RetCode = sendFailRetCode
+		response.Status = "failed"
 	} else {
 		response.Message = ""
 		response.RetCode = 0
@@ -528,7 +535,7 @@ func SendGuildResponse(client callapi.Client, err error, message *callapi.Action
 		botstats.RecordMessageSent()
 	} else {
 		// Default ID handling
-		// 无真实 message_id 不再伪造固定假值,诚实置 0;RetCode/Status 保持现状(官方审核异步假失败但消息可能已发)
+		// 无真实 message_id 不再伪造固定假值,诚实置 0
 		response.Data.MessageID = 0
 	}
 	//转换成int
@@ -540,11 +547,9 @@ func SendGuildResponse(client callapi.Client, err error, message *callapi.Action
 	response.ChannelID = ChannelID64
 	response.Echo = message.Echo
 	if err != nil {
-		response.Message = err.Error() // 可选：在响应中添加错误消息
-		//response.RetCode = -1          // 可以是任何非零值，表示出错
-		//response.Status = "failed"
-		response.RetCode = 0 //官方api审核异步的 审核中默认返回失败,但其实信息发送成功了
-		response.Status = "ok"
+		response.Message = sendFailureMessage(err)
+		response.RetCode = sendFailRetCode
+		response.Status = "failed"
 	} else {
 		response.Message = ""
 		response.RetCode = 0
@@ -595,7 +600,7 @@ func SendC2CResponse(client callapi.Client, err error, message *callapi.ActionMe
 		botstats.RecordMessageSent()
 	} else {
 		// Default ID handling
-		// 无真实 message_id 不再伪造固定假值,诚实置 0;RetCode/Status 保持现状(官方审核异步假失败但消息可能已发)
+		// 无真实 message_id 不再伪造固定假值,诚实置 0
 		response.Data.MessageID = 0
 	}
 	//将真实id转为int userid64
@@ -606,11 +611,9 @@ func SendC2CResponse(client callapi.Client, err error, message *callapi.ActionMe
 	response.UserID = userid64
 	response.Echo = message.Echo
 	if err != nil {
-		response.Message = err.Error() // 可选：在响应中添加错误消息
-		//response.RetCode = -1          // 可以是任何非零值，表示出错
-		//response.Status = "failed"
-		response.RetCode = 0 //官方api审核异步的 审核中默认返回失败,但其实信息发送成功了
-		response.Status = "ok"
+		response.Message = sendFailureMessage(err)
+		response.RetCode = sendFailRetCode
+		response.Status = "failed"
 	} else {
 		response.Message = ""
 		response.RetCode = 0
@@ -659,17 +662,15 @@ func SendGuildPrivateResponse(client callapi.Client, err error, message *callapi
 		response.Data.MessageID = int(messageID64)
 	} else {
 		// Default ID handling
-		// 无真实 message_id 不再伪造固定假值,诚实置 0;RetCode/Status 保持现状(官方审核异步假失败但消息可能已发)
+		// 无真实 message_id 不再伪造固定假值,诚实置 0
 		response.Data.MessageID = 0
 	}
 	response.Echo = message.Echo
 	response.GuildID = guildID
 	if err != nil {
-		response.Message = err.Error() // 可选：在响应中添加错误消息
-		//response.RetCode = -1          // 可以是任何非零值，表示出错
-		//response.Status = "failed"
-		response.RetCode = 0 //官方api审核异步的 审核中默认返回失败,但其实信息发送成功了
-		response.Status = "ok"
+		response.Message = sendFailureMessage(err)
+		response.RetCode = sendFailRetCode
+		response.Status = "failed"
 	} else {
 		response.Message = ""
 		response.RetCode = 0

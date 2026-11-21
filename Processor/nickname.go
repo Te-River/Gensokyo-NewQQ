@@ -1,6 +1,31 @@
 package Processor
 
-import "github.com/tencent-connect/botgo/dto"
+import (
+	"github.com/hoshinonyaruko/gensokyo/acnode"
+	"github.com/hoshinonyaruko/gensokyo/config"
+	"github.com/tencent-connect/botgo/dto"
+)
+
+// checkWordIN / changeWordEnabled 抽成变量，便于测试注入替换规则与开关状态
+var (
+	checkWordIN       = acnode.CheckWordIN
+	changeWordEnabled = config.GetEnableChangeWord
+)
+
+// FilterAuthorFields 对入站 author 的 username 与 member_nickname 应用同一敏感词替换。
+// 必须在 resolveNicknameAndCard 之前调用，否则 sender.nickname / sender.card 会取到未过滤的群名片。
+// 敏感词过滤未启用（enable_change_word）时不改动任何字段。
+func FilterAuthorFields(author *dto.User) {
+	if author == nil || !changeWordEnabled() {
+		return
+	}
+	if author.Username != "" {
+		author.Username = checkWordIN(author.Username)
+	}
+	if author.MemberNickname != "" {
+		author.MemberNickname = checkWordIN(author.MemberNickname)
+	}
+}
 
 // resolveNicknameAndCard 统一解析入站上报的 sender.nickname / sender.card：
 //

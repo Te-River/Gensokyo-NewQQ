@@ -1,6 +1,7 @@
 package Processor
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/tencent-connect/botgo/dto"
@@ -77,5 +78,79 @@ func TestResolveNicknameAndCardPrivate(t *testing.T) {
 				t.Fatalf("nickname = %q, want %q", gotNick, tt.wantNick)
 			}
 		})
+	}
+}
+
+// stubFilterHooks 注入敏感词替换规则与开关状态，测试结束后还原
+func stubFilterHooks(t *testing.T, enabled bool, replace func(string) string) {
+	t.Helper()
+	oldWordIN, oldEnabled := checkWordIN, changeWordEnabled
+	changeWordEnabled = func() bool { return enabled }
+	checkWordIN = replace
+	t.Cleanup(func() {
+		checkWordIN, changeWordEnabled = oldWordIN, oldEnabled
+	})
+}
+
+// maskSensitive 模拟 acnode.CheckWordIN 的入站替换规则
+func maskSensitive(s string) string {
+	return strings.ReplaceAll(s, "敏感", "**")
+}
+
+// 群消息：username 与 member_nickname 都含敏感词 → 两者都被替换，nickname/card 取过滤后的值
+func TestFilterAuthorFieldsGroupBothFields(t *testing.T) {
+	stubFilterHooks(t, true, maskSensitive)
+	author := &dto.User{Username: "敏感用户", MemberNickname: "敏感名片"}
+
+	FilterAuthorFields(author)
+
+	if author.Username != "**用户" || author.MemberNickname != "**名片" {
+		t.Fatalf("过滤后字段 = (%q, %q), want (%q, %q)", author.Username, author.MemberNickname, "**用户", "**名片")
+	}
+	gotNick, gotCard := resolveNicknameAndCard(author, "")
+	if gotNick != "**名片" || gotCard != "**名片" {
+		t.Fatalf("nickname/card = (%q, %q), want (%q, %q)", gotNick, gotCard, "**名片", "**名片")
+	}
+}
+
+// 群消息：只有 member_nickname 含敏感词 → nickname/card 被替换，username 保持原样
+func TestFilterAuthorFieldsGroupOnlyMemberNickname(t *testing.T) {
+	stubFilterHooks(t, true, maskSensitive)
+	author := &dto.User{Username: "普通用户", MemberNickname: "敏感名片"}
+
+	FilterAuthorFields(author)
+
+	if author.Username != "普通用户" {
+		t.Fatalf("username = %q, want %q（不含敏感词不应改动）", author.Username, "普通用户")
+	}
+	gotNick, gotCard := resolveNicknameAndCard(author, "")
+	if gotNick != "**名片" || gotCard != "**名片" {
+		t.Fatalf("nickname/card = (%q, %q), want (%q, %q)", gotNick, gotCard, "**名片", "**名片")
+	}
+}
+
+// 私聊：member_nickname 含敏感词 → sender.nickname 被替换（私聊不上报 card）
+func TestFilterAuthorFieldsPrivateMemberNickname(t *testing.T) {
+	stubFilterHooks(t, true, maskSensitive)
+	author := &dto.User{Username: "普通用户", MemberNickname: "敏感名片"}
+
+	FilterAuthorFields(author)
+
+	// 私聊忽略 card 返回值（resolveNicknameAndCard 不区分场景，调用方不写 sender.card）
+	gotNick, _ := resolveNicknameAndCard(author, "")
+	if gotNick != "**名片" {
+		t.Fatalf("nickname = %q, want %q", gotNick, "**名片")
+	}
+}
+
+// 过滤关闭（配置未启用）→ username 与 member_nickname 都不变
+func TestFilterAuthorFieldsDisabled(t *testing.T) {
+	stubFilterHooks(t, false, maskSensitive)
+	author := &dto.User{Username: "敏感用户", MemberNickname: "敏感名片"}
+
+	FilterAuthorFields(author)
+
+	if author.Username != "敏感用户" || author.MemberNickname != "敏感名片" {
+		t.Fatalf("过滤关闭后字段 = (%q, %q), want 原值", author.Username, author.MemberNickname)
 	}
 }
