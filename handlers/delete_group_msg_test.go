@@ -193,7 +193,9 @@ func stubDeleteGroupMsgDependencies(t *testing.T) func() {
 	originalLatestUser := deleteGroupMsgGetLatestUser
 	originalLatestBot := deleteGroupMsgGetLatestBot
 	originalRetract := deleteGroupMsgRetract
+	originalStringOb11 := deleteGroupMsgGetStringOb11
 
+	deleteGroupMsgGetStringOb11 = func() bool { return false }
 	deleteGroupMsgGetLatestUser = func(groupOpenID, userOpenID string) (string, error) {
 		return "", fmt.Errorf("unexpected user latest-message lookup")
 	}
@@ -206,5 +208,85 @@ func stubDeleteGroupMsgDependencies(t *testing.T) func() {
 		deleteGroupMsgGetLatestUser = originalLatestUser
 		deleteGroupMsgGetLatestBot = originalLatestBot
 		deleteGroupMsgRetract = originalRetract
+		deleteGroupMsgGetStringOb11 = originalStringOb11
+	}
+}
+
+// TestDeleteGroupMsgStringOb11SkipsMessageIDLookup string_ob11 下 msg_id 就是真实 ID：
+// 不得按虚拟号反查（原来会因查不到映射而撤回失败），与 delete_msg 同口径。
+func TestDeleteGroupMsgStringOb11SkipsMessageIDLookup(t *testing.T) {
+	restore := stubDeleteGroupMsgDependencies(t)
+	defer restore()
+
+	deleteGroupMsgGetStringOb11 = func() bool { return true }
+	deleteGroupMsgResolveOriginalID = func(value string) string {
+		if value == "100" {
+			return "GROUP-OPENID"
+		}
+		return value
+	}
+
+	var retractedGroup, retractedMessage string
+	deleteGroupMsgRetract = func(api openapi.OpenAPI, groupOpenID, messageID string) error {
+		retractedGroup, retractedMessage = groupOpenID, messageID
+		return nil
+	}
+
+	client := &deleteGroupMsgTestClient{}
+	_, err := DeleteGroupMsg(client, nil, nil, callapi.ActionMessage{
+		Action: "delete_group_msg",
+		Params: callapi.ParamsContent{
+			GroupID:   "100",
+			UserID:    "0",
+			MessageID: "1234567890",
+		},
+	})
+	if err != nil {
+		t.Fatalf("DeleteGroupMsg: %v", err)
+	}
+	if retractedGroup != "GROUP-OPENID" || retractedMessage != "1234567890" {
+		t.Fatalf("retract args = (%q, %q), want (GROUP-OPENID, 1234567890)", retractedGroup, retractedMessage)
+	}
+	if client.response["status"] != "ok" {
+		t.Fatalf("string_ob11 下应撤回成功: %v", client.response)
+	}
+}
+
+// TestDeleteGroupMsgNonStringOb11ResolvesMessageID 非 string_ob11 仍按虚拟号反查真实 message_id。
+func TestDeleteGroupMsgNonStringOb11ResolvesMessageID(t *testing.T) {
+	restore := stubDeleteGroupMsgDependencies(t)
+	defer restore()
+
+	const realMessageID = "ROBOT1.0_DELETE_GROUP_STRING_OB11"
+	deleteGroupMsgResolveOriginalID = func(value string) string {
+		if value == "100" {
+			return "GROUP-OPENID"
+		}
+		return value
+	}
+
+	var retractedMessage string
+	deleteGroupMsgRetract = func(api openapi.OpenAPI, groupOpenID, messageID string) error {
+		retractedMessage = messageID
+		return nil
+	}
+
+	client := &deleteGroupMsgTestClient{}
+	_, err := DeleteGroupMsg(client, nil, nil, callapi.ActionMessage{
+		Action: "delete_group_msg",
+		Params: callapi.ParamsContent{
+			GroupID:   "100",
+			UserID:    "0",
+			MessageID: deleteMsgMessageID(t, realMessageID),
+		},
+	})
+	if err != nil {
+		t.Fatalf("DeleteGroupMsg: %v", err)
+	}
+	if retractedMessage != realMessageID {
+		t.Fatalf("retract message_id = %q, want 反查后的 %q", retractedMessage, realMessageID)
+	}
+	if client.response["status"] != "ok" {
+		t.Fatalf("unexpected response: %v", client.response)
 	}
 }

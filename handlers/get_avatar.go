@@ -7,6 +7,7 @@ import (
 	"github.com/hoshinonyaruko/gensokyo/callapi"
 	"github.com/hoshinonyaruko/gensokyo/config"
 	"github.com/hoshinonyaruko/gensokyo/idmap"
+	"github.com/hoshinonyaruko/gensokyo/internal/domain/identity"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/tencent-connect/botgo/openapi"
 )
@@ -38,7 +39,10 @@ func GetAvatar(client callapi.Client, api openapi.OpenAPI, apiv2 openapi.OpenAPI
 	groupIDStr := paramsID(message.Params.GroupID)
 	userIDStr := paramsID(message.Params.UserID)
 
-	if config.GetIdmapPro() {
+	if identity.IsOpenID(userIDStr) {
+		// 32 位原生 openid 直通，不反查（与 get_user_info / get_group_info 同口径）
+		originalUserID = userIDStr
+	} else if config.GetIdmapPro() {
 		// 如果user_id可用且配置为使用Pro版本，则调用RetrieveRowByIDv2Pro
 		_, originalUserID, err = idmap.RetrieveRowByIDv2Pro(groupIDStr, userIDStr)
 		if err != nil {

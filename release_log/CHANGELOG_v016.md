@@ -100,6 +100,32 @@ QQ 官方自 2026-11-17 起允许群消息事件的 `msg_id` 直接用于私聊�
 
 ## 🐛 修复
 
+### `join_approval_strategy_create/update` 的关联群不反查：虚拟群号被当群 OpenID 发给官方（2026-11-21）
+
+改前：`group_openids` / `group_ids` 原样上行，插件传虚拟群号（如 `499967395`）时该号被当群 OpenID 发出，官方侧匹配不到任何群。
+
+- **修改**：`handlers/join_approval_strategy.go` 新增 `resolveJoinApprovalGroupOpenIDs` / `resolveJoinApprovalGroupOpenID` —— `group_openids` 与 `group_ids` 的每个值统一按「32 位 openid（`identity.IsOpenID`）直通 / 否则 `idmap.RetrieveRowByIDv2` 反查」处理
+- **修改**：官方 dto 的 `group_ids` 是 `[]uint64`（真实群号），而 Gensokyo 的虚拟群号不是真实群号、bot API 也拿不到真实群号 —— 两个字段反查后的结果统一填进请求的 `group_openids` 上行（官方要求两字段二选一）；`create` 与 `update` 的 `group_action` 同口径
+- **修改**：任一值反查失败回 `1400`，`message` 指明字段与取值（如 `group_ids=499967395 无法反查群 OpenID`），不再把虚拟号打给官方
+- **影响**：策略关联群在官方侧即真实群 OpenID；`update` 增删关联群与创建时的标识形式一致（都是 `group_openids`）
+- **测试**：`handlers/join_approval_strategy_test.go` —— 虚拟群号进 `group_ids` / `group_openids` 时上游实参是 openid、32 位 openid 原样直通、查不到回 1400 且不调用上游、`update` 的 `group_action` 同样反查
+
+### `get_avatar` 不支持 32 位 openid 直通：插件传真实 openid 一律回 1400（2026-11-21）
+
+改前：`user_id` 只走 `idmap.RetrieveRowByIDv2`（`idmap_pro` 下走 `RetrieveRowByIDv2Pro`）反查，插件手里的 32 位原生 openid 没有映射 → 恒回 `1400`「无法反查用户 OpenID」。
+
+- **修改**：`handlers/get_avatar.go` 反查前先判 `identity.IsOpenID`，32 位 openid 直通（与 `get_user_info` / `get_group_info` 同口径）；虚拟号仍按配置反查
+- **影响**：插件可直接用真实 openid 取头像 URL；虚拟号入参与未映射入参行为不变
+- **测试**：`handlers/get_avatar_test.go` —— 32 位 openid → `retcode:0` 且头像 URL 用该 openid 拼；虚拟号 → 仍反查出原 openid；未映射仍 1400（`handlers/query_action_receipt_test.go` 既有用例）
+
+### `delete_group_msg` 缺 `string_ob11` 豁免：真实 message_id 被当虚拟号反查导致撤回失败（2026-11-21）
+
+改前：`string_ob11` 模式下插件拿到的就是真实 `message_id`（数字串），`resolveDeleteGroupMessageID` 仍按虚拟号去 `RetrieveRowByCachev2` 反查 → 无映射 → `1400`，撤回失败；`delete_msg` 早已有该豁免。
+
+- **修改**：`handlers/delete_group_msg.go` 在反查前加 `string_ob11` 分支（`config.GetStringOb11`，经 `deleteGroupMsgGetStringOb11` 接缝便于测试）：`string_ob11` 下 `message_id` 原样使用，与 `handlers/delete_msg.go` 对齐
+- **影响**：`string_ob11` 下显式 `message_id` 可直接撤回；非 `string_ob11` 行为不变
+- **测试**：`handlers/delete_group_msg_test.go` —— `string_ob11` 下传数字 `message_id` 不反查、直接以该值调 `RetractGroupMessage`；非 `string_ob11` 仍反查为真实 ID
+
 ### `delete_msg` 撤回谎报成功：虚拟号被当 `group_openid` 发给上游（404 11001）且无条件回 `retcode:0`（2026-11-21）
 
 活体对照（同一群、同一条消息）：Rust 侧用反查后的 `group_openid` 调 `DELETE /v2/groups/31AB82CE7526BBFE4B1002C4B258FD0E/messages/ROBOT1.0_…` 得 `200 OK`；Go 侧把虚拟群号 `499967395` 直接当 `group_openid` 发出，上游回 `404 code:11001 不支持的调用`，而回执仍是 `{"retcode":0,"status":"ok"}`，`data` 里还带着 `get_status` 的 `app_enabled`/`stat` 字段。

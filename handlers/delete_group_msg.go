@@ -34,6 +34,7 @@ var (
 	deleteGroupMsgResolveOriginalID = idmap.ResolveOriginalID
 	deleteGroupMsgGetLatestUser     = idmap.GetLatestMsgID
 	deleteGroupMsgGetLatestBot      = idmap.GetLatestBotMsgID
+	deleteGroupMsgGetStringOb11     = config.GetStringOb11
 	deleteGroupMsgRetract           = func(api openapi.OpenAPI, groupOpenID, messageID string) error {
 		return api.RetractGroupMessage(context.TODO(), groupOpenID, messageID, openapi.RetractMessageOptionHidetip)
 	}
@@ -131,6 +132,10 @@ func resolveDeleteGroupMessageID(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" || isNonPositiveNumericID(value) {
 		return "", fmt.Errorf("message_id 必须是有效的虚拟消息ID或实际消息ID")
+	}
+	// string_ob11 模式下插件拿到的就是真实消息 ID，原样使用（与 delete_msg 一致）
+	if deleteGroupMsgGetStringOb11() {
+		return value, nil
 	}
 	if !isNumericID(value) {
 		return value, nil

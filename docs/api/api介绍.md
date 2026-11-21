@@ -124,6 +124,16 @@ event.json()  # 查看完整字段
 - 出站 `[CQ:at,qq=数字]`：纯文本消息转为 `@用户名 `（带空格），Markdown 消息转为 `<qqbot-at-user id="OpenID" />`
 - 纯文本出站时 @ 转为 `@用户名` 格式，用户名来自内存缓存（入站时自动缓存，10 分钟 TTL）
 
+### 事件里的 `data` 字段是原始 payload（含真实 OpenID）
+
+部分 notice 事件（如 `group_receive` / `group_reject`、`interaction`）会附带 `data` 字段——
+它是 QQ 官方 payload 的**原样镜像**，其中的 `group_openid`、`op_member_openid` 等
+**仍然是真实 OpenID**，Gensokyo **不做**虚拟号转换。
+
+- 请只使用**顶层** `user_id` / `group_id`（这两个是虚拟号）
+- `data.*_openid` 仅供排障参考；把它当主键写进数据库，换 bot / appid 后会全部失效
+- 这是 **v016 起成文的有意行为**（用户裁定），不是遗漏；两侧实现一致
+
 ### Markdown 中的 @ 能力
 
 在 Markdown 卡片（`msg_type=2`）内容中嵌入 `[CQ:at,qq=数字]`，Gensokyo 会自动将其转换为 QQ API 的 `<qqbot-at-user>` 标签，并且**整个 `messageText`**（含 `<qqbot-at-user>` 标签和文本内容）会合并到 Markdown 内容头部，确保文本不丢失。
