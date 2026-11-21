@@ -175,10 +175,12 @@ impl<T: Serialize> Serialize for ActionResponse<T> {
         S: serde::Serializer,
     {
         let mut map = serializer.serialize_map(None)?;
-        // `GoWakeupOk` 只对成功生效：失败仍是普通 Full（`1400` / `1500` 要带 `message`）
+        // `GoWakeupOk` / `GoEmptyObject` 只对成功生效：失败仍是普通 Full（`1400` / `1500`
+        // 要带 `message`）
         let envelope = match self.envelope {
             EnvelopeKind::GoWakeupOk if self.status == Status::Ok => EnvelopeKind::GoWakeupOk,
-            EnvelopeKind::GoWakeupOk => EnvelopeKind::Full,
+            EnvelopeKind::GoEmptyObject if self.status == Status::Ok => EnvelopeKind::GoEmptyObject,
+            EnvelopeKind::GoWakeupOk | EnvelopeKind::GoEmptyObject => EnvelopeKind::Full,
             other => other,
         };
         match envelope {
@@ -231,6 +233,8 @@ impl<T: Serialize> Serialize for ActionResponse<T> {
                 map.serialize_entry("status", &self.status)?;
                 map.serialize_entry("retcode", &self.retcode)?;
             }
+            // Go `handlers/get_robot_share_link.go:36` 回字面量 `{}`：一个键都不写
+            EnvelopeKind::GoEmptyObject => {}
         }
         map.end()
     }
@@ -547,6 +551,10 @@ pub struct VersionInfo {
 }
 
 /// `get_group_info` / `get_group_list` 的响应数据。
+///
+/// 键集与 Go 逐字段一致（`handlers/get_group_info.go` 的 `GroupInfo`、`handlers/get_group_list.go`
+/// 的 `Group`）：**显式字段列表**，没有 `flatten extra`——上游 DTO 的 `group_class_text` /
+/// `group_tags` 不对客户端可见。官方没有的两个字段（群创建时间 / 群等级）零值即为 Go 的默认值。
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct GroupInfo {
     /// 群 ID（虚拟）。
@@ -554,15 +562,21 @@ pub struct GroupInfo {
     /// 群名。
     #[serde(default)]
     pub group_name: String,
+    /// 群简介（Go `group_memo`，取上游 `group_finger_memo`）。
+    #[serde(default)]
+    pub group_memo: String,
+    /// 群创建时间；官方无该字段，恒为 Go 的零值。
+    #[serde(default)]
+    pub group_create_time: i32,
+    /// 群等级；官方无该字段，恒为 Go 的零值。
+    #[serde(default)]
+    pub group_level: i32,
     /// 成员数。
     #[serde(default)]
     pub member_count: i64,
     /// 最大成员数。
     #[serde(default)]
     pub max_member_count: i64,
-    /// 附加字段。
-    #[serde(default, flatten, skip_serializing_if = "is_empty")]
-    pub extra: Extra,
 }
 
 /// `get_group_member_info` / `get_group_member_list` 的响应数据。

@@ -8,6 +8,9 @@
 //! - **`send_private_msg_wakeup`** 用 [`EnvelopeKind::GoWakeupOk`]：Go 的成功路径直接
 //!   `return` 字面量 `{"status": "ok", "retcode": 0}`（`handlers/send_private_msg_wakeup.go:322`），
 //!   没有 `data` / `echo` / `message`；失败路径仍是普通 Full（`1400` / `1500`）。
+//! - **`get_robot_share_link`** 用 [`EnvelopeKind::GoEmptyObject`]：Go 的成功路径回字面量
+//!   `{}`（`handlers/get_robot_share_link.go:36`），链接本身走伪造 notice 事件；失败路径是
+//!   `sendActionResult(..., 1500)`，仍是 Full。
 //!
 //! 表逐条来自 Go 源码，**不要按 action 名字猜**：无 `data` 的在
 //! `handlers/set_group_add_request.go:54-82`，`data` 恒 `null` 的在
@@ -29,6 +32,12 @@ pub enum EnvelopeKind {
     ///
     /// 失败路径回落到 [`Self::Full`]：`1400` / `1500` 的字段照旧，客户端仍能拿错误文案。
     GoWakeupOk,
+    /// `get_robot_share_link` 的成功回执：字面量 `{}`（Go
+    /// `handlers/get_robot_share_link.go:36`），既没有 `retcode` 也没有 `echo`——链接本身走
+    /// 伪造的 `share_link_generated` notice 事件。
+    ///
+    /// 失败路径回落到 [`Self::Full`]：Go 侧失败走 `sendActionResult(..., 1500)`。
+    GoEmptyObject,
 }
 
 /// Compact 信封里 `data` 的形态。
@@ -75,12 +84,16 @@ const COMPACT_ACTIONS: &[(&str, CompactData)] = &[
     ("join_approval_strategy_whitelist", CompactData::AsIs),
 ];
 
-/// 该 action 的响应信封模式；B 类表与 wakeup 之外的（A 发送 / C 查询 / Rust 扩展）一律
-/// [`EnvelopeKind::Full`]。
+/// 该 action 的响应信封模式；B 类表、wakeup 与分享链接之外的（A 发送 / C 查询 / Rust 扩展）
+/// 一律 [`EnvelopeKind::Full`]。
 #[must_use]
 pub fn envelope_for(action: &str) -> EnvelopeKind {
     if action == "send_private_msg_wakeup" {
         return EnvelopeKind::GoWakeupOk;
+    }
+    // Go 只回字面量 `{}`，连 `retcode` / `echo` 都没有（`handlers/get_robot_share_link.go:36`）
+    if action == "get_robot_share_link" {
+        return EnvelopeKind::GoEmptyObject;
     }
     match COMPACT_ACTIONS.iter().find(|(name, _)| *name == action) {
         Some((_, data)) => EnvelopeKind::Compact(*data),
@@ -148,6 +161,15 @@ mod tests {
             EnvelopeKind::GoWakeupOk
         );
         assert_eq!(envelope_for("send_private_msg"), EnvelopeKind::Full);
+    }
+
+    /// `get_robot_share_link` 的成功回执是字面量 `{}`（Go 先推 notice 再回它）。
+    #[test]
+    fn share_link_uses_the_go_empty_object_envelope() {
+        assert_eq!(
+            envelope_for("get_robot_share_link"),
+            EnvelopeKind::GoEmptyObject
+        );
     }
 
     /// A 发送类 / C 查询类 / Rust 扩展都不进 Compact。

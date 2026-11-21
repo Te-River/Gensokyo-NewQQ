@@ -48,11 +48,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 
 use gensokyo_core::{Error, Ob11Id, Result};
 use gensokyo_protocol::action::{ActionRequest, ActionResponse, GroupInfo};
-use gensokyo_protocol::{Extra, Handler, HandlerFuture};
+use gensokyo_protocol::{Handler, HandlerFuture};
 
 use crate::params;
 use crate::qqapi::ActionContext;
@@ -372,19 +372,15 @@ impl GetGroupListHandler {
                     }
                 }
             };
-            let mut extra = Extra::new();
-            extra.insert("group_memo".to_owned(), json!(info.group_finger_memo));
-            extra.insert("group_class_text".to_owned(), json!(info.group_class_text));
-            extra.insert("group_tags".to_owned(), json!(info.group_tags));
-            // Go 的群列表还带两个官方没有的字段：诚实置 0，不编造
-            extra.insert("group_create_time".to_owned(), json!(0));
-            extra.insert("group_level".to_owned(), json!(0));
             data.push(GroupInfo {
                 group_id,
                 group_name: info.group_name,
+                group_memo: info.group_finger_memo,
+                // Go 的群列表还带两个官方没有的字段：诚实置 0，不编造
+                group_create_time: 0,
+                group_level: 0,
                 member_count: i64::try_from(info.group_member_num).unwrap_or(i64::MAX),
                 max_member_count: 0,
-                extra,
             });
         }
         ok_data(request, &data)
@@ -712,10 +708,28 @@ mod tests {
         assert_eq!(rows[0]["member_count"], json!(7));
         assert_eq!(rows[0]["max_member_count"], json!(0));
         assert_eq!(rows[0]["group_memo"], json!("简介"));
-        assert_eq!(rows[0]["group_class_text"], json!("游戏"));
-        assert_eq!(rows[0]["group_tags"], json!(["tag"]));
         assert_eq!(rows[0]["group_create_time"], json!(0));
         assert_eq!(rows[0]["group_level"], json!(0));
+        // 键集与 Go `handlers/get_group_list.go` 的 `Group` 一致
+        let mut keys: Vec<&str> = rows[0]
+            .as_object()
+            .expect("行应为对象")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "group_create_time",
+                "group_id",
+                "group_level",
+                "group_memo",
+                "group_name",
+                "max_member_count",
+                "member_count",
+            ]
+        );
         assert_eq!(handler.name(), "get_group_list");
         // 释放 handler（内含 store 的 Arc）后删除临时库目录；Windows 上若句柄
         // 释放不及时导致删除失败，静默交由 OS temp 目录治理，不阻塞用例

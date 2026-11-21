@@ -5,12 +5,12 @@
 //!
 //! | action | Go 对应 | 上游端点 | 结果 |
 //! |--------|---------|----------|------|
-//! | `get_avatar` | `handlers/get_avatar.go` | 无（`q.qlogo.cn` URL 模板） | 本地拼 URL：`{"message": url, "url": url, "user_id": …}` |
+//! | `get_avatar` | `handlers/get_avatar.go` | 无（`q.qlogo.cn` URL 模板） | 本地拼 URL：`{"message": url, "user_id": …}` |
 //! | `get_user_info` | 无（官方 2026-11-16 新增端点） | `GET /v2/users/{openid}/info` | `{"user_id": …, "username": …, "allow_proactive_msg": …, "avatar": …}` |
 //! | `mark_msg_as_read` | `handlers/mark_msg_as_read.go` | 无（官方无已读上报接口） | 本地空实现：`retcode = 0` + 顶层 `msg` / `wording` 空串 |
 //! | `.handle_quick_operation` | `handlers/handle_quick_operation.go` | 无（复用发送链） | deferred 计划（`send_group_msg` / `send_private_msg`） |
 //! | `.handle_quick_operation_async` | `handlers/handle_quick_operation_async.go` | 同上 | 同上 |
-//! | `get_robot_share_link` | `handlers/get_robot_share_link.go` | `POST /v2/generate_url_link` | `{"url": …, "callback_data": …}` |
+//! | `get_robot_share_link` | `handlers/get_robot_share_link.go` | `POST /v2/generate_url_link` | 先推 `share_link_generated` notice，回执字面量 `{}` |
 //! | `put_interaction` | `handlers/put_interaction.go` | `PUT /interactions/{interaction_id}` | `data = null` |
 //! | `delete_group_msg` | `handlers/delete_group_msg.go` | `DELETE /v2/groups/{gid}/messages/{mid}` | `data = null` |
 //! | `set_group_add_request` | `handlers/set_group_add_request.go` | `POST /v2/groups/{gid}/approval_join_request/{member}` | `data = null` |
@@ -27,8 +27,8 @@
 //! # 本地可判定的三项
 //!
 //! - **`get_avatar`**：Go 用 `https://q.qlogo.cn/qqapp/{app_id}/{openid}/640` 拼头像地址，不触达
-//!   上游。这里同样取配置 `app_id` + 反查出的 `user_openid` 拼 URL；响应保留 Go 的
-//!   `message` / `user_id` 字段，并额外给 go-cqhttp 标准客户端一个同值的 `url`。
+//!   上游。这里同样取配置 `app_id` + 反查出的 `user_openid` 拼 URL；响应的键集与 Go
+//!   `AvatarData` 逐字段一致（`message` / `user_id`），**URL 只放 `message`**。
 //!   Go 在 `idmap_pro` 下用「群 + 成员」二维反查，本 crate 只有一维虚拟号反查——32 位 OpenID
 //!   直通，两者结果一致；虚拟号场景下以 `user_openid` 映射为准。
 //! - **`mark_msg_as_read`**：官方没有已读上报端点，Go 回 `retcode = 0` + `status = ok` + 顶层
@@ -49,6 +49,13 @@
 //! 合并转发 / 原始直发 / SSE / `IsWakeup` 四条发送路径已接入 deferred 发送链
 //! （规划在 [`crate::send`]，执行在 runtime 的 `deferred` 模块）。
 //!
+//! # 分享链接
+//!
+//! `get_robot_share_link` 与 Go 同口径：handler 产出 `share_link_generated` notice 载荷
+//! （`self_id` 取配置 `app_id`），分发器把它发到事件总线、再把回执换成字面量 `{}`
+//! （无 `retcode` / `echo`，`handlers/get_robot_share_link.go:36`）。载荷经 `data` 交接的
+//! 原因见 [`GetRobotShareLinkHandler`] 的 `execute`。
+//!
 //! # 刻意的差异（相对 Go）
 //!
 //! - **`.handle_quick_operation` 的未知 `message_type`**：Go 返回空串（客户端收不到任何回执），
@@ -62,9 +69,6 @@
 //! - **合并转发的空 `messages` 数组**：Go 循环零轮后照发**整体成功回执**（`retcode = 0`、
 //!   一条未发）；这里在规划层直接 `1400` 拒绝——**刻意收紧**，retcode 对客户端可见，
 //!   空转发几乎必为客户端 bug，要暴露而不是假装成功。
-//! - **`get_robot_share_link`**：Go 把链接包成一条伪造的 `share_link_generated` notice 事件推给
-//!   客户端，action 本身回 `"{}"`。本 crate 的 handler 契约只能回一个响应，因此把链接放进
-//!   `data`（`url` + 回显的 `callback_data`），不伪造事件。
 //! - **`put_interaction`**：Go 从 `echo`（字符串）取 interaction_id、从顶层 `post_type` 取结果码；
 //!   `ActionRequest` 现在也有顶层 `post_type`，结果码按 `params.code` → 顶层 `post_type`
 //!   → `params.post_type`（旧写法）取值；interaction_id 仍先看 `params.interaction_id`，
@@ -89,6 +93,7 @@ use crate::handler::{deferred_data_of, respond_to_params};
 use crate::messages::resolve_message_id;
 use crate::params;
 use crate::qqapi::{ActionContext, RetractRequest};
+use crate::rfc3339;
 use crate::send::{
     SendRequest, plan_send_group_forward_msg, plan_send_group_msg, plan_send_group_msg_raw,
     plan_send_private_forward_msg, plan_send_private_msg, plan_send_private_msg_sse,
@@ -104,13 +109,11 @@ const GET_GROUP_HONOR_INFO: &str = "get_group_honor_info: QQ 官方未提供群�
 /// `set_group_anonymous_ban` 的说明。
 const SET_GROUP_ANONYMOUS_BAN: &str = "set_group_anonymous_ban: QQ 官方未提供匿名成员禁言接口";
 
-/// `get_avatar` 的响应数据（Go `AvatarData` + go-cqhttp 标准的 `url`）。
+/// `get_avatar` 的响应数据（逐字段对齐 Go `AvatarData`：URL 放在 `message` 里）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AvatarData {
     /// 头像地址（Go 把 URL 放在 `message` 字段里）。
     pub message: String,
-    /// 头像地址（go-cqhttp 标准字段，与 `message` 同值）。
-    pub url: String,
     /// 请求里的用户虚拟号（回填请求值）。
     pub user_id: Ob11Id,
 }
@@ -327,8 +330,7 @@ impl GetAvatarHandler {
         let app_id = self.context.config().snapshot().get_app_id();
         let url = format!("https://q.qlogo.cn/qqapp/{app_id}/{}/640", resolved.openid);
         let data = AvatarData {
-            message: url.clone(),
-            url,
+            message: url,
             user_id: ob11_id(&requested, self.context.string_ob11()),
         };
         ok_data(request, &data)
@@ -507,10 +509,21 @@ impl GetRobotShareLinkHandler {
                 callback_data: callback_data.clone(),
             })
             .await?;
-        // Go 把链接包成伪造 notice 事件推送；handler 只能回响应，因此放进 data
+        // Go 把这几个字段包成一条伪造的 `share_link_generated` notice 推给客户端，action 本身
+        // 回字面量 `{}`。本 crate 拿不到事件总线（在 runtime，依赖方向向下），所以 notice 载荷
+        // 经 `data` 交给分发器——与 deferred 计划同一握手口径：发到总线后由分发器把回执换成 `{}`。
         ok_data(
             request,
-            &json!({ "url": link.url, "callback_data": callback_data }),
+            &json!({
+                "post_type": "notice",
+                "notice_type": "share_link_generated",
+                "url": link.url,
+                "callback_data": callback_data,
+                "time": rfc3339::now_unix_secs(),
+                // Go `int64(config.GetAppID())`
+                "self_id": i64::try_from(self.context.config().snapshot().get_app_id())
+                    .unwrap_or(i64::MAX),
+            }),
         )
     }
 }
@@ -1138,9 +1151,17 @@ mod tests {
             .expect("本地拼 URL 不应失败");
         let data = ok_data(response);
         let url = format!("https://q.qlogo.cn/qqapp/102001234/{MEMBER}/640");
-        assert_eq!(data["url"], json!(url));
         assert_eq!(data["message"], json!(url));
         assert_eq!(data["user_id"], json!(MEMBER));
+        // 键集与 Go `AvatarData` 逐字段一致：只有 message / user_id（URL 在 message 里）
+        let mut keys: Vec<&str> = data
+            .as_object()
+            .expect("data 应为对象")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["message", "user_id"]);
         assert!(api.calls().is_empty(), "get_avatar 不应触达上游");
         assert_eq!(handler.name(), "get_avatar");
 
@@ -1266,8 +1287,10 @@ mod tests {
         );
     }
 
+    /// Go 口径：先推一条伪造的 `share_link_generated` notice，action 回执是字面量 `{}`。
+    /// handler 只产出 notice 载荷（事件总线在 runtime），分发器负责发布与 `{}` 回执。
     #[test]
-    fn share_link_forwards_callback_data_and_returns_url() {
+    fn share_link_yields_the_fake_notice_payload() {
         let (ctx, api) = context();
         *api.share_link.lock().unwrap() = Some(Ok(GenerateUrlLink {
             url: "https://example.com/link".to_owned(),
@@ -1280,8 +1303,31 @@ mod tests {
         )))
         .expect("生成分享链接不应失败");
         let data = ok_data(response);
+        assert_eq!(data["post_type"], json!("notice"));
+        assert_eq!(data["notice_type"], json!("share_link_generated"));
         assert_eq!(data["url"], json!("https://example.com/link"));
         assert_eq!(data["callback_data"], json!("c1"));
+        // `self_id` 取配置 app_id（Go `int64(config.GetAppID())`）
+        assert_eq!(data["self_id"], json!(102001234));
+        assert!(data["time"].as_i64().is_some_and(|time| time > 0));
+        let mut keys: Vec<&str> = data
+            .as_object()
+            .expect("data 应为对象")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "callback_data",
+                "notice_type",
+                "post_type",
+                "self_id",
+                "time",
+                "url",
+            ]
+        );
         assert_eq!(
             api.calls(),
             vec![Call::ShareLink(GenerateUrlLinkRequest {

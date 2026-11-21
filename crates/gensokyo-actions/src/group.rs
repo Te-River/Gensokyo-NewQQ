@@ -192,17 +192,16 @@ impl GetGroupInfoHandler {
             Err(err) => return Ok(upstream_error(request, &err)),
         };
 
-        let mut extra = Extra::new();
-        extra.insert("group_memo".to_owned(), json!(info.group_finger_memo));
-        extra.insert("group_class_text".to_owned(), json!(info.group_class_text));
-        extra.insert("group_tags".to_owned(), json!(info.group_tags));
         let data = GroupInfo {
             group_id: ob11_id(&group.requested, self.context.string_ob11()),
             group_name: info.group_name,
+            group_memo: info.group_finger_memo,
+            // 官方没有群创建时间 / 群等级：Go 的 int32 零值就是 0，不编造
+            group_create_time: 0,
+            group_level: 0,
             member_count: i64::try_from(info.group_member_num).unwrap_or(i64::MAX),
             // 官方不给群成员上限：保持 OneBot 字段形状，填 0 而不是编造默认值
             max_member_count: 0,
-            extra,
         };
         ok_data(request, &data)
     }
@@ -1042,6 +1041,29 @@ mod tests {
         assert_eq!(data["member_count"], json!(7));
         assert_eq!(data["max_member_count"], json!(0));
         assert_eq!(data["group_memo"], json!("简介"));
+        assert_eq!(data["group_create_time"], json!(0));
+        assert_eq!(data["group_level"], json!(0));
+        // 键集与 Go `handlers/get_group_info.go` 的 `GroupInfo` 逐字段一致：
+        // 上游 DTO 的 group_class_text / group_tags 不上线
+        let mut keys: Vec<&str> = data
+            .as_object()
+            .expect("data 应为对象")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "group_create_time",
+                "group_id",
+                "group_level",
+                "group_memo",
+                "group_name",
+                "max_member_count",
+                "member_count",
+            ]
+        );
         assert_eq!(handler.name(), "get_group_info");
     }
 

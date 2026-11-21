@@ -6,6 +6,13 @@
 //! - `1500`：内部错误——配置缺失、存储/上游/IO 失败，以及 handler panic；panic 对外只回
 //!   通用文案，全文只进日志。
 //!
+//! B 管理类（[`EnvelopeKind::Compact`]）的业务失败一律改写成 `100`（Go
+//! `sendActionResult(msg, 100)`），**参数 / 协议错误（`1400`）不改写**——Go 的 handler 先校验
+//! 参数、回 `sendParamRetCode`，只有走到上游才回 100。
+//!
+//! `get_robot_share_link`（[`EnvelopeKind::GoEmptyObject`]）成功时先推伪造的
+//! `share_link_generated` notice（载荷由 actions 侧产出），再回字面量 `{}`。
+//!
 //! # deferred 计划
 //!
 //! `send_*` 的 handler 只回计划（`data.deferred == true`）。分发器识别到该标记后按载荷键分派：
@@ -39,6 +46,7 @@ use gensokyo_actions::{ActionContext, ForwardRequest, SendRequest, SendTarget, S
 use gensokyo_core::Error as CoreError;
 use gensokyo_core::Ob11Id;
 use gensokyo_core::telemetry::metrics;
+use gensokyo_protocol::Event;
 use gensokyo_protocol::Registry;
 use gensokyo_protocol::action::{ActionRequest, ActionResponse, Echo, Status};
 use gensokyo_protocol::envelope::{EnvelopeKind, envelope_for};
@@ -56,7 +64,11 @@ pub const RETCODE_BAD_REQUEST: i32 = 1400;
 pub const RETCODE_UNKNOWN_ACTION: i32 = 1404;
 /// 内部错误（含 handler panic 与 deferred 执行失败）。
 pub const RETCODE_INTERNAL: i32 = 1500;
-/// B 管理类失败：Go `sendActionResult(msg, 100)` 只有这一档，不分参数错误 / 上游失败。
+/// B 管理类失败：Go `sendActionResult(msg, 100)` 只有这一档，不分上游失败 / 反查失败。
+///
+/// 例外是**参数 / 协议错误**（`1400`）：Go 的 handler 先校验参数、回 `sendParamRetCode`
+/// （`handlers/set_group_add_request.go:53`），只有走到上游才 `sendActionResult(msg, 100)`；
+/// 所以 [`retcode_for`] 的 `1400` 不被改写成 100，见 [`Dispatcher::dispatch`]。
 pub const RETCODE_MANAGEMENT_FAILED: i32 = 100;
 
 /// 把 action 请求喂给注册表。
@@ -152,11 +164,43 @@ impl Dispatcher {
         // （`envelope_for` 只认 B 类那 23 条）。
         let envelope = envelope_for(&request.action);
         response.envelope = envelope;
-        if matches!(envelope, EnvelopeKind::Compact(_)) && response.status == Status::Failed {
-            // Go 的 B 类失败一律 `sendActionResult(msg, 100)`，没有 1400/1500 分档。
+        if envelope == EnvelopeKind::GoEmptyObject && response.status == Status::Ok {
+            // Go `handlers/get_robot_share_link.go`：先把伪造 notice 推给客户端，再回字面量
+            // `{}`。载荷由 handler 产出（本 crate 的 actions 拿不到事件总线），在这里发到
+            // 总线——发布发生在回执序列化之前。
+            if let Some(payload) = response.data.take() {
+                self.publish_share_link_notice(payload);
+            }
+        }
+        if matches!(envelope, EnvelopeKind::Compact(_))
+            && response.status == Status::Failed
+            && response.retcode != RETCODE_BAD_REQUEST
+        {
+            // Go 的 B 类业务失败一律 `sendActionResult(msg, 100)`；参数 / 协议错误是
+            // `sendParamRetCode`（1400），handler 阶段就回了，不能被改写成 100。
             response.retcode = RETCODE_MANAGEMENT_FAILED;
         }
         response
+    }
+
+    /// 把 `get_robot_share_link` 的伪造 `share_link_generated` notice 发到事件总线
+    /// （Go `client.SendMessage(outputMap)`）。
+    ///
+    /// 与 deferred 计划的握手口径一致：actions 侧只产出载荷，runtime 侧发布。总线未装配时
+    /// 静默跳过（Go 无 client 时同样发不出去）；载荷不是合法 notice 时只记 error——Go 的
+    /// `SendMessage` 失败也只是 log，不影响 `{}` 回执。
+    fn publish_share_link_notice(&self, payload: Value) {
+        let Some(hub) = self.hub.as_ref() else {
+            return;
+        };
+        match serde_json::from_value::<Event>(payload) {
+            Ok(event) => {
+                hub.publish(event);
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "share_link_generated notice 载荷无效，未推送");
+            }
+        }
     }
 
     /// 分派本体：只产出响应内容；信封与 B 类失败码由 [`Self::dispatch`] 统一收口。
@@ -498,11 +542,16 @@ fn encode<T: Serialize>(response: &ActionResponse<T>) -> String {
     if response.envelope == EnvelopeKind::GoWakeupOk && response.status == Status::Ok {
         return r#"{"status": "ok", "retcode": 0}"#.to_owned();
     }
+    // Go `handlers/get_robot_share_link.go:36` 的成功回执是字面量 `{}`（无 `retcode` / `echo`）。
+    if response.envelope == EnvelopeKind::GoEmptyObject && response.status == Status::Ok {
+        return "{}".to_owned();
+    }
     serde_json::to_string(response).unwrap_or_else(|err| {
         tracing::error!(error = %err, "action 响应序列化失败");
         match response.envelope {
-            // `GoWakeupOk` 的失败 / 兜底形状与 Full 一致（成功路径已在上面提前返回）
-            EnvelopeKind::Full | EnvelopeKind::GoWakeupOk => {
+            // `GoWakeupOk` / `GoEmptyObject` 的失败 / 兜底形状与 Full 一致（成功路径已在上面
+            // 提前返回）
+            EnvelopeKind::Full | EnvelopeKind::GoWakeupOk | EnvelopeKind::GoEmptyObject => {
                 r#"{"data":null,"echo":null,"message":"","retcode":1500,"status":"failed"}"#
                     .to_owned()
             }
@@ -635,6 +684,48 @@ mod tests {
         }
     }
 
+    /// B 管理类里「上游拒绝」的那种失败（Go `sendActionResult(msg, 100)`）。
+    #[derive(Debug)]
+    struct UpstreamFails;
+
+    impl Handler for UpstreamFails {
+        fn name(&self) -> &'static str {
+            "upstream_fails"
+        }
+
+        fn handle<'a>(&'a self, _request: &'a ActionRequest<Value>) -> HandlerFuture<'a> {
+            Box::pin(async {
+                Err(Error::Upstream {
+                    code: 22009,
+                    message: "频控".to_owned(),
+                })
+            })
+        }
+    }
+
+    /// `get_robot_share_link`：只产出伪造 notice 的载荷，发布与 `{}` 回执由分发器完成。
+    #[derive(Debug)]
+    struct ShareLink;
+
+    impl Handler for ShareLink {
+        fn name(&self) -> &'static str {
+            "get_robot_share_link"
+        }
+
+        fn handle<'a>(&'a self, _request: &'a ActionRequest<Value>) -> HandlerFuture<'a> {
+            Box::pin(async {
+                Ok(ActionResponse::ok(json!({
+                    "post_type": "notice",
+                    "notice_type": "share_link_generated",
+                    "url": "https://example.com/link",
+                    "callback_data": "c1",
+                    "time": 1_700_000_000_i64,
+                    "self_id": 102001234_i64,
+                })))
+            })
+        }
+    }
+
     fn dispatcher() -> Dispatcher {
         let mut registry = Registry::new();
         let _ = registry.register("fixed", Arc::new(Fixed));
@@ -644,7 +735,9 @@ mod tests {
         let _ = registry.register("bad_config", Arc::new(BadConfig));
         // P86c：名字取自真实 B 管理类 action，验证信封按 action 名分派（不是按 handler 类型）。
         let _ = registry.register("set_group_ban", Arc::new(NullOk));
-        let _ = registry.register("set_group_card", Arc::new(BadParams));
+        let _ = registry.register("set_group_card", Arc::new(UpstreamFails));
+        let _ = registry.register("set_group_whole_ban", Arc::new(BadParams));
+        let _ = registry.register("get_robot_share_link", Arc::new(ShareLink));
         Dispatcher::new(Arc::new(registry))
     }
 
@@ -735,7 +828,7 @@ mod tests {
         assert_eq!(body, r#"{"message":"","retcode":0,"status":"ok"}"#);
     }
 
-    /// 失败：`retcode 100`（不是 1400/1500），且失败路径没有 `data`。
+    /// 失败：业务失败（上游拒绝）→ `retcode 100`，且失败路径没有 `data`。
     #[tokio::test]
     async fn management_failure_is_retcode_100() {
         let body = dispatch_json(
@@ -746,12 +839,64 @@ mod tests {
         let value: Value = serde_json::from_str(&body).expect("响应应为 JSON");
         assert_eq!(
             value["retcode"], RETCODE_MANAGEMENT_FAILED,
-            "B 类失败只有 100 这一档: {body}"
+            "B 类业务失败只有 100 这一档: {body}"
         );
         assert_eq!(value["status"], "failed");
         assert_eq!(value["echo"], "e1");
         assert!(value.get("data").is_none(), "B 类失败不带 data: {body}");
         assert!(value.get("message").is_some(), "message 恒在: {body}");
+    }
+
+    /// 参数 / 协议错误不被改写成 100：Go 的 B 类 handler 先校验参数、回 `sendParamRetCode`
+    /// （`handlers/set_group_add_request.go:53`），只有走到上游才 `sendActionResult(msg, 100)`。
+    #[tokio::test]
+    async fn management_param_errors_keep_1400() {
+        let body = dispatch_json(
+            dispatcher(),
+            br#"{"action":"set_group_whole_ban","params":{},"echo":"e1"}"#.to_vec(),
+        )
+        .await;
+        let value: Value = serde_json::from_str(&body).expect("响应应为 JSON");
+        assert_eq!(
+            value["retcode"], RETCODE_BAD_REQUEST,
+            "缺参仍是 1400: {body}"
+        );
+        assert_eq!(value["status"], "failed");
+        assert_eq!(value["echo"], "e1");
+        assert!(value.get("data").is_none(), "B 类失败不带 data: {body}");
+    }
+
+    /// `get_robot_share_link`：先把伪造 notice 发到总线，再回字面量 `{}`（无 retcode / echo）。
+    #[tokio::test]
+    async fn share_link_pushes_notice_then_returns_empty_object() {
+        let hub = crate::event_hub::EventHub::default();
+        let mut events = hub.subscribe();
+        let dispatcher = dispatcher().with_hub(Some(hub));
+
+        let body = dispatch_json(
+            dispatcher,
+            br#"{"action":"get_robot_share_link","params":{"callback_data":"c1"},"echo":"e1"}"#
+                .to_vec(),
+        )
+        .await;
+        assert_eq!(body, "{}");
+
+        let event = events.recv().await.expect("notice 应先发布到总线");
+        assert_eq!(
+            event.json(),
+            r#"{"callback_data":"c1","notice_type":"share_link_generated","post_type":"notice","self_id":102001234,"time":1700000000,"url":"https://example.com/link"}"#
+        );
+    }
+
+    /// 分享链接失败走 Go 的 `sendActionResult(..., 1500)`：仍是 Full 信封（不是 `{}`）。
+    #[test]
+    fn share_link_failure_falls_back_to_full_envelope() {
+        let mut failed = ActionResponse::<Value>::failed(RETCODE_INTERNAL, "生成分享链接失败");
+        failed.envelope = EnvelopeKind::GoEmptyObject;
+        assert_eq!(
+            encode(&failed),
+            r#"{"data":null,"echo":null,"message":"生成分享链接失败","retcode":1500,"status":"failed"}"#
+        );
     }
 
     /// A 发送类失败仍是 1400/1500 + Full 信封（D7 裁决），不被 B 类的 100 波及。

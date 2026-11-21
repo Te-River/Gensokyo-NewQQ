@@ -221,6 +221,43 @@ Go 在 `global_group_msg_rre_to_message` / `global_c2c_msg_switch_to_message` / 
 
 ## 🐛 修复
 
+### `get_avatar` 回执多出一个 `url` 字段（2026-11-21）
+
+47 例 action 回执对照（Go vs Rust，同一请求）发现 `get_avatar` 的 `data` 键集多了 `url`：Go `handlers/get_avatar.go:15-21` 的 `AvatarData` 只有 `message` / `user_id`，**URL 就放在 `message` 里**。
+
+- **修改**：`crates/gensokyo-actions/src/interaction.rs` 删掉 `AvatarData::url`，`GetAvatarHandler` 只填 `message`（URL）与 `user_id`；模块文档同步
+- **影响**：`data` 键集 = `message,user_id`，与 Go 逐字段一致；按 Go 编写的客户端读 `message` 不受影响
+- **测试**：`interaction::tests::avatar_is_built_locally_from_app_id_and_openid` 断言键集恰为 `["message", "user_id"]`
+
+### `get_group_info` / `get_group_list` 的 `data` 键集与 Go 不一致（2026-11-21）
+
+同一轮对照里，Go `data` 是 `group_create_time, group_id, group_level, group_memo, group_name, max_member_count, member_count`；Rust 缺 `group_create_time` / `group_level`，多出上游 DTO 的 `group_class_text` / `group_tags`（Go `handlers/get_group_info.go` 的 `GroupInfo` 与 `handlers/get_group_list.go` 的 `Group` 都是这 7 个字段）。
+
+- **根因**：`gensokyo-protocol` 的 `GroupInfo` 只有 4 个显式字段 + `flatten extra`，两个 handler 把 `group_memo` / `group_class_text` / `group_tags` 塞进 `extra`
+- **修改**：`GroupInfo` 改为显式字段列表（`group_id` / `group_name` / `group_memo` / `group_create_time: i32` / `group_level: i32` / `member_count` / `max_member_count`），删除 `extra`；`group.rs::GetGroupInfoHandler` 与 `group_admin.rs::GetGroupListHandler` 直接填字段，官方没有的 `group_create_time` / `group_level` 恒为 `0`（Go 的 int32 零值）
+- **flatten 判定**：`extra` 不会把上游多余字段漏进响应（`GroupInfo` 是 handler 新建的，不是从上游反序列化），但仍按显式字段列表收紧——入站 DTO（`gensokyo-qq::dto::GroupInfo`）的 `group_class_text` / `group_tags` 保持原样，只从**响应**里去掉
+- **影响**：`get_group_info` 与 `get_group_list` 的每行都与 Go 7 键一致；Go 的 `group_memo` 仍是上游 `group_finger_memo`
+- **测试**：`group::tests::get_group_info_maps_upstream_fields`、`group_admin::tests::` 的群列表用例断言键集数组与 7 个字段值
+
+### B 管理类把参数错误也改写成 `100`，Go 回 `1400`（2026-11-21）
+
+实测 `set_group_ban` / `set_group_whole_ban` 缺参：Go 回 `1400/failed`，Rust 回 `100/failed`。Go 的 B 类 handler 先校验参数、回 `sendParamRetCode`（`handlers/set_group_add_request.go:53` = `1400`），只有走到上游（或 idmap 反查失败）才 `sendActionResult(msg, 100)`。
+
+- **根因**：`crates/gensokyo-runtime/src/dispatcher.rs:155-158` 对所有 `Compact` 信封的失败无条件改写为 `RETCODE_MANAGEMENT_FAILED`
+- **修改**：改写条件加上 `retcode != RETCODE_BAD_REQUEST`——协议 / 参数错误（`1400`）放行，其余管理类失败仍映射 `100`
+- **影响**：`set_group_ban` / `set_group_whole_ban` 缺参回到 `1400/failed`；上游拒绝 / 反查失败仍是 `100`；A 发送类 / C 查询类不受影响
+- **测试**：`dispatcher::tests::management_param_errors_keep_1400`（缺参 → `1400`）、`management_failure_is_retcode_100`（上游拒绝 → `100`，用例改为真实业务失败形态）
+
+### `get_robot_share_link` 不推 notice、回执形状与 Go 不同（2026-11-21）
+
+Go（`handlers/get_robot_share_link.go:32-74`）先推一条伪造的 `{"post_type":"notice","notice_type":"share_link_generated","url":…,"callback_data":…,"time":…,"self_id":…}`，action 回执是字面量 `{}`。Rust 只回标准信封 `{retcode,data:{callback_data,url}}`，没有 notice。
+
+- **修改**：`crates/gensokyo-actions/src/interaction.rs` 的 handler 产出 notice 载荷（`self_id` 取配置 `app_id`，`time` 取当前秒）经 `data` 交接（actions 拿不到事件总线，与 deferred 计划同一握手口径）；`crates/gensokyo-runtime/src/dispatcher.rs` 在回执序列化前把载荷转成 `Event::Notice` 发到总线，再把回执换成 `{}`
+- **信封**：新增 `EnvelopeKind::GoEmptyObject`（`crates/gensokyo-protocol/src/envelope.rs` / `action.rs`）：成功编码为字面量 `{}`（无 `retcode` / `echo` / `data`），失败回落到 Full（Go 失败走 `sendActionResult(..., 1500)`）
+- **时序**：`hub.publish` 在 `dispatch` 内、回执字节生成之前完成；notice 与回执共用同一连接的 sink。`{}` 本身没有 `echo` / `retcode`，不会被分发器丢弃（`encode` 按信封模式直接输出，`finalize` 的 echo 兜底只改结构体字段、不上线）
+- **影响**：按 Go 写的插件能收到 `share_link_generated`（键名 / 值口径一致，事件帧键按字母序）；`callback_data` 仍原样回带
+- **测试**：`dispatcher::tests::share_link_pushes_notice_then_returns_empty_object`（回执 `{}` + 总线收到完整 notice，整串逐字节断言）、`share_link_failure_falls_back_to_full_envelope`、`interaction::tests::share_link_yields_the_fake_notice_payload`（6 键齐全、`self_id` = app_id）、`envelope::tests::share_link_uses_the_go_empty_object_envelope`
+
 ### `join_approval_strategy_*` 的关联群虚拟号未转 OpenID，上游拿到的是虚拟号（2026-11-21）
 
 全链路 ID 转换审计查出：`join_approval_strategy_create` / `_update` 把 `group_openids` 原样上行，`group_ids` 只做了 `parse::<u64>()`——插件的 GSK 虚拟群号（如 `610636458`）被当作真实群 OpenID / 真实群号发给 QQ，策略关联到不存在的群。契约是「插件侧只见虚拟号；调上游必须用真实 openid」。
