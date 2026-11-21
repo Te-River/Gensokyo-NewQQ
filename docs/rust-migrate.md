@@ -79,7 +79,7 @@ git ls-files --others --exclude-standard
 | `rustup` | 必需 | `rustup --version` | 官方 `rustup-init`；`rust-toolchain.toml` 钉 **1.99.1**，首次跑 `cargo` 会自动装该工具链（含 `rustfmt`/`clippy`，profile=minimal） |
 | mingw 链接器（Windows GNU 宿主） | 必需 | `gcc --version` | PATH 前置 mingw 目录，见下 |
 | `curl` + `tar` | 必需 | `curl --version` / `tar --version` | Windows 10+ 自带，供交叉工具链自动引导 |
-| zig / cargo-zigbuild / protoc | **不需要预装** | — | xtask 首次构建 Linux×4 时自动下载钉死版本：zig **0.16.0**、cargo-zigbuild **v0.24.1**，官方源 + sha256 校验，落到 `.tools/`，二跑零网络。流程与 URL 见 [rust-build.md](./rust-build.md)「Linux 交叉工具链自动引导」 |
+| zig / cargo-zigbuild / protoc | **不需要预装** | — | xtask 首次构建 Linux×4 + windows-gnu×2 时自动下载钉死版本：zig **0.16.0**、cargo-zigbuild **v0.24.1**，官方源 + sha256 校验，落到 `.tools/`，二跑零网络（windows-gnu 由 zig 交叉，不需要 MSVC / mingw）。流程与 URL 见 [rust-build.md](./rust-build.md)「zig 交叉工具链自动引导」 |
 | Go 工具链 | **只有重新生成金样才需要** | — | `crates/gensokyo-protocol/tests/xurls_golden.json`、`crates/gensokyo-media/tests/qr_golden.json` 已作为 fixture 入库，日常跑测试不需要 Go；本分支已无 Go 源码，重新生成金样请用 `main` 分支 / 兄弟目录 `../Gensokyo-NewQQ` |
 | Node / 前端 | 可选 | — | `cd frontend && npm run build`；不构建也行，xtask 自动写 `webui/dist` 占位文件 |
 | UPX | 可选 | `upx --version` | PATH 里没有只提示并跳过，不是构建失败 |

@@ -28,7 +28,7 @@
 | 格式检查 | `cargo fmt --all -- --check` |
 | TLS 依赖下限断言 | `cargo xtask check-tls-floors` |
 
-产物落 `release/`，命名带 `rust` 标识（如 `gensokyo-rust-windows-amd64.exe`）。`--all` = Go `build.ps1` 的 5 个平台（linux×3 + windows×2）× 双版本 = 10 个产物；linux×3 走 zig 自动引导（缓存落 `.tools/`，二跑零网络），windows-gnu×2 需对应位宽的 mingw-w64 gcc，缺工具链的目标输出 `[skip]` 不算失败。
+产物落 `release/`，命名带 `rust` 标识（如 `gensokyo-rust-windows-amd64.exe`）。`--all` = Go `build.ps1` 的 5 个平台（linux×3 + windows×2）× 双版本 = 10 个产物；linux×3 与 windows-gnu×2 全部走 zig 自动引导（缓存落 `.tools/`，二跑零网络；windows 目标由 zig 交叉，不需要 MSVC / mingw），缺工具链的目标输出 `[skip]` 不算失败。
 
 门禁基线（2026-11-18，HEAD `59510ca`）：`cargo test --workspace` = **45 suites / 1478 passed / 1 ignored / 0 failed**；clippy `-D warnings` 零告警；fmt 退出码 0。
 

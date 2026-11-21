@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
 
-use crate::bootstrap::{bootstrap_linux_tools, find_on_path, path_with_tools};
+use crate::bootstrap::{bootstrap_zig_tools, find_on_path, path_with_tools};
 use crate::find_lockfile;
 
 /// 发布目标矩阵（`--all` 使用）：与 Go `build.ps1:164-171` 的 5 个平台逐字一致，顺序也照 Go。
@@ -373,11 +373,20 @@ fn host_triple() -> Option<String> {
     Some(format!("{arch}-{rest}"))
 }
 
-/// linux-gnu 交叉目标走 `cargo zigbuild`（zig cc 当交叉 C 编译器，ring 等 C 依赖不再
-/// 需要各平台原生工具链）；其余目标（darwin/MSVC/android/musl/宿主）维持 `cargo build`。
+/// 交叉目标走 `cargo zigbuild`（zig cc 当交叉 C 编译器，ring 等 C 依赖不再需要各平台
+/// 原生工具链）；其余目标（darwin/MSVC/android/musl/宿主）维持 `cargo build`。
+///
+/// windows-gnu 也走 zig：rustc 对 `*-pc-windows-gnu` 会调 mingw 的 `dlltool` 生成
+/// `windows-sys` 等 crate 的导入库，而 MSYS2 的 dlltool 只认 `-m i386`、不认 rustc 传的
+/// `-m i386pe`，于是报
+/// `dlltool.exe: Can't create .lib file: …: invalid bfd target`（32 位目标稳定复现，
+/// `.tools\zig-0.16.0` 前置到 PATH 时两种位宽都命中）。zig 自带 PE 导入库与 Windows 头文件，
+/// `cargo zigbuild` 不经过 dlltool，与 linux-gnu 同一条路径，也不再需要 MSVC / mingw。
 fn uses_zigbuild(target: &Target) -> bool {
     target.triple.as_deref().is_some_and(|triple| {
-        triple.ends_with("-linux-gnu") || triple.ends_with("-linux-gnueabihf")
+        triple.ends_with("-linux-gnu")
+            || triple.ends_with("-linux-gnueabihf")
+            || triple.ends_with("-pc-windows-gnu")
     })
 }
 
@@ -460,10 +469,36 @@ fn target_env_overrides(triple: &str) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+/// zigbuild 目标额外的构建环境：目前只有 windows-gnu 的 `CFLAGS_*`。
+///
+/// zig cc 把 `-Wdate-time` 当错误（`-Werror`），而 mimalloc v3 的 `options.c:236` 用了
+/// `__DATE__` / `__TIME__`（`libmimalloc-sys` 的构建脚本编译它），windows-gnu 的 zigbuild
+/// 因此以 `expansion of date or time macro is not reproducible [-Werror,-Wdate-time]` 失败。
+/// cc crate 认 `CFLAGS_<target>`，连字符与下划线两种拼写各设一份（不同版本各认一种）；
+/// 只放宽这一条，且只在 windows-gnu 上注入——linux 目标与其余目标不带，保持原有告警口径。
+fn zigbuild_env(target: &Target) -> Vec<(String, String)> {
+    let Some(triple) = target
+        .triple
+        .as_deref()
+        .filter(|triple| triple.ends_with("-pc-windows-gnu"))
+    else {
+        return Vec::new();
+    };
+    if !uses_zigbuild(target) {
+        return Vec::new();
+    }
+    let value = "-Wno-error=date-time".to_owned();
+    vec![
+        (format!("CFLAGS_{triple}"), value.clone()),
+        (format!("CFLAGS_{}", triple.replace('-', "_")), value),
+    ]
+}
+
 /// 工具链可用性闸门（纯函数，便于单测）：`--all` 只尝试宿主真正能构建的目标，
 /// 其余打印 `[skip]` 理由、计入跳过而非失败（见 `BuildArgs::all` 的注释）。
 ///
-/// linux-gnu 不在这里拦：它由 zig + cargo-zigbuild 自动引导（见 `uses_zigbuild`）；
+/// linux-gnu / windows-gnu 不在这里拦：它们由 zig + cargo-zigbuild 自动引导（见
+/// [`uses_zigbuild`]），引导失败时走 bootstrap 的 `[skip]` 路径；
 /// 宿主自身（`triple` 为 `None`）交给 cargo 选目标，永远不跳过。
 ///
 /// MSVC 的判据是 `cl.exe` 而不是 `link.exe`：MSYS2 coreutils 在 `usr/bin/link.exe`
@@ -607,11 +642,14 @@ fn cargo_build(
     if let Some(path) = ctx.tool_path {
         command.env("PATH", path);
     }
-    if let Some(triple) = &target.triple {
-        // windows-gnu 的 PATH 覆盖必须排在 `ctx.tool_path` 之后：env 同名键后写者生效，
-        // 而这两类目标不走 zigbuild，不需要 zig 目录。
+    if let Some(triple) = &target.triple
+        && !uses_zigbuild(target)
+    {
+        // zigbuild 目标由 cargo-zigbuild 自己设 linker/CC，这里再注入 mingw gcc 只会让同一批
+        // 键上的两套工具链互相覆盖（env 同键后写者生效），所以只在非 zigbuild 目标上兜底。
         command.envs(target_env_overrides(triple));
     }
+    command.envs(zigbuild_env(target));
     if !capture {
         println!("{header}");
         let status = command
@@ -865,19 +903,20 @@ pub fn run(args: BuildArgs) -> Result<()> {
         }
     );
 
-    // 引导 linux-gnu 交叉工具链（zig + cargo-zigbuild）；全部命中 PATH/.tools 缓存时零网络。
+    // 引导 zig 交叉工具链（linux-gnu / windows-gnu，zig + cargo-zigbuild）；全部命中 PATH/.tools
+    // 缓存时零网络。
     let needs_zigbuild = targets.iter().any(uses_zigbuild);
     let mut tool_path: Option<std::ffi::OsString> = None;
-    // 引导失败只意味着「linux 目标跳过」，不是构建失败：既可能是网络（镜像不可达），
+    // 引导失败只意味着「zig 目标跳过」，不是构建失败：既可能是网络（镜像不可达），
     // 也可能是校验/解包缺陷。环境缺失不该让宿主目标连带失败；某个 zig 目标真正编译
     // 失败时仍走下面的 [fail] 分支，不会被吞。
     let mut bootstrap_failed = false;
     if needs_zigbuild {
-        match bootstrap_linux_tools(&root) {
+        match bootstrap_zig_tools(&root) {
             Ok(dirs) => tool_path = Some(path_with_tools(&dirs)?),
             Err(err) if matrix_mode => {
                 eprintln!(
-                    "[warn] Linux 交叉工具链不可用（zig/cargo-zigbuild 引导失败），linux 目标将跳过：{err:#}\n\
+                    "[warn] zig 交叉工具链不可用（zig/cargo-zigbuild 引导失败），linux / windows-gnu 目标将跳过：{err:#}\n\
                      零网络兜底：手工把工具解压到 <repo>\\.tools\\<tool>-<version>\\ 后重试\
                      （如 .tools\\zig-0.16.0\\ 与 .tools\\cargo-zigbuild-0.24.1\\，与自动引导同布局即可复用）"
                 );
@@ -900,7 +939,7 @@ pub fn run(args: BuildArgs) -> Result<()> {
     for target in &targets {
         if bootstrap_failed && uses_zigbuild(target) {
             verdicts.push(Some(format!(
-                "{}: Linux 交叉工具链不可用（zig/cargo-zigbuild 引导失败）",
+                "{}: zig 交叉工具链不可用（zig/cargo-zigbuild 引导失败）",
                 target.label()
             )));
             continue;
@@ -913,19 +952,8 @@ pub fn run(args: BuildArgs) -> Result<()> {
             verdicts.push(Some(format!("{}: {reason}", target.label())));
             continue;
         }
-        // windows-gnu 的 linker 与 C 编译器都是 mingw-w64 gcc；缺了必然在链接/C 代码里失败，
-        // 提前判掉（矩阵模式下 `[skip]`，不算失败）。单目标模式照旧交给 cargo 真实尝试。
-        if matrix_mode
-            && let Some(triple) = target.triple.as_deref()
-            && triple.ends_with("-pc-windows-gnu")
-            && windows_gnu_toolchain(triple).is_none()
-        {
-            let arch = triple.split('-').next().unwrap_or(triple);
-            verdicts.push(Some(format!(
-                "{triple}: 需要 mingw-w64 工具链（{arch} gcc 不在 PATH）"
-            )));
-            continue;
-        }
+        // windows-gnu 不再需要 mingw 探测：它和 linux-gnu 一样走 zigbuild，工具链缺失统一由
+        // 上面的 zig 引导失败路径（bootstrap_failed → `[skip]`）处理。
         if let Some(triple) = &target.triple
             && !ensure_target_installed(triple, installed.as_ref(), toolchain.as_deref())
             && matrix_mode
@@ -1078,8 +1106,7 @@ pub fn run(args: BuildArgs) -> Result<()> {
         bail!(
             "没有产出任何产物（跳过 {} 个目标）：这是环境缺失而非构建缺陷\n\
              本平台构建：.\\build.ps1（即 cargo xtask build），不需要安装任何 target\n\
-             Linux 目标会自动引导 zig/cargo-zigbuild 并补装 rustup target；\n\
-             windows-gnu 目标需要对应位宽的 mingw-w64 gcc；\n\
+             linux-gnu / windows-gnu 目标会自动引导 zig/cargo-zigbuild 并补装 rustup target；\n\
              darwin / MSVC / android 仍需各自的工具链（见 docs/rust-build.md）",
             skipped.len()
         );
@@ -1093,7 +1120,7 @@ mod tests {
         BuildArgs, Target, artifact_name, build_version, built_binary, cargo_invocation,
         ensure_webui_dist, flavors, git_short_commit, plan, shard, split_triple,
         target_env_overrides, target_skip_reason, uses_zigbuild, windows_gnu_env,
-        windows_gnu_gcc_names, windows_gnu_toolchain, worker_target_dir,
+        windows_gnu_gcc_names, windows_gnu_toolchain, worker_target_dir, zigbuild_env,
     };
     use std::time::{Duration, SystemTime};
 
@@ -1339,6 +1366,43 @@ mod tests {
         assert!(target_env_overrides("x86_64-pc-windows-msvc").is_empty());
     }
 
+    /// zig cc 把 `-Wdate-time` 当错误：windows-gnu 的 zigbuild 带 `CFLAGS_*` 放宽它，
+    /// linux 目标与其余目标不带（不污染其它目标的口径）。
+    #[test]
+    fn zigbuild_env_relaxes_date_time_only_for_windows_gnu() {
+        for triple in ["x86_64-pc-windows-gnu", "i686-pc-windows-gnu"] {
+            let target = Target::parse(triple).expect("三元组解析失败");
+            let expected: Vec<(String, String)> = [
+                format!("CFLAGS_{triple}"),
+                format!("CFLAGS_{}", triple.replace('-', "_")),
+            ]
+            .into_iter()
+            .map(|key| (key, "-Wno-error=date-time".to_owned()))
+            .collect();
+            assert_eq!(
+                zigbuild_env(&target),
+                expected,
+                "{triple} 应带两套拼写的 CFLAGS_*"
+            );
+        }
+        for triple in [
+            "x86_64-unknown-linux-gnu",
+            "i686-unknown-linux-gnu",
+            "x86_64-pc-windows-msvc",
+        ] {
+            let target = Target::parse(triple).expect("三元组解析失败");
+            assert!(
+                zigbuild_env(&target).is_empty(),
+                "{triple} 不该带 CFLAGS_*: {:?}",
+                zigbuild_env(&target)
+            );
+        }
+        assert!(
+            zigbuild_env(&Target::host()).is_empty(),
+            "宿主构建不带 CFLAGS_*"
+        );
+    }
+
     #[test]
     fn linux_only_filters_the_matrix() {
         let targets = plan(&args(&[], false, true, false)).expect("矩阵解析失败");
@@ -1404,12 +1468,14 @@ mod tests {
     }
 
     #[test]
-    fn only_linux_gnu_targets_route_to_zigbuild() {
+    fn zig_gnu_targets_route_to_zigbuild() {
         let zigbuild = [
             "x86_64-unknown-linux-gnu",
             "i686-unknown-linux-gnu",
             "armv7-unknown-linux-gnueabihf",
             "aarch64-unknown-linux-gnu",
+            "x86_64-pc-windows-gnu",
+            "i686-pc-windows-gnu",
         ];
         for triple in zigbuild {
             let target = Target::parse(triple).expect("三元组解析失败");
@@ -1477,7 +1543,7 @@ mod tests {
             target_skip_reason("windows", Some("x86_64-pc-windows-msvc"), true),
             None
         );
-        // 宿主平台自身的 gnu 目标（windows-gnu）本来就能构建。
+        // windows-gnu 也走 zigbuild（zig 自带 PE 导入库，绕开 mingw dlltool 的 `-m i386pe`）。
         assert_eq!(
             target_skip_reason("windows", Some("x86_64-pc-windows-gnu"), false),
             None

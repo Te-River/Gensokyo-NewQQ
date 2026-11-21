@@ -1,4 +1,4 @@
-//! Linux 交叉目标（linux-gnu×4）的工具链自动引导：zig + cargo-zigbuild。
+//! zig 交叉目标（linux-gnu×4 + windows-gnu×2）的工具链自动引导：zig + cargo-zigbuild。
 //!
 //! 探测顺序 PATH（须通过版本比对）→ `<workspace>/.tools/`（本地缓存，gitignore）→ 按宿主平台从官方 URL
 //! 下载。下载/解压/校验全部走系统工具（curl + tar + certutil/sha256sum），不新增 cargo
@@ -470,10 +470,10 @@ pub fn path_with_tools(dirs: &[PathBuf]) -> Result<std::ffi::OsString> {
     std::env::join_paths(&parts).context("拼接 PATH 失败")
 }
 
-/// linux-gnu 交叉构建前的工具引导入口：zig + cargo-zigbuild 就绪，返回目录清单
+/// zig 交叉构建前的工具引导入口：zig + cargo-zigbuild 就绪，返回目录清单
 /// （调用方用 `path_with_tools` 注入构建子进程的 PATH）。
 /// 全部命中缓存/PATH 时零网络；任一下载失败直接报错（不静默回退 plain cargo build）。
-pub fn bootstrap_linux_tools(root: &Path) -> Result<Vec<PathBuf>> {
+pub fn bootstrap_zig_tools(root: &Path) -> Result<Vec<PathBuf>> {
     let Some(host) = HostPlatform::detect() else {
         bail!(
             "当前宿主（{OS}/{ARCH}）没有官方预编译的 zig/cargo-zigbuild 下载源；\
@@ -491,7 +491,7 @@ pub fn bootstrap_linux_tools(root: &Path) -> Result<Vec<PathBuf>> {
         CARGO_ZIGBUILD_VERSION,
     )?;
     println!(
-        "[bootstrap] Linux 交叉工具链: zig {zig_version} + cargo-zigbuild {zigbuild_version}（探测 PATH → {TOOLS_DIR}/ → 官方下载）"
+        "[bootstrap] zig 交叉工具链: zig {zig_version} + cargo-zigbuild {zigbuild_version}（探测 PATH → {TOOLS_DIR}/ → 官方下载）"
     );
     let zig_dir = ensure_tool(root, host, "zig", &zig_version)?;
     let zigbuild_dir = ensure_tool(root, host, "cargo-zigbuild", &zigbuild_version)?;

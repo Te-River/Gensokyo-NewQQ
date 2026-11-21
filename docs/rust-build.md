@@ -11,16 +11,26 @@
 |----|------|
 | Rust 工具链 | `rust-toolchain.toml` 钉 `1.99.1`；MSRV 见根 `Cargo.toml`（1.90） |
 | 链接器 | 宿主 abi 必须有可用链接器：MSVC 需 VS Build Tools（`link.exe`），GNU 需 mingw。本仓库当前开发机走 GNU：`rustup override set 1.99.1-x86_64-pc-windows-gnu` |
-| Linux 交叉工具链 | **自动引导，无需预装**：linux-gnu×4 目标构建前 xtask 自动探测/下载 zig + cargo-zigbuild（见下节）；rustup target 缺失时自动 `rustup target add` |
+| zig 交叉工具链 | **自动引导，无需预装**：linux-gnu×4 + windows-gnu×2 目标构建前 xtask 自动探测/下载 zig + cargo-zigbuild（见下节）；rustup target 缺失时自动 `rustup target add`。windows-gnu 也由 zig 交叉，**无需 MSVC / mingw** |
 | 系统工具（仅首次下载需要） | `curl`、`tar`（Windows 10+ 自带两者；Linux 需发行版自带，zip 解压另可回退 `unzip`）、sha256 校验用 `certutil`（Windows）/ `sha256sum`（Linux）。全部系统自带，**不新增任何 cargo 依赖** |
 | `webui/dist` | **`rust-embed` 在编译期读取该目录**，目录缺失会直接编译失败。它以 `.gitignore` 忽略，xtask 会在缺失时自动写入 5 个占位文件（与 Go 版 `build.ps1`（`main` 分支）的 `Ensure-WebUIDist`、CI 占位步骤同一组文件） |
 | 前端产物（可选） | `cd frontend && npm run build` 会产出真实的 `webui/dist`；存在 `webui/dist/css/style.css` 时 xtask 不再写占位文件 |
 | UPX（可选） | 默认尝试压缩；PATH 里没有 `upx` 只提示并跳过，不是构建失败 |
 
-## Linux 交叉工具链自动引导（zig + cargo-zigbuild）
+## zig 交叉工具链自动引导（zig + cargo-zigbuild）
 
-linux-gnu×4 目标（`x86_64` / `i686` / `armv7-gnueabihf` / `aarch64`）改用 `cargo zigbuild`：
-zig cc 充当交叉 C 编译器，ring 等含 C 代码的依赖不再需要各平台原生工具链。
+linux-gnu×4 目标（`x86_64` / `i686` / `armv7-gnueabihf` / `aarch64`）与 windows-gnu×2 目标
+（`x86_64` / `i686`）改用 `cargo zigbuild`：zig cc 充当交叉 C 编译器，ring 等含 C 代码的依赖
+不再需要各平台原生工具链。
+
+windows-gnu 走 zig 是因为 rustc 对 `*-pc-windows-gnu` 会调 mingw 的 `dlltool` 生成
+`windows-sys` 等 crate 的导入库，而 MSYS2 的 dlltool 只认 `-m i386`、不认 rustc 传的
+`-m i386pe`，于是一旦依赖需要重编就报
+`dlltool.exe: Can't create .lib file: …: invalid bfd target`（32 位目标稳定复现）；
+zig 自带 PE 导入库与 Windows 头文件，`cargo zigbuild` 根本不经过 dlltool。
+另：zig cc 把 `-Wdate-time` 当错误，而 mimalloc v3 的 `options.c` 用了 `__DATE__` / `__TIME__`，
+所以 xtask 只给 windows-gnu 的 cargo 子进程注入 `CFLAGS_<triple>` 与 `CFLAGS_<triple 下划线>`
+= `-Wno-error=date-time`（linux 目标不带）。
 引导逻辑在 `xtask/src/bootstrap.rs`，**跨平台（Windows / Linux 宿主均可）**，流程：
 
 1. **探测**：先 PATH（`where.exe` / `which`，命中后跑 `zig version` / `cargo-zigbuild --version`
@@ -39,7 +49,7 @@ zig cc 充当交叉 C 编译器，ring 等含 C 代码的依赖不再需要各�
 
 `.tools/` 齐全时**零网络**；下载/校验失败直接报错（给出 URL 与原因），
 **不静默回退到必败的 plain `cargo build`**。`--all` 矩阵模式下引导失败只打印一条 `[warn]`
-并把 linux 目标记为 `[skip]`，darwin / windows / android 目标照常继续。
+并把 linux×3 与 windows-gnu×2 记为 `[skip]`，darwin / MSVC / android 目标照常继续。
 下载失败是**有界的**：单次缺省 600s（`GENSOKYO_DOWNLOAD_MAX_TIME=<秒>` 可收紧）、最多 1 次重试，
 且下载速率 <1 KB/s 持续 120s 即中止当前尝试——断网或镜像停摆时在个位分钟级落到 `[skip]`，
 不会一等几十分钟。Windows 下下载走 schannel 的**软吊销策略**（`--ssl-revoke-best-effort`）：
@@ -79,10 +89,9 @@ macOS / 32 位宿主没有官方预编译源：引导会报错并提示手动安
 ### 不自动引导的目标（维持现状）
 
 darwin×2 仍需 macOS + Xcode CLT；windows-msvc×2 仍需 VS Build Tools；
-windows-gnu×2 需对应位宽的 mingw-w64 gcc（xtask 只探测与注入，不下载）；
 android 仍需 NDK。这些目标缺工具链时按原口径报错/跳过，不自动下载。
 linux-musl 也不在引导范围（cargo-zigbuild 只路由 linux-gnu；musl 需自备工具链）。
-以上目标除 windows-gnu×2 外都不在 `--all` 矩阵里，需 `--target <triple>` 显式构建。
+以上目标都不在 `--all` 矩阵里，需 `--target <triple>` 显式构建。
 
 ## 迁移到新机器（整仓搬运）
 
@@ -98,7 +107,7 @@ linux-musl 也不在引导范围（cargo-zigbuild 只路由 linux-gnu；musl 需
   不在系统盘）。它是纯缓存，可随时整目录删除换取空间，代价是下次冷编译一次。新机自定义位置时
   记住两件事：`protoc` 构建脚本对跨盘路径敏感（同一分区最稳），且别在 Go 主仓目录里跑 cargo
   （历史上曾在此留下 68 GB 的 `target/`）。
-- 宿主构建直接可用；Linux×3 交叉由自动引导补齐；windows-gnu 需对应位宽的 mingw-w64 gcc；
+- 宿主构建直接可用；Linux×3 与 windows-gnu×2 交叉由自动引导补齐（不需要 MSVC / mingw）；
   darwin / MSVC / android 仍需各自工具链或 CI（见目标矩阵备注）。
 - 前端产物可选：`cd frontend && npm run build`；不构建时 xtask 自动写 `webui/dist` 占位文件。
 
@@ -140,8 +149,8 @@ cargo xtask build --linux-only
 | `x86_64-unknown-linux-gnu` | linux | amd64 | `gensokyo-rust-linux-amd64` | `cargo zigbuild`，工具链自动引导 |
 | `i686-unknown-linux-gnu` | linux | 386 | `gensokyo-rust-linux-386` | 同上 |
 | `aarch64-unknown-linux-gnu` | linux | arm64 | `gensokyo-rust-linux-arm64` | 同上 |
-| `x86_64-pc-windows-gnu` | windows | amd64 | `gensokyo-rust-windows-amd64.exe` | 需 64 位 mingw gcc（`x86_64-w64-mingw32-gcc`，或 `C:\msys64\mingw64\bin\gcc.exe`） |
-| `i686-pc-windows-gnu` | windows | 386 | `gensokyo-rust-windows-386.exe` | 需 32 位 mingw gcc（`i686-w64-mingw32-gcc`，或 `C:\msys64\mingw32\bin\gcc.exe`） |
+| `x86_64-pc-windows-gnu` | windows | amd64 | `gensokyo-rust-windows-amd64.exe` | `cargo zigbuild`，工具链自动引导（与 linux-gnu 同一路径，无需 MSVC / mingw） |
+| `i686-pc-windows-gnu` | windows | 386 | `gensokyo-rust-windows-386.exe` | 同上 |
 
 `--all` = 5 个平台 × 2 个版本（完整 + `-noWebui`）= **10 个产物**；`--linux-only` 只保留前三个
 linux 目标 = **6 个产物**。
@@ -155,25 +164,20 @@ darwin（`*-apple-darwin` ×2）、windows-msvc（`*-pc-windows-msvc` ×2）、a
   自动 `rustup target add --toolchain <当前工具链>`（幂等，并发补装会撞 rustup 的
   `could not rename … .partial (os error 2)`）；补装失败才打印 `[skip] <triple> …` 后继续，**不计失败**。
 - 宿主缺少对应工具链的目标先打印 `[skip] <triple>: <理由>` 并计入跳过、**不计失败**：
-  windows-gnu 需对应位宽的 mingw-w64 gcc（同时充当 linker 与 C 编译器，`ring` 等 C 依赖都要它）——
-  `x86_64` 找 `x86_64-w64-mingw32-gcc` / `C:\msys64\mingw64\bin\gcc.exe` / PATH 里的 `gcc`，
-  `i686` 找 `i686-w64-mingw32-gcc` / `C:\msys64\mingw32\bin\gcc.exe`，找不到即为
-  `[skip] <triple>: 需要 mingw-w64 工具链（<arch> gcc 不在 PATH）`；macOS 目标需 macOS 宿主或
-  专用交叉工具链、windows-msvc 需 `cl.exe` 在 PATH（判据不是 `link.exe`——MSYS2 coreutils 在
-  `usr/bin/link.exe` 提供同名 Unix `link`，会误判可用）、android 需 NDK；linux-gnu 目标由 zig
-  自动引导，不跳过。
-- windows-gnu 目标找到 gcc 后，cargo 子进程会带上 `CARGO_TARGET_<TRIPLE>_LINKER` 与
-  `CC_<target>`（连字符 / 下划线两种拼写都设，cc crate 版本不同认法不同），**并把该 gcc 的
-  `bin` 目录前置到 PATH**：gcc 的子进程（`cc1` / `as` / `ld`）要加载同目录 DLL，只设
-  `CC` / linker 不够——MSYS2 两个环境并存时 `mingw64\bin` 排在前面，32 位 gcc 连 `gcc -E`
-  都会以退出码 1 静默失败（`ring` 的编译器家族探测即如此）。
+  macOS 目标需 macOS 宿主或专用交叉工具链、windows-msvc 需 `cl.exe` 在 PATH（判据不是
+  `link.exe`——MSYS2 coreutils 在 `usr/bin/link.exe` 提供同名 Unix `link`，会误判可用）、
+  android 需 NDK；linux-gnu 与 windows-gnu 由 zig 自动引导，不在这里拦。
+- windows-gnu 的 linker / C 编译器 / PATH 全由 cargo-zigbuild 设置（zig 自带的 PE 导入库
+  代替 dlltool），xtask **不再注入** mingw 的 `CARGO_TARGET_<TRIPLE>_LINKER` / `CC_<target>`
+  ——同一批键上两套工具链互相覆盖只会让结果不可预期。
 - zig / cargo-zigbuild 引导失败（断网、镜像不可达、校验或解包失败）时打印一条 `[warn]`，
-  3 个 linux 目标一律 `[skip]`、**不阻塞其余目标**；引导成功后某个 zig 目标真正编译失败仍记失败。
+  linux×3 与 windows-gnu×2 一律 `[skip]`、**不阻塞其余目标**；引导成功后某个 zig 目标真正
+  编译失败仍记失败。
   离线兜底：把 zig 解压到 `<repo>\.tools\zig-<版本>\`（cargo-zigbuild 同理）即可零网络构建，
   引导的探测顺序是 PATH → `.tools/` → 官方下载。
-- linux-gnu×3 目标走自动引导的 `cargo zigbuild`（见上节）：**裸机上 `-All` / `-LinuxOnly`
-  的 linux 部分开箱即跑**，无需预装任何交叉工具链；首次运行会下载 zig + cargo-zigbuild
-  到 `.tools/`（之后零网络）。
+- linux-gnu×3 与 windows-gnu×2 目标走自动引导的 `cargo zigbuild`（见上节）：**裸机上 `-All` /
+  `-LinuxOnly` 开箱即跑**，无需预装任何交叉工具链（windows 目标也不需要 MSVC / mingw）；
+  首次运行会下载 zig + cargo-zigbuild 到 `.tools/`（之后零网络）。
 - 已安装但编译失败的目标记入失败清单并继续跑其余目标，结束时以非零退出码汇总
   （真编译错误不会被当成"环境缺失"吞掉）；全部目标都被跳过（0 个产物）时同样以非零
   退出码报错，并列出因缺工具链跳过的目标——只构建宿主平台请用默认模式 `cargo xtask build`。
@@ -263,8 +267,9 @@ dev/test 仍是 unwind：`dispatcher.rs` 的 `catch_unwind` handler 隔离只在
 ```
 
 `--locked` 落在 `cargo run` 上（同 `check-tls-floors` job 的理由：防止 cargo 在校验前改写 `Cargo.lock`）。
-linux-gnu 交叉目标无需预装链接器 / `cross` 容器：xtask 自动引导 zig + cargo-zigbuild 并补装
-rustup target（runner 需能访问 ziglang.org 与 github.com；缓存 `.tools/` 可跨 job 复用）。
+linux-gnu / windows-gnu 交叉目标无需预装链接器 / `cross` 容器：xtask 自动引导 zig +
+cargo-zigbuild 并补装 rustup target（runner 需能访问 ziglang.org 与 github.com；缓存 `.tools/`
+可跨 job 复用）。
 darwin / MSVC / android 目标仍需各自工具链（且需 `--target` 显式指定，不在 `--all` 矩阵内）。
 
 ## 退出码
@@ -290,7 +295,7 @@ darwin / MSVC / android 目标仍需各自工具链（且需 `--target` 显式�
 | 版本信息 | `-ldflags -X buildinfo.BuildType/BuildSpec` 注入 `git-<short>`（无 git 时 `dev-<epoch>.<ms>`） | `cargo xtask build` 给 cargo 子进程设 `GENSOKYO_BUILD_VERSION`（同一规则：git 时 `git-<7位短 hash>`、否则 `dev-<epoch>.<ms>`；同名环境变量优先，发布流水线可覆盖）；直接 `cargo build` 不注入、走运行时 `dev-…` 回退 |
 | WebUI 占位 | 脚本内 `Ensure-WebUIDist` | xtask 内 `ensure_webui_dist`（同一组占位文件） |
 | `-NoWebUI` | `-tags=small`（实际不删 WebUI：embed 与路由保留，只桩掉 `handleSysInfo`） | `--no-default-features` = **四能力全关**（webui/grpc/qr/oss，见上节），产物与完整版 SHA256 不同 |
-| 交叉编译 | Go 自带 | linux-gnu×4 自动引导 zig + cargo-zigbuild；其余目标需 `rustup target add` + 各自工具链 |
+| 交叉编译 | Go 自带 | linux-gnu×4 + windows-gnu×2 自动引导 zig + cargo-zigbuild；其余目标需 `rustup target add` + 各自工具链 |
 
 版本串口径补充：`GENSOKYO_BUILD_VERSION` 是构建版本串的覆盖开关（不受上文 zig 版本号的数字约束）喵~
 `Release 016 Rust` 起 Go 与 Rust 两侧产物版本串同口径（`git-<7 位短 hash>` / `dev-<epoch>.<ms>`），可按短 hash 追溯喵~

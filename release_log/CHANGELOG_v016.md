@@ -171,6 +171,27 @@ QQ 官方 2026-11-16 起群消息事件的 `author` 新增 `member_nickname`（�
 
 ## 🐛 修复
 
+### `cargo xtask build --all` 的 i686-pc-windows-gnu 稳定挂 dlltool（2026-11-21）
+
+矩阵里的两个 windows-gnu 目标此前走 plain `cargo build` + 注入 mingw gcc：`windows-sys` 这类带导入库的 crate 一旦需要重编，rustc 就用 MSYS2 的 `dlltool.exe` 造 `.lib`，于是稳定失败（两种风味各一次，exit code 101）：
+
+```text
+error: dlltool could not create import library with C:\msys64\mingw32\bin\dlltool.exe …
+  C:\msys64\mingw32\bin\dlltool.exe: Can't create .lib file: …: invalid bfd target
+error: could not compile `windows-sys` (lib)
+```
+
+单目标模式在缓存命中时能过，把 `.tools\zig-0.16.0` 前置到 PATH 后两种位宽都稳定复现；手工用 `i686-w64-mingw32-dlltool` 造 `.lib` 是成功的——根因是 rustc 传给 dlltool 的参数（`-m i386pe`）与 MSYS2 dlltool（`-m` 只认 `i386`/`i386pep`）不匹配。
+
+- **修改**：
+  - `xtask/src/build.rs` 的 `uses_zigbuild()` 纳入 `*-pc-windows-gnu`（原只匹配 `-linux-gnu` / `-linux-gnueabihf`），windows-gnu 与 linux-gnu 走同一条 `cargo zigbuild` 路径——zig 自带 PE 导入库与 Windows 头文件，根本不经过 dlltool
+  - 走 zigbuild 时不再注入 mingw 的 `CARGO_TARGET_<TRIPLE>_LINKER` / `CC_<target>` / PATH（linker 与 C 编译器由 cargo-zigbuild 设置），避免两套工具链在同一批环境键上互相覆盖；`windows_gnu_env` / `target_env_overrides` 保留为非 zigbuild 目标的兜底
+  - `--all` 的 windows-gnu 跳过判据由「需要 mingw-w64 工具链（gcc 不在 PATH）」改为沿用 zig 引导失败路径（`bootstrap_failed` → `[skip]`），与 linux-gnu 统一；`target_skip_reason()` 的 windows 分支只剩 MSVC 的 `cl.exe` 判据
+  - `xtask/src/bootstrap.rs` 引导入口改名 `bootstrap_linux_tools` → `bootstrap_zig_tools`（不再只服务 linux），`[bootstrap]` / `[warn]` / `[skip]` 文案统一改为「zig 交叉工具链」
+  - windows-gnu 的 zigbuild 额外注入 `CFLAGS_<triple>` 与 `CFLAGS_<triple 下划线>` = `-Wno-error=date-time`（`zigbuild_env()`）：zig cc 把 `-Wdate-time` 当错误，mimalloc v3 的 `options.c:236` 用了 `__DATE__` / `__TIME__`，不加这条会以 `expansion of date or time macro is not reproducible [-Werror,-Wdate-time]` 挂在 `libmimalloc-sys`；只对 windows-gnu 注入，linux 目标不受影响
+- **影响**：`--all` 的 windows 目标不再需要 MSVC / mingw，也不再受 dlltool 与 mimalloc 的 `__DATE__` 影响；zig 引导失败时 windows-gnu 与 linux 一起 `[skip]`（不静默退回必败的 mingw 路径）。Linux 目标的 zig 行为、产物命名、`[skip]` 语义与退出码全部不变
+- **测试**：删掉 `i686-pc-windows-gnu` 的 target 目录后真实重编通过；`cargo xtask build --all` = `10 个产物 / 0 个跳过 / 0 个失败`；`cargo test -p xtask` 全绿（含 `zig_gnu_targets_route_to_zigbuild`、`zigbuild_env_relaxes_date_time_only_for_windows_gnu`）、`cargo clippy -p xtask --all-targets -- -D warnings` 与 `cargo fmt --all -- --check` 零告警；两个 windows 产物 `--version` 正常、文件头 `4D 5A`
+
 ### `[CQ:reply]` 引用块全丢：入站未存 REFIDX、出站从不填 `message_reference`（2026-11-20）
 
 QQ 群 / 单聊消息事件的 `message_scene.ext[]` 带 `msg_idx=REFIDX_*`（引用索引）。Go 入站按**真实**消息 ID 把它存进 echo（`Processor/ProcessGroupMessage.go:51`、`ProcessGroupNormalMessage.go:42`、`ProcessC2CMessage.go:36` → `echo/echo.go:443` 的 `StoreRefIdxFromScene`），被动回复时 `handlers/reply_helpers.go:21-26` 的 `ResolveReplyRefID` 反查，命中则写进 `MessageReference.MessageID`（`send_group_msg.go:415-419`）。Rust 两条链都断：入站事件模型没有 `message_scene`（serde 静默丢弃），`EchoStore` 的 `store_ref_idx` / `store_ref_idx_from_scene` / `get_ref_idx` 全仓零调用者，`MessageToCreate.message_reference` 从未被填充 ⇒ `[CQ:reply]` 只带 `msg_id`，QQ v2 引用非机器人消息不认普通 ID，**引用块不显示**。
