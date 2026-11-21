@@ -128,6 +128,7 @@ fn group_event(message_id: Ob11Id, group_id: Ob11Id, to_me: Option<bool>) -> Eve
     Event::Message(MessageEvent {
         time: 1_700_000_000,
         self_id: Ob11Id::num(12345),
+        avatar: None,
         message_type: MessageType::Group,
         sub_type: Some("normal".to_owned()),
         message_id,
@@ -148,6 +149,7 @@ fn private_event(message_id: Ob11Id, user_id: Ob11Id) -> Event {
     Event::Message(MessageEvent {
         time: 1_700_000_000,
         self_id: Ob11Id::num(12345),
+        avatar: None,
         message_type: MessageType::Private,
         sub_type: Some("friend".to_owned()),
         message_id,

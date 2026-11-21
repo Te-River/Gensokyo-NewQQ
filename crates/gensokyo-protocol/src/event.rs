@@ -317,6 +317,9 @@ pub struct MessageEvent {
     pub time: i64,
     /// 机器人自身 ID（虚拟）。
     pub self_id: Ob11Id,
+    /// 发送者头像地址（`!native_ob11` 时的增强字段，Go `GenerateAvatarURLV2`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
     /// 私聊 / 群聊。
     pub message_type: MessageType,
     /// 子类型（`friend` / `group` / `normal` / `anonymous` …）。
@@ -991,6 +994,7 @@ impl<'de> Visitor<'de> for MessageEventVisitor {
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<MessageEvent, A::Error> {
         let mut time = None;
         let mut self_id = None;
+        let mut avatar = None;
         let mut message_type = None;
         let mut sub_type = None;
         let mut message_id = None;
@@ -1009,6 +1013,7 @@ impl<'de> Visitor<'de> for MessageEventVisitor {
             match key.0.as_ref() {
                 "time" => time = Some(map.next_value()?),
                 "self_id" => self_id = Some(map.next_value::<Ob11IdWire>()?.into_inner()),
+                "avatar" => avatar = map.next_value()?,
                 "message_type" => message_type = Some(map.next_value()?),
                 "sub_type" => sub_type = map.next_value()?,
                 "message_id" => message_id = Some(map.next_value::<Ob11IdWire>()?.into_inner()),
@@ -1038,6 +1043,7 @@ impl<'de> Visitor<'de> for MessageEventVisitor {
         Ok(MessageEvent {
             time: time.ok_or_else(|| de::Error::missing_field("time"))?,
             self_id: self_id.ok_or_else(|| de::Error::missing_field("self_id"))?,
+            avatar,
             message_type: message_type.ok_or_else(|| de::Error::missing_field("message_type"))?,
             sub_type,
             message_id: message_id.ok_or_else(|| de::Error::missing_field("message_id"))?,

@@ -207,6 +207,16 @@ Go 在 `global_group_msg_rre_to_message` / `global_c2c_msg_switch_to_message` / 
 - **影响**：只在非空时出现（缺失 / 空串不输出该键）；仅作为新增字段透传，**不改写** `group_id` 或任何现有字段；不带该字段的旧事件上报与改动前逐字节一致
 - **测试**：`group_events_pass_union_group_openid_through`（七类事件逐条断言 + 缺失时不出现 + `group_id` 不变）
 
+### `send_private_msg` 支持显式 `message_id`（群 msg_id 可用于私聊回复，官方 2026-11-17）
+
+官方 2026-11-17 起，群消息的 `msg_id` 可直接用于 `POST /v2/users/{user_openid}/messages`（私聊回复该群消息的发送者）。此前只有 `send_group_msg_raw` 读该参数，`send_private_msg` 会把凭据静默丢弃、退化成主动推送：
+
+- **修改**：`crates/gensokyo-actions/src/send.rs`——`plan_send_private_msg` 复用既有的 `raw_message_id` 语义（助手 `apply_raw_message_id`，`send_group_msg_raw` 与私聊发送共用一份实现），`plan_send_msg` 的 `message_type=private` 分支经同一条链自动生效
+- **语义**：非空字符串 → `reply_msg_id = Some(该串)`；`"0"` / 空串 / 缺失 / `null` → 主动发送（与 `send_group_msg_raw` 逐字同口径）；数字形态归一成 `Ob11Id::Num`，虚拟号 ↔ 真实 ID 的还原仍留给 runtime 的 reply 反查
+- **优先级**：显式 `message_id` 与 `[CQ:reply]` 同一条通道——`compose` 先把它写进 `msg_id`，`stamp_message` 不覆盖，因此优先于 echo 懒消息池；`[CQ:active]` 仍只清池值，不覆盖显式凭据（与既有 `[CQ:reply]` 行为一致）；`send_private_msg_wakeup` 的被动凭据照旧在 deferred 链清空
+- **影响**：回执形状不变；不带 `message_id` 的私聊发送行为与改动前逐字节一致
+- **测试**：`private_send_maps_explicit_message_id_to_passive_reply`（原 `#[ignore]` 缺陷用例转为常驻回归守卫）、`raw_private_route_maps_explicit_group_message_id`、`raw_private_route_treats_zero_message_id_as_active`
+
 ---
 
 ## 🐛 修复
@@ -502,6 +512,15 @@ P86 审计遗留的两条回执路径（`send_private_msg_sse` 与 `send_*_forwa
 - **发现**：Go 的 numeric 模式（默认 `string_ob11=false`）响应里 `data.message_id` 是 **int**、`group_id` 为 int64；string 模式为原串 + OpenID；Rust dispatcher 恒回字符串且缺 `group_id`/`user_id`；空回执 `0` vs `"0"`；顶层 `message`/`echo` 缺省省略；键序不同。D1–D9 详见 `reports/refactor/17-go-rust-parity.md` §F。
 - **裁决**：D1–D4、D6、D9 是正常路径硬性差异，必须修（P86a→P86b）；D5（私聊空消息 Go 无回执）/D7（Go 失败恒 ok）/D8（Go 参数错无回执）保留 Rust 更安全行为，登记为刻意分侧。
 - **状态**：修复待 P80 落地后开始（同改 `dispatcher`/`deferred`）。
+
+### 入站事件帧与 Go 的 3 处代码差异（2026-11-21）
+
+活体实测（Go / Rust 双实例同时在线，同一 QQ 群消息）抓到 3 处纯代码差异，逐条对齐 Go：
+
+- **顶层 `avatar`**（`crates/gensokyo-protocol/src/event.rs`、`crates/gensokyo-runtime/src/inbound.rs`）：`MessageEvent` 新增 `avatar: Option<String>`（空值省略）；`!native_ob11` 时补 `https://q.qlogo.cn/qqapp/<app_id>/<openid>/640`（Go `GenerateAvatarURLV2`，`Processor/Processor.go:1176-1182`）。赋值点与 Go 一一对应：群 AT / 全量群消息、C2C 私聊、`GROUP_MSG_RECEIVE`/`REJECT` 与 `C2C_MSG_*` 的 `*_to_message` 形态、`INTERACTION_CREATE` 的群聊形态（单聊形态 Go 没有 `avatar`）
+- **`sender.area`**：群消息 / 群 AT 数字形态恒 `"0"`（Go `ProcessGroupNormalMessage.go:217`、`ProcessGroupMessage.go:231`），字符串形态是首条附件 URL（无附件时省略，`ProcessGroupMessage.go:305-319`）；`INTERACTION_CREATE` 群聊两形态 `"0"`（`ProcessInlineSearch.go:213,334`）。Go 的 `PrivateSender` 没有 `area`，C2C 私聊不补
+- **`time` 口径**：Go 用 `time.Now().Unix()` 的消息事件与通知（群/私聊消息、`GROUP_MSG_RECEIVE`/`REJECT`、`C2C_MSG_*`、`INTERACTION_CREATE`）改取处理时刻；好友增删、机器人入群/退群、群成员增删、入群申请仍用负载 `timestamp`
+- **测试**：`inbound` 单元测试新增 2 例（群消息 JSON 的 `avatar` / `sender.area` / `time` 断言，`native_ob11` 打开时不出现 `avatar`）
 
 ---
 

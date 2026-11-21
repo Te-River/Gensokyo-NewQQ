@@ -59,9 +59,15 @@
 //! - `!native_ob11` 时补 `real_user_id` / `real_group_id` / `real_message_type` 附加字段
 //!   （与 Go 的「增强配置」一致）。例外：`GROUP_MEMBER_ADD/REMOVE` 在 Go 里**不区分**
 //!   `native_ob11`（`RealUserID`/`RealGroupID` 只被 `omitempty` 省略空值），这里照搬。
-//! - `time`：QQ 负载带 `timestamp` 时用它，否则取当前秒级时间戳。Go 群消息用 `time.Now()`，
-//!   这里偏向可复现（同一事件重放得到同一 `time`）。`GROUP_JOIN_REQUEST` 的 `apply_at`
-//!   优先按 RFC3339 解析（Go `time.Parse`），失败再按秒级数字解析。
+//! - `time`：与 Go 一致，按事件类型分流。**消息事件**（`message`）与三个
+//!   `*_to_message` 开关转出的消息、以及 `INTERACTION_CREATE` 的 notice 取**处理时刻**
+//!   （Go `time.Now().Unix()`）；`GROUP_MSG_RECEIVE/REJECT` 与 `C2C_MSG_*` 的 notice 同样取
+//!   处理时刻（`ProcessGroupMsgReceive.go:85`、`process_c2c_switch.go:76`）。只有负载本身
+//!   带事件时间的通知才用负载 `timestamp`：好友增删（`process_friend.go:56,136`）、机器人
+//!   入群/退群（`ProcessGroupAddBot.go`、`ProcessGroupDelBot.go`）、群成员增删
+//!   （`ProcessGroupMember.go:49-64`）、入群申请（`ProcessGroupJoinRequest.go:39-55`），
+//!   缺失/非法时回退当前秒。`GROUP_JOIN_REQUEST` 的 `apply_at` 优先按 RFC3339 解析
+//!   （Go `time.Parse`），失败再按秒级数字解析。
 //! - **入站媒体段**（`attachments` / `ark_data` / `msg_elements` 通路，P50）：图片附件、
 //!   语音附件、结构化卡片、引用与嵌套正文按 Go 的两条路径各自成型——字符串路径把
 //!   `[CQ:image…]` / `[CQ:record…]` / `[CQ:ark…]` / `[CQ:reply…]` 与嵌套正文接在正文之后
@@ -107,7 +113,7 @@
 //!
 //! # 未做项
 //!
-//! - `echo` 的 `app_id/s` 映射、双路 echo、`is_binded_*`、`avatar`、
+//! - `echo` 的 `app_id/s` 映射、双路 echo、`is_binded_*`、
 //!   idmap-pro（`StoreIDv2Pro`）；`GROUP_MEMBER_ADD` / `GROUP_JOIN_REQUEST` 的 `event_id`
 //!   只落在 `extra`，Go 侧 `echo.AddEvnetIDv2` 的被动回复缓存未做。
 //! - `message_sent`、`request` 的 `flag` 审批链路（Go 侧 `GROUP_ADD_ROBOT` 的 `flag` 也是空串）。
@@ -168,8 +174,6 @@ struct QqMessage {
     union_group_openid: Option<String>,
     #[serde(default)]
     content: String,
-    #[serde(default)]
-    timestamp: Option<Value>,
     #[serde(default)]
     author: Option<QqAuthor>,
     #[serde(default)]
@@ -1102,6 +1106,20 @@ impl Inbound {
 
         // Go `e6c7e32`：群聊昵称/名片取 `member_nickname`，`card_nick` 配置非空时两者都覆盖。
         let (nickname, card) = resolve_nickname_and_card(author, settings.get_card_and_nick());
+        // Go 群消息的 `Sender.Area`：数字形态恒 `"0"`（`ProcessGroupMessage.go:231` /
+        // `ProcessGroupNormalMessage.go:217`），字符串形态是首条附件的 URL
+        // （`ProcessGroupMessage.go:305-319` / `ProcessGroupNormalMessage.go:283-289`），
+        // 无附件时为空串、被 `omitempty` 丢弃。
+        let area = if settings.get_string_ob11() {
+            payload
+                .attachments
+                .first()
+                .and_then(|attachment| attachment.as_ref())
+                .map(|attachment| attachment.url.clone())
+                .filter(|url| !url.is_empty())
+        } else {
+            Some("0".to_owned())
+        };
         let sender = Sender {
             // Go M1-B：string 形态不做 idmap 转换，`sender.user_id` 恒为 0（见 `derive_message_ids`）。
             user_id: Some(sender_user_id),
@@ -1114,6 +1132,7 @@ impl Inbound {
                     .unwrap_or_else(|| "member".to_owned()),
             ),
             sex: Some("0".to_owned()),
+            area,
             level: Some("0".to_owned()),
             // Go `Sender.TinyID` 非 omitempty：未取到时上报空串。
             tiny_id: Some(String::new()),
@@ -1157,8 +1176,10 @@ impl Inbound {
         };
         let message = reported_message(settings, &segment_source, &raw_message, &payload);
         Ok(vec![Event::Message(MessageEvent {
-            time: timestamp_of(payload.timestamp.as_ref()),
+            // Go `ProcessGroupMessage.go:235` / `ProcessGroupNormalMessage.go:223`：处理时刻
+            time: now_unix(),
             self_id: Ob11Id::num(self.self_id_of(settings)),
+            avatar: self.avatar(settings, user_raw),
             message_type: MessageType::Group,
             sub_type: Some("normal".to_owned()),
             message_id,
@@ -1259,8 +1280,10 @@ impl Inbound {
         };
         let message = reported_message(settings, &segment_source, &string_form, &payload);
         Ok(vec![Event::Message(MessageEvent {
-            time: timestamp_of(payload.timestamp.as_ref()),
+            // Go `ProcessC2CMessage.go:150` / `:200`：处理时刻
+            time: now_unix(),
             self_id: Ob11Id::num(self.self_id_of(settings)),
+            avatar: self.avatar(settings, user_raw),
             message_type: MessageType::Private,
             sub_type: Some("friend".to_owned()),
             message_id,
@@ -1411,7 +1434,8 @@ impl Inbound {
         let group_id = self.vuid(&payload.group_openid);
         self.register_group(&group_id);
         Ok(vec![Event::Notice(NoticeEvent {
-            time: timestamp_of(payload.timestamp.as_ref()),
+            // Go `ProcessGroupMsgReceive.go:85` / `ProcessGroupMsgReject.go:86`：处理时刻
+            time: now_unix(),
             self_id: Ob11Id::num(self.self_id_of(settings)),
             notice_type: notice_type.to_owned(),
             sub_type: Some("create".to_owned()),
@@ -1480,6 +1504,7 @@ impl Inbound {
             // Go 用 `time.Now()`，不读事件负载里的 timestamp
             time: now_unix(),
             self_id: Ob11Id::num(self.self_id_of(settings)),
+            avatar: self.avatar(settings, &payload.op_member_openid),
             message_type: MessageType::Group,
             sub_type: Some("normal".to_owned()),
             message_id: Ob11Id::num(if notice_type == "group_receive" {
@@ -1548,6 +1573,7 @@ impl Inbound {
         Ok(vec![Event::Message(MessageEvent {
             time: now_unix(),
             self_id: Ob11Id::num(self.self_id_of(settings)),
+            avatar: self.avatar(settings, &payload.openid),
             message_type: MessageType::Private,
             sub_type: Some("friend".to_owned()),
             message_id: Ob11Id::num(-1),
@@ -1657,7 +1683,13 @@ impl Inbound {
             );
         }
         Ok(vec![Event::Notice(NoticeEvent {
-            time: timestamp_of(payload.timestamp.as_ref()),
+            // Go：`FRIEND_DEL` 用负载 timestamp（`process_friend.go:136`），`C2C_MSG_*` 的
+            // notice 用处理时刻（`process_c2c_switch.go:76,228`）。
+            time: if notice_type == "friend_decrease" {
+                timestamp_of(payload.timestamp.as_ref())
+            } else {
+                now_unix()
+            },
             self_id: Ob11Id::num(self.self_id_of(settings)),
             notice_type: notice_type.to_owned(),
             sub_type: None,
@@ -1909,6 +1941,13 @@ impl Inbound {
                 Value::String(user_raw.to_owned()),
             );
         }
+        // Go 群聊两个分支都在 `!native_ob11` 里补 `GenerateAvatarURLV2(data.GroupMemberOpenID)`
+        // （`ProcessInlineSearch.go:226` / `:346`）；单聊两个分支没有 avatar。
+        let avatar = if group {
+            self.avatar(settings, user_raw)
+        } else {
+            None
+        };
 
         let (message_type, sub_type, message_id, group_id, user_id_out, sender) =
             match (group, string_form) {
@@ -2022,6 +2061,8 @@ impl Inbound {
         Some(Event::Message(MessageEvent {
             time: now_unix(),
             self_id: Ob11Id::num(self.self_id_of(settings)),
+            // 只有群聊两个分支补 avatar（Go `ProcessInlineSearch.go:226` / `:346`），单聊没有
+            avatar,
             message_type,
             sub_type: Some(sub_type.to_owned()),
             message_id,
@@ -2052,6 +2093,20 @@ impl Inbound {
             );
         }
         extra
+    }
+
+    /// `!native_ob11` 时才补的消息头像（Go `GenerateAvatarURLV2`，`Processor/Processor.go:1176-1182`）。
+    ///
+    /// `appid` 恒取配置的 `app_id`：`use_uin` 打开时 `self_id` 是 QQ 号，但 Go 的
+    /// `GenerateAvatarURLV2` 用的仍是 `config.GetAppIDStr()`。
+    fn avatar(&self, settings: &Settings, openid: &str) -> Option<String> {
+        if settings.get_native_ob11() {
+            return None;
+        }
+        Some(format!(
+            "https://q.qlogo.cn/qqapp/{}/{openid}/640",
+            settings.get_app_id()
+        ))
     }
 }
 
@@ -2720,8 +2775,9 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        QqAuthor, at_placeholder, auto_approved_pair, expand_at_placeholders, parse_rfc3339,
-        resolve_nickname_and_card, scan_mentions, strip_extension, timestamp_of, verify_comment,
+        QqAuthor, at_placeholder, auto_approved_pair, expand_at_placeholders, now_unix,
+        parse_rfc3339, resolve_nickname_and_card, scan_mentions, strip_extension, timestamp_of,
+        verify_comment,
     };
     use gensokyo_protocol::Segment;
     use serde_json::json;
@@ -3017,6 +3073,66 @@ mod tests {
                 .read_config(&group_id.to_string(), "type")
                 .expect("群应已注册"),
             "group"
+        );
+    }
+
+    /// Go `ProcessGroupNormalMessage.go:217,223,232`：群消息 `sender.area` 恒 `"0"`、
+    /// `time` 取处理时刻、`!native_ob11` 时补 `avatar`
+    /// （`https://q.qlogo.cn/qqapp/<app_id>/<作者 openid>/640`）。
+    #[test]
+    fn group_message_reports_area_avatar_and_processing_time() {
+        use gensokyo_protocol::Event;
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "app_id: 102001234\n").expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let inbound = Inbound::new(manager, Some(test_store(dir.path())));
+
+        let now = now_unix();
+        let events = inbound
+            .convert("GROUP_MESSAGE_CREATE", Some(&group_at_payload()), None)
+            .expect("全量群消息应可转换");
+        let Event::Message(message) = &events[0] else {
+            panic!("GROUP_MESSAGE_CREATE 应转成群消息");
+        };
+        let value = serde_json::to_value(message).expect("事件序列化失败");
+        assert_eq!(
+            value["avatar"].as_str(),
+            Some("https://q.qlogo.cn/qqapp/102001234/u0123456789abcdef0123456789abcdef/640")
+        );
+        assert_eq!(
+            value.pointer("/sender/area").and_then(|area| area.as_str()),
+            Some("0")
+        );
+        assert!(
+            (message.time - now).abs() <= 2,
+            "time 应取处理时刻：上报 {}，当前 {now}",
+            message.time
+        );
+    }
+
+    /// Go 只在 `!native_ob11` 时赋 `avatar`（`ProcessGroupNormalMessage.go:226-233`）。
+    #[test]
+    fn group_message_omits_avatar_when_native_ob11_is_on() {
+        use gensokyo_protocol::Event;
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "app_id: 102001234\nnative_ob11: true\n").expect("写测试配置失败");
+        let manager = Arc::new(ConfigManager::new(&path).expect("加载配置失败"));
+        let inbound = Inbound::new(manager, Some(test_store(dir.path())));
+
+        let events = inbound
+            .convert("GROUP_MESSAGE_CREATE", Some(&group_at_payload()), None)
+            .expect("全量群消息应可转换");
+        let Event::Message(message) = &events[0] else {
+            panic!("GROUP_MESSAGE_CREATE 应转成群消息");
+        };
+        let value = serde_json::to_value(message).expect("事件序列化失败");
+        assert!(
+            value.get("avatar").is_none(),
+            "native_ob11 打开时不应上报 avatar"
         );
     }
 

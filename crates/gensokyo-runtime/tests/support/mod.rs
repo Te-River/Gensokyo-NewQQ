@@ -117,6 +117,7 @@ pub fn hub_event() -> Event {
     Event::Message(MessageEvent {
         time: 1_700_000_000,
         self_id: Ob11Id::num(12345),
+        avatar: None,
         message_type: MessageType::Group,
         sub_type: Some("normal".to_owned()),
         message_id: Ob11Id::str("M1"),
