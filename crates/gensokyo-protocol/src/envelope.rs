@@ -4,8 +4,9 @@
 //!   [`EnvelopeKind::Full`]：`data` 恒在，`message` / `echo` 恒在。
 //! - **B 管理类**（23 条）用 [`EnvelopeKind::Compact`]：Go 的 `sendActionResult` /
 //!   `sendActionResultWithData` 没有 `group_id` / `user_id`，`echo` 带 `omitempty`，失败
-//!   一律 `retcode 100` + `data:null`（`sendActionResult.Data` 无 `omitempty`；例外是
-//!   `set_group_ban` / `set_group_whole_ban` 群类型校验分支的 `1400`，见 runtime 的
+//!   一律 `retcode 100`；`data` 键成功与失败都恒在（`sendActionResult.Data` 无
+//!   `omitempty`，活体 Go 成功帧即 `"data":null`；例外的失败码是 `set_group_ban` /
+//!   `set_group_whole_ban` 群类型校验分支的 `1400`，见 runtime 的
 //!   `PARAM_ERROR_KEEPS_1400`）。
 //! - **`send_private_msg_wakeup`** 用 [`EnvelopeKind::GoWakeupOk`]：Go 的成功路径直接
 //!   `return` 字面量 `{"status": "ok", "retcode": 0}`（`handlers/send_private_msg_wakeup.go:322`），
@@ -27,7 +28,8 @@ pub enum EnvelopeKind {
     /// `group_id` / `user_id` 按需。
     #[default]
     Full,
-    /// B 管理类：Go `sendActionResult` 系列形状，`data` 形态由 [`CompactData`] 决定。
+    /// B 管理类：Go `sendActionResult` 系列形状，`data` 形态由 [`CompactData`] 决定
+    /// （四种形态的成功与失败都写 `data` 键，只是值不同）。
     Compact(CompactData),
     /// `send_private_msg_wakeup` 的成功回执：只有 `status` + `retcode`
     /// （Go `handlers/send_private_msg_wakeup.go:322` 的字面量，没有 `data` / `echo` / `message`）。
@@ -45,8 +47,10 @@ pub enum EnvelopeKind {
 /// Compact 信封里 `data` 的形态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactData {
-    /// 成功时没有 `data` 键（Go `sendActionResult` 的 HTTP 返回值）；失败路径不受这一位
-    /// 影响——四种形态的失败都是 `data:null`（WS 实发帧，D-a）。
+    /// 成功也是 `data:null`：Go `sendActionResult` 传的 `nil` Data 在 HTTP body 里没这个
+    /// 键，WS 实发帧却有（`structToMap` → map marshal 剥不掉 `nil`；活体 E01/E11/E17/E21/
+    /// E33/E43 六次复现）——所以本形态与 [`Self::Null`] 在线上同形，不省略 `data`
+    /// （D-a 口径修正：ad721dc 只给 failed 分支补了键）。
     Omit,
     /// `data` 恒在，取 handler 的返回值。
     AsIs,
@@ -58,7 +62,7 @@ pub enum CompactData {
 
 /// B 管理类的 23 条 action 及其 `data` 形态。
 const COMPACT_ACTIONS: &[(&str, CompactData)] = &[
-    // 无 data：Go 全部走 `sendActionResult`。
+    // Go 全部走 `sendActionResult`（Data 为 nil）：WS 实发帧 `data:null`，与 Null 同形。
     ("set_group_add_request", CompactData::Omit),
     ("set_group_ban", CompactData::Omit),
     ("set_group_whole_ban", CompactData::Omit),

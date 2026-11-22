@@ -253,9 +253,17 @@ Go 在 `global_group_msg_rre_to_message` / `global_c2c_msg_switch_to_message` / 
 活体实测 `set_group_card` 失败帧：Go 是 `{"data":null,"echo":…,"message":…,"retcode":100,"status":"failed"}`（五键字母序），Rust 少一个 `data` 键。审计依据 `reports/refactor/20261122-action-receipt-parity.md` §1.3/§6 D-a。
 
 - **根因**：Go 的 B 类失败出口只有一个 `sendActionResult`（`handlers/set_group_add_request.go:71-101`），其 `Data interface{} `json:"data"`` **没有** `omitempty`；WS 下发走 `structToMap(response)` → map marshal（键字母序、`nil` 剥不掉），实发帧恒带 `data:null`。Rust 的 Compact 序列化此前在 failed 分支整体短路掉 data
-- **修改**：`crates/gensokyo-protocol/src/action.rs` 的 `EnvelopeKind::Compact` 序列化改为「失败一律写 `"data":null`，成功才按子形态（Omit/AsIs/EmptyObject/Null）决定 data 有无」；codec 兜底帧同步（`dispatcher.rs encode()` 的 Compact 兜底串补 `data:null`）；`envelope.rs` 模块文档与 `CompactData::Omit` 注释按此口径改写
-- **影响**：全部 23 条 B 类 action 的失败回执多一个 `data:null` 键（四种 data 子形态的失败帧逐字节相同）；成功路径零变化；Full / wakeup / share_link 不受影响
+- **修改**：`crates/gensokyo-protocol/src/action.rs` 的 `EnvelopeKind::Compact` 序列化改为「失败一律写 `"data":null`」（成功路径当时仍按子形态决定 data 有无——该口径已被下一条勘正）；codec 兜底帧同步（`dispatcher.rs encode()` 的 Compact 兜底串补 `data:null`）；`envelope.rs` 模块文档与 `CompactData::Omit` 注释按此口径改写
+- **影响**：全部 23 条 B 类 action 的失败回执多一个 `data:null` 键（四种 data 子形态的失败帧逐字节相同）；Full / wakeup / share_link 不受影响
 - **测试**：`action.rs` 的 `compact_failure_writes_null_data_for_every_subshape`（四子形态 × handler 带载荷 × 无 echo 三组整串断言）、`dispatcher::tests::management_failure_is_retcode_100_with_null_data`、`compact_failure_bytes_are_the_same_for_every_subshape`、codec 兜底用例反转；`tests/deferred.rs` 的 `whole_ban_receipt_carries_null_data_like_go` / `compact_upstream_failure_receipt_is_100_with_null_data`（生产注册表整串）
+
+### Compact **成功**回执补 `data:null`（2026-11-22，parity D-a 口径修正）
+
+上一条 D-a 只修了 Compact 的 **failed** 分支。活体对照复跑（live-diff E01/E11/E17/E21/E33/E43 六次复现）钉出**成功**回执同样缺键：Go `set_group_ban` 成功帧是 `{"data":null,"echo":…,"message":"","retcode":0,"status":"ok"}`，Rust 少整个 `data` 键。根因与失败分支同一个：`sendActionResult.Data` 无 `omitempty`，HTTP body 里没有 `data`、WS 实发帧经 `structToMap` → map marshal 后恒有（`nil` 剥不掉）——「Go HTTP 返回值无 data」不等于「线上帧无 data」。
+
+- **修改**：`crates/gensokyo-protocol/src/action.rs` 的 `EnvelopeKind::Compact` 成功路径改为 `data` 键恒写：`Omit` 与 `Null` 在线上同形（都是 `"data":null`），`AsIs` 取 handler 值、`EmptyObject` 恒 `{}` 两档不动；failed 分支维持 ad721dc 的行为逐字节不变。`envelope.rs` 模块文档、`CompactData::Omit` 注释与 `COMPACT_ACTIONS` 表注释同步改口径；`dispatcher.rs` 模块文档与 `encode()` 注释按「成功与失败都恒带 data」改写
+- **影响**：4 条 `Omit` 形态 action（`set_group_add_request` / `set_group_ban` / `set_group_whole_ban` / `set_group_card`）的成功回执多一个 `data:null` 键，与 Go WS 实发帧逐字节一致；其余 19 条 B 类成功路径与全部失败路径零变化；Full / wakeup / share_link 不受影响
+- **测试**：反转把「成功省略 data」钉死的旧断言并改整串含 `"data":null`——`action.rs` 的 `compact_omits_data_and_empty_echo` → `compact_success_writes_null_data_and_omits_empty_echo`、`full_and_compact_envelopes_differ`（补无 echo 对照组）、`dispatcher::tests::management_success_uses_the_compact_envelope`；wire 级新增生产注册表用例 `tests/deferred.rs::compact_success_receipt_carries_null_data_like_go`（真实 handler + 真实信封表 + `dispatch_json` 整串钉死，替身记录器证明两次调用均打到上游）
 
 ### 管理类参数错码按 Go 分支口径细分 + 反查失败档位对齐（2026-11-22，parity D-b/D-c）
 
@@ -622,7 +630,7 @@ P86 审计（parity §F）确认的 D1/D3/D4：Go numeric 模式（默认 `strin
 
 ### per-action 响应信封（管理类 Compact，Rust 侧 P86c，2026-11-15）
 
-- **修复**：新增 `EnvelopeKind`（`Full`/`Compact(CompactData::{Omit,AsIs,EmptyObject,Null})`）与 `envelope_for(action)` 表（B 类 23 个管理 action 逐条对 Go 源码映射）；`ActionResponse` 改为手写 `Serialize`（两套键集、恒按字母序）。Compact 下：`data` 按子形态（4 省略 / 15 有值 / 2 `{}` / 2 `null`；**失败一律不写 data**）、`echo` 缺省省略、`message` 恒在、不写 `group_id`/`user_id`；B 类失败 `retcode 100 / failed`。dispatcher 在唯一出口按 action 设置信封，**未改任何 handler 业务逻辑**。
+- **修复**：新增 `EnvelopeKind`（`Full`/`Compact(CompactData::{Omit,AsIs,EmptyObject,Null})`）与 `envelope_for(action)` 表（B 类 23 个管理 action 逐条对 Go 源码映射）；`ActionResponse` 改为手写 `Serialize`（两套键集、恒按字母序）。Compact 下：`data` 按子形态（4 省略 / 15 有值 / 2 `{}` / 2 `null`；**失败一律不写 data**）〔2026-11-22 D-a 两轮勘正：WS 实发帧 **`data` 键恒在**——失败一律 `data:null`、成功 Omit≡Null，见上面两条 D-a 条目〕、`echo` 缺省省略、`message` 恒在、不写 `group_id`/`user_id`；B 类失败 `retcode 100 / failed`。dispatcher 在唯一出口按 action 设置信封，**未改任何 handler 业务逻辑**。
 - **影响**：群管理类响应不再多出 `data`/`echo` 字段；A 发送类与 C 查询类保持 Full；A 类失败仍 1400/1500（D7）。剩余见 P86d（`next_cursor` 进 data、`mark_msg_as_read` 的 `msg`/`wording`、C 类个别字段）。
 - **测试**：协议 8 例 + runtime 3 例（Compact 七条 golden 整串）；全量 **44 suites / 1427 passed / 0 failed**、clippy 零告警、release Finished、fmt 退出码 0。
 

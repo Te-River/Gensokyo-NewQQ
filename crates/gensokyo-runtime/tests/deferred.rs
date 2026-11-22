@@ -205,6 +205,147 @@ fn state_with_echo(settings: &str) -> (TempDir, Arc<FakeQqApi>, AppState, Arc<Ec
     (dir, api, state, echo)
 }
 
+/// `set_group_ban` 成功用的替身：记录入参并回 `Ok(())`（默认替身恒 `Unsupported`，
+/// 钉不了成功帧）。其余端点仍走 [`FakeQqApi`] 的失败口径。
+#[derive(Debug, Default)]
+struct BanOkApi {
+    bans: Mutex<Vec<(String, String, i64)>>,
+}
+
+impl QqApi for BanOkApi {
+    fn get_group_info(&self, _group_openid: &str) -> QqFuture<'_, GroupInfo> {
+        Box::pin(async { Err(Error::Unsupported("fake: get_group_info".to_owned())) })
+    }
+
+    fn get_group_member_info(
+        &self,
+        _group_openid: &str,
+        _member_openid: &str,
+    ) -> QqFuture<'_, GroupMember> {
+        Box::pin(async { Err(Error::Unsupported("fake: get_group_member_info".to_owned())) })
+    }
+
+    fn get_group_member_list(
+        &self,
+        _group_openid: &str,
+        _limit: u32,
+    ) -> QqFuture<'_, GroupMemberList> {
+        Box::pin(async { Err(Error::Unsupported("fake: get_group_member_list".to_owned())) })
+    }
+
+    fn set_group_ban(
+        &self,
+        group_openid: &str,
+        member_openid: &str,
+        duration_secs: i64,
+    ) -> QqFuture<'_, ()> {
+        let group_openid = group_openid.to_owned();
+        let member_openid = member_openid.to_owned();
+        Box::pin(async move {
+            self.bans.lock().expect("禁言记录锁未中毒").push((
+                group_openid,
+                member_openid,
+                duration_secs,
+            ));
+            Ok(())
+        })
+    }
+
+    fn get_group_bot_state(&self, _group_openid: &str) -> QqFuture<'_, BotInGroupState> {
+        Box::pin(async { Err(Error::Unsupported("fake: get_group_bot_state".to_owned())) })
+    }
+
+    fn get_group_join_request_list(
+        &self,
+        _group_openid: &str,
+        _cursor: Option<&str>,
+        _limit: Option<u32>,
+    ) -> QqFuture<'_, JoinRequestList> {
+        Box::pin(async {
+            Err(Error::Unsupported(
+                "fake: get_group_join_request_list".to_owned(),
+            ))
+        })
+    }
+
+    fn send_group_message(
+        &self,
+        _group_openid: String,
+        _msg: MessageToCreate,
+    ) -> QqFuture<'_, MessageResponse> {
+        Box::pin(async { Err(Error::Unsupported("fake: send_group_message".to_owned())) })
+    }
+
+    fn send_c2c_message(
+        &self,
+        _user_openid: String,
+        _msg: MessageToCreate,
+    ) -> QqFuture<'_, MessageResponse> {
+        Box::pin(async { Err(Error::Unsupported("fake: send_c2c_message".to_owned())) })
+    }
+
+    fn delete_msg(&self, _target: RetractRequest) -> QqFuture<'_, ()> {
+        Box::pin(async { Err(Error::Unsupported("fake: delete_msg".to_owned())) })
+    }
+}
+
+/// 生产注册表 + 禁言成功的替身：`set_group_ban` 能走到 ok 分支。
+fn ban_ok_state(settings: &str) -> (TempDir, Arc<BanOkApi>, AppState) {
+    let (manager, dir) = config(settings);
+    let api = Arc::new(BanOkApi::default());
+    let api_dyn: Arc<dyn QqApi> = api.clone();
+    let context = Arc::new(ActionContext::new(api_dyn, Arc::clone(&manager)));
+    let state = AppState::with_actions(manager, context);
+    (dir, api, state)
+}
+
+/// 生产注册表下的 Compact **成功**整串（D-a 口径修正）：活体 Go 的 `set_group_ban` ok 帧是
+/// `{"data":null,"echo":"e1","message":"","retcode":0,"status":"ok"}`——`sendActionResult.Data`
+/// 无 `omitempty`，成功也恒带 `data`（E01/E11/E17/E21/E33/E43 六次复现）。真实 handler、真实
+/// 信封表、真实 `dispatch_json` 出口；无 echo 时该键整个消失，`data` 照在。
+#[tokio::test]
+async fn compact_success_receipt_carries_null_data_like_go() {
+    let (_dir, api, state) = ban_ok_state("app_id: 12345\n");
+    let dispatcher = state.dispatcher();
+
+    let body = gensokyo_runtime::dispatch_json(
+        dispatcher.clone(),
+        format!(
+            r#"{{"action":"set_group_ban","params":{{"group_id":"{OPENID}","user_id":"{USER_OPENID}","duration":600}},"echo":"e1"}}"#
+        )
+        .into_bytes(),
+    )
+    .await;
+    assert_eq!(
+        body,
+        r#"{"data":null,"echo":"e1","message":"","retcode":0,"status":"ok"}"#
+    );
+
+    // 无请求回执：`echo` 按 omitempty 缺席，`data:null` 不受影响
+    let body = gensokyo_runtime::dispatch_json(
+        dispatcher,
+        format!(
+            r#"{{"action":"set_group_ban","params":{{"group_id":"{OPENID}","user_id":"{USER_OPENID}","duration":0}}}}"#
+        )
+        .into_bytes(),
+    )
+    .await;
+    assert_eq!(
+        body,
+        r#"{"data":null,"message":"","retcode":0,"status":"ok"}"#
+    );
+
+    // 成功确实打到了上游：替身按序记录 (group_openid, member_openid, duration)；
+    // 两个 ID 都是 32 位 OpenID，直通不反查（本用例刻意不装配 idmap）
+    assert_eq!(
+        api.bans.lock().expect("禁言记录锁未中毒").as_slice(),
+        [
+            (OPENID.to_owned(), USER_OPENID.to_owned(), 600_i64),
+            (OPENID.to_owned(), USER_OPENID.to_owned(), 0_i64),
+        ]
+    );
+}
+
 /// 同 [`state_with_echo`]，并装配 idmap：numeric 模式的虚拟号要它才能反查回 OpenID。
 fn state_with_idmap(
     settings: &str,

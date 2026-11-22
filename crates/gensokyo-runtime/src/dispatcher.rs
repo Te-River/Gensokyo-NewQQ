@@ -10,8 +10,9 @@
 //! `sendActionResult(msg, 100)`），**例外只有 [`compact_failure_keeps_retcode`] 认得的
 //! 参数错**：Go 只在禁言两兄弟与 `get_group_bot_state` / `get_group_join_request_list` 的
 //! 个别失败出口写 `sendParamRetCode`（`1400`），其余管理类的参数错与上游失败同样落到
-//! `sendActionResult(msg, 100)`。Compact 失败帧的 `data` 恒为 `null`（Go
-//! `sendActionResult.Data` 无 `omitempty`；D-a）。
+//! `sendActionResult(msg, 100)`。Compact 的 `data` 键成功与失败都恒在，非 `AsIs` /
+//! `EmptyObject` 形态线上是 `data:null`（Go `sendActionResult.Data` 无 `omitempty`；D-a
+//! 口径修正——活体 Go 的 `set_group_ban` 成功帧即带 `"data":null`）。
 //!
 //! `get_robot_share_link`（[`EnvelopeKind::GoEmptyObject`]）成功时先推伪造的
 //! `share_link_generated` notice（载荷由 actions 侧产出），再回字面量 `{}`。
@@ -632,7 +633,7 @@ fn retcode_for(err: &CoreError) -> i32 {
 /// 序列化响应；codec 出问题时按**当前信封模式**回一个同形状的兜底，响应不能凭空消失。
 ///
 /// 兜底形状必须与本模式正常输出一致：Full 有 `data` / `echo` / `message`（D6：三者恒在），
-/// Compact 有 `data:null` 与 `message`、没有 `echo`（Go 的 B 类失败是 `sendActionResult`，
+/// Compact 有 `data:null` 与 `message`、没有 `echo`（Go 的 B 类出口是 `sendActionResult`，
 /// `Data` 无 `omitempty`；D-a）。`message` 留空串而不是塞一句
 /// 说明——失败原因进 `tracing::error!`，线上形状只负责让客户端拿到 `retcode`。
 ///
@@ -925,7 +926,9 @@ mod tests {
 
     // ---- P86c：B 管理类走 Go 的 Compact 信封 ----
 
-    /// 无 `data` 的成功回执：`echo` 有请求回执则带，没有则整个键消失（Go `echo,omitempty`）。
+    /// Compact 成功回执：`data:null` 恒在（Go `sendActionResult.Data` 无 `omitempty`，
+    /// 活体 `set_group_ban` 成功帧即此形状；D-a 口径修正）。`echo` 有请求回执则带，没有则
+    /// 整个键消失（Go `echo,omitempty`）。
     #[tokio::test]
     async fn management_success_uses_the_compact_envelope() {
         let body = dispatch_json(
@@ -935,11 +938,14 @@ mod tests {
         .await;
         assert_eq!(
             body,
-            r#"{"echo":"e1","message":"","retcode":0,"status":"ok"}"#
+            r#"{"data":null,"echo":"e1","message":"","retcode":0,"status":"ok"}"#
         );
 
         let body = dispatch_json(dispatcher(), br#"{"action":"set_group_ban"}"#.to_vec()).await;
-        assert_eq!(body, r#"{"message":"","retcode":0,"status":"ok"}"#);
+        assert_eq!(
+            body,
+            r#"{"data":null,"message":"","retcode":0,"status":"ok"}"#
+        );
     }
 
     /// 失败：业务失败（上游拒绝）→ `retcode 100`，整串带 `data:null`——Go 的

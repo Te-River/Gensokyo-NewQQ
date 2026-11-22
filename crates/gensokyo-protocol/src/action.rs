@@ -211,17 +211,23 @@ impl<T: Serialize> Serialize for ActionResponse<T> {
                 }
             }
             EnvelopeKind::Compact(data) => {
-                // 失败一律写 `"data":null`：Go 的失败回执是 `sendActionResult`，其 `Data` 字段
-                // 没有 `omitempty`（`handlers/set_group_add_request.go:77`），WS 实发帧恒带
-                // `data:null`（活体探针已证）。成功路径才按子形态决定 data 的有无与形状。
+                // `data` 键**成功与失败都恒在**：Go 的 `sendActionResult.Data` 没有
+                // `omitempty`（`handlers/set_group_add_request.go:77`），两种状态都经
+                // `structToMap` → map marshal 上线（键字母序、`nil` 剥不掉）——活体
+                // E01/E11/E17/E21/E33/E43 六次复现的 Go 成功帧即
+                // `{"data":null,"echo":…,"message":"","retcode":0,"status":"ok"}`。
+                // 失败一律 `null`（ad721dc/D-a 已修）；成功路径里 `Omit` 与 `Null` 同形
+                // （本单 D-a 口径修正：Go 的 nil Data 在线上就是 `null`），只有
+                // `AsIs` / `EmptyObject` 两档改变值。
                 if self.status == Status::Failed {
                     map.serialize_entry("data", &Value::Null)?;
                 } else {
                     match data {
-                        CompactData::Omit => {}
+                        CompactData::Omit | CompactData::Null => {
+                            map.serialize_entry("data", &Value::Null)?;
+                        }
                         CompactData::AsIs => map.serialize_entry("data", &self.data)?,
                         CompactData::EmptyObject => map.serialize_entry("data", &EmptyObject {})?,
-                        CompactData::Null => map.serialize_entry("data", &Value::Null)?,
                     }
                 }
                 if let Some(echo) = &self.echo {
@@ -757,9 +763,11 @@ mod tests {
         serde_json::to_string(response).expect("序列化失败")
     }
 
-    /// 无 `data` 的成功回执：`echo` 带 omitempty（无请求回执时整个键消失）。
+    /// `Omit` 子形态的成功回执：线上仍是 `data:null`（Go `sendActionResult` 的 nil Data
+    /// 经 `structToMap` → map marshal 剥不掉，活体 E01/E11/E17/E21/E33/E43 六次复现；D-a
+    /// 口径修正）。只有 `echo` 带 omitempty：无请求回执时整个键消失。
     #[test]
-    fn compact_omits_data_and_empty_echo() {
+    fn compact_success_writes_null_data_and_omits_empty_echo() {
         let echo: ActionResponse<serde_json::Value> = compact(
             ActionResponse::ok(serde_json::Value::Null),
             CompactData::Omit,
@@ -767,7 +775,7 @@ mod tests {
         .with_echo(Some(serde_json::json!("e1")));
         assert_eq!(
             to_json(&echo),
-            r#"{"echo":"e1","message":"","retcode":0,"status":"ok"}"#
+            r#"{"data":null,"echo":"e1","message":"","retcode":0,"status":"ok"}"#
         );
 
         let bare: ActionResponse<serde_json::Value> = compact(
@@ -776,7 +784,7 @@ mod tests {
         );
         assert_eq!(
             to_json(&bare),
-            r#"{"message":"","retcode":0,"status":"ok"}"#
+            r#"{"data":null,"message":"","retcode":0,"status":"ok"}"#
         );
     }
 
@@ -859,7 +867,8 @@ mod tests {
         );
     }
 
-    /// 同一个响应体在两种信封下产出不同线上形状（默认仍是 Full）。
+    /// 同一个响应体在两种信封下产出不同线上形状（默认仍是 Full）：Full 的 `echo` 恒在
+    /// （无回执是 `null`），Compact 的 `echo` 带 omitempty；两者的 `data` 都是 `null`。
     #[test]
     fn full_and_compact_envelopes_differ() {
         let mut response: ActionResponse<serde_json::Value> =
@@ -873,7 +882,21 @@ mod tests {
         response.envelope = EnvelopeKind::Compact(CompactData::Omit);
         assert_eq!(
             to_json(&response),
-            r#"{"echo":"e1","message":"","retcode":0,"status":"ok"}"#
+            r#"{"data":null,"echo":"e1","message":"","retcode":0,"status":"ok"}"#
+        );
+
+        // 无 echo 时才看得出两套信封的差别：Full 写 `"echo":null`，Compact 整个键消失
+        response.echo = None;
+        assert_eq!(
+            to_json(&response),
+            r#"{"data":null,"message":"","retcode":0,"status":"ok"}"#
+        );
+
+        let full_no_echo: ActionResponse<serde_json::Value> =
+            ActionResponse::ok(serde_json::Value::Null);
+        assert_eq!(
+            to_json(&full_no_echo),
+            r#"{"data":null,"echo":null,"message":"","retcode":0,"status":"ok"}"#
         );
     }
 
