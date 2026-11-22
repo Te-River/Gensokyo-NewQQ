@@ -403,6 +403,16 @@ C2C 单聊只支持按钮 `permission.type=2`（所有人）：此前的兜底�
 - **影响**：`md != nil` 路径逐字节不变（前缀合并、`[CQ:markdown]` 剔除、keyboard 附加）；私聊 `send_private_msg` 与出站桥 `applyGroupMarkdownKeyboard` / `applyPrivateMarkdownKeyboard` 复查确认无此形态（本就只在 `md != nil` 时转换 `md.Content`，正文不参与 markdown 语境转换）；`send_group_msg_raw` 无 markdown 语境 @ 转换、缺陷形态不成立，其 `[CQ:markdown]` 剔除保持无条件（否则解析失败时标记会以字面量发出）
 - **测试**：新增 `handlers/send_group_msg_md_parse_fail_test.go`——解析失败载荷（`{}` 与 `{"markdown":{"content":123}}`）+ `[CQ:at,qq=虚拟号]` 时出站任何 payload 均不含 `qqbot-at-user`，首条为 `msg_type=0` 且正文含 `<@OpenID>`；解析成功载荷 + at 仍为单条 `msg_type=2`、`<qqbot-at-user>` 保留在 `markdown.content` 且前缀已合并；纯文本 + at 不变
 
+### markdown 内嵌 keyboard 的 `content.rows` 形态被吞成空 content：群里没有按钮（2026-11-22）
+
+实测同一条 `[CQ:markdown,data=base64://…]`（`{"content":"### …","keyboard":{"content":{"rows":[…]}}}`）Rust 端能渲染按钮，Go 端出站体却是 `{"msg_type":2,"markdown":{…},"keyboard":{"content":{}}}`。根因：`handlers/message_parser.go` 的 `parseMDData` 用同一个结构体字段 `Content *keyboard.CustomKeyboard` 承接顶层 `content`，而 markdown 载荷的顶层 `content` 是字符串——`json.Unmarshal` 先给该指针分配内存、再报类型冲突，留下一个非 nil 的空壳 content；后续 keyboard 分支按顺序先命中这个空壳，把已解析成功的 `keyboard.content.rows` 顶掉。
+
+- **修改**：`parseMDData` 外壳字段全部改 `json.RawMessage`（markdown / keyboard / content / rows 各自解析），不再有同名字段类型冲突；markdown 与 keyboard 解析互相独立，markdown 残缺不再连带丢 keyboard
+- **修改**：新增 `parseKeyboardObject` 统一处理 `{id}` / `{content:{rows}}` / `{rows}` 三形态；空 `rows` 视为没有 keyboard，不再下发空 `content`
+- **修改**：字段无法映射到 DTO（第三方扩展、类型不符，如 `render_data.style` 为字符串）时不再丢整块 keyboard——`botgo/dto/keyboard.MessageKeyboard` 新增 `Raw` 字段，非空时 `MarshalJSON` 原样输出；`rawKeyboard` 仍在原样 JSON 上做 `specify_user_ids` 虚拟号→OpenID 替换
+- **影响**：`specify_user_ids` 的虚拟号→OpenID 转换（`ResolveKeyboardVirtualIDs`）在两条路径下都生效；`[CQ:keyboard]` 独立形态、模板 id 形态、`keyboard.rows` 形态、顶层 `content` 简写形态与 markdown 降级语义均不变
+- **测试**：新增 `handlers/markdown_keyboard_payload_test.go`——活体载荷断言 `kb.Content.Rows` 非空且按钮字段（id / render_data / action / permission）与载荷逐字段 DeepEqual；类型不符字段断言原样透传且仍转 OpenID；`send_group_msg` 端到端断言上游 `MessageToCreate.Keyboard.Content.Rows` 非空、`specify_user_ids[0]` 为 32 位 OpenID
+
 ---
 
 ## 📝 工程与文档变更

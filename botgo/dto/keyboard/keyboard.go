@@ -1,5 +1,7 @@
 package keyboard
 
+import "encoding/json"
+
 // ActionType 按钮操作类型
 type ActionType uint32
 
@@ -27,6 +29,18 @@ const (
 type MessageKeyboard struct {
 	ID      string          `json:"id,omitempty"`      // 消息按钮组件模板 ID
 	Content *CustomKeyboard `json:"content,omitempty"` // 消息按钮组件自定义内容
+	// Raw 无法映射到本结构体的原始 keyboard JSON（第三方扩展字段等）。
+	// 非空时序列化直接用它，避免整块按钮被丢掉
+	Raw json.RawMessage `json:"-"`
+}
+
+// MarshalJSON 优先原样输出 Raw；否则按结构体字段序列化
+func (k MessageKeyboard) MarshalJSON() ([]byte, error) {
+	if len(k.Raw) > 0 {
+		return k.Raw, nil
+	}
+	type alias MessageKeyboard
+	return json.Marshal(alias(k))
 }
 
 // CustomKeyboard 自定义 Keyboard

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -2605,31 +2606,35 @@ func parseMDData(mdData []byte) (*dto.Markdown, *keyboard.MessageKeyboard, error
 		Params           []*dto.MarkdownParams `json:"params,omitempty"`
 		Content          string                `json:"content,omitempty"`
 	}
+	// 外壳字段一律用 RawMessage，再分派给 markdown / keyboard 各自解析：
+	// markdown 载荷的顶层 content 是字符串，而 keyboard 简写形态的顶层 content 是对象，
+	// 同一字段无法同时承接这两种类型——json.Unmarshal 会先给 *keyboard.CustomKeyboard
+	// 分配内存、再报类型冲突并留下一个非 nil 的空壳 content，把真正的
+	// keyboard.content.rows 顶掉，出站就变成 {"keyboard":{"content":{}}}。
 	var temp struct {
-		Markdown mdFields `json:"markdown,omitempty"`
-		Keyboard struct {
-			ID      string                   `json:"id,omitempty"`
-			Content *keyboard.CustomKeyboard `json:"content,omitempty"`
-			Rows    []*keyboard.Row          `json:"rows,omitempty"`
-		} `json:"keyboard,omitempty"`
-		// 顶层 content/id：官方 keyboard 简写形态（[CQ:keyboard] 独立使用时）
-		Content *keyboard.CustomKeyboard `json:"content,omitempty"`
-		ID      string                   `json:"id,omitempty"`
-		Rows    []*keyboard.Row          `json:"rows,omitempty"`
+		Markdown json.RawMessage `json:"markdown,omitempty"`
+		Keyboard json.RawMessage `json:"keyboard,omitempty"`
+		Content  json.RawMessage `json:"content,omitempty"`
+		ID       string          `json:"id,omitempty"`
+		Rows     []*keyboard.Row `json:"rows,omitempty"`
 	}
 
 	// 解析 JSON（允许失败——后续降级处理嵌套/解包场景）
 	unmarshalErr := json.Unmarshal(mdData, &temp)
 
-	// 当首次 Unmarshal 失败（如顶层 content 为 string 与 *keyboard.CustomKeyboard 类型冲突）
-	// 或 markdown 字段为空时，尝试从嵌套包装中解包 markdown。
+	var mdf mdFields
+	if unmarshalErr == nil && len(temp.Markdown) > 0 {
+		unmarshalErr = json.Unmarshal(temp.Markdown, &mdf)
+	}
+
+	// 当 markdown 解析失败或为空时，尝试从嵌套包装中解包 markdown。
 	// 典型场景：
 	//   1. 双层包装 {"markdown":{"markdown":{"content":"..."}}} → 递进一层
 	//   2. 顶层 content 为字符串的非标准格式 {"content":"markdown text"} → 降级提取
-	if unmarshalErr != nil || (temp.Markdown.Content == "" && temp.Markdown.CustomTemplateID == nil) {
+	if unmarshalErr != nil || (mdf.Content == "" && mdf.CustomTemplateID == nil) {
 		if extracted, ok := unwrapNestedMarkdown(mdData); ok {
-			temp.Markdown = extracted
-			// 降级成功：清除首次 Unmarshal 的错误（keyboard 等字段可能部分丢失，但 markdown 是主路径）
+			mdf = extracted
+			// 降级成功：清除错误（keyboard 独立解析，不受 markdown 残缺影响）
 			unmarshalErr = nil
 		}
 	}
@@ -2640,17 +2645,17 @@ func parseMDData(mdData []byte) (*dto.Markdown, *keyboard.MessageKeyboard, error
 
 	// 处理 Markdown
 	var md *dto.Markdown
-	if temp.Markdown.CustomTemplateID != nil {
+	if mdf.CustomTemplateID != nil {
 		// 处理模板 Markdown
 		md = &dto.Markdown{
-			CustomTemplateID: *temp.Markdown.CustomTemplateID,
-			Params:           temp.Markdown.Params,
-			Content:          temp.Markdown.Content,
+			CustomTemplateID: *mdf.CustomTemplateID,
+			Params:           mdf.Params,
+			Content:          mdf.Content,
 		}
-	} else if temp.Markdown.Content != "" {
+	} else if mdf.Content != "" {
 		// 处理自定义 Markdown
 		md = &dto.Markdown{
-			Content: temp.Markdown.Content,
+			Content: mdf.Content,
 		}
 	}
 
@@ -2659,48 +2664,106 @@ func parseMDData(mdData []byte) (*dto.Markdown, *keyboard.MessageKeyboard, error
 		md.ForceVerifyImageResource = true
 	}
 
-	// 处理 Keyboard
-	var kb *keyboard.MessageKeyboard
-	if temp.Content != nil {
-		// 处理顶层 content（官方 keyboard 简写形态，[CQ:keyboard] 独立使用）
-		kb = &keyboard.MessageKeyboard{
-			Content: temp.Content,
-		}
-	} else if temp.ID != "" {
-		// 处理顶层 id（按钮模板形态）
-		kb = &keyboard.MessageKeyboard{
-			ID: temp.ID,
-		}
-	} else if temp.Keyboard.Content != nil {
-		// 处理嵌套在 Keyboard 中的 CustomKeyboard
-		kb = &keyboard.MessageKeyboard{
-			ID:      temp.Keyboard.ID,
-			Content: temp.Keyboard.Content,
-		}
-	} else if len(temp.Keyboard.Rows) > 0 {
-		// 处理 keyboard.rows 格式
-		kb = &keyboard.MessageKeyboard{
-			Content: &keyboard.CustomKeyboard{Rows: temp.Keyboard.Rows},
-		}
-	} else if len(temp.Rows) > 0 {
+	// 处理 Keyboard：优先显式 keyboard 字段，其次顶层 content 简写、顶层 rows、顶层 id
+	kb := parseKeyboardObject(temp.Keyboard)
+	if kb == nil {
+		kb = parseKeyboardObject(temp.Content)
+	}
+	if kb == nil && len(temp.Rows) > 0 {
 		// 处理顶层的 Rows
 		kb = &keyboard.MessageKeyboard{
 			Content: &keyboard.CustomKeyboard{Rows: temp.Rows},
 		}
-	} else if temp.Keyboard.ID != "" {
-		// 处理嵌套在 Keyboard 中的 ID(当使用按钮模板时)
+	}
+	if kb == nil && temp.ID != "" {
+		// 处理顶层 id（按钮模板形态）
 		kb = &keyboard.MessageKeyboard{
-			ID: temp.Keyboard.ID,
+			ID: temp.ID,
 		}
 	}
 
 	// 自动转换 keyboard 中的虚拟ID为QQ官方OpenID
-	if kb != nil {
-		// 自动转换 keyboard 中的虚拟ID为QQ官方OpenID
-		ResolveKeyboardVirtualIDs(kb)
-	}
+	ResolveKeyboardVirtualIDs(kb)
 
 	return md, kb, nil
+}
+
+// parseKeyboardObject 解析 keyboard 对象（官方三形态：{id} / {content:{rows}} / {rows}）。
+// 字段无法映射到 DTO（第三方扩展字段、类型不符等）时不丢整块 keyboard，
+// 改为原样透传，优先保证按钮能出现。
+func parseKeyboardObject(raw json.RawMessage) *keyboard.MessageKeyboard {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || raw[0] != '{' {
+		return nil
+	}
+	var obj struct {
+		ID      string          `json:"id,omitempty"`
+		Content json.RawMessage `json:"content,omitempty"`
+		Rows    []*keyboard.Row `json:"rows,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		mylog.Printf("[CQ:markdown] keyboard 含无法映射到 DTO 的字段,原样透传: %v", err)
+		return rawKeyboard(raw)
+	}
+	var content *keyboard.CustomKeyboard
+	if c := bytes.TrimSpace(obj.Content); len(c) > 0 && c[0] == '{' {
+		var ck keyboard.CustomKeyboard
+		if err := json.Unmarshal(c, &ck); err != nil {
+			mylog.Printf("[CQ:markdown] keyboard.content 含无法映射到 DTO 的字段,原样透传: %v", err)
+			return rawKeyboard(raw)
+		}
+		content = &ck
+	}
+	if content == nil && len(obj.Rows) > 0 {
+		content = &keyboard.CustomKeyboard{Rows: obj.Rows}
+	}
+	if content != nil && len(content.Rows) > 0 {
+		return &keyboard.MessageKeyboard{Content: content}
+	}
+	// 空 rows 的 content 对 QQ 无意义：按"没有 keyboard"处理，避免下发空按钮块
+	if obj.ID != "" {
+		return &keyboard.MessageKeyboard{ID: obj.ID}
+	}
+	return nil
+}
+
+// rawKeyboard 用原始 JSON 构造原样透传的 keyboard，只替换 specify_user_ids 中的虚拟号
+// （QQ 只认 OpenID，留虚拟号会让整块按钮失效）。
+func rawKeyboard(raw json.RawMessage) *keyboard.MessageKeyboard {
+	var v interface{}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return &keyboard.MessageKeyboard{Raw: append(json.RawMessage(nil), raw...)}
+	}
+	resolveRawSpecifyUserIDs(v)
+	out, err := json.Marshal(v)
+	if err != nil {
+		out = raw
+	}
+	return &keyboard.MessageKeyboard{Raw: json.RawMessage(out)}
+}
+
+// resolveRawSpecifyUserIDs 递归把所有 specify_user_ids 的虚拟号替换为 OpenID
+func resolveRawSpecifyUserIDs(v interface{}) {
+	switch node := v.(type) {
+	case map[string]interface{}:
+		for k, child := range node {
+			if k == "specify_user_ids" {
+				if ids, ok := child.([]interface{}); ok {
+					for i, id := range ids {
+						if s, ok := id.(string); ok {
+							ids[i] = idmap.ResolveOriginalID(s)
+						}
+					}
+				}
+				continue
+			}
+			resolveRawSpecifyUserIDs(child)
+		}
+	case []interface{}:
+		for _, child := range node {
+			resolveRawSpecifyUserIDs(child)
+		}
+	}
 }
 
 // parseKeyboardData 从 JSON 数据解析独立的 keyboard 对象（不带 markdown）
