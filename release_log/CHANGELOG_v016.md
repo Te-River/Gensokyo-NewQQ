@@ -676,6 +676,23 @@ Go 的成功路径直接 `return` 字面量 `{"status": "ok", "retcode": 0}`（`
 - **影响**：wakeup 成功回执不再带 `echo` / `data`（与 Go 一致）。按 `echo` 关联响应的客户端该 action 从此对不上——这是 Go 既有行为，`echo` 在本仓内部的懒消息池 / `msg_seq` 键上仍照常使用，只是不上线
 - **测试**：`dispatcher::tests::wakeup_receipt_is_the_go_literal`（`encode` 整串 + 失败回落）、`action::tests::wakeup_envelope_drops_data_and_echo`、`envelope::tests::wakeup_uses_the_go_literal_envelope`、`deferred.rs::wakeup_receipt_is_the_go_literal`（`dispatch_json` 端到端：成功 `{"status": "ok", "retcode": 0}`，缺 `message` 时 `retcode 1400` 且带 `echo`）
 
+### `get_robot_share_link` 的 notice `url` 恒空：上游把链接放在 `data.url`（2026-11-22）
+
+同一实例、同一上游实测：`POST /v2/generate_url_link` 返回 `{"retcode":0,"msg":"success","data":{"url":"https://bot.q.qq.com/s/wVmmPBgBDa"}}`，Go 的 notice `url` 是完整链接，Rust 的 notice `url` 是空串。
+
+- **原因**：Go `openapi/v2/message.go:393` 不走 `SetResult`，而是 `gjson.Get(jsonStr, "data.url")` 手动取值（botgo `dto.GenerateURLLink` 的 tag 只是顶层 `url`）；Rust 的 `GenerateUrlLink` 派生反序列化只认顶层 `url`，信封形状下恒为空串
+- **修改**：`crates/gensokyo-qq/src/dto/message.rs` 的 `GenerateUrlLink` 改为手写 `Deserialize`：`data.url` 优先、顶层 `url` 回退。`crates/gensokyo-qq/src/openapi.rs` 的 `generate_url_link` 补 Go 同层的失败判定（`openapi/v2/message.go:394-396`）：`retcode=0` 但 url 为空时返回错误并带上原始响应体，handler 因此回 `1500` + `data:null` + `echo` 原样，**不推** notice（Go 的 err 分支早退，`handlers/get_robot_share_link.go:47-50`）
+- **影响**：有 url 时成功路径不变（推 `share_link_generated` notice + 字面量 `{}`）；上游拿不到 url 时由「推空 `url` 的 notice」改为 `1500/failed`，与 Go 一致
+- **测试**：`dto::message::tests::share_link_reads_the_url_inside_the_data_envelope`（信封 / 顶层回退 / 缺 url 留空）、`OpenApiClient` 的 `share_link_without_url_is_an_error`（`{"retcode":0,"data":{}}` 与 `{}` 两种上游形状都报错并带 `Response:`）、`interaction::tests::share_link_yields_the_fake_notice_payload`（上游信封 → notice `url` 非空）、`interaction::tests::share_link_without_url_fails`（`1500` / `data:null` / `echo` 原样）、`dispatcher::tests::share_link_without_url_fails_without_publishing_a_notice`（失败无 notice 帧）、`interaction_skips_the_v2_prefix_and_share_link_posts` 改用真实信封响应
+
+### `put_interaction` 成功回执的 `data` 由 `null` 改为 `""`（2026-11-22）
+
+47 例 action 回执对照中 Go 是 `data: ""`（`handlers/put_interaction.go:92` 显式 `response.Data = ""`），Rust 是 `data: null`。
+
+- **修改**：`crates/gensokyo-actions/src/interaction.rs` 的成功分支由 `ok_data(request, &Value::Null)` 改为 `ok_data(request, &json!(""))`；失败回执保持 `data: null`
+- **影响**：成功回执 `{"data":"","echo":…,"message":"","retcode":0,"status":"ok"}` 与 Go 逐字节一致
+- **测试**：`interaction::tests::put_interaction_uses_echo_id_and_result_code`、`put_interaction_reads_top_level_post_type` 断言成功回执 `data` 是 `""`（不是 null）
+
 ---
 
 ## 📝 工程与文档变更

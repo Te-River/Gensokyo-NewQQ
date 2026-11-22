@@ -474,7 +474,9 @@ async fn interaction_skips_the_v2_prefix_and_share_link_posts() {
     assert_eq!(request.url, "https://api.bot.qq.com/interactions/i1");
     assert_eq!(body_of(request), json!({"code": 2}));
 
-    transport.push_response(ok_json(r#"{"url":"https://example.com/s"}"#));
+    transport.push_response(ok_json(
+        r#"{"retcode":0,"msg":"success","data":{"url":"https://example.com/s"}}"#,
+    ));
     let link = client
         .generate_url_link(&GenerateUrlLinkRequest {
             callback_data: "c1".to_owned(),
@@ -486,6 +488,25 @@ async fn interaction_skips_the_v2_prefix_and_share_link_posts() {
     assert_eq!(request.method, HttpMethod::Post);
     assert_eq!(request.url, "https://api.bot.qq.com/v2/generate_url_link");
     assert_eq!(body_of(request), json!({"callback_data": "c1"}));
+}
+
+/// Go `openapi/v2/message.go:394-396`：`retcode=0` 但没有 `data.url` 时返回错误
+/// （handler 因此回 `1500`），错误里带上原始响应。
+#[tokio::test]
+async fn share_link_without_url_is_an_error() {
+    let (transport, _clock, client) = setup();
+    transport.push_response(token_response("tok", 7200));
+
+    for body in [r#"{"retcode":0,"msg":"success","data":{}}"#, "{}"] {
+        transport.push_response(ok_json(body));
+        let err = client
+            .generate_url_link(&GenerateUrlLinkRequest::default())
+            .await
+            .expect_err("拿不到 url 必须返回错误");
+        let message = err.to_string();
+        assert!(message.contains("上游未返回 url"), "{message}");
+        assert!(message.contains("Response:"), "{message}");
+    }
 }
 
 #[tokio::test]

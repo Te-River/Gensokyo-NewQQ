@@ -931,6 +931,61 @@ mod tests {
         );
     }
 
+    /// 拿不到 url 时 Go 的 err 分支早退（`handlers/get_robot_share_link.go:47-50`）：
+    /// `1500` + Full 信封、`echo` 原样，**不推** notice。
+    #[tokio::test]
+    async fn share_link_without_url_fails_without_publishing_a_notice() {
+        /// 真实 handler 在 `url` 空时拿到的是 `gensokyo-qq` 的错误（上游 `retcode=0` 但没 url）。
+        #[derive(Debug)]
+        struct ShareLinkNoUrl;
+
+        impl Handler for ShareLinkNoUrl {
+            fn name(&self) -> &'static str {
+                "get_robot_share_link"
+            }
+
+            fn handle<'a>(&'a self, _request: &'a ActionRequest<Value>) -> HandlerFuture<'a> {
+                Box::pin(async {
+                    Err(Error::Network(
+                        "上游未返回 url（API success but url is empty）. Response: {\"retcode\":0,\"data\":{}}"
+                            .to_owned(),
+                    ))
+                })
+            }
+        }
+
+        let hub = crate::event_hub::EventHub::default();
+        let mut events = hub.subscribe();
+        let mut registry = Registry::new();
+        let _ = registry.register("get_robot_share_link", Arc::new(ShareLinkNoUrl));
+        let dispatcher = Dispatcher::new(Arc::new(registry)).with_hub(Some(hub));
+
+        // 不能走 `dispatch_json`：它会消费 dispatcher，总线发送端随之释放，
+        // `try_recv` 只会拿到 `Closed`，分不清「没推帧」与「通道已关」。
+        let mut request = request("get_robot_share_link", Some(json!("e1")));
+        request.params = Some(json!({"callback_data": "c1"}));
+        let response = dispatcher.dispatch(&request).await;
+        let body = super::encode(&response);
+        let value: Value = serde_json::from_str(&body).expect("响应应为 JSON");
+        assert_eq!(value["retcode"], RETCODE_INTERNAL, "{body}");
+        assert_eq!(value["status"], "failed");
+        assert_eq!(value["data"], Value::Null);
+        assert_eq!(value["echo"], "e1");
+        assert!(
+            value["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("上游未返回 url")),
+            "message 应带上游原因: {body}"
+        );
+        assert!(
+            matches!(
+                events.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "失败路径不得推 notice"
+        );
+    }
+
     /// 分享链接失败走 Go 的 `sendActionResult(..., 1500)`：仍是 Full 信封（不是 `{}`）。
     #[test]
     fn share_link_failure_falls_back_to_full_envelope() {

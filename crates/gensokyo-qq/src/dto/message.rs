@@ -1,6 +1,6 @@
 //! QQ 消息 DTO（对齐 `botgo/dto/message_create.go` 的 `MessageToCreate`）。
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 use tracing::warn;
 
@@ -607,11 +607,43 @@ pub struct GenerateUrlLinkRequest {
 }
 
 /// 机器人资料页分享链接响应。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+///
+/// 上游把链接放在信封的 `data.url`：Go `openapi/v2/message.go:393` 不用 `SetResult`，
+/// 而是 `gjson.Get(jsonStr, "data.url")` 手动提取（botgo `dto.GenerateURLLink` 的 tag
+/// 只是顶层 `url`）。两种形态都收，`data.url` 优先，取不到时留空串。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct GenerateUrlLink {
     /// 生成的分享链接。
     pub url: String,
+}
+
+impl<'de> Deserialize<'de> for GenerateUrlLink {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Default, Deserialize)]
+        #[serde(default)]
+        struct Raw {
+            url: String,
+            data: Data,
+        }
+
+        #[derive(Default, Deserialize)]
+        #[serde(default)]
+        struct Data {
+            url: String,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        Ok(Self {
+            url: if raw.data.url.is_empty() {
+                raw.url
+            } else {
+                raw.data.url
+            },
+        })
+    }
 }
 
 #[cfg(test)]
@@ -957,5 +989,24 @@ mod tests {
         let mut upper = valid_card();
         upper.url = Some("HTTPS://example.com/a".to_owned());
         assert!(upper.validate().is_ok(), "https 前缀大小写不敏感");
+    }
+
+    #[test]
+    fn share_link_reads_the_url_inside_the_data_envelope() {
+        // 上游实测形状：`{"retcode":0,"msg":"success","data":{"url":"…"}}`
+        let nested: GenerateUrlLink =
+            serde_json::from_str(r#"{"retcode":0,"msg":"success","data":{"url":"https://x"}}"#)
+                .expect("信封形状应可解析");
+        assert_eq!(nested.url, "https://x");
+
+        // botgo `dto.GenerateURLLink` 的顶层 `url` tag 仍收（回退）
+        let flat: GenerateUrlLink =
+            serde_json::from_str(r#"{"url":"https://y"}"#).expect("顶层 url 应可解析");
+        assert_eq!(flat.url, "https://y");
+
+        // 两处都没有：留空串、不报错（Go 侧不会因 url 空而失败）
+        let empty: GenerateUrlLink =
+            serde_json::from_str(r#"{"retcode":0,"msg":"success"}"#).expect("缺 url 不应报错");
+        assert_eq!(empty.url, "");
     }
 }

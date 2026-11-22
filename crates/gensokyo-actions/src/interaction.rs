@@ -11,7 +11,7 @@
 //! | `.handle_quick_operation` | `handlers/handle_quick_operation.go` | 无（复用发送链） | deferred 计划（`send_group_msg` / `send_private_msg`） |
 //! | `.handle_quick_operation_async` | `handlers/handle_quick_operation_async.go` | 同上 | 同上 |
 //! | `get_robot_share_link` | `handlers/get_robot_share_link.go` | `POST /v2/generate_url_link` | 先推 `share_link_generated` notice，回执字面量 `{}` |
-//! | `put_interaction` | `handlers/put_interaction.go` | `PUT /interactions/{interaction_id}` | `data = null` |
+//! | `put_interaction` | `handlers/put_interaction.go` | `PUT /interactions/{interaction_id}` | `data = ""` |
 //! | `delete_group_msg` | `handlers/delete_group_msg.go` | `DELETE /v2/groups/{gid}/messages/{mid}` | `data = null` |
 //! | `set_group_add_request` | `handlers/set_group_add_request.go` | `POST /v2/groups/{gid}/approval_join_request/{member}` | `data = null` |
 //! | `get_group_member_blacklist` | `handlers/get_group_member_blacklist.go` | `GET /v2/groups/{gid}/member_blacklist` | 黑名单分页 |
@@ -54,7 +54,8 @@
 //! `get_robot_share_link` 与 Go 同口径：handler 产出 `share_link_generated` notice 载荷
 //! （`self_id` 取配置 `app_id`），分发器把它发到事件总线、再把回执换成字面量 `{}`
 //! （无 `retcode` / `echo`，`handlers/get_robot_share_link.go:36`）。载荷经 `data` 交接的
-//! 原因见 [`GetRobotShareLinkHandler`] 的 `execute`。
+//! 原因见 [`GetRobotShareLinkHandler`] 的 `execute`。上游没给 url 时按 Go 的 err 分支早退：
+//! `1500` 失败、不产 notice（判定在 `gensokyo-qq` 的 `generate_url_link`，与 Go 同层）。
 //!
 //! # 刻意的差异（相对 Go）
 //!
@@ -565,7 +566,8 @@ impl PutInteractionHandler {
             .api()
             .put_interaction(&interaction_id, code)
             .await?;
-        ok_data(request, &Value::Null)
+        // Go `handlers/put_interaction.go:92` 显式 `response.Data = ""`
+        ok_data(request, &json!(""))
     }
 }
 
@@ -1292,9 +1294,12 @@ mod tests {
     #[test]
     fn share_link_yields_the_fake_notice_payload() {
         let (ctx, api) = context();
-        *api.share_link.lock().unwrap() = Some(Ok(GenerateUrlLink {
-            url: "https://example.com/link".to_owned(),
-        }));
+        // 上游实测响应把链接放在 `data.url`（Go `gjson.Get(jsonStr, "data.url")`）。
+        let link: GenerateUrlLink = serde_json::from_str(
+            r#"{"retcode":0,"msg":"success","data":{"url":"https://example.com/link"}}"#,
+        )
+        .expect("上游响应应可解析");
+        *api.share_link.lock().unwrap() = Some(Ok(link));
         let handler = GetRobotShareLinkHandler::new(ctx);
 
         let response = block_on(handler.handle(&request(
@@ -1338,6 +1343,41 @@ mod tests {
         assert_eq!(handler.name(), "get_robot_share_link");
     }
 
+    /// Go `openapi/v2/message.go:394-396` + `handlers/get_robot_share_link.go:47-50`：
+    /// 上游 `retcode=0` 却没有 url 时 action 回 `1500` 失败（data 不写、echo 原样），
+    /// handler 不产出 notice 载荷，分发器因此无帧可推。
+    #[test]
+    fn share_link_without_url_fails() {
+        let (ctx, api) = context();
+        *api.share_link.lock().unwrap() = Some(Err(Error::Network(
+            "上游未返回 url（API success but url is empty）. Response: {\"retcode\":0,\"data\":{}}"
+                .to_owned(),
+        )));
+        let handler = GetRobotShareLinkHandler::new(ctx);
+
+        let mut req = request("get_robot_share_link", json!({"callback_data": "c1"}));
+        req.echo = Some(json!("e1"));
+        let response = block_on(handler.handle(&req)).expect("失败也应是 Ok(失败响应)");
+        assert_eq!(response.status, Status::Failed);
+        assert_eq!(response.retcode, RETCODE_UPSTREAM);
+        assert_eq!(response.data, None);
+        assert_eq!(response.echo, Some(json!("e1")));
+        assert!(
+            response
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("上游未返回 url")),
+            "message 应带上游原因: {:?}",
+            response.message
+        );
+        assert_eq!(
+            api.calls(),
+            vec![Call::ShareLink(GenerateUrlLinkRequest {
+                callback_data: "c1".to_owned(),
+            })]
+        );
+    }
+
     #[test]
     fn put_interaction_uses_echo_id_and_result_code() {
         let (ctx, api) = context();
@@ -1349,7 +1389,7 @@ mod tests {
             json!({"interaction_id": "inter-1", "code": 3}),
         )))
         .expect("回应互动不应失败");
-        assert_eq!(ok_data(response), Value::Null);
+        assert_eq!(ok_data(response), json!(""));
         assert_eq!(
             api.calls(),
             vec![Call::Interaction("inter-1".to_owned(), 3)]
@@ -1394,7 +1434,7 @@ mod tests {
             req.post_type = Some(post_type.clone());
             let response = block_on(handler.handle(&req)).expect("回应互动不应失败");
             assert_eq!(response.status, Status::Ok);
-            assert_eq!(response.data, Some(Value::Null));
+            assert_eq!(response.data, Some(json!("")));
             assert_eq!(
                 api.calls().last(),
                 Some(&Call::Interaction("inter-9".to_owned(), expected)),

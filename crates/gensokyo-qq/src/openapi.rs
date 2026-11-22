@@ -430,11 +430,24 @@ impl<T: HttpTransport> OpenApiClient<T> {
     }
 
     /// 生成机器人资料页分享链接（`POST /v2/generate_url_link`）。
+    ///
+    /// 链接在信封的 `data.url`；`retcode=0` 却拿不到链接时按 Go
+    /// `openapi/v2/message.go:394-396` 返回错误（handler 因此回 `1500`）。
     pub async fn generate_url_link(
         &self,
         request: &GenerateUrlLinkRequest,
     ) -> Result<GenerateUrlLink> {
-        self.post_json("/v2/generate_url_link", request).await
+        let response = self
+            .body_authorized(HttpMethod::Post, "/v2/generate_url_link", request)
+            .await?;
+        let link: GenerateUrlLink = decode_json(&response)?;
+        if link.url.is_empty() {
+            return Err(Error::InvalidResponse(format!(
+                "上游未返回 url（API success but url is empty）. Response: {}",
+                body_for_log(&response.body)
+            )));
+        }
+        Ok(link)
     }
 
     /// 发起 GET 并解析 JSON 响应（群管理子集复用）。
