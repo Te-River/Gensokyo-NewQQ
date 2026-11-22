@@ -53,6 +53,7 @@ use gensokyo_protocol::Event;
 use gensokyo_protocol::Registry;
 use gensokyo_protocol::action::{ActionRequest, ActionResponse, Echo, Status};
 use gensokyo_protocol::envelope::{EnvelopeKind, envelope_for};
+use gensokyo_protocol::strict_params::check_params;
 use gensokyo_storage::{BotStatsStore, EchoStore};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -72,6 +73,10 @@ pub const RETCODE_INTERNAL: i32 = 1500;
 /// 例外是 [`PARAM_ERROR_KEEPS_1400`] 那几个 action 的**参数 / 协议错误**（`1400`）：Go 只给
 /// 它们写了 `sendParamRetCode`，改写在 [`Dispatcher::dispatch`] 里按 action 放行。
 pub const RETCODE_MANAGEMENT_FAILED: i32 = 100;
+
+/// 分发层整包类型契约拒绝的文案前缀（Go `callapi.ReplyUnparseableMessage` 的
+/// 「参数解析失败: 」档；见 `route()` 与 `gensokyo_protocol::strict_params`）。
+const PARAM_PARSE_PREFIX: &str = "参数解析失败: ";
 
 /// Compact（B 类）里参数错误（`1400`）仍原样放行的 action。
 ///
@@ -135,6 +140,12 @@ const BRANCH_PARAM_ERROR_KEEPS_1400: &[(&str, &[&str])] = &[
 
 /// Compact 失败帧是否放行原 retcode（`1400`）。
 fn compact_failure_keeps_retcode(action: &str, message: &str) -> bool {
+    // 「参数解析失败」是分发层自己的整包类型契约拒绝（对齐 Go ReplyUnparseableMessage：
+    // 收包 json.Unmarshal 失败在 handler 之前，sendActionResult 的 100 改写永远够不到它），
+    // 任何 action 都放行 1400，不看 B 类表。
+    if message.starts_with(PARAM_PARSE_PREFIX) {
+        return true;
+    }
     if PARAM_ERROR_KEEPS_1400.contains(&action) {
         return true;
     }
@@ -290,6 +301,20 @@ impl Dispatcher {
                 request.echo.clone(),
             );
         };
+
+        // Go 的整包严格解码契约（活体 B01/B02/F02/H04）：params 里已声明类型的字段遇到类型
+        // 不符时，Go 在收包层 json.Unmarshal 就失败、分发层回 1400「参数解析失败」，请求进不了
+        // handler（`wsclient/ws.go:253-258` → `callapi.ReplyUnparseableMessage`）。Rust 在这
+        // 一唯一分发口做同构校验——dispatch / dispatch_json / HTTP / 正反 WS 全部经过这里，
+        // 坏类型请求因此不可能触达 handler，更不可能发出上游调用（副作用对称）。
+        if let Err(err) = check_params(request.params.as_ref()) {
+            tracing::debug!(action = %request.action, error = %err, "action params 类型契约校验失败");
+            return failure(
+                RETCODE_BAD_REQUEST,
+                format!("参数解析失败: {err}"),
+                request.echo.clone(),
+            );
+        }
 
         // 把 `handle` 的调用也放进 async 块再捕获：handler 在构造 future 时 panic（例如参数
         // 解包的 `expect`）同样被隔离成 1500，而不是沿调用栈炸到传输层的连接任务。
@@ -1074,6 +1099,106 @@ mod tests {
             )
         );
     }
+    /// Go 整包严格解码契约（B01/B02/F02/H04）：已声明字段类型不符必须在 route() 被拒成
+    /// 1400「参数解析失败」，**不进 handler**——替身 handler 一旦被调用即 panic。
+    #[derive(Debug)]
+    struct MustNotRun;
+
+    impl Handler for MustNotRun {
+        fn name(&self) -> &'static str {
+            "must_not_run"
+        }
+
+        fn handle<'a>(&'a self, _request: &'a ActionRequest<Value>) -> HandlerFuture<'a> {
+            panic!("类型契约失败的请求不得到达 handler")
+        }
+    }
+
+    fn strict_dispatcher() -> Dispatcher {
+        let mut registry = Registry::new();
+        for action in [
+            "set_group_whole_ban",
+            "set_group_ban",
+            "set_group_add_request",
+            "get_group_join_request_list",
+            "must_not_run",
+        ] {
+            let _ = registry.register(action, Arc::new(MustNotRun));
+        }
+        Dispatcher::new(Arc::new(registry))
+    }
+
+    /// 逐 action 交叉表：与 Go live-results B01/B02/F02/H04 同形的坏类型 params，
+    /// Rust 必须回 Compact/Full 各自的 1400 + 「参数解析失败: 」前缀 + data:null。
+    #[tokio::test]
+    async fn strict_param_types_reject_before_handler() {
+        let dispatcher = strict_dispatcher();
+        // (payload, want retcode, want message 片段)
+        let cases: Vec<(&str, i32, &str)> = vec![
+            (
+                r#"{"action":"set_group_whole_ban","params":{"group_id":1,"enable":"yes"},"echo":"e"}"#,
+                RETCODE_BAD_REQUEST,
+                "cannot unmarshal string into Go struct field .Alias.params.enable of type bool",
+            ),
+            (
+                r#"{"action":"set_group_add_request","params":{"group_id":1,"user_id":2,"approve":"yes"},"echo":"e"}"#,
+                RETCODE_BAD_REQUEST,
+                "cannot unmarshal string into Go struct field .Alias.params.approve of type bool",
+            ),
+            (
+                r#"{"action":"set_group_ban","params":{"group_id":1,"user_id":2,"duration":"0"},"echo":"e"}"#,
+                RETCODE_BAD_REQUEST,
+                "cannot unmarshal string into Go struct field .Alias.params.duration of type int",
+            ),
+            (
+                r#"{"action":"set_group_ban","params":{"group_id":1,"user_id":2,"duration":"abc"},"echo":"e"}"#,
+                RETCODE_BAD_REQUEST,
+                ".Alias.params.duration of type int",
+            ),
+            (
+                r#"{"action":"get_group_join_request_list","params":{"group_id":1,"limit":"30"},"echo":"e"}"#,
+                RETCODE_BAD_REQUEST,
+                ".Alias.params.limit of type int",
+            ),
+            (
+                r#"{"action":"must_not_run","params":{"cursor":5},"echo":"e"}"#,
+                RETCODE_BAD_REQUEST,
+                ".Alias.params.cursor of type string",
+            ),
+        ];
+        for (payload, want_retcode, want_fragment) in cases {
+            let body = dispatch_json(dispatcher.clone(), payload.as_bytes().to_vec()).await;
+            let value: Value = serde_json::from_str(&body).expect("回执应是合法 JSON");
+            assert_eq!(value["retcode"], want_retcode, "{payload} → {body}");
+            assert_eq!(value["status"], "failed", "{payload}");
+            assert_eq!(
+                value["data"],
+                Value::Null,
+                "失败帧必须带 data:null（{body}）"
+            );
+            let message = value["message"].as_str().unwrap_or_default();
+            assert!(message.starts_with("参数解析失败: "), "{body}");
+            assert!(
+                message.contains(want_fragment),
+                "{body} 缺定位片段 {want_fragment}"
+            );
+        }
+    }
+
+    /// 未声明字段维持宽容（Go Alias 也只校验已声明字段）：正常请求照旧进 handler。
+    #[tokio::test]
+    async fn strict_check_keeps_undeclared_fields_lenient() {
+        let response = dispatcher()
+            .dispatch(&ActionRequest {
+                action: "fixed".to_owned(),
+                params: Some(json!({"unknown_switch": "yes", "msg_type": 0})),
+                echo: Some(json!("e9")),
+                post_type: None,
+            })
+            .await;
+        assert_eq!(response.retcode, 0, "未声明字段不该触发整包拒绝");
+    }
+
     /// Compact 四种 data 子形态的失败帧逐字节相同——Go 的失败出口只有一个
     /// `sendActionResult`，成功路径的 data 形状位不参与（D-a）。
     #[test]

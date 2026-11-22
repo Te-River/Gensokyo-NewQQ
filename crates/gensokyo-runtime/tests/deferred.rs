@@ -378,12 +378,13 @@ async fn send_private_msg_and_send_msg_dispatch_by_target() {
 /// 固定 `sendActionResult(errWholeBanUnsupported, 100)`，WS 实发帧带 `data:null`——
 /// `Data` 无 `omitempty`，五键字母序。真实 handler、真实信封表、真实 `dispatch_json` 出口。
 /// 缺 `group_id` 的分支钉 D-b：Rust 的用户级参数校验回 `1400`，经白名单原样放行、
-/// 不被改写成 `100`（Go `handlers/set_group_whole_ban.go:24,28` 的两个 `sendParamRetCode`）；
-/// `enable` 非布尔不影响该回执——Go 的 `ParamsContent.Enable` 是 `bool`，那种入参在反序列化
-/// 阶段就失败（分发层 1400「参数解析失败」），handler 侧从不校验它。
+/// 不被改写成 `100`（Go `handlers/set_group_whole_ban.go:24,28` 的两个 `sendParamRetCode`）。
+/// `enable:"yes"` 分支钉 B01（活体对照）：Go 的 `ParamsContent.Enable` 是 `bool`，整包
+/// 反序列化在收包层失败 → 分发层 1400「参数解析失败」（`callapi.ReplyUnparseableMessage`）；
+/// Rust 由 `strict_params` 在 route() 同构拒绝，**不进 handler、零上游调用**。
 #[tokio::test]
 async fn whole_ban_receipt_carries_null_data_like_go() {
-    let (_dir, _api, state) = state("app_id: 12345\n");
+    let (_dir, api, state) = state("app_id: 12345\n");
     let dispatcher = state.dispatcher();
 
     let body = gensokyo_runtime::dispatch_json(
@@ -394,8 +395,10 @@ async fn whole_ban_receipt_carries_null_data_like_go() {
     .await;
     assert_eq!(
         body,
-        r#"{"data":null,"echo":"e1","message":"官方未提供全员禁言写入字段，仅支持按成员禁言","retcode":100,"status":"failed"}"#
+        r#"{"data":null,"echo":"e1","message":"参数解析失败: cannot unmarshal string into Go struct field .Alias.params.enable of type bool","retcode":1400,"status":"failed"}"#
     );
+    // 零上游副作用证明：FakeQqApi 记录器必须一条调用都没有（等价 mock try_recv 空）
+    assert!(api.sent().is_empty(), "enable:\"yes\" 不得触达任何发送端点");
 
     let body = gensokyo_runtime::dispatch_json(
         dispatcher,
@@ -405,6 +408,40 @@ async fn whole_ban_receipt_carries_null_data_like_go() {
     assert_eq!(
         body,
         r#"{"data":null,"echo":"e2","message":"协议错误: 缺少 group_id","retcode":1400,"status":"failed"}"#
+    );
+}
+
+/// F02/H04（活体最高危）：`duration:"0"` 字符串数字在 Go 让整包 `json.Unmarshal` 失败
+/// → 分发层 1400「参数解析失败」，请求根本进不了 handler；修复前 Rust 宽容解码并**真发出**
+/// `restrict_chat_setting`（op=add 禁言副作用！）。本用例钉两件事：
+/// 1. wire 整串 = Full 信封 1400 + data:null + 「参数解析失败: 」文案档；
+/// 2. **零上游调用**——`api.calls()`（FakeQqApi 记录器，等价 mock transport try_recv 空）
+///    必须为空，坏类型请求在到达 openapi 之前就被拒。
+#[tokio::test]
+async fn ban_duration_string_number_is_1400_with_zero_upstream_calls() {
+    let (_dir, api, state) = state("app_id: 12345\n");
+    let dispatcher = state.dispatcher();
+
+    for payload in [
+        r#"{"action":"set_group_ban","params":{"group_id":"610636458","user_id":"7","duration":"0"},"echo":"d1"}"#,
+        r#"{"action":"set_group_ban","params":{"group_id":"610636458","user_id":"7","duration":"abc"},"echo":"d2"}"#,
+    ] {
+        let body =
+            gensokyo_runtime::dispatch_json(dispatcher.clone(), payload.as_bytes().to_vec()).await;
+        let value: serde_json::Value = serde_json::from_str(&body).expect("响应应为 JSON");
+        assert_eq!(value["retcode"], 1400, "{body}");
+        assert_eq!(value["status"], "failed", "{body}");
+        assert_eq!(value["data"], serde_json::Value::Null, "{body}");
+        let message = value["message"].as_str().unwrap_or_default();
+        assert!(message.starts_with("参数解析失败: "), "{body}");
+        assert!(
+            message.contains(".Alias.params.duration of type int"),
+            "应给出 Go 同款字段定位: {body}"
+        );
+    }
+    assert!(
+        api.sent().is_empty(),
+        "duration 字符串数字必须被分发层拒绝，禁止任何发送类上游调用"
     );
 }
 

@@ -22,7 +22,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 # 节流用例要带时间驱动的 runtime（crate 内 testing::block_on 是 noop waker，驱动不了计时器）
-tokio = { workspace = true, features = ["rt", "time"] }
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
 
 [lints]
 workspace = true

@@ -52,6 +52,7 @@ pub mod event;
 pub mod outbound;
 pub mod registry;
 pub mod segment;
+pub mod strict_params;
 pub mod xurls;
 
 pub use action::{ActionRequest, ActionResponse, Echo, Status};
@@ -60,6 +61,7 @@ pub use event::Event;
 pub use outbound::OutboundPlan;
 pub use registry::{Handler, HandlerFuture, Registry};
 pub use segment::{MediaRef, MessageContent, Segment};
+pub use strict_params::check_params;
 
 /// JSON 附加字段：`#[serde(flatten)]` 的落点，未知字段不会丢失。
 pub type Extra = serde_json::Map<String, serde_json::Value>;
