@@ -7,8 +7,9 @@
 //!   通用文案，全文只进日志。
 //!
 //! B 管理类（[`EnvelopeKind::Compact`]）的业务失败一律改写成 `100`（Go
-//! `sendActionResult(msg, 100)`），**参数 / 协议错误（`1400`）不改写**——Go 的 handler 先校验
-//! 参数、回 `sendParamRetCode`，只有走到上游才回 100。
+//! `sendActionResult(msg, 100)`），**例外只有 [`PARAM_ERROR_KEEPS_1400`] 里的 action**：
+//! Go 只给 `set_group_ban` / `set_group_whole_ban` 的 handler 写了参数校验
+//! `sendParamRetCode`（`1400`），其余管理类 action 缺参同样落到 `sendActionResult(msg, 100)`。
 //!
 //! `get_robot_share_link`（[`EnvelopeKind::GoEmptyObject`]）成功时先推伪造的
 //! `share_link_generated` notice（载荷由 actions 侧产出），再回字面量 `{}`。
@@ -66,10 +67,23 @@ pub const RETCODE_UNKNOWN_ACTION: i32 = 1404;
 pub const RETCODE_INTERNAL: i32 = 1500;
 /// B 管理类失败：Go `sendActionResult(msg, 100)` 只有这一档，不分上游失败 / 反查失败。
 ///
-/// 例外是**参数 / 协议错误**（`1400`）：Go 的 handler 先校验参数、回 `sendParamRetCode`
-/// （`handlers/set_group_add_request.go:53`），只有走到上游才 `sendActionResult(msg, 100)`；
-/// 所以 [`retcode_for`] 的 `1400` 不被改写成 100，见 [`Dispatcher::dispatch`]。
+/// 例外是 [`PARAM_ERROR_KEEPS_1400`] 那几个 action 的**参数 / 协议错误**（`1400`）：Go 只给
+/// 它们写了 `sendParamRetCode`，改写在 [`Dispatcher::dispatch`] 里按 action 放行。
 pub const RETCODE_MANAGEMENT_FAILED: i32 = 100;
+
+/// 参数错误（`1400`）仍原样放行的 B 类 action。
+///
+/// 这是逐 action 对齐 Go 的既有口径（不是新设计）：47 例回执对照里只有 `set_group_ban` /
+/// `set_group_whole_ban` 的缺参回 `1400`（`handlers/set_group_ban.go`、
+/// `handlers/set_group_whole_ban.go` 的 `sendParamRetCode`），其余管理类 action 的缺参在 Go
+/// 侧同样走 `sendActionResult(msg, 100)`。两个旧 action 名是同一 handler 的兼容别名
+/// （[`gensokyo_protocol::registry::ACTION_ALIASES`]），一并列出。
+const PARAM_ERROR_KEEPS_1400: &[&str] = &[
+    "set_group_ban",
+    "set_group_whole_ban",
+    "get_group_ban",
+    "get_group_whole_ban",
+];
 
 /// 把 action 请求喂给注册表。
 #[derive(Debug, Clone)]
@@ -174,10 +188,12 @@ impl Dispatcher {
         }
         if matches!(envelope, EnvelopeKind::Compact(_))
             && response.status == Status::Failed
-            && response.retcode != RETCODE_BAD_REQUEST
+            && !(response.retcode == RETCODE_BAD_REQUEST
+                && PARAM_ERROR_KEEPS_1400.contains(&request.action.as_str()))
         {
-            // Go 的 B 类业务失败一律 `sendActionResult(msg, 100)`；参数 / 协议错误是
-            // `sendParamRetCode`（1400），handler 阶段就回了，不能被改写成 100。
+            // Go 的 B 类业务失败一律 `sendActionResult(msg, 100)`；只有
+            // [`PARAM_ERROR_KEEPS_1400`] 的缺参是 `sendParamRetCode`（1400），handler 阶段
+            // 就回了，不能被改写成 100。
             response.retcode = RETCODE_MANAGEMENT_FAILED;
         }
         response
@@ -737,6 +753,10 @@ mod tests {
         let _ = registry.register("set_group_ban", Arc::new(NullOk));
         let _ = registry.register("set_group_card", Arc::new(UpstreamFails));
         let _ = registry.register("set_group_whole_ban", Arc::new(BadParams));
+        // 1400 → 100 的那批管理类：Go 缺参也走 `sendActionResult(msg, 100)`。
+        let _ = registry.register("set_group_kick", Arc::new(BadParams));
+        let _ = registry.register("set_custom_menu", Arc::new(BadParams));
+        let _ = registry.register("create_panel", Arc::new(BadParams));
         let _ = registry.register("get_robot_share_link", Arc::new(ShareLink));
         Dispatcher::new(Arc::new(registry))
     }
@@ -847,23 +867,46 @@ mod tests {
         assert!(value.get("message").is_some(), "message 恒在: {body}");
     }
 
-    /// 参数 / 协议错误不被改写成 100：Go 的 B 类 handler 先校验参数、回 `sendParamRetCode`
-    /// （`handlers/set_group_add_request.go:53`），只有走到上游才 `sendActionResult(msg, 100)`。
+    /// 禁言两兄弟的缺参仍是 `1400`：Go 只给 `set_group_ban` / `set_group_whole_ban` 写了
+    /// `sendParamRetCode`，所以它们是 [`PARAM_ERROR_KEEPS_1400`] 唯一放行的 action。
     #[tokio::test]
-    async fn management_param_errors_keep_1400() {
-        let body = dispatch_json(
-            dispatcher(),
-            br#"{"action":"set_group_whole_ban","params":{},"echo":"e1"}"#.to_vec(),
-        )
-        .await;
-        let value: Value = serde_json::from_str(&body).expect("响应应为 JSON");
-        assert_eq!(
-            value["retcode"], RETCODE_BAD_REQUEST,
-            "缺参仍是 1400: {body}"
-        );
-        assert_eq!(value["status"], "failed");
-        assert_eq!(value["echo"], "e1");
-        assert!(value.get("data").is_none(), "B 类失败不带 data: {body}");
+    async fn ban_param_errors_keep_1400() {
+        // 共用注册表里 `set_group_ban` 绑着成功 handler（信封用例），这里另起一张表。
+        let mut registry = Registry::new();
+        for action in ["set_group_ban", "set_group_whole_ban"] {
+            let _ = registry.register(action, Arc::new(BadParams));
+        }
+        let dispatcher = Dispatcher::new(Arc::new(registry));
+        for action in ["set_group_ban", "set_group_whole_ban"] {
+            let payload = format!(r#"{{"action":"{action}","params":{{}},"echo":"e1"}}"#);
+            let body = dispatch_json(dispatcher.clone(), payload.into_bytes()).await;
+            let value: Value = serde_json::from_str(&body).expect("响应应为 JSON");
+            assert_eq!(
+                value["retcode"], RETCODE_BAD_REQUEST,
+                "{action} 缺参仍是 1400: {body}"
+            );
+            assert_eq!(value["status"], "failed");
+            assert_eq!(value["echo"], "e1");
+            assert!(value.get("data").is_none(), "B 类失败不带 data: {body}");
+        }
+    }
+
+    /// 其余管理类的缺参与 Go 一致回 `100`——Go 侧这些 handler 没有参数校验，
+    /// 缺参直接落到 `sendActionResult(msg, 100)`。
+    #[tokio::test]
+    async fn management_param_errors_are_100_outside_the_ban_actions() {
+        for action in ["set_group_kick", "set_custom_menu", "create_panel"] {
+            let payload = format!(r#"{{"action":"{action}","params":{{}},"echo":"e1"}}"#);
+            let body = dispatch_json(dispatcher(), payload.into_bytes()).await;
+            let value: Value = serde_json::from_str(&body).expect("响应应为 JSON");
+            assert_eq!(
+                value["retcode"], RETCODE_MANAGEMENT_FAILED,
+                "{action} 缺参应与 Go 一致回 100: {body}"
+            );
+            assert_eq!(value["status"], "failed");
+            assert_eq!(value["echo"], "e1");
+            assert!(value.get("data").is_none(), "B 类失败不带 data: {body}");
+        }
     }
 
     /// `get_robot_share_link`：先把伪造 notice 发到总线，再回字面量 `{}`（无 retcode / echo）。

@@ -239,14 +239,14 @@ Go 在 `global_group_msg_rre_to_message` / `global_c2c_msg_switch_to_message` / 
 - **影响**：`get_group_info` 与 `get_group_list` 的每行都与 Go 7 键一致；Go 的 `group_memo` 仍是上游 `group_finger_memo`
 - **测试**：`group::tests::get_group_info_maps_upstream_fields`、`group_admin::tests::` 的群列表用例断言键集数组与 7 个字段值
 
-### B 管理类把参数错误也改写成 `100`，Go 回 `1400`（2026-11-21）
+### 管理类失败码按 action 细分：只有禁言两兄弟保留 `1400`（2026-11-21）
 
-实测 `set_group_ban` / `set_group_whole_ban` 缺参：Go 回 `1400/failed`，Rust 回 `100/failed`。Go 的 B 类 handler 先校验参数、回 `sendParamRetCode`（`handlers/set_group_add_request.go:53` = `1400`），只有走到上游（或 idmap 反查失败）才 `sendActionResult(msg, 100)`。
+47 例回执对照显示 Go 只有 `set_group_ban` / `set_group_whole_ban` 的缺参回 `1400`（`handlers/set_group_ban.go` / `handlers/set_group_whole_ban.go` 的 `sendParamRetCode`）；`set_group_kick` / `set_custom_menu` / `create_panel` / 面板 / 审批策略等管理类的缺参仍走 `sendActionResult(msg, 100)`。
 
-- **根因**：`crates/gensokyo-runtime/src/dispatcher.rs:155-158` 对所有 `Compact` 信封的失败无条件改写为 `RETCODE_MANAGEMENT_FAILED`
-- **修改**：改写条件加上 `retcode != RETCODE_BAD_REQUEST`——协议 / 参数错误（`1400`）放行，其余管理类失败仍映射 `100`
-- **影响**：`set_group_ban` / `set_group_whole_ban` 缺参回到 `1400/failed`；上游拒绝 / 反查失败仍是 `100`；A 发送类 / C 查询类不受影响
-- **测试**：`dispatcher::tests::management_param_errors_keep_1400`（缺参 → `1400`）、`management_failure_is_retcode_100`（上游拒绝 → `100`，用例改为真实业务失败形态）
+- **根因**：`crates/gensokyo-runtime/src/dispatcher.rs` 的改写规则此前是全局的——要么所有 `Compact` 失败都改写成 `100`（缺参也改），要么整体放行 `1400`，两种口径都对不齐 Go 的逐 action 行为
+- **修改**：新增具名集合 `PARAM_ERROR_KEEPS_1400`（`set_group_ban` / `set_group_whole_ban` 及兼容别名 `get_group_ban` / `get_group_whole_ban`，逐 action 对齐 Go，不是新设计）：只有集合内 action 的 `1400` 放行，其余管理类失败照旧改写成 `RETCODE_MANAGEMENT_FAILED`（`100`）
+- **影响**：`set_group_ban` / `set_group_whole_ban` 缺参 `1400/failed`；`set_group_kick` / `set_group_add_request` / `set_group_member_blacklist` / `set_custom_menu` / `create_panel` / `get_panel` / `delete_panel` / `set_panel` / `set_panel_target` / `join_approval_strategy_{update,delete,whitelist}` 缺参回到 `100/failed`，与 Go 一致；上游拒绝 / 反查失败仍是 `100`；A 发送类 / C 查询类不受影响
+- **测试**：`dispatcher::tests::ban_param_errors_keep_1400`（两个禁言 action 缺参 → `1400`）、`management_param_errors_are_100_outside_the_ban_actions`（`set_group_kick` / `set_custom_menu` / `create_panel` 缺参 → `100`）、`management_failure_is_retcode_100`（上游拒绝 → `100`）
 
 ### `get_robot_share_link` 不推 notice、回执形状与 Go 不同（2026-11-21）
 
