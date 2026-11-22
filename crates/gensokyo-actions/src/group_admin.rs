@@ -24,13 +24,14 @@
 //!
 //! # 刻意的差异（相对 Go）
 //!
-//! - **参数错误统一 1400**：Go 的 `set_group_whole_ban` / `set_group_kick` 在 ID 反查失败时也回
-//!   `retcode = 100`；这里只有「操作本身不受官方支持」才是 100，参数与 ID 反查失败按全 crate
-//!   口径回 1400，避免客户端把「ID 写错」读成「功能不支持」。
+//! - **参数错误的档位**：缺 `group_id` 这类请求侧参数问题回 `1400`（Go 的同一条前置校验也是
+//!   `sendParamRetCode`，`handlers/set_group_whole_ban.go:24,28`）；ID 反查失败与上游失败走
+//!   `100` 档——`set_group_kick` 逐成员反查失败照 Go 跳过（`set_group_kick.go:46-57`），全部失败
+//!   时回 Go 的固定文案「所有用户反查 OpenID 失败」（`:60`），经 runtime 的 B 类改写落 `100`。
 //! - **`set_group_whole_ban` 不查 idmap**：Go 先反查 `group_openid` 再固定失败；这个 action 没有
 //!   任何写入路径，反查只会把「ID 没绑定」变成额外的失败原因，因此这里只校验 `group_id` 必填。
-//! - **`set_group_kick` 不跳过反查失败的成员**：Go 逐个反查、失败的成员跳过并继续整批；这里整条
-//!   请求 1400 并指出是哪个 ID，避免静默少踢。
+//! - **`set_group_kick` 跳过反查失败的成员**（与 Go 同口径，`set_group_kick.go:46-57`）：被跳过的
+//!   ID 不进 `kicked` 回显，原因只进日志。
 //! - **`set_group_kick` 的批量上限照抄 20**（Go `dedupeTruncateUserIDs`）：`user_id` 与 `user_ids`
 //!   合并、去重保序，超出的后半段截断。
 //! - **`get_group_list` 的失败群跳过**：Go 单群 `info` 拉取失败（或反查失败）时保留一行
@@ -105,10 +106,9 @@ impl SetGroupWholeBanHandler {
         if let Err(err) = params::required_id(object, "group_id") {
             return Ok(bad_request(request, &err));
         }
-        // 参数形状仍按 OneBot 契约校验（`enable` 必须是布尔）；官方无写入路径，值本身用不到
-        if let Err(err) = params::optional_bool(object, "enable") {
-            return Ok(bad_request(request, &err));
-        }
+        // `enable` 不校验形状：Go 的 `ParamsContent.Enable` 是 `bool`，`enable:"yes"` 让整包
+        // 反序列化失败、由分发层回 1400「参数解析失败」（`callapi/callapi.go` 的
+        // `ReplyUnparseableMessage`），根本到不了 handler。这里也不查 idmap（见模块文档）。
         Ok(failed(
             request,
             RETCODE_ACTION_UNSUPPORTED,
@@ -197,12 +197,30 @@ impl SetGroupKickHandler {
             Err(err) => return Ok(bad_request(request, &err)),
         };
 
+        // 逐个反查成员 OpenID：失败的跳过并日志、不中断整批（Go `set_group_kick.go:46-57`）；
+        // 一个都没反查到才是整体失败，文案与 Go 逐字一致，经 B 类改写落 `100`。
         let mut openids = Vec::with_capacity(virtual_ids.len());
+        let mut kicked = Vec::with_capacity(virtual_ids.len());
         for virtual_id in &virtual_ids {
             match resolve_identity_text(&self.context, "user_id", virtual_id, "member_openid") {
-                Ok(resolved) => openids.push(resolved.openid),
-                Err(err) => return Ok(bad_request(request, &err)),
+                Ok(resolved) => {
+                    openids.push(resolved.openid);
+                    kicked.push(virtual_id.clone());
+                }
+                Err(err) => tracing::warn!(
+                    action = "set_group_kick",
+                    user_id = %virtual_id,
+                    error = %err,
+                    "成员 OpenID 反查失败，已跳过该用户"
+                ),
             }
+        }
+        if openids.is_empty() {
+            return Ok(failed(
+                request,
+                RETCODE_ACTION_UNSUPPORTED,
+                "所有用户反查 OpenID 失败",
+            ));
         }
 
         let result = match self
@@ -217,7 +235,7 @@ impl SetGroupKickHandler {
 
         let string_mode = self.context.string_ob11();
         let data = KickData {
-            kicked: virtual_ids
+            kicked: kicked
                 .iter()
                 .map(|virtual_id| ob11_id(virtual_id, string_mode))
                 .collect(),
@@ -478,18 +496,30 @@ mod tests {
         assert!(WHOLE_BAN_MESSAGE.contains("全员禁言"));
     }
 
+    /// 缺 `group_id` → `1400`（Go `set_group_whole_ban.go:24,28` 的 `sendParamRetCode`）。
+    /// `enable` 的形状不参与 handler 校验：Go 的 `ParamsContent.Enable` 是 `bool`，
+    /// `enable:"yes"` 在整包反序列化阶段就失败、由分发层回 1400「参数解析失败」，到不了这里；
+    /// Rust 同样不因此改判固定回执。
     #[test]
-    fn whole_ban_rejects_missing_group_or_bad_enable_with_1400() {
+    fn whole_ban_rejects_missing_group_id_with_1400() {
         let (_context, api) = context();
         let handler = SetGroupWholeBanHandler::new();
-        for params in [json!({}), json!({"group_id": GROUP, "enable": "yes"})] {
-            let response = block_on(handler.handle(&request("set_group_whole_ban", params)))
-                .expect("参数错误也应是 Ok(失败响应)");
-            let (status, retcode, data) = failed(response);
-            assert_eq!(status, Status::Failed);
-            assert_eq!(retcode, RETCODE_BAD_REQUEST);
-            assert_eq!(data, None);
-        }
+        let response = block_on(handler.handle(&request("set_group_whole_ban", json!({}))))
+            .expect("参数错误也应是 Ok(失败响应)");
+        let (status, retcode, data) = failed(response);
+        assert_eq!(status, Status::Failed);
+        assert_eq!(retcode, RETCODE_BAD_REQUEST);
+        assert_eq!(data, None);
+
+        // enable 非布尔不影响固定失败回执
+        let response = block_on(handler.handle(&request(
+            "set_group_whole_ban",
+            json!({"group_id": GROUP, "enable": "yes"}),
+        )))
+        .expect("enable 形状不参与校验");
+        let (status, retcode, _) = failed(response);
+        assert_eq!(status, Status::Failed);
+        assert_eq!(retcode, RETCODE_ACTION_UNSUPPORTED);
         assert!(api.calls().is_empty());
     }
 
@@ -569,6 +599,9 @@ mod tests {
         assert!(!*add_blacklist, "默认不拉黑");
     }
 
+    /// 缺成员 / 缺群仍是 `1400`（请求侧参数问题）；虚拟号反查失败**不再**整条 `1400`——
+    /// Go 逐个跳过失败的成员（`set_group_kick.go:46-57`），一个都没反查到才回固定文案
+    /// 「所有用户反查 OpenID 失败」（`:60`，`100` 档，经 runtime B 类改写落 `100`）。
     #[test]
     fn kick_requires_users_and_group() {
         let (context, api) = context();
@@ -576,7 +609,6 @@ mod tests {
         for params in [
             json!({"group_id": GROUP}),
             json!({"group_id": GROUP, "user_ids": []}),
-            json!({"group_id": GROUP, "user_id": "42"}),
             json!({"user_id": MEMBER}),
         ] {
             let response = block_on(handler.handle(&request("set_group_kick", params)))
@@ -586,6 +618,18 @@ mod tests {
             assert_eq!(retcode, RETCODE_BAD_REQUEST);
         }
         assert!(api.calls().is_empty());
+
+        let response = block_on(handler.handle(&request(
+            "set_group_kick",
+            json!({"group_id": GROUP, "user_id": "42"}),
+        )))
+        .expect("反查失败也应是 Ok(失败响应)");
+        let message = response.message.clone();
+        let (status, retcode, _) = failed(response);
+        assert_eq!(status, Status::Failed);
+        assert_eq!(retcode, RETCODE_ACTION_UNSUPPORTED);
+        assert_eq!(message.as_deref(), Some("所有用户反查 OpenID 失败"));
+        assert!(api.calls().is_empty(), "全员反查失败不应触达上游");
     }
 
     #[test]

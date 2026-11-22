@@ -796,6 +796,10 @@ impl Handler for JoinApprovalStrategyDeleteHandler {
 ///
 /// `group_openids` 与 `group_ids` 两个字段都收（插件可能填错字段）：32 位 OpenID 直通，其余
 /// 视为虚拟群号经 idmap 反查，任一失败整体 `1400` 并在文案里带上字段名与该值。
+///
+/// 文案逐字照 Go `resolveJoinApprovalGroupOpenID`（`handlers/join_approval_strategy.go:156,159`：
+/// `"%s=%s 无法反查群 OpenID"` / 带 `: %w` 后缀），runtime 的
+/// `BRANCH_PARAM_ERROR_KEEPS_1400` 按该前缀放行这两条 action 的这一分支。
 fn strategy_group_openids(
     context: &ActionContext,
     object: &Map<String, Value>,
@@ -805,9 +809,7 @@ fn strategy_group_openids(
         for id in params::id_list(object, key)? {
             let openid = context
                 .resolve_openid(key, &id, "group_openid")
-                .map_err(|err| {
-                    Error::Protocol(format!("{key} 的 {id} 无法换算成群 OpenID: {err}"))
-                })?;
+                .map_err(|err| Error::Protocol(format!("{key}={id} 无法反查群 OpenID: {err}")))?;
             openids.push(openid);
         }
     }

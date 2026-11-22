@@ -146,7 +146,9 @@ pub mod ws_server;
 
 pub use boot::{DEFAULT_SHUTDOWN_TIMEOUT, Runtime, RuntimeHandle, RuntimeOptions};
 pub use deferred::DEFERRED_FIELD;
-pub use dispatcher::{Dispatcher, RETCODE_BAD_REQUEST, RETCODE_INTERNAL, RETCODE_UNKNOWN_ACTION};
+pub use dispatcher::{
+    Dispatcher, RETCODE_BAD_REQUEST, RETCODE_INTERNAL, RETCODE_UNKNOWN_ACTION, dispatch_json,
+};
 pub use event_hub::EventHub;
 pub use gateway::{GatewayClient, GatewayHandle, GatewayOptions};
 pub use inbound::Inbound;

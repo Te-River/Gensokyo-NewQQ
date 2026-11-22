@@ -244,9 +244,30 @@ Go 在 `global_group_msg_rre_to_message` / `global_c2c_msg_switch_to_message` / 
 47 例回执对照显示 Go 只有 `set_group_ban` / `set_group_whole_ban` 的缺参回 `1400`（`handlers/set_group_ban.go` / `handlers/set_group_whole_ban.go` 的 `sendParamRetCode`）；`set_group_kick` / `set_custom_menu` / `create_panel` / 面板 / 审批策略等管理类的缺参仍走 `sendActionResult(msg, 100)`。
 
 - **根因**：`crates/gensokyo-runtime/src/dispatcher.rs` 的改写规则此前是全局的——要么所有 `Compact` 失败都改写成 `100`（缺参也改），要么整体放行 `1400`，两种口径都对不齐 Go 的逐 action 行为
-- **修改**：新增具名集合 `PARAM_ERROR_KEEPS_1400`（`set_group_ban` / `set_group_whole_ban` 及兼容别名 `get_group_ban` / `get_group_whole_ban`，逐 action 对齐 Go，不是新设计）：只有集合内 action 的 `1400` 放行，其余管理类失败照旧改写成 `RETCODE_MANAGEMENT_FAILED`（`100`）
+- **修改**：新增具名集合 `PARAM_ERROR_KEEPS_1400`（`set_group_ban` / `set_group_whole_ban` 及兼容别名 `get_group_ban` / `get_group_whole_ban`，逐 action 对齐 Go，不是新设计）：只有集合内 action 的 `1400` 放行，其余管理类失败照旧改写成 `RETCODE_MANAGEMENT_FAILED`（`100`）**〔2026-11-22 更新：该口径已被后续单扩展——`get_group_bot_state` / `get_group_join_request_list` / `join_approval_strategy_create` / `_update` 四个分支型出口改按 message 文案放行，见下一条；本条的「其余管理类失败一律改写」不再成立〕**
 - **影响**：`set_group_ban` / `set_group_whole_ban` 缺参 `1400/failed`；`set_group_kick` / `set_group_add_request` / `set_group_member_blacklist` / `set_custom_menu` / `create_panel` / `get_panel` / `delete_panel` / `set_panel` / `set_panel_target` / `join_approval_strategy_{update,delete,whitelist}` 缺参回到 `100/failed`，与 Go 一致；上游拒绝 / 反查失败仍是 `100`；A 发送类 / C 查询类不受影响
 - **测试**：`dispatcher::tests::ban_param_errors_keep_1400`（两个禁言 action 缺参 → `1400`）、`management_param_errors_are_100_outside_the_ban_actions`（`set_group_kick` / `set_custom_menu` / `create_panel` 缺参 → `100`）、`management_failure_is_retcode_100`（上游拒绝 → `100`）
+
+### B 类失败回执补 `data:null`（2026-11-22，parity D-a）
+
+活体实测 `set_group_card` 失败帧：Go 是 `{"data":null,"echo":…,"message":…,"retcode":100,"status":"failed"}`（五键字母序），Rust 少一个 `data` 键。审计依据 `reports/refactor/20261122-action-receipt-parity.md` §1.3/§6 D-a。
+
+- **根因**：Go 的 B 类失败出口只有一个 `sendActionResult`（`handlers/set_group_add_request.go:71-101`），其 `Data interface{} `json:"data"`` **没有** `omitempty`；WS 下发走 `structToMap(response)` → map marshal（键字母序、`nil` 剥不掉），实发帧恒带 `data:null`。Rust 的 Compact 序列化此前在 failed 分支整体短路掉 data
+- **修改**：`crates/gensokyo-protocol/src/action.rs` 的 `EnvelopeKind::Compact` 序列化改为「失败一律写 `"data":null`，成功才按子形态（Omit/AsIs/EmptyObject/Null）决定 data 有无」；codec 兜底帧同步（`dispatcher.rs encode()` 的 Compact 兜底串补 `data:null`）；`envelope.rs` 模块文档与 `CompactData::Omit` 注释按此口径改写
+- **影响**：全部 23 条 B 类 action 的失败回执多一个 `data:null` 键（四种 data 子形态的失败帧逐字节相同）；成功路径零变化；Full / wakeup / share_link 不受影响
+- **测试**：`action.rs` 的 `compact_failure_writes_null_data_for_every_subshape`（四子形态 × handler 带载荷 × 无 echo 三组整串断言）、`dispatcher::tests::management_failure_is_retcode_100_with_null_data`、`compact_failure_bytes_are_the_same_for_every_subshape`、codec 兜底用例反转；`tests/deferred.rs` 的 `whole_ban_receipt_carries_null_data_like_go` / `compact_upstream_failure_receipt_is_100_with_null_data`（生产注册表整串）
+
+### 管理类参数错码按 Go 分支口径细分 + 反查失败档位对齐（2026-11-22，parity D-b/D-c）
+
+47 例对照与逐 handler 取证（`grep sendParamRetCode handlers/`）表明：Go 的 Compact 失败里 `1400` 只挂在**特定出口**上——禁言两兄弟的前置校验、`get_group_bot_state.go:52` / `get_group_join_request_list.go:82` 的「group_id 不能为空」、`join_approval_strategy.go:34,73` 的「关联群换算失败」；同一 action 的反查失败 / 上游失败都是 `100`。审计报告 D-b 把 `set_group_kick` 的「所有用户反查 OpenID 失败」记成 1400 属误引，以 `set_group_kick.go:46-60` 实测为准（`100`）。
+
+- **修改**：
+  - `crates/gensokyo-runtime/src/dispatcher.rs`：新增 `BRANCH_PARAM_ERROR_KEEPS_1400`（action → 放行 1400 的 message 文案前缀）与 `compact_failure_keeps_retcode(action, message)`，覆盖 `get_group_bot_state` / `get_group_join_request_list`（缺 group_id）与 `join_approval_strategy_create` / `_update`（关联群换算失败）四个分支型出口；`PARAM_ERROR_KEEPS_1400`（禁言两兄弟+别名）保持 action 级放行
+  - `crates/gensokyo-actions/src/group_admin.rs`：`set_group_whole_ban` 移除 handler 内的 `enable` 形状校验（Go `ParamsContent.Enable` 是 `bool`，`enable:"yes"` 在整包反序列化阶段失败、由分发层回 1400「参数解析失败」，到不了 handler）；`set_group_kick` 成员逐个反查失败改为**跳过并 warn**（Go `set_group_kick.go:46-57`），全部失败时回 Go 逐字文案「所有用户反查 OpenID 失败」（`:60`，经 B 类改写落 `100`），`kicked` 只回显实际提交集合
+  - `crates/gensokyo-actions/src/panels.rs`：`strategy_group_openids` 的失败文案照 Go `resolveJoinApprovalGroupOpenID` 逐字（`group_openids=<id> 无法反查群 OpenID[: …]`，`join_approval_strategy.go:156,159`），供 runtime 按前缀放行
+  - `crates/gensokyo-actions/src/interaction.rs`：`set_group_add_request` 的 `approve` 形状注释口径说明（Go bool 解码层拒绝，Rust params 层同档 1400、文案不同）
+- **影响**：`get_group_bot_state` / `get_group_join_request_list` 缺 `group_id` 由 `100` 回到 `1400`；`join_approval_strategy_create` / `_update` 关联群换算失败回 `1400`、其余失败仍 `100`；`set_group_kick` 部分成员反查失败从整条 `1400` 变为跳过继续（全失败 `100`+`data:null`）；`set_group_whole_ban` `enable` 非布尔不再被 handler 拒形（固定 `100` 回执不变）。刻意差异与已知未对齐登记 `reports/refactor/17-go-rust-parity.md` §F D37
+- **测试**：`dispatcher::tests::param_error_retcode_cross_table_matches_go`（Compact 1400 / Compact 100 / Full 1400 三档逐 action 交叉 + 分支型正反例整串）、`management_success_uses_the_compact_envelope` 不变；`tests/deferred.rs` 新增 `join_approval_unmapped_group_keeps_1400_with_null_data`（生产注册表）；actions 侧 `whole_ban_rejects_missing_group_id_with_1400`（原 bad_enable 反转）、`kick_requires_users_and_group`（反查失败档）、`set_group_add_request_maps_approve_to_op`（approve 形状）
 
 ### `get_robot_share_link` 不推 notice、回执形状与 Go 不同（2026-11-21）
 

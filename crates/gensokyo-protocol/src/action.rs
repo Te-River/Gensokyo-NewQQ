@@ -211,9 +211,12 @@ impl<T: Serialize> Serialize for ActionResponse<T> {
                 }
             }
             EnvelopeKind::Compact(data) => {
-                // Go 的失败路径只有 `sendActionResult`（那里根本没有 data 字段），所以 failed
-                // 时无论子形态如何都不写 data。
-                if self.status != Status::Failed {
+                // 失败一律写 `"data":null`：Go 的失败回执是 `sendActionResult`，其 `Data` 字段
+                // 没有 `omitempty`（`handlers/set_group_add_request.go:77`），WS 实发帧恒带
+                // `data:null`（活体探针已证）。成功路径才按子形态决定 data 的有无与形状。
+                if self.status == Status::Failed {
+                    map.serialize_entry("data", &Value::Null)?;
+                } else {
                     match data {
                         CompactData::Omit => {}
                         CompactData::AsIs => map.serialize_entry("data", &self.data)?,
@@ -777,17 +780,44 @@ mod tests {
         );
     }
 
-    /// 失败：Go 的 B 类只有 `retcode 100` 这一档，且失败路径没有 `data`（即使子形态是 AsIs）。
+    /// 失败：Go 的 B 类失败回执是 `sendActionResult`，其 `Data` 无 `omitempty`
+    /// （`handlers/set_group_add_request.go:77`），WS 实发帧恒带 `data:null`——四种子形态在
+    /// 失败路径收敛为同一个形状（D-a）。`echo` 仍按 omitempty 语义缺席时不写。
     #[test]
-    fn compact_failure_has_no_data() {
-        let failed: ActionResponse<serde_json::Value> = compact(
-            ActionResponse::failed(100, "无法反查群 OpenID"),
+    fn compact_failure_writes_null_data_for_every_subshape() {
+        for data in [
+            CompactData::Omit,
             CompactData::AsIs,
-        )
-        .with_echo(Some(serde_json::json!("e1")));
+            CompactData::EmptyObject,
+            CompactData::Null,
+        ] {
+            let failed: ActionResponse<serde_json::Value> =
+                compact(ActionResponse::failed(100, "无法反查群 OpenID"), data)
+                    .with_echo(Some(serde_json::json!("e1")));
+            assert_eq!(
+                to_json(&failed),
+                r#"{"data":null,"echo":"e1","message":"无法反查群 OpenID","retcode":100,"status":"failed"}"#,
+                "Compact 失败必须带 data:null（子形态 {data:?}）"
+            );
+        }
+
+        // handler 带了 data 值也一样：失败路径写的是 null，不是 handler 的载荷
+        let with_payload: ActionResponse<serde_json::Value> = compact(
+            ActionResponse::failed(1400, "group_id 不能为空")
+                .with_echo(Some(serde_json::json!("e2"))),
+            CompactData::AsIs,
+        );
         assert_eq!(
-            to_json(&failed),
-            r#"{"echo":"e1","message":"无法反查群 OpenID","retcode":100,"status":"failed"}"#
+            to_json(&with_payload),
+            r#"{"data":null,"echo":"e2","message":"group_id 不能为空","retcode":1400,"status":"failed"}"#
+        );
+
+        // 无 echo：data 照样在，echo 键消失
+        let bare: ActionResponse<serde_json::Value> =
+            compact(ActionResponse::failed(100, "x"), CompactData::Omit);
+        assert_eq!(
+            to_json(&bare),
+            r#"{"data":null,"message":"x","retcode":100,"status":"failed"}"#
         );
     }
 

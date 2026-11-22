@@ -7,9 +7,11 @@
 //!   通用文案，全文只进日志。
 //!
 //! B 管理类（[`EnvelopeKind::Compact`]）的业务失败一律改写成 `100`（Go
-//! `sendActionResult(msg, 100)`），**例外只有 [`PARAM_ERROR_KEEPS_1400`] 里的 action**：
-//! Go 只给 `set_group_ban` / `set_group_whole_ban` 的 handler 写了参数校验
-//! `sendParamRetCode`（`1400`），其余管理类 action 缺参同样落到 `sendActionResult(msg, 100)`。
+//! `sendActionResult(msg, 100)`），**例外只有 [`compact_failure_keeps_retcode`] 认得的
+//! 参数错**：Go 只在禁言两兄弟与 `get_group_bot_state` / `get_group_join_request_list` 的
+//! 个别失败出口写 `sendParamRetCode`（`1400`），其余管理类的参数错与上游失败同样落到
+//! `sendActionResult(msg, 100)`。Compact 失败帧的 `data` 恒为 `null`（Go
+//! `sendActionResult.Data` 无 `omitempty`；D-a）。
 //!
 //! `get_robot_share_link`（[`EnvelopeKind::GoEmptyObject`]）成功时先推伪造的
 //! `share_link_generated` notice（载荷由 actions 侧产出），再回字面量 `{}`。
@@ -71,13 +73,34 @@ pub const RETCODE_INTERNAL: i32 = 1500;
 /// 它们写了 `sendParamRetCode`，改写在 [`Dispatcher::dispatch`] 里按 action 放行。
 pub const RETCODE_MANAGEMENT_FAILED: i32 = 100;
 
-/// 参数错误（`1400`）仍原样放行的 B 类 action。
+/// Compact（B 类）里参数错误（`1400`）仍原样放行的 action。
 ///
-/// 这是逐 action 对齐 Go 的既有口径（不是新设计）：47 例回执对照里只有 `set_group_ban` /
-/// `set_group_whole_ban` 的缺参回 `1400`（`handlers/set_group_ban.go`、
-/// `handlers/set_group_whole_ban.go` 的 `sendParamRetCode`），其余管理类 action 的缺参在 Go
-/// 侧同样走 `sendActionResult(msg, 100)`。两个旧 action 名是同一 handler 的兼容别名
-/// （[`gensokyo_protocol::registry::ACTION_ALIASES`]），一并列出。
+/// 判据：**Go 源码里该 action 有没有 `Compact` 失败出口用 `sendParamRetCode`**
+/// （`handlers/set_group_add_request.go:53` 注释：历史 handler 沿用旧口径 `100`，新增分支
+/// 才用 `1400`）。逐条对照 `handlers/` 全部 `sendActionResult(..., sendParamRetCode)`
+/// 调用点后的完整清单（活体回执对照 `reports/refactor/20261122-action-receipt-parity.md` D-b）：
+///
+/// - `set_group_ban` / `set_group_whole_ban`（含两个兼容别名，见
+///   [`gensokyo_protocol::registry::ACTION_ALIASES`]）：群类型读取失败 / 非群聊场景回
+///   `1400`（`set_group_ban.go:23,27`、`set_group_whole_ban.go:24,28`），反查 OpenID 失败与
+///   上游失败回 `100`（`:34,40,45` / `:35,44`）。Rust 没有 Go 的「读群类型」前置步骤，
+///   对应的是缺 ID 的用户级参数校验——同为「请求侧参数问题」放行 `1400`；其余协议错
+///   （如 `group_id 必须是 …`，Go 走同一条参数校验、必是 `1400`）一并放行。
+/// - `get_group_bot_state` / `get_group_join_request_list`：仅 `group_id 不能为空` 一个出口
+///   写 `1400`（`get_group_bot_state.go:52`、`get_group_join_request_list.go:82`），反查失败与
+///   上游失败都是 `100`（`:61,69` / `:91,100`）。Rust 对这两条按**文案**区分（见
+///   [`compact_failure_keeps_retcode`]）：只有 `缺少 group_id` 放行，其余照旧改写。
+///
+/// - `join_approval_strategy_create` / `_update`：仅「关联群换算失败」一个出口写 `1400`
+///   （`join_approval_strategy.go:34,73`），上游失败都是 `100`（`:45,56,83`）。Rust 对应文案照
+///   Go 逐字（`协议错误: group_openids=<id> 无法反查群 OpenID…`，`panels.rs` 的
+///   `strategy_group_openids`），同样按文案前缀放行（见 [`BRANCH_PARAM_ERROR_KEEPS_1400`]）。
+///
+/// Full 信封的 action（`get_group_info` / `get_group_member_list` / `delete_msg` /
+/// `put_interaction` / `get_avatar` / `send_*` 等）不走这条改写规则，Go 在那些出口同样写
+/// `sendParamRetCode`，Rust 天然保留 `1400`。`set_group_kick` 的「所有用户反查 OpenID 失败」
+/// 在 Go 就是 `100`（`set_group_kick.go:60`；审计报告 D-b 把它列为 1400 属误引），Rust 经
+/// B 类改写同样落 `100`——**已一致**，无需放行。
 const PARAM_ERROR_KEEPS_1400: &[&str] = &[
     "set_group_ban",
     "set_group_whole_ban",
@@ -85,6 +108,41 @@ const PARAM_ERROR_KEEPS_1400: &[&str] = &[
     "get_group_whole_ban",
 ];
 
+/// 只按 `message` 文案区分 Go 两档码的 Compact action：`action → 放行 1400 的文案前缀`。
+///
+/// `get_group_bot_state` / `get_group_join_request_list` 的 `1400` 只有一个出口
+/// （`group_id 不能为空`），Rust 对应的用户级校验文案是 `协议错误: 缺少 group_id`；
+/// 同 action 的反查失败 / 上游失败（`协议错误: group_id … 无法换算`、`上游 API 错误: …`）
+/// 仍改写 `100`。前提：handler 对两类失败给出可区分的文案——上游失败不得复用参数错的
+/// 措辞（`panels.rs` 的 `scope 参数缺失…` / `panel 参数格式无效: …` 与此无关：那两条 action
+/// 不在本表内，缺参照旧改写 `100`，与 Go 一致）。
+///
+/// 依据 Go `join_approval_strategy.go:34,73` / `get_group_bot_state.go:52` /
+/// `get_group_join_request_list.go:82` 的实测口径：这三处的 `sendParamRetCode` 只挂在特定失败
+/// 出口上，同一 action 的其他出口仍是 `100`，所以放行必须落到**分支**粒度而不是 action 粒度。
+const BRANCH_PARAM_ERROR_KEEPS_1400: &[(&str, &[&str])] = &[
+    ("get_group_bot_state", &["协议错误: 缺少 group_id"]),
+    ("get_group_join_request_list", &["协议错误: 缺少 group_id"]),
+    (
+        "join_approval_strategy_create",
+        &["协议错误: group_openids=", "协议错误: group_ids="],
+    ),
+    (
+        "join_approval_strategy_update",
+        &["协议错误: group_openids=", "协议错误: group_ids="],
+    ),
+];
+
+/// Compact 失败帧是否放行原 retcode（`1400`）。
+fn compact_failure_keeps_retcode(action: &str, message: &str) -> bool {
+    if PARAM_ERROR_KEEPS_1400.contains(&action) {
+        return true;
+    }
+    BRANCH_PARAM_ERROR_KEEPS_1400
+        .iter()
+        .find(|(name, _)| *name == action)
+        .is_some_and(|(_, prefixes)| prefixes.iter().any(|prefix| message.starts_with(prefix)))
+}
 /// 把 action 请求喂给注册表。
 #[derive(Debug, Clone)]
 pub struct Dispatcher {
@@ -189,11 +247,14 @@ impl Dispatcher {
         if matches!(envelope, EnvelopeKind::Compact(_))
             && response.status == Status::Failed
             && !(response.retcode == RETCODE_BAD_REQUEST
-                && PARAM_ERROR_KEEPS_1400.contains(&request.action.as_str()))
+                && compact_failure_keeps_retcode(
+                    &request.action,
+                    response.message.as_deref().unwrap_or_default(),
+                ))
         {
-            // Go 的 B 类业务失败一律 `sendActionResult(msg, 100)`；只有
-            // [`PARAM_ERROR_KEEPS_1400`] 的缺参是 `sendParamRetCode`（1400），handler 阶段
-            // 就回了，不能被改写成 100。
+            // Go 的 B 类业务失败一律 `sendActionResult(msg, 100)`——上游拒绝 / 反查失败 /
+            // 未列举的参数错全在这一档；只有 [`compact_failure_keeps_retcode`] 认得的
+            // `sendParamRetCode`（1400）出口放行，handler 阶段就回了，不能被改写成 100。
             response.retcode = RETCODE_MANAGEMENT_FAILED;
         }
         response
@@ -546,7 +607,8 @@ fn retcode_for(err: &CoreError) -> i32 {
 /// 序列化响应；codec 出问题时按**当前信封模式**回一个同形状的兜底，响应不能凭空消失。
 ///
 /// 兜底形状必须与本模式正常输出一致：Full 有 `data` / `echo` / `message`（D6：三者恒在），
-/// Compact 三者都没有（Go 的 B 类失败只有 `sendActionResult`）。`message` 留空串而不是塞一句
+/// Compact 有 `data:null` 与 `message`、没有 `echo`（Go 的 B 类失败是 `sendActionResult`，
+/// `Data` 无 `omitempty`；D-a）。`message` 留空串而不是塞一句
 /// 说明——失败原因进 `tracing::error!`，线上形状只负责让客户端拿到 `retcode`。
 ///
 /// 模式取自 `response.envelope`：[`Dispatcher::dispatch`] 已用
@@ -572,7 +634,7 @@ fn encode<T: Serialize>(response: &ActionResponse<T>) -> String {
                     .to_owned()
             }
             EnvelopeKind::Compact(_) => {
-                r#"{"message":"","retcode":100,"status":"failed"}"#.to_owned()
+                r#"{"data":null,"message":"","retcode":100,"status":"failed"}"#.to_owned()
             }
         }
     })
@@ -669,7 +731,9 @@ mod tests {
         }
 
         fn handle<'a>(&'a self, _request: &'a ActionRequest<Value>) -> HandlerFuture<'a> {
-            Box::pin(async { Err(Error::Protocol("group_id 缺失".to_owned())) })
+            // 与 Go get_group_bot_state / get_group_join_request_list 的 sendParamRetCode
+            // 出口同文案（params::required_id 的「缺少 group_id」经 Display 加前缀）
+            Box::pin(async { Err(Error::Protocol("缺少 group_id".to_owned())) })
         }
     }
 
@@ -757,6 +821,11 @@ mod tests {
         let _ = registry.register("set_group_kick", Arc::new(BadParams));
         let _ = registry.register("set_custom_menu", Arc::new(BadParams));
         let _ = registry.register("create_panel", Arc::new(BadParams));
+        // 分支型放行表的样本：Go 只在缺 group_id / 关联群换算失败这两个出口写 `sendParamRetCode`。
+        let _ = registry.register("get_group_bot_state", Arc::new(BadParams));
+        let _ = registry.register("get_group_join_request_list", Arc::new(BadParams));
+        let _ = registry.register("join_approval_strategy_create", Arc::new(BadParams));
+        let _ = registry.register("join_approval_strategy_update", Arc::new(BadParams));
         let _ = registry.register("get_robot_share_link", Arc::new(ShareLink));
         Dispatcher::new(Arc::new(registry))
     }
@@ -848,64 +917,180 @@ mod tests {
         assert_eq!(body, r#"{"message":"","retcode":0,"status":"ok"}"#);
     }
 
-    /// 失败：业务失败（上游拒绝）→ `retcode 100`，且失败路径没有 `data`。
+    /// 失败：业务失败（上游拒绝）→ `retcode 100`，整串带 `data:null`——Go 的
+    /// `sendActionResult.Data` 无 `omitempty`，WS 实发帧恒有该键（D-a；活体探针里 Go
+    /// `set_group_card` 失败帧即此形状）。
     #[tokio::test]
-    async fn management_failure_is_retcode_100() {
+    async fn management_failure_is_retcode_100_with_null_data() {
         let body = dispatch_json(
             dispatcher(),
             br#"{"action":"set_group_card","params":{},"echo":"e1"}"#.to_vec(),
         )
         .await;
-        let value: Value = serde_json::from_str(&body).expect("响应应为 JSON");
         assert_eq!(
-            value["retcode"], RETCODE_MANAGEMENT_FAILED,
-            "B 类业务失败只有 100 这一档: {body}"
+            body,
+            r#"{"data":null,"echo":"e1","message":"上游 API 错误: code=22009 message=频控","retcode":100,"status":"failed"}"#
         );
-        assert_eq!(value["status"], "failed");
-        assert_eq!(value["echo"], "e1");
-        assert!(value.get("data").is_none(), "B 类失败不带 data: {body}");
-        assert!(value.get("message").is_some(), "message 恒在: {body}");
     }
 
-    /// 禁言两兄弟的缺参仍是 `1400`：Go 只给 `set_group_ban` / `set_group_whole_ban` 写了
-    /// `sendParamRetCode`，所以它们是 [`PARAM_ERROR_KEEPS_1400`] 唯一放行的 action。
+    /// 缺参请求的失败帧整串：`data:null` + `echo` + `message` + `retcode` + `status`
+    /// 字母序（Go `structToMap(sendActionResult)` → map marshal 同为字母序）。
+    async fn param_error_wire(action: &str) -> String {
+        let payload = format!(r#"{{"action":"{action}","params":{{}},"echo":"e1"}}"#);
+        dispatch_json(dispatcher(), payload.into_bytes()).await
+    }
+
+    /// 指定 action 上抛一条给定协议错文案的替身（分支型放行表按 message 判定，需要
+    /// 能注入任意文案）。
+    #[derive(Debug)]
+    struct MessageDriven(&'static str);
+
+    impl Handler for MessageDriven {
+        fn name(&self) -> &'static str {
+            "message_driven"
+        }
+
+        fn handle<'a>(&'a self, _request: &'a ActionRequest<Value>) -> HandlerFuture<'a> {
+            // Ok(失败响应)：文案原样上线，不再经 Error::Protocol 的 Display 加前缀
+            Box::pin(async {
+                Ok(ActionResponse::<Value>::failed(
+                    RETCODE_BAD_REQUEST,
+                    self.0.to_owned(),
+                ))
+            })
+        }
+    }
+
+    async fn wire_with_message(action: &'static str, message: &'static str) -> String {
+        let mut registry = Registry::new();
+        let _ = registry.register(action, Arc::new(MessageDriven(message)));
+        let payload = format!(r#"{{"action":"{action}","params":{{}},"echo":"e1"}}"#);
+        dispatch_json(Dispatcher::new(Arc::new(registry)), payload.into_bytes()).await
+    }
+
+    /// 逐 action 交叉表：同为「参数错」，Go 的回码与信封分三档——
+    /// - Compact + `1400`：`set_group_ban` / `set_group_whole_ban`（[`PARAM_ERROR_KEEPS_1400`]）
+    ///   与 `get_group_bot_state` / `get_group_join_request_list` 的缺 `group_id`（Go 用
+    ///   `sendParamRetCode` 的唯一出口，按文案放行）；
+    /// - Compact + `100`：其余管理类缺参（Go 无本地校验，落 `sendActionResult(msg, 100)`），
+    ///   以及两个分支型 action 的**非**缺-group_id 协议错；
+    /// - Full + `1400`：`get_group_info` / `delete_msg` / `put_interaction` / `send_*` 等
+    ///   C 查询 / A 发送类（Go 同样 `sendParamRetCode`，但信封是 Full，改写规则不作用）。
     #[tokio::test]
-    async fn ban_param_errors_keep_1400() {
-        // 共用注册表里 `set_group_ban` 绑着成功 handler（信封用例），这里另起一张表。
+    async fn param_error_retcode_cross_table_matches_go() {
+        const MISSING_GROUP: &str = "协议错误: 缺少 group_id";
+
+        // Compact 1400：整串钉死（D-a + D-b）。共用注册表里 `set_group_ban` 绑着成功
+        // handler（信封用例），两个禁言 action 这里另起一张 BadParams 表。
         let mut registry = Registry::new();
         for action in ["set_group_ban", "set_group_whole_ban"] {
             let _ = registry.register(action, Arc::new(BadParams));
         }
-        let dispatcher = Dispatcher::new(Arc::new(registry));
+        let bad_bans = Dispatcher::new(Arc::new(registry));
         for action in ["set_group_ban", "set_group_whole_ban"] {
             let payload = format!(r#"{{"action":"{action}","params":{{}},"echo":"e1"}}"#);
-            let body = dispatch_json(dispatcher.clone(), payload.into_bytes()).await;
-            let value: Value = serde_json::from_str(&body).expect("响应应为 JSON");
+            let body = dispatch_json(bad_bans.clone(), payload.into_bytes()).await;
             assert_eq!(
-                value["retcode"], RETCODE_BAD_REQUEST,
-                "{action} 缺参仍是 1400: {body}"
+                body,
+                format!(
+                    r#"{{"data":null,"echo":"e1","message":"{MISSING_GROUP}","retcode":1400,"status":"failed"}}"#
+                ),
+                "{action} 缺参应回 Compact 1400 + data:null"
             );
-            assert_eq!(value["status"], "failed");
-            assert_eq!(value["echo"], "e1");
-            assert!(value.get("data").is_none(), "B 类失败不带 data: {body}");
         }
-    }
 
-    /// 其余管理类的缺参与 Go 一致回 `100`——Go 侧这些 handler 没有参数校验，
-    /// 缺参直接落到 `sendActionResult(msg, 100)`。
-    #[tokio::test]
-    async fn management_param_errors_are_100_outside_the_ban_actions() {
-        for action in ["set_group_kick", "set_custom_menu", "create_panel"] {
+        // 分支型：缺 group_id → 1400（Go 唯一的 sendParamRetCode 出口）；
+        // 其余协议错 → 100（Go 的反查失败 / 上游失败档）。
+        for action in ["get_group_bot_state", "get_group_join_request_list"] {
             let payload = format!(r#"{{"action":"{action}","params":{{}},"echo":"e1"}}"#);
             let body = dispatch_json(dispatcher(), payload.into_bytes()).await;
-            let value: Value = serde_json::from_str(&body).expect("响应应为 JSON");
             assert_eq!(
-                value["retcode"], RETCODE_MANAGEMENT_FAILED,
-                "{action} 缺参应与 Go 一致回 100: {body}"
+                body,
+                format!(
+                    r#"{{"data":null,"echo":"e1","message":"{MISSING_GROUP}","retcode":1400,"status":"failed"}}"#
+                ),
+                "{action} 缺 group_id 应放行 1400"
             );
-            assert_eq!(value["status"], "failed");
-            assert_eq!(value["echo"], "e1");
-            assert!(value.get("data").is_none(), "B 类失败不带 data: {body}");
+        }
+        // 非缺-group_id 的协议错（Go 的反查 / 上游档）仍改写 100。
+        let body = wire_with_message(
+            "get_group_bot_state",
+            "协议错误: group_id 必须是数字或字符串",
+        )
+        .await;
+        assert_eq!(
+            body,
+            r#"{"data":null,"echo":"e1","message":"协议错误: group_id 必须是数字或字符串","retcode":100,"status":"failed"}"#
+        );
+
+        // 审批策略的关联群换算失败 → 1400（Go `join_approval_strategy.go:34,73` 唯一
+        // `sendParamRetCode` 出口），文案照 Go `resolveJoinApprovalGroupOpenID` 逐字。
+        for action in [
+            "join_approval_strategy_create",
+            "join_approval_strategy_update",
+        ] {
+            let body = wire_with_message(
+                action,
+                "协议错误: group_openids=123456 无法反查群 OpenID: 存储错误: 键不存在",
+            )
+            .await;
+            assert_eq!(
+                body,
+                r#"{"data":null,"echo":"e1","message":"协议错误: group_openids=123456 无法反查群 OpenID: 存储错误: 键不存在","retcode":1400,"status":"failed"}"#,
+                "{action} 关联群换算失败应放行 1400"
+            );
+        }
+        // 同 action 的上游失败仍是 100 档。
+        let body = wire_with_message(
+            "join_approval_strategy_create",
+            "上游 API 错误: code=304005 message=无权限",
+        )
+        .await;
+        assert_eq!(
+            body,
+            r#"{"data":null,"echo":"e1","message":"上游 API 错误: code=304005 message=无权限","retcode":100,"status":"failed"}"#
+        );
+
+        // Compact 100：其余管理类缺参与 Go 的历史口径一致
+        for action in ["set_group_kick", "set_custom_menu", "create_panel"] {
+            let body = param_error_wire(action).await;
+            assert_eq!(
+                body,
+                format!(
+                    r#"{{"data":null,"echo":"e1","message":"{MISSING_GROUP}","retcode":100,"status":"failed"}}"#
+                ),
+                "{action} 缺参应与 Go 一致回 100 且带 data:null"
+            );
+        }
+
+        // Full 1400：不受 B 类改写影响（D7 裁决：A/C 类保留 1400/1500 语义）。
+        // `bad_params` 不在任何表内，是 Full 的替身——Go 在 get_group_info / delete_msg /
+        // put_interaction / send_* 这些 Full 出口同样写 sendParamRetCode。
+        let body = param_error_wire("bad_params").await;
+        assert_eq!(
+            body,
+            format!(
+                r#"{{"data":null,"echo":"e1","message":"{MISSING_GROUP}","retcode":1400,"status":"failed"}}"#
+            )
+        );
+    }
+    /// Compact 四种 data 子形态的失败帧逐字节相同——Go 的失败出口只有一个
+    /// `sendActionResult`，成功路径的 data 形状位不参与（D-a）。
+    #[test]
+    fn compact_failure_bytes_are_the_same_for_every_subshape() {
+        for data in [
+            CompactData::Omit,
+            CompactData::AsIs,
+            CompactData::EmptyObject,
+            CompactData::Null,
+        ] {
+            let mut failed = ActionResponse::<Value>::failed(RETCODE_MANAGEMENT_FAILED, "x");
+            failed.envelope = EnvelopeKind::Compact(data);
+            assert_eq!(
+                encode(&failed),
+                r#"{"data":null,"message":"x","retcode":100,"status":"failed"}"#,
+                "子形态 {data:?} 的失败帧"
+            );
         }
     }
 
@@ -1029,13 +1214,13 @@ mod tests {
             r#"{"data":null,"echo":null,"message":"","retcode":1500,"status":"failed"}"#
         );
 
-        // 只有 `AsIs` 会序列化 `data`（Omit / EmptyObject / Null 根本不碰它），所以 B 类
-        // 兜底只在 `AsIs` 下可达——失败路径本来也不写 `data`。
+        // 只有 `AsIs` 成功路径会序列化 handler 的 `data`，所以 B 类的 codec 兜底只在
+        // `AsIs` 下可达；兜底形状与 D-a 后的正常失败帧一致（`data:null`、无 `echo`）。
         let mut compact: ActionResponse<Broken> = ActionResponse::ok(Broken);
         compact.envelope = EnvelopeKind::Compact(CompactData::AsIs);
         assert_eq!(
             super::encode(&compact),
-            r#"{"message":"","retcode":100,"status":"failed"}"#
+            r#"{"data":null,"message":"","retcode":100,"status":"failed"}"#
         );
     }
 

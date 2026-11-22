@@ -374,6 +374,93 @@ async fn send_private_msg_and_send_msg_dispatch_by_target() {
     assert!(matches!(&sent[2], Sent::C2c(openid, _) if openid == USER_OPENID));
 }
 
+/// 生产注册表下的 Compact 失败整串（D-a + D-b）：Go `set_group_whole_ban` 命中群类型后
+/// 固定 `sendActionResult(errWholeBanUnsupported, 100)`，WS 实发帧带 `data:null`——
+/// `Data` 无 `omitempty`，五键字母序。真实 handler、真实信封表、真实 `dispatch_json` 出口。
+/// 缺 `group_id` 的分支钉 D-b：Rust 的用户级参数校验回 `1400`，经白名单原样放行、
+/// 不被改写成 `100`（Go `handlers/set_group_whole_ban.go:24,28` 的两个 `sendParamRetCode`）；
+/// `enable` 非布尔不影响该回执——Go 的 `ParamsContent.Enable` 是 `bool`，那种入参在反序列化
+/// 阶段就失败（分发层 1400「参数解析失败」），handler 侧从不校验它。
+#[tokio::test]
+async fn whole_ban_receipt_carries_null_data_like_go() {
+    let (_dir, _api, state) = state("app_id: 12345\n");
+    let dispatcher = state.dispatcher();
+
+    let body = gensokyo_runtime::dispatch_json(
+        dispatcher.clone(),
+        br#"{"action":"set_group_whole_ban","params":{"group_id":"610636458","enable":"yes"},"echo":"e1"}"#
+            .to_vec(),
+    )
+    .await;
+    assert_eq!(
+        body,
+        r#"{"data":null,"echo":"e1","message":"官方未提供全员禁言写入字段，仅支持按成员禁言","retcode":100,"status":"failed"}"#
+    );
+
+    let body = gensokyo_runtime::dispatch_json(
+        dispatcher,
+        br#"{"action":"set_group_whole_ban","params":{},"echo":"e2"}"#.to_vec(),
+    )
+    .await;
+    assert_eq!(
+        body,
+        r#"{"data":null,"echo":"e2","message":"协议错误: 缺少 group_id","retcode":1400,"status":"failed"}"#
+    );
+}
+
+/// 生产注册表下的 Compact **参数错 / 上游失败**整串（D-a + D-b/D-c 口径）：`create_panel` 缺
+/// `scope` 在 Go 是 `sendActionResult("scope 参数缺失", 100)`（`handlers/create_panel.go:27`）——
+/// 管理类参数错一律 100，且 WS 实发帧恒带 `data:null`（`Data` 无 `omitempty`）。Rust 侧 handler
+/// 回 `1400`，不在任何放行表内，经 runtime 的 B 类改写落 `100`；帧形与 Go 逐字节同构（五键字母序）。
+#[tokio::test]
+async fn compact_upstream_failure_receipt_is_100_with_null_data() {
+    let (_dir, _api, state) = state("app_id: 12345\n");
+    let body = gensokyo_runtime::dispatch_json(
+        state.dispatcher(),
+        br#"{"action":"create_panel","params":{"panel":{}},"echo":"e1"}"#.to_vec(),
+    )
+    .await;
+    let value: serde_json::Value = serde_json::from_str(&body).expect("响应应为 JSON");
+    assert_eq!(value["retcode"], 100, "{body}");
+    assert_eq!(value["status"], "failed");
+    assert_eq!(
+        value["data"],
+        serde_json::Value::Null,
+        "Compact 失败必须带 data:null: {body}"
+    );
+    assert_eq!(value["echo"], "e1");
+    assert!(value["message"].as_str().is_some(), "message 恒在: {body}");
+}
+
+/// 审批策略关联群换算失败的整串（D-b 分支型放行）：Go 只在
+/// `resolveJoinApprovalGroupOpenIDs` 失败这一个出口写 `sendParamRetCode`
+/// （`handlers/join_approval_strategy.go:34,73`），其余失败都是 `100`。Rust 的文案照 Go 逐字
+/// （`panels.rs` `strategy_group_openids`），runtime 按前缀放行 → 线上帧 `1400` + `data:null`。
+#[tokio::test]
+async fn join_approval_unmapped_group_keeps_1400_with_null_data() {
+    let (_dir, _api, state) = state("app_id: 12345\n");
+    let dispatcher = state.dispatcher();
+    for action in [
+        "join_approval_strategy_create",
+        "join_approval_strategy_update",
+    ] {
+        let payload = format!(
+            r#"{{"action":"{action}","params":{{"group_openids":["123456"],"op":"add","strategy_id":"s1"}},"echo":"e1"}}"#
+        );
+        let body = gensokyo_runtime::dispatch_json(dispatcher.clone(), payload.into_bytes()).await;
+        let value: serde_json::Value = serde_json::from_str(&body).expect("响应应为 JSON");
+        assert_eq!(value["retcode"], 1400, "{action}: {body}");
+        assert_eq!(value["status"], "failed");
+        assert_eq!(value["data"], serde_json::Value::Null, "{action}: {body}");
+        assert_eq!(value["echo"], "e1");
+        let message = value["message"].as_str().expect("message 恒在");
+        assert!(
+            message.starts_with("协议错误: group_openids=123456 无法反查群 OpenID"),
+            "{action} 应照 Go 文案给出换算失败原因: {body}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn upstream_failure_is_1500_and_echo_kept() {
     let (_dir, api, state) = state("app_id: 12345\n");

@@ -1527,10 +1527,17 @@ mod tests {
             )]
         );
         assert_bad_request(&handler, json!({"group_id": GROUP}));
-        assert_bad_request(
-            &handler,
+        // `approve` 非布尔：Go 的 `ParamsContent.Approve` 是 `bool`，整包反序列化失败由分发层回
+        // 1400「参数解析失败」（`wsclient/ws.go:253-258` → `callapi.ReplyUnparseableMessage`），
+        // handler 看不到这个形状；Rust 在 params 层同样拒绝（文案不同、档位同为 1400）。
+        let response = block_on(handler.handle(&request(
+            "set_group_add_request",
             json!({"group_id": GROUP, "user_id": MEMBER, "approve": "yes"}),
-        );
+        )))
+        .expect("参数错误也应是 Ok(失败响应)");
+        let (status, retcode, _) = failed(response);
+        assert_eq!(status, Status::Failed);
+        assert_eq!(retcode, RETCODE_BAD_REQUEST);
         assert_eq!(handler.name(), "set_group_add_request");
     }
 

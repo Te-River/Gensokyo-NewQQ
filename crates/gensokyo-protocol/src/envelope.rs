@@ -4,7 +4,9 @@
 //!   [`EnvelopeKind::Full`]：`data` 恒在，`message` / `echo` 恒在。
 //! - **B 管理类**（23 条）用 [`EnvelopeKind::Compact`]：Go 的 `sendActionResult` /
 //!   `sendActionResultWithData` 没有 `group_id` / `user_id`，`echo` 带 `omitempty`，失败
-//!   一律 `retcode 100`。
+//!   一律 `retcode 100` + `data:null`（`sendActionResult.Data` 无 `omitempty`；例外是
+//!   `set_group_ban` / `set_group_whole_ban` 群类型校验分支的 `1400`，见 runtime 的
+//!   `PARAM_ERROR_KEEPS_1400`）。
 //! - **`send_private_msg_wakeup`** 用 [`EnvelopeKind::GoWakeupOk`]：Go 的成功路径直接
 //!   `return` 字面量 `{"status": "ok", "retcode": 0}`（`handlers/send_private_msg_wakeup.go:322`），
 //!   没有 `data` / `echo` / `message`；失败路径仍是普通 Full（`1400` / `1500`）。
@@ -43,7 +45,8 @@ pub enum EnvelopeKind {
 /// Compact 信封里 `data` 的形态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactData {
-    /// 没有 `data` 键（Go `sendActionResult`；所有失败路径也都是这个形状）。
+    /// 成功时没有 `data` 键（Go `sendActionResult` 的 HTTP 返回值）；失败路径不受这一位
+    /// 影响——四种形态的失败都是 `data:null`（WS 实发帧，D-a）。
     Omit,
     /// `data` 恒在，取 handler 的返回值。
     AsIs,
