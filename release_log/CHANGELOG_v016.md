@@ -855,6 +855,92 @@ Rust 侧第一次有 crate 级 feature：`webui` / `grpc` / `qr` / `oss`，`defa
 ## ✅ 提交记录
 
 ```
+68b5870  fix(protocol): 活体遗留五项低优先形状差收口（parity D39）
+b171085  fix(protocol): Compact 成功回执补 data:null 对齐 Go sendActionResult
+0424dc8  fix(protocol): params 严格类型契约对齐 Go 分发层 1400，杜绝宽容解码副作用
+ad721dc  fix(protocol): B类失败回执补 data:null 并按 Go 分支口径细分参数错码
+4050aca  fix(qq): share_link 上游未返回 url 时按失败处理（对齐 Go 的 err 分支）
+2f3ca2f  docs(parity): 新增 D36 —— 群聊键盘按钮「无权限操作」已由用户实机确认修复
+c476240  docs(parity): 新增 D35 —— 47 例对照牵出的第二批缺陷
+ca88417  fix(dispatcher): 管理类缺参错误码按 action 细分（仅禁言两兄弟保留 1400，其余仍 100）
+02f96e7  docs(parity): D34 补第二轮结果（32/15）与管理类错误码/put_interaction 的逐 action 结论
+4f06828  fix(api): 对齐 get_avatar/get_group_info 字段集、1400 不被改写成 100、get_robot_share_link 推 notice 并回 {}
+8f59de8  docs(parity): 登记 D34 全 action 契约对照首轮结果（47 例 / 40 SAME / 6 DIFF + 1 探针问题）
+16d07f7  fix(api): 审批策略响应回传虚拟号、put_interaction 支持顶层 post_type、wakeup 回执对齐 Go、不支持 CQ 码剥离
+d823b0c  fix(join_approval): 关联群统一按虚拟群号反查成 OpenID；group_ids 不再直接上行
+8c2e9e6  docs(api): 成文『事件里的 data 是原始 payload，含真实 OpenID』（用户裁定 C：不修，标注）
+7c18990  fix(keyboard): specify_user_ids 的虚拟号转 OpenID（群点按钮「无权限操作」根因）
+0388648  docs(parity): 登记 D33 —— 纯文本消息的 @ 不可渲染属官方限制（两侧一致，不修）
+f5a96a9  docs(parity): D32 回写已对齐 (a092634)
+a092634  fix(at): `[CQ:at]` 只匹配纯数字 qq（对齐 Go 的 cqAtNumRe），非数字原样保留
+be7ad69  docs(parity): D32 明确契约前提——插件侧只用虚拟号，openid 仅在内部用于调上游
+937d033  docs(parity): D31 回写已对齐（5de6fae）；新增 D32 at 匹配范围收紧（修复中）
+5de6fae  fix(at): 普通文本 `[CQ:at]` 按 Go 三段式渲染（用户名缓存 → openid → 删除）
+a55bd0e  docs(parity): 登记 D31 普通文本 at 三段式差异（待修，含 Go 缓存机制与修法）
+f604e25  docs(parity): D24 补齐私聊帧终验（427=427 逐字节相同）；新增 D30 markdown 前缀 at 形态已对齐
+bf67aff  fix(markdown): 前缀里的 @ 形态改为 markdown 语境的 `<qqbot-at-user id="…" />`
+318a4b5  docs(parity): D29 回写已对齐（修复后用发布产物实测出站体含前缀）
+b1fa1ef  docs(parity): D24 群帧终验通过（593=593 字节，归一化后逐字节相同，26 键序一致）
+9a522f6  fix(markdown): 前缀文本并入 markdown 内容头（对齐 Go 的 messageText + "\n" + content）
+81be817  docs(parity): D28 扩写为 12 种 CQ 段的实机验收矩阵；新增 D29 markdown 前缀丢失（修复中）
+69c0efd  docs(parity): D26 delete_msg 语义 / D27 C2C 回执 user_id / D28 不支持 CQ 段的实机观测
+428a194  docs(parity): D25 出站成功路径 9/9 一致；D24 更新为私聊帧已对齐/群帧待复验
+f3507ae  fix(delete_msg): 撤回按 Go 口径先查 echo 行号反表再查 idmap（不再「键不存在」）
+d2c5814  test(inbound): 4 条 time 断言按 Go 的 time.Now() 口径修正（消息事件取处理时刻）
+3f1f899  fix(inbound): 私聊 sender 按 string_ob11 二选一（tiny_id 有无与 Go 一致）
+641d975  fix(parity): [CQ:reply] 与 [CQ:active] / 显式 message_id 的优先级按 Go 定稿
+414dac9  fix(parity): [CQ:active] 覆盖显式 message_id + 事件帧键序按 Go 的 map 字母序
+e2c382d  fix(inbound): 群消息事件帧补齐 avatar / sender.area / time 口径（活体实测驱动）
+dd67999  feat(send): send_private_msg 支持显式 message_id（群 msg_id → 私聊被动回复）
+d16b874  docs(parity): D24 登记入站群消息帧的活体实测差异（avatar / sender.area / time / 键序）
+b5062db  docs(parity): D21 更新为已对齐（18/18 用例 retcode/status 一致，零超时）
+e170eed  docs(parity): D23 记录 action 回执 HTML 转义已对齐（Go 9126fe7，活体实测确认）
+8f8c216  feat(api): 新增 get_user_info + 群事件透传 union_group_openid（与 Go a217c63 同一契约）
+8ce3fd7  docs(parity): D21 按复跑结果更正（两侧均非零失败，Go 1500 上游层 / Rust 1400 协议层）
+02c5e7d  docs(parity): D21 更新为已对齐（Go c88b31b 起上游失败同样回 retcode 1500）
+2f9a9a4  feat(inbound): 实现 *_to_message 三个开关与 white_enable 指令白名单（parity D19/D20）
+75a1315  fix(build): windows-gnu 改走 cargo zigbuild，绕开 dlltool 与 -Wdate-time
+6fe9633  feat(build): 四能力 feature（webui/grpc/qr/oss），--no-webui 变真实裁剪
+535c74b  fix(inbound): 解析 message_scene 的 REFIDX 并在被动回复里带上 message_reference
+ac239dc  fix(inbound): 群消息写入「群 × 用户」最新 msg_id（[CQ:remove] 无 msg_id 不再恒失败）
+5f99725  feat(inbound): sender.nickname/card 优先官方 member_nickname（与 Go e6c7e32 同口径）
+40bd10e  fix(log): 热路径日志降到 trace + 补 Go 的两行 INFO；修 idmap stub 的测试假红
+ab15d72  fix(outbound): 数组段的未知类型与 remove 改为丢弃（对齐 Go）
+9bfdaea  fix(outbound): send_msg 缺 message_type 时按参数推断 + markdown 双层包装解包
+4349ee1  feat(xtask)!: 矩阵对齐 Go 五平台 + 产物改名 gensokyo-rust-*
+a928492  feat(log): 控制台日志对齐 Go 版（格式 / 配色 / 降噪）+ 新增 [openapi] 请求日志
+e93a5ad  feat(xtask): --all 多目标并行构建（worker 隔离缓存 + 确定性输出）
+51d47a9  fix(xtask): --ssl-revoke-best-effort 按 curl 版本探测（>=7.70 才加）
+87e3987  fix(xtask): Windows 下载启用 schannel 软吊销，cargo-zigbuild 引导不再被 CRYPT_E_NO_REVOCATION_CHECK 打断
+201977e  docs: 门禁基线按实测校正为 45 suites / 1478 passed / 1 ignored（HEAD 59510ca）
+59510ca  docs: 群聊 keyboard 占位符判定补 Go 侧取证（非缺口，勿据文件名误认）
+57a4d2b  docs: 修正 CHANGELOG 中 --all 退出码口径（0 产物同样非零退出）
+9ec6e2b  fix(xtask): zig 下载失败从 45 分钟收敛到个位分钟
+6b1eb38  fix(xtask): --all 的 MSVC 判据改用 cl.exe，zig 引导失败降级为 [skip]
+6febe77  docs: 纯 Rust 化后的文档审计与修正（readme/AGENTS/迁移/交接/parity 标注）
+63cd9b0  chore!: Refactor 分支移除 Go 遗留源码树（纯 Rust 化）
+469f98a  docs: 撤回提前封版标记（016 尚未发布），xtask --all 修复入 v016 changelog
+f3c8a7f  docs: v017 changelog 记录 xtask --all 跳过修复
+abb5cc5  fix: xtask --all 对缺工具链目标输出 [skip] 而非计入失败
+11d27fa  docs: Release 016 Rust 封版（changelog 定稿标记 + v017 stub）
+ae49704  feat: P86d-2 回执补齐 + get_group_member_list 全量翻页
+30a554f  feat: Rust parity 批——键盘 C2C 权限归一 + 自定义数据库位置（phase 2）
+631b272  feat: P83 出站管理三码真实实现（member/set_group/remove）
+a35d66a  docs: P86d-1 收口与基线 1429
+a5efa86  fix: 响应信封收尾三件（next_cursor / mark_msg_as_read / encode 兜底）（P86d-1）
+b58c280  docs: P86c 收口与基线 1427
+aecaaab  feat: per-action 响应信封（B 类管理 Compact，P86c）
+e63e47c  docs: P86b 收口与 P86c 登记（基线 1416）
+4a89ae0  fix: action 响应外层信封按 Go 字母序与字段语义（P86b）
+3d0e05d  docs: P86a 收口与基线 1406
+a6d6fcd  fix: action 回执 message_id 按 string_ob11 渲染（P86a）
+ef66cd9  docs: 清理 handover §7 / parity B6 过期条目
+ea6304b  docs: P80 avatar 图片化文档收口与基线 1399
+843d4d3  feat: avatar 出站按 Go 段路径发 qlogo 真图（P80）
+6e00ffd  docs: P81/P85/P86 收口与基线 1391
+05a1567  docs: 发布名 Release 016 Rust 与构建版本口径
+b1c25f5  fix: 出站不可消费段按 Go 三分界 + 纯码空消息回执（P81）
+38c0b97  feat: xtask 注入构建版本串，--version 与 Go 同口径（P85）
 2d9fa6e  docs: P79/P82 文档收口与已知差异登记
 56cf231  test: 加固环回依赖用例的间歇假红（P82）
 ca59e2b  fix: 出站不可消费的 avatar/music 保留字面，不再整条 1400（P79）
