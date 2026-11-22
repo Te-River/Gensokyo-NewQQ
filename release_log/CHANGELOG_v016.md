@@ -730,6 +730,18 @@ Go 的成功路径直接 `return` 字面量 `{"status": "ok", "retcode": 0}`（`
 - **影响**：成功回执 `{"data":"","echo":…,"message":"","retcode":0,"status":"ok"}` 与 Go 逐字节一致
 - **测试**：`interaction::tests::put_interaction_uses_echo_id_and_result_code`、`put_interaction_reads_top_level_post_type` 断言成功回执 `data` 是 `""`（不是 null）
 
+### 活体对照遗留的五项低优先形状差收口（2026-11-22，parity D39）
+
+第 4/5 轮活体对照（`live-summary.json` E40/E37/E12/E29/E14-E16）遗留五项低优先差异，逐项取证 Go `a322b11` 后裁决「改齐 or 登记刻意差异」：
+
+- **① `delete_group_msg` 缺 `message_id`（E40，改 Rust + 补能力）**：Go `handlers/delete_group_msg.go:89-101` 对空 / 非正 `message_id` **并非静默成功**——撤回「机器人在该群发送的最后一条消息」（`idmap.GetLatestBotMsgID`），取不到才回 1400「未找到机器人在群 %s 发送的最后一条消息: key not found」。Rust 此前直接 1400「缺少 message_id」且全仓没有 latest-bot 状态源。本轮补齐闭环：`gensokyo-storage` 新增 `store_latest_bot_msg_id`/`get_latest_bot_msg_id`（复用 Go 的 latest 表 + NUL 哨兵键 `\u{0}qq_bot_self`，逐字节兼容 Go bbolt 导出行）；`gensokyo-runtime/src/deferred.rs` 群发送成功后记录机器人最新消息（Go `rememberLatestBotGroupMessageInGroup` 的活路径口径）；handler 的空 id 分支读它并真撤回。**非字符串正数 `user_id`（Go 的「撤成员最新消息」分支）本仓无上游定位能力，如实拒绝并登记 §F D39a**
+- **② `get_user_info`/`get_avatar` 的 `user_id` 类型（E37，审计 D-i，改 Rust）**：Go `get_user_info.go:19,55` 的 `UserID string` 原样回显入参文本 ⇒ Rust `UserInfoData.user_id` 由 `Ob11Id` 改 `String`（恒带引号，数字入参经归一也是字符串）；Go `get_avatar.go:68-73` 的 `int64` 来自 `ParseInt` 失败给 `0` ⇒ `AvatarData.user_id` 改 `i64`（OpenID 入参落 0）。两者都不再跟 `string_ob11` 分叉
+- **③ `get_custom_menu` 的 `data.menu.items`（E12/A14，改 Rust）**：Go `botgo/dto/menu.go` 的 `Items []MenuItem` 无 omitempty ⇒ 空菜单实发帧 `"menu":{"items":null}`；Rust 透传官方对象时是 `"menu":{}`（缺键）。MenuResponse.menu 改为 `Option<Menu>` 镜像 Go 指针语义，handler 按 Go `get_custom_menu.go:24-35` 补空对象并把空 items 写 `null`
+- **④ `get_friend_list` 昵称（E29，改 Rust 写侧）**：取证结论为**数据内容差非形状差**（两侧键集逐字节一致）——根因在写侧：Go `ProcessC2CMessage.go:233-243` 写 `FriendData{Nickname: privateNickname}`（`e6c7e32` 起为 `member_nickname || username`），Rust `inbound.rs::record_user_info` 只写 user_id（注释「Go 恒写空串」已过时）。本轮把 sender 同源昵称写进 `user_info` 并修注释；备注两侧都恒空、不动
+- **⑤ `set_group_member_blacklist` 空参校验顺序（E14/E16/A05，只登记不改码）**：Go 先验 op（`op 必须为 add 或 del`）再反查 group，Rust 先 `resolve_group`；档位同为 100、仅首报错文案不同，属既有登记的 a 类前缀族（D37 残留 b 项），并入 §F D39 说明
+- **影响**：①③④ 改变线上行为（空 id 撤回可用、menu 键存在、好友列表出昵称）；② 修正回执 ID 形态；⑤ 零改动。wire 整串断言覆盖 ①三档（有记录 0/ok+data:null、无记录 1400+Go 同文案、显式 id 不回归）、②两 action、③items:null
+- **测试**：`interaction::tests::delete_group_msg_without_message_id_retracts_latest_bot_message`/`…_without_latest_bot_record_is_1400_with_go_text`/`…_rejects_member_targeted_retract`/`…_retracts_through_the_group_endpoint`（wire）、`user_info_echoes_request_id_and_maps_three_fields`（三形态 wire）、`avatar_is_built_locally_from_app_id_and_openid`（两种形态 wire）、`panels::tests::menu_actions_forward_scope`（items:null wire + None 形态）、`gensokyo_qq::dto::panel::tests::menu_response_mirrors_the_go_pointer_field`、`inbound::tests::c2c_message_stores_user_info`（昵称写侧 + username 回落）
+
 ---
 
 ## 📝 工程与文档变更

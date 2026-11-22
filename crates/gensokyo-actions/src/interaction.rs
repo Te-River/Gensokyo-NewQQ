@@ -102,7 +102,7 @@ use crate::send::{
 };
 use crate::unsupported::{checked_unsupported, required_add_del_op, required_object};
 use crate::util::{
-    bad_request, ob11_id, ok_data, params_object, params_or_empty, resolve_group,
+    ResolvedId, bad_request, ob11_id, ok_data, params_object, params_or_empty, resolve_group,
     resolve_identity_text, resolve_member, respond,
 };
 /// `get_group_honor_info` 的说明。
@@ -115,8 +115,47 @@ const SET_GROUP_ANONYMOUS_BAN: &str = "set_group_anonymous_ban: QQ 官方未提�
 pub struct AvatarData {
     /// 头像地址（Go 把 URL 放在 `message` 字段里）。
     pub message: String,
-    /// 请求里的用户虚拟号（回填请求值）。
-    pub user_id: Ob11Id,
+    /// 请求里的用户 ID：**恒 JSON 数字**——Go `get_avatar.go:15-18,68-73` 把它写成
+    /// `int64`，值来自 `strconv.ParseInt(userIDStr, 10, 64)` 且忽略 err（32 位 OpenID
+    /// 解析失败落 `0`）；不跟 `string_ob11` 分叉（审计 D-i）。
+    pub user_id: i64,
+}
+
+/// Go `strconv.ParseInt(s, 10, 64)` 的回执形态：解析失败给 `0`（`get_avatar.go:68-73`
+/// 取 `userid64` 时忽略 err）。
+fn go_int64_id(text: &str) -> i64 {
+    text.parse::<i64>().unwrap_or(0)
+}
+
+/// Go `resolveDeleteGroupMessageID`（`delete_group_msg.go:131-158`）：非正数字与含非数字
+/// 字符的 ID **原样透传**（插件拿到的就是真实消息 ID），只有正整数才按虚拟号反查。
+fn resolve_delete_message_id(context: &ActionContext, text: &str) -> Result<String> {
+    let trimmed = text.trim();
+    if let Ok(value) = trimmed.parse::<i64>()
+        && value <= 0
+    {
+        return Ok(trimmed.to_owned());
+    }
+    if !trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        return Ok(trimmed.to_owned());
+    }
+    resolve_message_id(context, trimmed)
+}
+
+/// Go `actionIDString`（`delete_group_msg.go:160-169`）：nil → 空串、字符串 trim、其余
+/// `fmt.Sprint` 后 trim（JSON 数字经 float64 解码再 Sprint，整数形态即十进制文本）。
+fn go_action_id_text(value: Option<&Value>) -> String {
+    match value {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(text)) => text.trim().to_owned(),
+        Some(other) => other.to_string().trim().to_owned(),
+    }
+}
+
+/// Go `isNonPositiveNumericID`（`delete_group_msg.go:176-179`）叠加判空：空串与非正数字
+/// 都算「没给 ID」（解析不动的数字串按 Go 语义是「给了一个真实 ID」，不算空）。
+fn is_absent_or_non_positive(text: &str) -> bool {
+    text.is_empty() || text.parse::<i64>().is_ok_and(|value| value <= 0)
 }
 
 /// `message` 必填：消息体可以是字符串 / 数组 / 对象，只拒绝缺失与 `null`。
@@ -332,7 +371,7 @@ impl GetAvatarHandler {
         let url = format!("https://q.qlogo.cn/qqapp/{app_id}/{}/640", resolved.openid);
         let data = AvatarData {
             message: url,
-            user_id: ob11_id(&requested, self.context.string_ob11()),
+            user_id: go_int64_id(&requested),
         };
         ok_data(request, &data)
     }
@@ -351,8 +390,10 @@ impl Handler for GetAvatarHandler {
 /// `get_user_info` 的响应数据（`user_id` 回显请求值，其余三个字段照抄上游）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UserInfoData {
-    /// 请求里的用户虚拟号 / openid（回填请求值）。
-    pub user_id: Ob11Id,
+    /// 请求里的用户 ID：**恒 JSON 字符串原样回显**——Go `get_user_info.go:19,55` 的
+    /// `UserID string` 装的是 `params.user_id` 归一后的文本（数字入参经
+    /// `ParamsContent.UnmarshalJSON` 变十进制字符串），不跟 `string_ob11` 分叉（审计 D-i）。
+    pub user_id: String,
     /// 用户昵称。
     pub username: String,
     /// 是否允许机器人主动发消息。
@@ -387,7 +428,7 @@ impl GetUserInfoHandler {
         ok_data(
             request,
             &UserInfoData {
-                user_id: ob11_id(&requested, self.context.string_ob11()),
+                user_id: requested,
                 username: info.username,
                 allow_proactive_msg: info.allow_proactive_msg,
                 avatar: info.avatar,
@@ -602,19 +643,55 @@ impl DeleteGroupMsgHandler {
     async fn execute(&self, request: &ActionRequest<Value>) -> Result<ActionResponse<Value>> {
         let object = params_object(request)?;
         let group = resolve_group(&self.context, object)?;
-        // `user_id` 只做类型校验：Go 用它区分「撤回自己发的消息」，群撤回路径不看它
-        params::id_text(object, "user_id")?;
-        let requested = params::required_id(object, "message_id")?;
-        let message_id = resolve_message_id(&self.context, &requested)?;
+        // Go `delete_group_msg.go:79-87`：`user_id` 归一后非空且不是非正数字 ⇒ 「撤回该成员
+        // 最新消息」分支——本仓没有「按成员定位最新消息」的上游能力，如实拒绝（§F D39a）。
+        // 其余形态（缺失 / null / 空串 / 非正数）与 Go 一样落「机器人自己发的消息」模式。
+        if !is_absent_or_non_positive(&go_action_id_text(object.get("user_id"))) {
+            return Err(Error::Protocol(
+                "delete_group_msg 暂不支持按 user_id 撤回指定成员的消息".to_owned(),
+            ));
+        }
+        // Go `delete_group_msg.go:89-101` + `actionIDString`/`isNonPositiveNumericID`：
+        // `message_id` 缺失 / null / 空串 / 非正数字 ⇒ 撤回「机器人在该群发送的最后一条消息」
+        // （`GetLatestBotMsgID`，idmap latest 表的哨兵键），取不到才失败；给了有效值才按
+        // 虚拟号反查。**不走 `params::required_id`**——它把 `0` 拦成参数错，Go 却当「没给 ID」。
+        let message_id = {
+            let text = go_action_id_text(object.get("message_id"));
+            if is_absent_or_non_positive(&text) {
+                self.latest_bot_message_id(&group)?
+            } else {
+                resolve_delete_message_id(&self.context, &text)?
+            }
+        };
         self.context
             .api()
             .delete_msg(RetractRequest {
-                group_openid: Some(group.openid),
+                group_openid: Some(group.openid.clone()),
                 user_openid: None,
                 message_id,
             })
             .await?;
         ok_data(request, &Value::Null)
+    }
+
+    /// Go `deleteGroupMsgGetLatestBot` = `idmap.GetLatestBotMsgID`，失败文案照抄
+    /// `delete_group_msg.go:92-95`（`未找到机器人在群 %s 发送的最后一条消息: %w`）。
+    /// Go 侧查不到时 err 恒为 `key not found`（`idmap/new_service.go:1076-1078` 把
+    /// 「无记录」与「已过期」都映射成它）；Rust 的 `StorageError` 文案逐字对齐这条。
+    fn latest_bot_message_id(&self, group: &ResolvedId) -> Result<String> {
+        let missing = || {
+            Error::Protocol(format!(
+                "未找到机器人在群 {} 发送的最后一条消息: key not found",
+                group.requested
+            ))
+        };
+        let Some(store) = self.context.idmap() else {
+            return Err(missing());
+        };
+        match store.get_latest_bot_msg_id(&group.openid) {
+            Ok(id) if !id.trim().is_empty() => Ok(id),
+            _ => Err(missing()),
+        }
     }
 }
 
@@ -1110,7 +1187,8 @@ mod tests {
     use crate::handler::{DEFERRED_FIELD, RETCODE_BAD_REQUEST};
     use crate::send::SendRequest;
     use crate::testing::{
-        Call, block_on, context, failed, ok_data, request, request_without_params,
+        Call, block_on, context, context_with_idmap, failed, idmap_store, ok_data, request,
+        request_without_params,
     };
     use crate::util::RETCODE_UPSTREAM;
     use gensokyo_core::{Error, Ob11Id};
@@ -1120,6 +1198,7 @@ mod tests {
         ApprovalJoinRequest, GenerateUrlLink, GenerateUrlLinkRequest, MemberBlacklistList,
         MemberBlacklistRequest, MemberBlacklistResponse, UserInfo,
     };
+    use std::sync::Arc;
 
     const GROUP: &str = "0123456789abcdef0123456789abcdef";
     const MEMBER: &str = "fedcba9876543210fedcba9876543210";
@@ -1132,6 +1211,11 @@ mod tests {
         assert_eq!(status, Status::Failed);
         assert_eq!(retcode, RETCODE_UPSTREAM, "{}", handler.name());
         assert_eq!(data, None);
+    }
+
+    /// 取失败响应的 `message`（wire 文案断言用）。
+    fn status_message(response: &gensokyo_protocol::action::ActionResponse<Value>) -> String {
+        response.message.clone().unwrap_or_default()
     }
 
     /// 断言 `1400`。
@@ -1151,10 +1235,17 @@ mod tests {
 
         let response = block_on(handler.handle(&request("get_avatar", json!({"user_id": MEMBER}))))
             .expect("本地拼 URL 不应失败");
+        // Go `AvatarData.UserID` 是 `int64`（`get_avatar.go:15-18`），值取
+        // `strconv.ParseInt(userIDStr, 10, 64)` 并忽略 err（`:68-73`）：32 位 OpenID 解析
+        // 失败落 **0**，恒 JSON 数字、不跟 `string_ob11` 分叉（审计 D-i）。
+        assert_eq!(
+            serde_json::to_string(&response).expect("响应应可序列化"),
+            r#"{"data":{"message":"https://q.qlogo.cn/qqapp/102001234/fedcba9876543210fedcba9876543210/640","user_id":0},"echo":"e-1","message":"","retcode":0,"status":"ok"}"#
+        );
         let data = ok_data(response);
         let url = format!("https://q.qlogo.cn/qqapp/102001234/{MEMBER}/640");
         assert_eq!(data["message"], json!(url));
-        assert_eq!(data["user_id"], json!(MEMBER));
+        assert_eq!(data["user_id"], json!(0));
         // 键集与 Go `AvatarData` 逐字段一致：只有 message / user_id（URL 在 message 里）
         let mut keys: Vec<&str> = data
             .as_object()
@@ -1169,35 +1260,85 @@ mod tests {
 
         assert_bad_request(&handler, json!({}));
         assert_bad_request(&handler, json!({"user_id": "not-a-vuin"}));
+
+        // 数字虚拟号形态：ParseInt 成功 ⇒ 回执带该数字（仍恒数字）
+        let store = idmap_store("avatar-num");
+        let (_, vuin) = store.retrieve_virtual_value(MEMBER).expect("预置虚拟号");
+        let (ctx, _api) = context_with_idmap(store, false);
+        let handler = GetAvatarHandler::new(ctx);
+        let response =
+            block_on(handler.handle(&request("get_avatar", json!({"user_id": vuin.to_string()}))))
+                .expect("虚拟号反查不应失败");
+        assert_eq!(
+            serde_json::to_string(&response).expect("响应应可序列化"),
+            format!(
+                "{{\"data\":{{\"message\":\"https://q.qlogo.cn/qqapp/102001234/{MEMBER}/640\",\"user_id\":{vuin}}},\"echo\":\"e-1\",\"message\":\"\",\"retcode\":0,\"status\":\"ok\"}}"
+            )
+        );
     }
 
     /// 官方 2026-11-16 的 `get_user_info`：回显请求 ID + 上游三个字段。
+    ///
+    /// Go `UserInfoData.UserID` 是 `string`（`get_user_info.go:19,55`），装的是归一后的
+    /// 入参文本 ⇒ **恒 JSON 字符串原样回显**，数字 / 字符串入参同形（审计 D-i）。
     #[test]
     fn user_info_echoes_request_id_and_maps_three_fields() {
-        let (ctx, api) = context();
-        *api.user_info.lock().unwrap() = Some(Ok(UserInfo {
-            username: "同道中人".to_owned(),
-            allow_proactive_msg: true,
-            avatar: "https://thirdqq.qlogo.cn/bqqthird?x=1".to_owned(),
-        }));
-        let handler = GetUserInfoHandler::new(ctx);
+        // 数字虚拟号要先经 idmap 反查：播种一个非 32 位的身份（长度不是 32 才不走
+        // openid 直通分支），拿到的 vUIN 作数字入参
+        let store = idmap_store("user-info");
+        let short_openid = "u-short-user-1".to_owned();
+        let (_, vuin) = store
+            .retrieve_virtual_value(&short_openid)
+            .expect("预置虚拟号");
+        assert_ne!(vuin, 0, "顺序分配的 vUIN 应为正数");
+        // 三元组：入参 / data.user_id（**请求文本原样回显**，Go `UserID: userID`）/
+        // 上游收到的 openid（反查结果）
+        for (requested, echoed, upstream) in [
+            (json!(MEMBER), MEMBER, MEMBER),
+            (
+                json!(vuin),
+                vuin.to_string().as_str(),
+                short_openid.as_str(),
+            ),
+            (
+                json!(vuin.to_string()),
+                vuin.to_string().as_str(),
+                short_openid.as_str(),
+            ),
+        ] {
+            let (ctx, api) = context_with_idmap(Arc::clone(&store), true);
+            *api.user_info.lock().unwrap() = Some(Ok(UserInfo {
+                username: "同道中人".to_owned(),
+                allow_proactive_msg: true,
+                avatar: "https://thirdqq.qlogo.cn/bqqthird?x=1".to_owned(),
+            }));
+            let handler = GetUserInfoHandler::new(ctx);
 
-        let response =
-            block_on(handler.handle(&request("get_user_info", json!({"user_id": MEMBER}))))
-                .expect("查询用户资料不应失败");
-        assert_eq!(response.retcode, 0);
-        let data = ok_data(response);
-        assert_eq!(
-            data,
-            json!({
-                "user_id": MEMBER,
-                "username": "同道中人",
-                "allow_proactive_msg": true,
-                "avatar": "https://thirdqq.qlogo.cn/bqqthird?x=1",
-            })
-        );
-        assert_eq!(api.calls(), vec![Call::UserInfo(MEMBER.to_owned())]);
-        assert_eq!(handler.name(), "get_user_info");
+            let response =
+                block_on(handler.handle(&request("get_user_info", json!({"user_id": requested}))))
+                    .expect("查询用户资料不应失败");
+            assert_eq!(response.retcode, 0);
+            let data = ok_data(response.clone());
+            assert_eq!(
+                data,
+                json!({
+                    "user_id": echoed,
+                    "username": "同道中人",
+                    "allow_proactive_msg": true,
+                    "avatar": "https://thirdqq.qlogo.cn/bqqthird?x=1",
+                }),
+                "user_id 必须是字符串形态的原样回显: {requested} / {echoed}"
+            );
+            assert_eq!(
+                serde_json::to_string(&response).expect("响应应可序列化"),
+                format!(
+                    r#"{{"data":{{"allow_proactive_msg":true,"avatar":"https://thirdqq.qlogo.cn/bqqthird?x=1","user_id":"{echoed}","username":"同道中人"}},"echo":"e-1","message":"","retcode":0,"status":"ok"}}"#
+                ),
+                "wire 整串：user_id 恒带引号"
+            );
+            assert_eq!(api.calls(), vec![Call::UserInfo(upstream.to_owned())]);
+            assert_eq!(handler.name(), "get_user_info");
+        }
     }
 
     /// 缺 `user_id` / 不可解析 → `1400`；上游错误 → `1500`。
@@ -1470,6 +1611,8 @@ mod tests {
         }
     }
 
+    /// Go `delete_group_msg.go:52-67` 的三条路：显式 `message_id`（含非数字真实 ID 原样
+    /// 透传）、缺省时撤回「机器人在该群的最后一条」、两者皆不可得回 `1400" + Go 逐字文案。
     #[test]
     fn delete_group_msg_retracts_through_the_group_endpoint() {
         let (ctx, api) = context();
@@ -1481,7 +1624,11 @@ mod tests {
             json!({"group_id": GROUP, "message_id": "msg-1"}),
         )))
         .expect("撤回群消息不应失败");
-        assert_eq!(ok_data(response), Value::Null);
+        // 回执 data:null + 空 message（Go sendDeleteGroupMsgResponse 的成功帧）
+        assert_eq!(
+            serde_json::to_string(&response).expect("响应应可序列化"),
+            r#"{"data":null,"echo":"e-1","message":"","retcode":0,"status":"ok"}"#
+        );
         assert_eq!(
             api.calls(),
             vec![Call::DeleteMsg(
@@ -1490,8 +1637,97 @@ mod tests {
                 "msg-1".to_owned()
             )]
         );
-        assert_bad_request(&handler, json!({"group_id": GROUP}));
         assert_eq!(handler.name(), "delete_group_msg");
+    }
+
+    /// 缺 `message_id`（或空串 / 非正数）⇒ 撤回机器人最后一条（Go
+    /// `delete_group_msg.go:89-101` + `idmap.GetLatestBotMsgID`）。
+    #[test]
+    fn delete_group_msg_without_message_id_retracts_latest_bot_message() {
+        let store = idmap_store("dgm-latest");
+        store
+            .store_latest_bot_msg_id(GROUP, "ROBOT1.0_LATEST_BOT")
+            .expect("预置机器人最新消息");
+        let (ctx, api) = context_with_idmap(store, true);
+        let handler = DeleteGroupMsgHandler::new(ctx);
+
+        for params in [
+            json!({"group_id": GROUP}),
+            json!({"group_id": GROUP, "message_id": ""}),
+            json!({"group_id": GROUP, "message_id": 0}),
+            json!({"group_id": GROUP, "message_id": -1}),
+        ] {
+            // FakeQqApi 的槽位一次调用取走一次（testing.rs::take），逐轮重新预置
+            *api.delete.lock().unwrap() = Some(Ok(()));
+            let response = block_on(handler.handle(&request("delete_group_msg", params.clone())))
+                .expect("缺省 message_id 应撤回机器人最后一条");
+            assert_eq!(
+                serde_json::to_string(&response).expect("响应应可序列化"),
+                r#"{"data":null,"echo":"e-1","message":"","retcode":0,"status":"ok"}"#,
+                "{params}"
+            );
+        }
+        let expected: Vec<Call> = (0..4)
+            .map(|_| {
+                Call::DeleteMsg(
+                    Some(GROUP.to_owned()),
+                    None,
+                    "ROBOT1.0_LATEST_BOT".to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(api.calls(), expected);
+    }
+
+    /// 无 latest-bot 记录 ⇒ 档位与文案照 Go（`未找到机器人在群 %s 发送的最后一条消息: %w`，
+    /// err 恒为 `key not found`），且零上游调用。
+    #[test]
+    fn delete_group_msg_without_latest_bot_record_is_1400_with_go_text() {
+        let store = idmap_store("dgm-none");
+        let (ctx, api) = context_with_idmap(store, true);
+        let handler = DeleteGroupMsgHandler::new(ctx);
+
+        let response =
+            block_on(handler.handle(&request("delete_group_msg", json!({"group_id": GROUP}))))
+                .expect("取不到目标也应是 Ok(失败响应)");
+        let (status, retcode, _) = failed(response.clone());
+        assert_eq!(status, Status::Failed);
+        assert_eq!(retcode, RETCODE_BAD_REQUEST);
+        assert_eq!(
+            status_message(&response),
+            format!("协议错误: 未找到机器人在群 {GROUP} 发送的最后一条消息: key not found")
+        );
+        assert!(api.calls().is_empty(), "定位失败不得触达上游");
+    }
+
+    /// 「撤回指定成员最新消息」分支（Go `delete_group_msg.go:82-87,97-100`）本仓无上游能力，
+    /// 如实拒绝而不是静默撤机器人那条（§F D39a）。
+    #[test]
+    fn delete_group_msg_rejects_member_targeted_retract() {
+        let (ctx, api) = context();
+        let handler = DeleteGroupMsgHandler::new(ctx);
+        for user_id in [json!("12345"), json!(12345_u64)] {
+            let response = block_on(handler.handle(&request(
+                "delete_group_msg",
+                json!({"group_id": GROUP, "user_id": user_id}),
+            )))
+            .expect("不支持的分支也应是 Ok(失败响应)");
+            let (_, retcode, _) = failed(response);
+            assert_eq!(retcode, RETCODE_BAD_REQUEST, "{user_id}");
+        }
+        assert!(api.calls().is_empty(), "拒绝路径不得触达上游");
+        // 非正数 user_id 与 Go 一样落「机器人消息」模式（botMessage=true）：不报文案错，
+        // 走 latest-bot 定位——无 idmap 时按 Go 口径回「未找到…」
+        let response = block_on(handler.handle(&request(
+            "delete_group_msg",
+            json!({"group_id": GROUP, "user_id": -1}),
+        )))
+        .expect("非正 user_id 应落机器人消息模式");
+        let message = response.message.clone().unwrap_or_default();
+        assert!(
+            message.contains("未找到机器人在群") && message.contains("发送的最后一条消息"),
+            "非正 user_id 不该被当成成员撤回: {message}"
+        );
     }
 
     #[test]

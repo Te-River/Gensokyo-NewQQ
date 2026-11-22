@@ -572,6 +572,7 @@ async fn send_body(
         }
     };
     record_sent_message(echo, &response.id);
+    remember_latest_bot_group_message(context, target, openid, &response.id);
     Ok(response.id)
 }
 
@@ -904,6 +905,37 @@ fn reserve_at_everyone(
         return Ok(None);
     };
     Ok(Some(at_everyone::reserve(idmap, openid)?))
+}
+
+/// 群发送成功后记录「机器人最新消息」（Go `rememberLatestBotGroupMessageInGroup`，
+/// `delete_group_msg.go:211-223`；活路径调用点 `outbound_bridge.go:251-256` 与 legacy
+/// `send_group_msg.go:488/704/757/866/971`、`send_group_msg_raw.go:314/375/422/480`）。
+/// `delete_group_msg` 缺 `message_id` 时靠它定位撤回目标——没有这条记录，Go 会回
+/// 「未找到机器人在群 … 发送的最后一条消息」而 Rust 只能永远报「缺少 message_id」。
+///
+/// 与 Go 同口径的三点：只在**群目标**且 message_id 非空时写；键用反查后的
+/// `group_openid`（Go 在回执前把 GroupID 覆写成真实 OpenID）；写失败只告警，
+/// 不改变发送结果（Go 的 `StoreLatestMsgID` 同样吞错）。
+fn remember_latest_bot_group_message(
+    context: &ActionContext,
+    target: &SendTarget,
+    group_openid: &str,
+    message_id: &str,
+) {
+    if !matches!(target, SendTarget::Group(_)) || message_id.is_empty() {
+        return;
+    }
+    let Some(idmap) = context.idmap() else {
+        return;
+    };
+    if let Err(err) = idmap.store_latest_bot_msg_id(group_openid, message_id) {
+        tracing::warn!(
+            group = %group_openid,
+            message_id = %message_id,
+            error = %err,
+            "记录机器人最新消息失败，delete_group_msg 缺参撤回可能定位不到目标"
+        );
+    }
 }
 
 /// 发送成功后的 echo 回写（Go `StoreCacheInMemory`）：失败只告警，不改变发送结果。

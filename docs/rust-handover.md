@@ -110,7 +110,7 @@
 
 ## 6. 已知缺口与有意差异（「不要当成 bug」清单）
 
-下面 28 条都是**已裁决 / 已登记**的差异：看到时先查证据列，不要直接按「和 Go 不一样」开修。真正待办的只在 §7。
+下面 32 条都是**已裁决 / 已登记**的差异：看到时先查证据列，不要直接按「和 Go 不一样」开修。真正待办的只在 §7。
 
 | # | 项 | 说明 | 证据 |
 |---|----|------|------|
@@ -145,6 +145,7 @@
 | ㉘ | 精简构建的 gRPC / OSS 是 **warn 降级**、不是静默 | Go small：gRPC 服务端与客户端都不起（`main_grpc_stub.go:6-8`）、上传函数 `return "", nil`、`CheckText` 恒 true。Rust：`lotus_grpc` 与 `oss_type` 1~3 各 warn 一次后降级（idmap 走本地、`/getid` 保持挂载；内置 OSS 回 `Error::HostingConfig` 并保留原引用）。**看到这两条 warn 不是配置写错** | `crates/gensokyo-runtime/src/boot.rs`、`crates/gensokyo-media/src/oss/mod.rs`；parity §F D18 |
 | ㉙ | `*_to_message` 开关打开时**不再发 notice（interaction 除外）** | `global_group_msg_rre_to_message` / `global_c2c_msg_switch_to_message` 打开后，`GROUP_MSG_RECEIVE/REJECT`、`C2C_MSG_RECEIVE/REJECT` 改发 `message/group` / `message/private`（Go `ProcessGroupMsgReceive.go:104-213` 等）；`group_openid`/`openid` 为空时 Go 整条不报，Rust 同样返回空。`global_interaction_to_message` 打开时 Go 是**先 message 后 notice 双发**（四分支 `ProcessInlineSearch.go:152-423,424-628`），所以一条回调会看到两条事件。分侧：`avatar`、`is_binded_*`、echo 双路未做 | `crates/gensokyo-runtime/src/inbound.rs`（`group_payload_message` / `c2c_msg_switch` / `interaction_message`）；parity §F D19 |
 | ㉚ | `white_enable` 单独打开**不生效**，必须同时开 `white_prefix_mode` | Go 的白名单是「指令前缀白名单」：`white_prefix_mode=true` 且 `white_enable[4]`（群）/ `white_enable[5]`（单聊）为真时，正文不以 `white_prefixs` 任一项开头 ⇒ `messageText` 置空、调用方 `return nil`，**整条消息不上报**（`handlers/message_parser.go:1913-1971`、`ProcessGroupMessage.go:121-125`）。`white_bypass` 是豁免名单，`white_bypass_reverse=true` 时反转（只有名单内才过滤）。分侧：Go 未命中会回 `no_white_response` 兜底消息，Rust 无出站通道、只丢弃；Go 的 `TemporaryCommands` 无对应物 | `crates/gensokyo-runtime/src/inbound.rs`（`white_list_passes` 与群/私聊两个调用点）；parity §F D20 |
+| ㉜ | `delete_group_msg` 的「撤指定成员最新消息」分支如实拒绝 + blacklist 空参首报错文案 | **D39（2026-11-22）**：① Go 空 `message_id` 撤回「机器人最后一条」的能力 Rust 已补齐（latest 表 NUL 哨兵键 + deferred 写侧），但 `user_id` 非空正数时 Go 撤**该成员**最后一条、Rust 无此上游能力 ⇒ 1400 如实拒绝，不是回归；② `set_group_member_blacklist` 空参两侧档位同 100、首报错不同（Go 报 op、Rust 报 group_id）——校验顺序差，属 a 类前缀族既有登记的延伸，不修 | parity §F D39；`crates/gensokyo-actions/src/interaction.rs`（DeleteGroupMsgHandler）、`crates/gensokyo-storage/src/idmap/mod.rs`（LATEST_BOT_MESSAGE_USER_KEY） |
 
 ## 7. 未完成项与下一步
 

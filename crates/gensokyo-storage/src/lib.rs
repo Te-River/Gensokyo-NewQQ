@@ -105,8 +105,8 @@ pub use error::StorageError;
 #[cfg(feature = "grpc")]
 pub use idmap::grpc::{IdMapClient, IdMapService};
 pub use idmap::{
-    IdMapOptions, IdMapRemoteMode, IdMapStore, USER_NAME_SWEEP_THRESHOLD, UserInfoRow,
-    idmap_remote_mode,
+    IdMapOptions, IdMapRemoteMode, IdMapStore, LATEST_BOT_MESSAGE_USER_KEY,
+    USER_NAME_SWEEP_THRESHOLD, UserInfoRow, idmap_remote_mode,
 };
 pub use importer::{ImportError, ImportOptions, ImportReport, OnVuinConflict};
 pub use short_url::{

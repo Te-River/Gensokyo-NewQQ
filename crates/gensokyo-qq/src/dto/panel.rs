@@ -218,14 +218,18 @@ pub struct SubMenuItem {
     pub link: String,
 }
 
-/// 自定义菜单响应（未设置过时 `menu` 为 `null`）。
+/// 自定义菜单响应（Go `botgo/dto/menu.go:33-36`：`Menu *Menu`，无 `omitempty`）。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MenuResponse {
     /// 菜单版本。
     pub version: i64,
-    /// 菜单内容（原样透传）。
-    pub menu: Value,
+    /// 菜单内容。**形态与 Go 的指针字段同构**：官方不带 `menu` 键 / 显式 `null` →
+    /// `None`；否则 `Some`。序列化恒写 `menu` 键（Go 的 `json:"menu"` 没有 omitempty），
+    /// 且 `Menu.items` 恒在（`MenuItem.SubMenuItems` 带 omitempty、其余字段不带——见
+    /// `MenuItem`/`SubMenuItem` 的 `skip_serializing_if`），所以「未设置过菜单」经
+    /// handler 补空对象后逐字节是 `{"items":null}`，与 Go 实发帧一致（活体 A14/E12）。
+    pub menu: Option<Menu>,
 }
 
 /// 设置自定义菜单请求（`PUT /v2/menu`，覆盖式）。
@@ -244,4 +248,35 @@ fn is_zero_i64(value: &i64) -> bool {
 /// `bool` 是否为 `false`（`omitempty` 语义）。
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MenuResponse;
+
+    /// Go `botgo/dto/menu.go` + `handlers/get_custom_menu.go:24-35`：官方响应没有 `menu` 键
+    /// （或显式 `null`）时解码成 `None`，序列化恒写 `menu` 键——空菜单经 handler 补
+    /// `Some(Menu::default())` 后是 `{"items":null}`（`Vec` 的零值是 `null`，与 Go 切片同形）。
+    #[test]
+    fn menu_response_mirrors_the_go_pointer_field() {
+        let absent: MenuResponse =
+            serde_json::from_str(r#"{"version":0}"#).expect("缺 menu 键应解码");
+        assert_eq!(absent.menu, None);
+        assert_eq!(
+            serde_json::to_string(&absent).expect("序列化"),
+            r#"{"version":0,"menu":null}"#
+        );
+
+        let explicit_null: MenuResponse =
+            serde_json::from_str(r#"{"version":7,"menu":null}"#).expect("null menu 应解码");
+        assert_eq!(explicit_null.menu, None);
+
+        let with_items: MenuResponse =
+            serde_json::from_str(r#"{"version":1,"menu":{"items":[]}}"#).expect("空数组 menu");
+        assert_eq!(with_items.menu.as_ref().expect("应有 menu").items.len(), 0);
+        assert_eq!(
+            serde_json::to_string(&with_items).expect("序列化"),
+            r#"{"version":1,"menu":{"items":[]}}"#
+        );
+    }
 }

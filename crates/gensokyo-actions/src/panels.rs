@@ -89,6 +89,21 @@ struct PanelDetailData {
     group_openids: Vec<Ob11Id>,
 }
 
+/// `data.menu` 的回执形态（Go `handlers/get_custom_menu.go:24-35` + `botgo/dto/menu.go`）：
+/// 官方 `menu == null` → 空对象；对象里的 `items` 缺省 / `null` / `[]` 一律写成 `null`
+/// （Go nil 切片 marshal 成 `null`），非空数组原样保留。
+fn menu_receipt_value(menu: Option<gensokyo_qq::dto::Menu>) -> Value {
+    let Some(menu) = menu else {
+        return json!({"items": Value::Null});
+    };
+    let items = if menu.items.is_empty() {
+        Value::Null
+    } else {
+        serde_json::to_value(menu.items).unwrap_or(Value::Null)
+    };
+    json!({"items": items})
+}
+
 /// 严格解码客户端透传对象（未知字段直接报错，对齐 Go `decodeStrictJSON`）。
 fn decode_strict<T>(object: &Map<String, Value>, key: &str) -> Result<T>
 where
@@ -509,7 +524,17 @@ impl GetCustomMenuHandler {
             // Go 不读参数：这里只确认「给了 params 就得是对象」
             params_or_empty(request)?;
             let response = self.context.api().get_menu().await?;
-            ok_data(request, &response)
+            // Go `get_custom_menu.go:24-35`：官方 `menu` 为 `null` 时补**空对象**再出帧。
+            // `Menu.items` 是 Go 切片（无 omitempty）⇒ 线上恒有 `items` 键、空菜单值为
+            // `null`；Rust 的 `Vec` 序列化成 `[]`，故空 items 显式写 `Value::Null`
+            // （活体 A14/E12 逐字节口径）。
+            ok_data(
+                request,
+                &json!({
+                    "version": response.version,
+                    "menu": menu_receipt_value(response.menu),
+                }),
+            )
         }
         .await;
         respond(request, result)
@@ -838,8 +863,8 @@ mod tests {
     use gensokyo_protocol::Status;
     use gensokyo_qq::dto::{
         CreateJoinApprovalStrategyRequest, CreateJoinApprovalStrategyResponse, CreatePanelRequest,
-        CreatePanelResponse, GroupAction, JoinApprovalStrategy, JoinApprovalStrategyList,
-        MenuResponse, Panel, PanelItem, PanelList, PanelRecord, PanelRecordDetail,
+        CreatePanelResponse, GroupAction, JoinApprovalStrategy, JoinApprovalStrategyList, Menu,
+        MenuItem, MenuResponse, Panel, PanelItem, PanelList, PanelRecord, PanelRecordDetail,
         PanelTargetRequest, PutMenuRequest, UpdateJoinApprovalStrategyRequest,
         UpdateJoinApprovalStrategyResponse, VersionResponse, WhitelistUsersRequest,
         WhitelistUsersResponse,
@@ -1092,16 +1117,54 @@ mod tests {
         let (ctx, api) = context();
         *api.menu_get.lock().unwrap() = Some(Ok(MenuResponse {
             version: 3,
-            menu: json!({"items": []}),
+            menu: Some(Menu { items: Vec::new() }),
         }));
         let get = GetCustomMenuHandler::new(ctx);
         let response = block_on(get.handle(&request_without_params("get_custom_menu")))
             .expect("查询菜单不应失败");
-        let data = ok_data(response);
-        assert_eq!(data["version"], json!(3));
-        assert_eq!(data["menu"], json!({"items": []}));
+        // Go `Items []MenuItem` 无 omitempty ⇒ 空菜单实发帧 `"menu":{"items":null}`
+        // （活体 A14/E12）；Rust 改前是 `"menu":{}`（缺 items 键）。
+        assert_eq!(
+            serde_json::to_string(&response).expect("响应应可序列化"),
+            r#"{"data":{"menu":{"items":null},"version":3},"echo":"e-1","message":"","retcode":0,"status":"ok"}"#
+        );
         assert_eq!(api.calls(), vec![Call::MenuGet]);
         assert_eq!(get.name(), "get_custom_menu");
+
+        // 官方不带 menu 键（解码成 None）：Go `resp.Menu == nil` → 补空对象 ⇒ 同形
+        let (ctx, api) = context();
+        *api.menu_get.lock().unwrap() = Some(Ok(MenuResponse {
+            version: 0,
+            menu: None,
+        }));
+        let get = GetCustomMenuHandler::new(ctx);
+        let response = block_on(get.handle(&request_without_params("get_custom_menu")))
+            .expect("空菜单不应失败");
+        assert_eq!(
+            serde_json::to_string(&response).expect("响应应可序列化"),
+            r#"{"data":{"menu":{"items":null},"version":0},"echo":"e-1","message":"","retcode":0,"status":"ok"}"#
+        );
+
+        // 非空 items 原样透传（字段形态仍按 Go dto 的 omitempty 口径）
+        let (ctx, api) = context();
+        *api.menu_get.lock().unwrap() = Some(Ok(MenuResponse {
+            version: 1,
+            menu: Some(Menu {
+                items: vec![MenuItem {
+                    name: "指令".to_owned(),
+                    item_type: "send_message".to_owned(),
+                    send_message: "/help".to_owned(),
+                    ..MenuItem::default()
+                }],
+            }),
+        }));
+        let get = GetCustomMenuHandler::new(ctx);
+        let response = block_on(get.handle(&request_without_params("get_custom_menu")))
+            .expect("查询菜单不应失败");
+        assert_eq!(
+            ok_data(response)["menu"],
+            json!({"items": [{"name": "指令", "type": "send_message", "send_message": "/help"}]})
+        );
     }
 
     #[test]

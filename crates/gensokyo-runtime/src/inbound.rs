@@ -810,7 +810,8 @@ impl Inbound {
     ///
     /// `raw_user` 是事件里的 OpenID（Go `data.Author.ID`，C2C 不做 union 切换）；`user_id` 取
     /// **上报形态**——数字模式是虚拟号十进制串，`string_ob11` 下是原始 OpenID，与 Go `:231-234`
-    /// 的 `struserid` 一致。昵称 / 备注 Go 恒写空串（`:235-239`），这里照抄零值。
+    /// 的 `struserid` 一致。`nickname` 是 sender 用的同一份昵称（Go `:133/:238`，
+    /// `member_nickname || username`）；备注 Go 恒写空串（`:239`），这里同样留空。
     ///
     /// Go 不检查返回值（`:241` 直接丢弃 err），因此写失败绝不阻断事件上报。重复键
     /// [`StorageError::DuplicateKey`] 是稳态（同一好友的第二条私信起必然命中，见
@@ -822,7 +823,7 @@ impl Inbound {
     /// 这里取其"不写"的一半——空 OpenID 写进 `user_info` 只会产出键 `":"` 的垃圾行，Go 库里
     /// 绝不会有这一行（`derive_message_ids` 已为同类空身份行设守卫）。Go 的判定是 `== ""`、
     /// 不含 trim，本守卫同样只判空串。
-    fn record_user_info(&self, raw_user: &str, user_id: &Ob11Id) {
+    fn record_user_info(&self, raw_user: &str, user_id: &Ob11Id, nickname: &str) {
         // Go `ProcessC2CMessage.go:30-33`：Author 为空 ⇒ 早退，不入库
         if raw_user.is_empty() {
             return;
@@ -831,6 +832,7 @@ impl Inbound {
             return;
         };
         let row = UserInfoRow {
+            nickname: nickname.to_owned(),
             user_id: user_id.to_string(),
             ..UserInfoRow::default()
         };
@@ -1250,14 +1252,15 @@ impl Inbound {
             );
         }
 
+        // 私聊无 card：同一函数传 `""` 只取昵称（`member_nickname > username`）。
+        let (nickname, _) = resolve_nickname_and_card(author, "");
+
         // Go `ProcessC2CMessage.go:231-241`：私信顺手把好友写进 `user_info`（`get_friend_list`
         // 的数据源，纯 Rust 部署此前没有任何写入口）。Go 在 `dispatchInbound` 之后写，这里放在
         // 转换末尾：只动本地库，**事件上报 JSON 字节不变**；本包唯一的外部变化是
-        // `get_friend_list` 开始出数据。
-        self.record_user_info(user_raw, &user_id);
-
-        // 私聊无 card：同一函数传 `""` 只取昵称（`member_nickname > username`）。
-        let (nickname, _) = resolve_nickname_and_card(author, "");
+        // `get_friend_list` 开始出数据。昵称 Go 写的是同一个 `privateNickname`
+        // （`:133/:238`，`e6c7e32` 起为 `member_nickname || username`），备注恒空。
+        self.record_user_info(user_raw, &user_id, &nickname);
         // Go 私信 sender 是**结构体二选一**（`ProcessC2CMessage.go:145` / `:195`）：
         // `string_ob11` 关闭时用 `PrivateSender`（`Processor.go:202`，只有 nickname / user_id，
         // 没有 `tiny_id` 字段）；打开时用 `PrivateSenderS`（`Processor.go:208`，`TinyID` 非
@@ -3567,11 +3570,17 @@ mod tests {
         );
     }
 
+    /// 默认形态：author 带 `username` + `member_nickname`（sender 昵称与 `user_info` 写侧
+    /// 共用同一判据 `member_nickname > username`）。需要别的身份形态的用例自行覆盖。
     fn c2c_payload() -> serde_json::Value {
         json!({
             "id": "m-c2c",
             "content": "hi",
-            "author": {"id": "u0123456789abcdef0123456789abcdef"}
+            "author": {
+                "id": "u0123456789abcdef0123456789abcdef",
+                "username": "同道中人",
+                "member_nickname": "私聊X"
+            }
         })
     }
 
@@ -3837,6 +3846,9 @@ mod tests {
 
     /// C2C 私信把好友写进 `user_info`（Go `ProcessC2CMessage.go:231-241`）——`get_friend_list`
     /// 的数据源；写侧键/value 与重复键语义由 storage 用例覆盖，这里只看接线与持久化。
+    ///
+    /// 昵称与 sender 同源（Go `:133/:238` 的 `privateNickname` = `member_nickname || username`，
+    /// `e6c7e32` 起不再是空串）；备注 Go 恒写空（`:239`）。
     #[test]
     fn c2c_message_stores_user_info() {
         use gensokyo_protocol::Event;
@@ -3865,10 +3877,11 @@ mod tests {
             assert_eq!(
                 store.list_all_users().expect("枚举"),
                 vec![UserInfoRow {
+                    nickname: "私聊X".to_owned(),
                     user_id: user_id.clone(),
                     ..UserInfoRow::default()
                 }],
-                "昵称 / 备注 Go 恒写空串（ProcessC2CMessage.go:235-239）"
+                "昵称取 sender 同一份 member_nickname（Go privateNickname），备注恒空"
             );
 
             // 同一好友的第二条私信命中重复键：Go 丢弃错误（`:241`），事件照常上报
@@ -3876,14 +3889,33 @@ mod tests {
                 .convert("C2C_MESSAGE_CREATE", Some(&c2c_payload()), None)
                 .expect("重复写 user_info 不得影响事件上报");
             assert_eq!(store.list_all_users().expect("枚举").len(), 1);
+
+            // 无 `member_nickname` 时回落 `username`（Go `resolveNicknameAndCard` 同序）
+            let mut fallback = c2c_payload();
+            fallback["author"].as_object_mut().expect("author 是对象")["id"] =
+                json!("u11111111111111111111111111111111");
+            fallback["author"]["member_nickname"] = json!("");
+            inbound
+                .convert("C2C_MESSAGE_CREATE", Some(&fallback), None)
+                .expect("缺 member_nickname 的事件应照常转换");
+            let rows = store.list_all_users().expect("枚举");
+            assert_eq!(rows.len(), 2, "第二个好友应新增一行");
+            assert!(
+                rows.iter().any(|row| row.nickname == "同道中人"),
+                "member_nickname 为空时写侧回落 username: {rows:?}"
+            );
         }
 
-        // 关库重开仍在：持久化不变式（`get_friend_list` 跨重启可见）
+        // 关库重开仍在：持久化不变式（`get_friend_list` 跨重启可见）。两行按 key 字节序
+        // 排列（`u0…:<vuin>` < `u1…:<vuin>`），主用例那条在第一行。
         let reopened = test_store(dir.path());
         let rows = reopened.list_all_users().expect("枚举");
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].user_id, user_id);
-        assert!(rows[0].nickname.is_empty() && rows[0].remark.is_empty());
+        // 昵称随 sender 同源持久化；备注仍恒空（Go `Remark: ""`）
+        assert_eq!(rows[0].nickname, "私聊X");
+        assert!(rows[0].remark.is_empty());
+        assert_eq!(rows[1].nickname, "同道中人", "username 回落同样持久化");
     }
 
     /// 空 author 的 C2C 事件**不写** `user_info`（Go `ProcessC2CMessage.go:30-33` 对

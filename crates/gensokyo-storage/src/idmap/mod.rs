@@ -1456,6 +1456,24 @@ impl IdMapStore {
         }
     }
 
+    /// 记录「机器人在该群发送的最后一条消息」（Go `StoreLatestBotMsgID`，
+    /// `idmap/new_service.go:1082-1085`）：复用同一张 latest 表，用户位取
+    /// [`LATEST_BOT_MESSAGE_USER_KEY`] 哨兵。空参数静默返回与 Go 一致。
+    ///
+    /// # Errors
+    ///
+    /// redb 事务失败时返回 [`StorageError`]。
+    pub fn store_latest_bot_msg_id(&self, group: &str, msg_id: &str) -> Result<(), StorageError> {
+        self.store_latest_msg_id(group, LATEST_BOT_MESSAGE_USER_KEY, msg_id)
+    }
+
+    /// 取「机器人在该群发送的最后一条未过期消息」（Go `GetLatestBotMsgID`，
+    /// `delete_group_msg` 缺 `message_id` 时的定位来源）。错误语义同
+    /// [`IdMapStore::get_latest_msg_id`]。
+    pub fn get_latest_bot_msg_id(&self, group: &str) -> Result<String, StorageError> {
+        self.get_latest_msg_id(group, LATEST_BOT_MESSAGE_USER_KEY)
+    }
+
     /// 写 vUIN 对应的用户名到内存缓存（Go `StoreUserName`）。
     pub fn store_user_name(&self, vuin: i64, name: &str) {
         let mut cache = self
@@ -1822,6 +1840,11 @@ pub(crate) fn config_key(section: &str, subtype: &str) -> String {
 pub(crate) fn latest_key(group: &str, user: &str) -> String {
     format!("{group}:{user}")
 }
+
+/// 「机器人自身」在 latest 表用户位的哨兵（Go `latestBotMessageUserKey`，
+/// `idmap/new_service.go:39` 的 NUL 前缀常量）。逐字节照抄——从 Go bbolt 导出的
+/// `latest` 行带的就是这条 key，导入后必须能原样命中。
+pub const LATEST_BOT_MESSAGE_USER_KEY: &str = "\u{0}qq_bot_self";
 
 pub(crate) fn counter_text(value: i64) -> String {
     value.to_string()
