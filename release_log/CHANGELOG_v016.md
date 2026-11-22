@@ -351,6 +351,16 @@ C2C 单聊只支持按钮 `permission.type=2`（所有人）：此前的兜底�
 - **影响**：上游失败不再伪装成功，与「上游失败进入错误分支，比看起来成功但数据是假的更好」原则一致；`get_group_member_list` 的兜底逻辑本次未改动
 - **测试**：新增 `handlers/get_group_member_info_test.go`——mock 上游 `errs.New(11253, "应用无接口访问权限")` → `1500/failed` 且 `message` 含 `11253` 与错误文案；反查失败 → `1400` 且不调用上游；上游成功路径字段与 body 形状不变
 
+### 报文反序列化失败时无回执（客户端只能等超时）+ `put_interaction` 数字 `post_type` 被整包丢弃（2026-11-22）
+
+`wsclient/ws.go`（反向 WS）与 `server/wsserver.go`（正向 WS）在 `json.Unmarshal` 失败时只打一行日志就 `return`。实测客户端发 `{"echo":"pi-1","action":"put_interaction","post_type":0}`，日志留下 `json: cannot unmarshal number into Go struct field .Alias.post_type of type string` 后**没有任何响应**，客户端超时；任何 action 只要报文字段类型不符，都走同一静默分支：
+
+- **修改**：两条收包路径反序列化失败时调用 `callapi.ReplyUnparseableMessage(client, msg, err)`——回执构造复用既有 `actionFailureReceipt(...)`（与 handlers 的 `sendActionResult` 同形状），回 `1400` / `status:"failed"` / `data:null`，`message` 为 `参数解析失败: <原始错误>`
+- **修改**：`echo` 从原始报文二次提取（解析成 `map[string]json.RawMessage` 取 `echo`）并以 `json.RawMessage` 原样回显，超大整数不被 `float64` 改写；取不到时 `echo` 为 `null`，回执照发
+- **修改**：`callapi.ActionMessage.UnmarshalJSON` 把 `post_type` 先按 raw 取出再落值——字符串照常写入；`action == "put_interaction"` 时数字转成等价字符串（`0` ≡ `"0"`，沿用 handler 既有 `case "0"` 分支）；其它类型（对象/布尔）仍返回解析错误（→ `1400`）。全局 `Alias` 的 `PostType string` 未改，其它 action 的 `post_type` 仍按字符串严格解析，其它 handler 的字符串用法不变
+- **影响**：任何 action 的解析失败都不再静默；NoneBot 生态常见的数字 `post_type` 对 `put_interaction` 直接可用；`1404` / `1500` / panic 回执路径不变
+- **测试**：`post_type` 传对象 `{}` → 收到 `1400/failed` / `data:null` 且 `echo` 原样带回（不是静默）；`post_type:0`（数字）与 `"0"`（字符串）都归一为 `"0"` 走同一 `case "0"` 分支；`echo` 为大整数（`1234567890123456789`）时回执逐字节保留
+
 ---
 
 ## 📝 工程与文档变更

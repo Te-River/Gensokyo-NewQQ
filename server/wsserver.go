@@ -164,6 +164,8 @@ func processWSMessage(client *WebSocketServerClient, msg []byte) {
 	err := json.Unmarshal(msg, &message)
 	if err != nil {
 		mylog.Printf("Error unmarshalling message: %v, Original message: %s", err, string(msg))
+		// 解析失败也必须回执，否则客户端只能等到超时
+		callapi.ReplyUnparseableMessage(client, msg, err)
 		return
 	}
 

@@ -30,16 +30,40 @@ func (a *ActionMessage) UnmarshalJSON(data []byte) error {
 	type Alias ActionMessage
 
 	var rawEcho json.RawMessage
+	// post_type 在 Alias 中是 string，但客户端（含 NoneBot 生态）对 put_interaction 常传数字。
+	// 先按 raw 取出、再决定是否放宽：只放宽 put_interaction，其它 action 仍按 string 严格解析，
+	// 因此无需改动 Alias 的字段类型，其它路径的语义不受影响。
+	var rawPostType json.RawMessage
 	temp := &struct {
 		*Alias
-		Echo *json.RawMessage `json:"echo,omitempty"`
+		Echo     *json.RawMessage `json:"echo,omitempty"`
+		PostType *json.RawMessage `json:"post_type,omitempty"`
 	}{
-		Alias: (*Alias)(a),
-		Echo:  &rawEcho,
+		Alias:    (*Alias)(a),
+		Echo:     &rawEcho,
+		PostType: &rawPostType,
 	}
 
 	if err := json.Unmarshal(data, &temp); err != nil {
 		return err
+	}
+
+	if rawPostType != nil {
+		var strValue string
+		err := json.Unmarshal(rawPostType, &strValue)
+		if err == nil {
+			a.PostType = strValue
+		} else if a.Action == "put_interaction" {
+			// 数字与字符串等价：0 与 "0" 都归一成 "0"，沿用 handler 的 case "0" 分支；
+			// 其它类型（对象/布尔…）仍按解析失败返回，由收包层回 1400。
+			var numValue json.Number
+			if numErr := json.Unmarshal(rawPostType, &numValue); numErr != nil {
+				return err
+			}
+			a.PostType = numValue.String()
+		} else {
+			return err
+		}
 	}
 
 	if rawEcho != nil {
@@ -406,4 +430,20 @@ func actionFailureReceipt(client Client, message ActionMessage, retCode int, err
 		return ""
 	}
 	return string(result)
+}
+
+// ReplyUnparseableMessage 在整包反序列化失败时补一份失败回执（1400 / failed / data:null），
+// 否则客户端只能等到超时。此时拿不到完整的 ActionMessage，echo 从原始报文里二次提取：
+// 反序列化失败多半只是字段类型不符、JSON 语法本身合法，按 RawMessage 取回可原样回显
+// （数字不会被 float64 改写）；取不到则 echo 为 null，回执照发。
+// 回执构造复用 actionFailureReceipt，与 handlers 的 sendActionResult 同形状。
+func ReplyUnparseableMessage(client Client, raw []byte, err error) string {
+	var echo interface{}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) == nil {
+		if e, ok := fields["echo"]; ok {
+			echo = e
+		}
+	}
+	return actionFailureReceipt(client, ActionMessage{Echo: echo}, 1400, "参数解析失败: "+err.Error(), false)
 }
