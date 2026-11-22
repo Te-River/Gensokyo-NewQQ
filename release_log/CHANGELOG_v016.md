@@ -451,6 +451,53 @@ C2C 单聊只支持按钮 `permission.type=2`（所有人）：此前的兜底�
 ## ✅ 提交记录
 
 ```
+a322b11  fix(handler): markdown 内嵌 keyboard 的 content.rows 形态不再被吞
+17931cf  fix(handler): share_link 补发 action 回执、wakeup 失败回 1500、markdown 解析失败不再误用 md-@
+fb56c66  test(callapi): 反序列化失败回 1400 与 put_interaction 数字 post_type 的回归用例
+80822e2  fix(callapi): 反序列化失败不再静默丢弃，回 1400 回执；put_interaction 兼容数字 post_type
+42465ff  fix(action): mark_msg_as_read 回 data:null；get_group_member_info 上游失败改如实 1500
+2b4358b  fix(callapi): handler panic 也下发 1500 回执（不再静默超时）
+37d0fa4  fix(handler): 唤醒消息补 keyboard 装配、合并转发补署名与节点按钮、四个不支持的 CQ 码改为剥离告警
+75ebb1e  fix(idmap): 审批策略群号反查 / get_avatar 直通 openid / delete_group_msg string_ob11 豁免；并成文 data 原始 payload
+38e61a9  fix(handler): Params 里的 id 统一安全取值（直接构造结构体时不再 panic）
+ed0281e  fix(delete_msg): 撤回改用反查后的 OpenID；失败不再谎报 ok；C2C 回执不再改号
+932df6a  fix(handler): 缺参 action 的无限递归导致 fatal error: stack overflow（进程崩溃）
+36bcc99  feat(send_private_msg): 支持显式 message_id（群 msg_id 可用于私聊回复）
+21ed5e1  fix(receipt): 消息已发出但虚拟 message_id 写缓存失败时回成功回执（message_id 0）
+52c4bf5  fix(callapi): 未知 action / handler 异常也回执（客户端不再超时）
+f012073  fix(action): 查询类 handler 未映射 id 时同样无回执（与发送类同一病根，一并收口）
+b897405  fix(send): 所有发送 handler 的静默无回执分支补错误回执（客户端不再超时）
+9126fe7  fix(api): action 回执序列化关闭 HTML 转义（& 原样输出，与 Rust 逐字节一致）
+a217c63  feat(api): 新增 get_user_info（官方 2026-11-16 接口）+ 群事件透传 union_group_openid
+c88b31b  fix(send): 上游失败改回非零 retcode（1500）+ 敏感词覆盖 member_nickname
+e6c7e32  feat(inbound): sender.nickname/card 优先官方 member_nickname（群/私聊统一口径）
+1d4c1b4  docs: 更正 AGENTS.md 的 -tags=small 表述（WebUI 本体不删，只打桩 sysinfo）
+3cbaaaf  docs: 补充自定义数据库位置与私聊键盘权限归一化
+255af02  fix: 私聊 keyboard 按钮权限全类型归一化
+7965832  feat: 新增自定义数据库位置（idmap 族一期）
+39a4d5b  test: 补入站手打 CQ 数组上报保留原文用例，并修正 readme 戳一戳表述
+6e073de  docs: 回写官网已核实的 CQ 码文档修正至主仓镜像页（14 页）
+0c151b6  feat: 启动横幅品牌改为 Gensokyo-NewQQ - Te-River
+38c7ba1  perf: 素材配额清理删除改为 5 路有界并发
+51cc2f9  fix: 素材列表数值字段宽容解析字符串形态
+cfeb03b  fix: 素材配额清理改按 expires_at 排序，封死"高速发图时清理失效"与"刚上传即被删"两个窗口
+f3ab78f  feat: oss_type=7 改为官方素材 API 模式，素材配额按需清理
+bf63c3e  feat: Markdown 图片改走官方素材 API（qqbot-media://），修复外链不显示
+e50ffda  fix: 请求日志改用关闭 HTML 转义的序列化，便于核对签名 URL
+6a8d99e  fix: resty 客户端关闭 JSON HTML 转义，请求体保留原始 &
+72a6781  fix: panic 兜底与崩溃落盘 + 消息热路径 nil/panic 热点
+5f44a2b  fix: 出站 JSON 关闭 HTML 转义，带签名图片 URL 保持原始 &
+93e9cde  fix: 短签名降级路径采纳内层直链并补 ① 分支单测
+1d9e390  fix: 短签名图床外链优先解析 302 直链后再出站
+5911afa  chore: build.ps1 UPX 占用报错改为可读提示
+a20ffca  fix: 短签名图床外链不得进入出站与对外接口，回退本地公网 URL
+4c6f2a0  chore: build.ps1 依赖步骤改用 go mod download
+91a5e86  fix: build.ps1 假失败与 UPX 重复压缩幂等
+8372ee5  fix: ChatGLM 短签名图床自取转传，修复 QQ 图片不显示
+488ced6  fix: 仓库自带 webui/dist 占位文件，clean clone 可直接构建 Go 与 Rust
+ab5ea16  docs: 图床实测状态标注（2026-11-07）
+68efccd  chore: 升级漏洞依赖与工具链
+4977720  fix: 修复 wsclient Close/Reconnect 竞态（send on closed channel）
 eca1843  fix: 官方口径再对齐（token 域名 / 5M 直传阈值 / dto.User 字段）
 8f3cfdb  docs: 修复 3 处失效相对链接（语法参考 cq-set_group / API介绍 本版新增功能 / 入群申请列表 readme）
 c1c6470  feat: 对齐官方 v2 现文档（群管理契约 / 入站事件字段 / 5MB 直传 / 错误码）
