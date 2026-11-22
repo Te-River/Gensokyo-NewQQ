@@ -553,16 +553,20 @@ func HandleSendGroupMsg(client callapi.Client, api openapi.OpenAPI, apiv2 openap
 					 if kb != nil {
 					  ResolveKeyboardImages(kb, apiv2)
 					 }
-					 messageText = ResolveMarkdownAtMentions(messageText)
-					 // 步骤 2: 将整个 messageText 合并到 markdown 内容头部（qq 官方 md 整个消息以 md 语法渲染）
-					 // 仅当 md 非 nil 时才合并，避免 parseMarkdownFromMessage 解析失败返回 nil 时触发 panic
-					 // md-only（messageText 为空）时跳过拼接，避免产出前导换行
-					 if md != nil && messageText != "" {
-					  md.Content = messageText + "\n" + md.Content
+					 // 正文的 @ 转换与 [CQ:markdown] 剔除同样只在 markdown 解析成功时执行：
+					 // md == nil（解析失败）时正文必须原样走下方纯文本路径，
+					 // 否则 <qqbot-at-user> 会被塞进纯文本 Content，群里显示成字面文本
+					 if md != nil {
+					  messageText = ResolveMarkdownAtMentions(messageText)
+					  // 步骤 2: 将整个 messageText 合并到 markdown 内容头部（qq 官方 md 整个消息以 md 语法渲染）
+					  // md-only（messageText 为空）时跳过拼接，避免产出前导换行
+					  if messageText != "" {
+					   md.Content = messageText + "\n" + md.Content
+					  }
+					  // 步骤 3: 清理 messageText 中的 [CQ:markdown] 标记
+					  mdRe := regexp.MustCompile(`\[CQ:markdown,[^\]]*\]`)
+					  messageText = mdRe.ReplaceAllString(messageText, "")
 					 }
-					 // 步骤 3: 清理 messageText 中的 [CQ:markdown] 标记
-					 mdRe := regexp.MustCompile(`\[CQ:markdown,[^\]]*\]`)
-					 messageText = mdRe.ReplaceAllString(messageText, "")
 					}
 
 					    // 没有 markdown 时，纯文本消息转换 [CQ:at] 为 @用户名

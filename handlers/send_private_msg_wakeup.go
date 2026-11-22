@@ -99,6 +99,13 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 	// 是否已发出至少一条召回消息：markdown/keyboard 等键被前置装配消费后，
 	// 末尾不再补发一条空的占位召回。
 	sentAny := false
+	// 首个失败原因：各场景跑完后统一回一条失败回执，避免多场景各回一条（同一请求只回一条 action 回执）。
+	var wakeupErr error
+	recordFailure := func(err error) {
+		if err != nil && wakeupErr == nil {
+			wakeupErr = err
+		}
+	}
 
 	// 检查图片并计算数量 (复刻原逻辑)
 	if imageURLs, ok := foundItems["local_image"]; ok && len(imageURLs) == 1 {
@@ -157,6 +164,7 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 		// 发送
 		resp, err := postC2CWakeupMessageWithRetry(apiv2, userID, groupMessage)
 		sendWakeupNotice(client, userID, resp, err, selfID)
+		recordFailure(err)
 		sentAny = true
 
 		delete(foundItems, imageType)
@@ -193,9 +201,11 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 
 			resp, err := postC2CWakeupMessageWithRetry(apiv2, userID, groupMessage)
 			sendWakeupNotice(client, userID, resp, err, selfID)
+			recordFailure(err)
 			sentAny = true
 		} else {
 			mylog.Println("Error: Expected MessageToCreate type for text.")
+			recordFailure(fmt.Errorf("文本消息生成失败: 消息类型不匹配"))
 		}
 	}
 
@@ -221,6 +231,7 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 					groupMessage, ok := groupReply.(*dto.MessageToCreate)
 					if !ok {
 						mylog.Println("Error: Expected MessageToCreate type.")
+						recordFailure(fmt.Errorf("%s 消息生成失败: 消息类型不匹配", key))
 						continue
 					}
 
@@ -245,6 +256,7 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 
 					// 发送通知
 					sendWakeupNotice(client, userID, resp, err, selfID)
+					recordFailure(err)
 					sentAny = true
 				} else {
 					mylog.Printf("Error: Expected RichMediaMessage type for key %s.", key)
@@ -294,10 +306,13 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 
 				// 发送通知
 				sendWakeupNotice(client, userID, resp, err, selfID)
+				recordFailure(err)
 				sentAny = true
 			} else {
 				// 上传都失败了，发一个失败通知
-				sendWakeupNotice(client, userID, nil, fmt.Errorf("media upload failed for %s: %v", key, err), selfID)
+				uploadErr := fmt.Errorf("media upload failed for %s: %v", key, err)
+				sendWakeupNotice(client, userID, nil, uploadErr, selfID)
+				recordFailure(uploadErr)
 			}
 		}
 	}
@@ -317,6 +332,11 @@ func HandleSendPrivateMsgWakeup(client callapi.Client, api openapi.OpenAPI, apiv
 		}
 		resp, err := postC2CWakeupMessageWithRetry(apiv2, userID, groupMessage)
 		sendWakeupNotice(client, userID, resp, err, selfID)
+		recordFailure(err)
+	}
+
+	if wakeupErr != nil {
+		return sendActionResult(client, message, "召回消息发送失败: "+wakeupErr.Error(), sendFailRetCode)
 	}
 
 	return `{"status": "ok", "retcode": 0}`, nil

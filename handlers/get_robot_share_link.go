@@ -69,6 +69,13 @@ func GetRobotShareLink(client callapi.Client, api openapi.OpenAPI, apiv2 openapi
 		mylog.Printf("Error sending message via client: %v", err)
 	}
 
+	// 5. 补发 action 回执：分发层（wsclient/server）丢弃 CallAPIFromDict 的返回值，
+	// 回执必须由 handler 自己发出，否则客户端收不到 action 响应只能等到超时。
+	// 内容与 Rust 侧一致——空对象，不带 retcode/echo。
+	if err := client.SendMessage(map[string]interface{}{}); err != nil {
+		mylog.Printf("Error sending action receipt via client: %v", err)
+	}
+
 	// 因为是假装 Event 推送，这里函数返回值其实已经不重要了
 	// 返回一个空 JSON 对象即可，满足函数签名
 	return "{}", nil

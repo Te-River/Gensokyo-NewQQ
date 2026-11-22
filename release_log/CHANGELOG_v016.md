@@ -100,6 +100,30 @@ QQ 官方自 2026-11-17 起允许群消息事件的 `msg_id` 直接用于私聊�
 
 ## 🐛 修复
 
+### `get_robot_share_link` 的 action 回执从未发给客户端（2026-11-22）
+
+改前：`handlers/get_robot_share_link.go` 只推伪造 notice 然后 `return "{}", nil`；而分发层（`wsclient/ws.go` 与 `server/wsserver.go` 的 `go callapi.CallAPIFromDict(...)`）丢弃返回值，回执必须由 handler 自己 `client.SendMessage` 发出 —— 客户端只看到 `notice`（`notice_type:"share_link_generated"` + `url`），永远等不到 action 回执。
+
+- **修改**：`handlers/get_robot_share_link.go` 在推完 notice 后追加 `client.SendMessage(map[string]interface{}{})` 补发空对象回执，发送失败仅记日志
+- **顺序**：先 notice 后 `{}`（Rust 侧为先 `{}` 后 notice，两帧字段无交集，顺序不影响客户端匹配）
+- **影响**：成功时客户端依次收到 notice 与 `{}` 两帧；失败路径（生成链接失败）仍是既有 `1500/failed` 回执，不推 notice
+- **测试**：`handlers/get_robot_share_link_test.go` —— 成功断言收到 `notice`（`url` 等于 mock 上游返回值）+ `{}` 两条；失败断言只收到 `retcode:1500` / `status:"failed"` 一条且无 notice
+
+### markdown 解析失败时仍按 markdown 语境转换 @：`<qqbot-at-user>` 落到纯文本（2026-11-22）
+
+改前：`handlers/send_group_msg.go` 在 `[CQ:markdown]` 载荷解析失败（`md == nil`）时，
+仍对正文执行 `ResolveMarkdownAtMentions` 并删除 `[CQ:markdown]` 标记 → `<qqbot-at-user id="…"/>`
+被放进顶层 `content`（`msg_type:0`），客户端显示为字面文本（活体实测 + 用户截图确认）。
+
+- **修改**：`ResolveMarkdownAtMentions(messageText)`、正文前缀合并、`[CQ:markdown]` 标记剔除
+  统一收进 `if md != nil`；`md == nil` 时正文原样交给纯文本三段式
+  （`resolvePlainTextAtMentions`：`@用户名` → `<@openid>` → 整段删除）
+- **同构核查**：`send_private_msg` / `outbound_bridge` 的两处 markdown 装配本来就只在 `md != nil` 内转换；
+  `send_group_msg_raw` 的无条件剔标记是正确的（否则解析失败时会把 `[CQ:markdown,…]` 字面发出）
+- **影响**：正常 markdown 行为不变；解析失败不再把 markdown 语法泄漏进纯文本
+- **测试**：`handlers/send_group_msg_md_parse_fail_test.go` —— 解析失败时出站 payload 不含 `qqbot-at-user`
+  且首条 `msg_type=0`；解析成功仍在 `markdown.content` 内；纯文本 @ 不变
+
 ### `join_approval_strategy_create/update` 的关联群不反查：虚拟群号被当群 OpenID 发给官方（2026-11-21）
 
 改前：`group_openids` / `group_ids` 原样上行，插件传虚拟群号（如 `499967395`）时该号被当群 OpenID 发出，官方侧匹配不到任何群。
@@ -360,6 +384,24 @@ C2C 单聊只支持按钮 `permission.type=2`（所有人）：此前的兜底�
 - **修改**：`callapi.ActionMessage.UnmarshalJSON` 把 `post_type` 先按 raw 取出再落值——字符串照常写入；`action == "put_interaction"` 时数字转成等价字符串（`0` ≡ `"0"`，沿用 handler 既有 `case "0"` 分支）；其它类型（对象/布尔）仍返回解析错误（→ `1400`）。全局 `Alias` 的 `PostType string` 未改，其它 action 的 `post_type` 仍按字符串严格解析，其它 handler 的字符串用法不变
 - **影响**：任何 action 的解析失败都不再静默；NoneBot 生态常见的数字 `post_type` 对 `put_interaction` 直接可用；`1404` / `1500` / panic 回执路径不变
 - **测试**：`post_type` 传对象 `{}` → 收到 `1400/failed` / `data:null` 且 `echo` 原样带回（不是静默）；`post_type:0`（数字）与 `"0"`（字符串）都归一为 `"0"` 走同一 `case "0"` 分支；`echo` 为大整数（`1234567890123456789`）时回执逐字节保留
+
+### `send_private_msg_wakeup` 上游失败只推 notice、不回 action 回执（客户端超时，2026-11-22）
+
+实测真实实例上游返回 `40034122 召回消息已达区间上限` 时，`handlers/send_private_msg_wakeup.go` 只推了一条 `c2c_wakeup_resp` notice（`status:"failed"`），**没有 action 回执**，客户端只能等到超时；Rust 侧同场景同时回 `{"data":null,"message":"上游 API 错误: code=40034122 ...","retcode":1500,"status":"failed"}` 与同样的 notice：
+
+- **修改**：六个「只推 notice 不回执」的失败分支全部收口——场景 A 图文混合发送、场景 B 文本/markdown 发送、场景 C `keyMap` 分支发送、场景 C 富媒体最终发送、场景 C 媒体上传失败、末尾无内容兜底发送；各分支在 `sendWakeupNotice(...)` 之后由 `recordFailure(err)` 记下首个失败原因
+- **修改**：handler 收口处统一 `return sendActionResult(client, message, "召回消息发送失败: "+wakeupErr.Error(), sendFailRetCode)`——复用既有助手，回 `1500` / `status:"failed"` / `data:null` / `echo` 原样，`message` 带上游真实错误；一次请求**只回一条** action 回执（多场景失败也只回首个，不会与 notice 或自身双发）
+- **修改**：两处 `MessageToCreate` 类型断言失败（场景 B 正文装配、场景 C `keyMap` 分支）此前只打日志、仍回成功回执，现同样记入失败原因
+- **影响**：成功路径不动——仍返字面量 `{"status": "ok", "retcode": 0}`；`c2c_wakeup_resp` notice 在成功/失败时都照旧各推一次，字段口径未改
+- **测试**：新增 `handlers/send_private_msg_wakeup_receipt_test.go`——上游 mock 返回 `40034122` 时断言 notice 恰好 1 条、action 回执恰好 1 条（`1500`/`failed`/`data:null`/`echo:"p3"`/`message` 含 `40034122`），返回体与回执一致；成功路径断言回执逐字节为 `{"status": "ok", "retcode": 0}`、notice 仍 1 条、不额外发 action 回执
+
+### markdown 载荷解析失败仍按 markdown 语境转换正文 @：`<qqbot-at-user>` 以字面文本发进群（2026-11-22）
+
+实测 `send_group_msg` 消息 `PREFIX-KB [CQ:at,qq=<虚拟号>] [CQ:markdown,data=base64://…]` 的 markdown 载荷解析失败（`parseMarkdownFromMessage` 返回 `md == nil`）时，`handlers/send_group_msg.go` 的 legacy 群聊分支仍对正文执行 `ResolveMarkdownAtMentions` 并剔除 `[CQ:markdown]` 标记，`<qqbot-at-user id="…" />` 被放进顶层 `content`（纯文本消息），群里显示成字面文本（Rust 侧同输入仍走 `markdown.content` + `msg_type:2`）：
+
+- **修改**：正文的两件事（`ResolveMarkdownAtMentions(messageText)`、剔除 `[CQ:markdown]` 标记）收进 `if md != nil`，与「前缀合并」同处一个条件；`md == nil` 时正文保持原样，交给既有纯文本三段式 `resolvePlainTextAtMentions`（`<@openid> ` / `@用户名 ` / 删除）
+- **影响**：`md != nil` 路径逐字节不变（前缀合并、`[CQ:markdown]` 剔除、keyboard 附加）；私聊 `send_private_msg` 与出站桥 `applyGroupMarkdownKeyboard` / `applyPrivateMarkdownKeyboard` 复查确认无此形态（本就只在 `md != nil` 时转换 `md.Content`，正文不参与 markdown 语境转换）；`send_group_msg_raw` 无 markdown 语境 @ 转换、缺陷形态不成立，其 `[CQ:markdown]` 剔除保持无条件（否则解析失败时标记会以字面量发出）
+- **测试**：新增 `handlers/send_group_msg_md_parse_fail_test.go`——解析失败载荷（`{}` 与 `{"markdown":{"content":123}}`）+ `[CQ:at,qq=虚拟号]` 时出站任何 payload 均不含 `qqbot-at-user`，首条为 `msg_type=0` 且正文含 `<@OpenID>`；解析成功载荷 + at 仍为单条 `msg_type=2`、`<qqbot-at-user>` 保留在 `markdown.content` 且前缀已合并；纯文本 + at 不变
 
 ---
 
