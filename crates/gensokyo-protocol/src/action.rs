@@ -180,7 +180,11 @@ impl<T: Serialize> Serialize for ActionResponse<T> {
         let envelope = match self.envelope {
             EnvelopeKind::GoWakeupOk if self.status == Status::Ok => EnvelopeKind::GoWakeupOk,
             EnvelopeKind::GoEmptyObject if self.status == Status::Ok => EnvelopeKind::GoEmptyObject,
-            EnvelopeKind::GoWakeupOk | EnvelopeKind::GoEmptyObject => EnvelopeKind::Full,
+            // map 直出的成功回执省略 `message`；失败带真实错误文案，回落 Full。
+            EnvelopeKind::GoMapOk if self.status == Status::Ok => EnvelopeKind::GoMapOk,
+            EnvelopeKind::GoWakeupOk | EnvelopeKind::GoEmptyObject | EnvelopeKind::GoMapOk => {
+                EnvelopeKind::Full
+            }
             other => other,
         };
         match envelope {
@@ -234,6 +238,14 @@ impl<T: Serialize> Serialize for ActionResponse<T> {
                     map.serialize_entry("echo", echo)?;
                 }
                 map.serialize_entry("message", self.message.as_deref().unwrap_or_default())?;
+                map.serialize_entry("retcode", &self.retcode)?;
+                map.serialize_entry("status", &self.status)?;
+            }
+            EnvelopeKind::GoMapOk => {
+                // Go 的 map 直出（`buildResponseForSingleMember` / `buildResponse`）：四键、
+                // 无 `message`。echo 恒写（Full 口径），`data` 取 handler 返回值。
+                map.serialize_entry("data", &self.data)?;
+                map.serialize_entry("echo", &self.echo)?;
                 map.serialize_entry("retcode", &self.retcode)?;
                 map.serialize_entry("status", &self.status)?;
             }
@@ -589,6 +601,13 @@ pub struct GroupInfo {
 }
 
 /// `get_group_member_info` / `get_group_member_list` 的响应数据。
+///
+/// 键集与 Go 逐字段一致（`handlers/get_group_member_info.go` 的 `MemberInfo`、
+/// `handlers/get_group_member_list.go` 的 `MemberList`，两处都是同一份 16 键）：**显式字段
+/// 列表**，没有 `flatten extra`——上游 DTO 的 `member_openid` / `union_openid` / `bot` /
+/// `joined_at` 不对客户端可见（Go 的 data map 里没有这些键，多一个键就是多一字节，parity §F D40）。
+/// 官方无对应字段的（`age` / `area` / `last_sent_time` / `level` / `unfriendly` / `title` /
+/// `title_expire_time` / `card_changeable` / `shut_up_timestamp`）恒为 Go 的中性零值。
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct GroupMemberInfo {
     /// 群 ID（虚拟）。
@@ -601,42 +620,42 @@ pub struct GroupMemberInfo {
     /// 群名片。
     #[serde(default)]
     pub card: String,
-    /// 性别。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sex: Option<String>,
-    /// 年龄。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub age: Option<i64>,
-    /// 地区。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub area: Option<String>,
-    /// 入群时间。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub join_time: Option<i64>,
-    /// 最后发言时间。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_sent_time: Option<i64>,
-    /// 等级。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub level: Option<String>,
+    /// 性别：API 路径恒 `unknown`，本地回退恒 `"0"`（Go 同口径）。
+    #[serde(default)]
+    pub sex: String,
+    /// 年龄；官方无该字段，恒为 Go 的零值。
+    #[serde(default)]
+    pub age: i64,
+    /// 地区：API 路径恒空串，本地回退恒 `"0"`（Go 同口径）。
+    #[serde(default)]
+    pub area: String,
+    /// 入群时间（`joined_at` 解析出的 Unix 秒；解析失败置 0）。
+    #[serde(default)]
+    pub join_time: i64,
+    /// 最后发言时间；官方无该字段，恒为 Go 的零值。
+    #[serde(default)]
+    pub last_sent_time: i64,
+    /// 等级：API 路径恒空串，本地回退恒 `"0"`（Go 同口径）。
+    #[serde(default)]
+    pub level: String,
     /// 角色：`owner` / `admin` / `member`。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
-    /// 是否不良记录成员。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unfriendly: Option<bool>,
-    /// 群头衔。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    /// 头衔过期时间。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title_expire_time: Option<i64>,
-    /// 是否允许修改群名片。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub card_changeable: Option<bool>,
-    /// 附加字段。
-    #[serde(default, flatten, skip_serializing_if = "is_empty")]
-    pub extra: Extra,
+    #[serde(default)]
+    pub role: String,
+    /// 是否不良记录成员；官方无该字段，恒为 Go 的零值。
+    #[serde(default)]
+    pub unfriendly: bool,
+    /// 群头衔：API 路径恒空串，本地回退恒 `"0"`（Go 同口径）。
+    #[serde(default)]
+    pub title: String,
+    /// 头衔过期时间；官方无该字段，恒为 Go 的零值。
+    #[serde(default)]
+    pub title_expire_time: i64,
+    /// 是否允许修改群名片；官方无该字段，恒为 Go 的零值。
+    #[serde(default)]
+    pub card_changeable: bool,
+    /// 禁言到期时间戳；官方无该字段，恒为 Go 的零值。
+    #[serde(default)]
+    pub shut_up_timestamp: i64,
 }
 
 /// 泛型兜底请求（注册表入口用的形态）。

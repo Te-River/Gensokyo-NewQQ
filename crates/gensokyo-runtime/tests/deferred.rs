@@ -299,6 +299,176 @@ fn ban_ok_state(settings: &str) -> (TempDir, Arc<BanOkApi>, AppState) {
     (dir, api, state)
 }
 
+/// 查询类成功替身：get_group_info / get_group_member_info / get_group_member_list 回固定
+/// 数据，钉 D-e（message="success"）、D-f（成功无 message 键）、D-g（成员 16 键）三条 wire 整串。
+#[derive(Debug, Default)]
+struct QueryOkApi;
+
+impl QqApi for QueryOkApi {
+    fn get_group_info(&self, _group_openid: &str) -> QqFuture<'_, GroupInfo> {
+        Box::pin(async {
+            Ok(GroupInfo {
+                group_openid: OPENID.to_owned(),
+                group_name: "测试群".to_owned(),
+                group_finger_memo: "简介".to_owned(),
+                group_class_text: String::new(),
+                group_tags: Vec::new(),
+                group_member_num: 7,
+            })
+        })
+    }
+
+    fn get_group_member_info(
+        &self,
+        _group_openid: &str,
+        member_openid: &str,
+    ) -> QqFuture<'_, GroupMember> {
+        let member_openid = member_openid.to_owned();
+        Box::pin(async move {
+            Ok(GroupMember {
+                member_openid,
+                username: "小明".to_owned(),
+                member_role: "owner".to_owned(),
+                bot: false,
+                joined_at: "2026-08-05T14:19:09+08:00".to_owned(),
+                union_openid: "u-1".to_owned(),
+            })
+        })
+    }
+
+    fn get_group_member_list(
+        &self,
+        _group_openid: &str,
+        _limit: u32,
+    ) -> QqFuture<'_, GroupMemberList> {
+        Box::pin(async {
+            Ok(GroupMemberList {
+                members: vec![GroupMember {
+                    member_openid: USER_OPENID.to_owned(),
+                    username: "甲".to_owned(),
+                    member_role: "member".to_owned(),
+                    bot: false,
+                    joined_at: "2026-08-05T14:19:09+08:00".to_owned(),
+                    union_openid: String::new(),
+                }],
+                next_cursor: String::new(),
+            })
+        })
+    }
+
+    fn set_group_ban(
+        &self,
+        _group_openid: &str,
+        _member_openid: &str,
+        _duration_secs: i64,
+    ) -> QqFuture<'_, ()> {
+        Box::pin(async { Err(Error::Unsupported("fake: set_group_ban".to_owned())) })
+    }
+
+    fn get_group_bot_state(&self, _group_openid: &str) -> QqFuture<'_, BotInGroupState> {
+        Box::pin(async { Err(Error::Unsupported("fake: get_group_bot_state".to_owned())) })
+    }
+
+    fn get_group_join_request_list(
+        &self,
+        _group_openid: &str,
+        _cursor: Option<&str>,
+        _limit: Option<u32>,
+    ) -> QqFuture<'_, JoinRequestList> {
+        Box::pin(async {
+            Err(Error::Unsupported(
+                "fake: get_group_join_request_list".to_owned(),
+            ))
+        })
+    }
+
+    fn send_group_message(
+        &self,
+        _group_openid: String,
+        _msg: MessageToCreate,
+    ) -> QqFuture<'_, MessageResponse> {
+        Box::pin(async { Err(Error::Unsupported("fake: send_group_message".to_owned())) })
+    }
+
+    fn send_c2c_message(
+        &self,
+        _user_openid: String,
+        _msg: MessageToCreate,
+    ) -> QqFuture<'_, MessageResponse> {
+        Box::pin(async { Err(Error::Unsupported("fake: send_c2c_message".to_owned())) })
+    }
+
+    fn delete_msg(&self, _target: RetractRequest) -> QqFuture<'_, ()> {
+        Box::pin(async { Err(Error::Unsupported("fake: delete_msg".to_owned())) })
+    }
+}
+
+/// 生产注册表 + 查询成功替身。
+fn query_ok_state(settings: &str) -> (TempDir, Arc<QueryOkApi>, AppState) {
+    let (manager, dir) = config(settings);
+    let api = Arc::new(QueryOkApi);
+    let api_dyn: Arc<dyn QqApi> = api.clone();
+    let context = Arc::new(ActionContext::new(api_dyn, Arc::clone(&manager)));
+    let state = AppState::with_actions(manager, context);
+    (dir, api, state)
+}
+
+/// D-e：`get_group_info` 成功回执的 `message` 恒写 `"success"`（Go
+/// `handlers/get_group_info.go:20`），不是空串；失败档不动。真实 handler、真实信封表（Full）、
+/// 真实 `dispatch_json` 出口整串钉死。
+#[tokio::test]
+async fn get_group_info_success_message_is_the_go_literal() {
+    let (_dir, _api, state) = query_ok_state("app_id: 12345\n");
+    let body = gensokyo_runtime::dispatch_json(
+        state.dispatcher(),
+        format!(r#"{{"action":"get_group_info","params":{{"group_id":"{OPENID}"}},"echo":"e1"}}"#)
+            .into_bytes(),
+    )
+    .await;
+    assert_eq!(
+        body,
+        r#"{"data":{"group_create_time":0,"group_id":"0123456789abcdef0123456789abcdef","group_level":0,"group_memo":"简介","group_name":"测试群","max_member_count":0,"member_count":7},"echo":"e1","message":"success","retcode":0,"status":"ok"}"#
+    );
+}
+
+/// D-f：`get_group_member_info` 成功回执顶层**不写 `message` 键**（Go map 直出四键
+/// `data`/`echo`/`retcode`/`status`，`handlers/get_group_member_info.go:61`）。成员条目同时钉
+/// D-g 的 16 键（补齐官方无对应字段的中性零值，上游 openid/union/bot/joined_at 不进 data）。
+#[tokio::test]
+async fn get_group_member_info_success_omits_message_and_has_sixteen_keys() {
+    let (_dir, _api, state) = query_ok_state("app_id: 12345\n");
+    let body = gensokyo_runtime::dispatch_json(
+        state.dispatcher(),
+        format!(
+            r#"{{"action":"get_group_member_info","params":{{"group_id":"{OPENID}","user_id":"{USER_OPENID}"}},"echo":"e1"}}"#
+        )
+        .into_bytes(),
+    )
+    .await;
+    assert_eq!(
+        body,
+        r#"{"data":{"age":0,"area":"","card":"小明","card_changeable":false,"group_id":"0123456789abcdef0123456789abcdef","join_time":1785910749,"last_sent_time":0,"level":"","nickname":"小明","role":"owner","sex":"unknown","shut_up_timestamp":0,"title":"","title_expire_time":0,"unfriendly":false,"user_id":"fedcba9876543210fedcba9876543210"},"echo":"e1","retcode":0,"status":"ok"}"#
+    );
+}
+
+/// D-f/D-g：`get_group_member_list` 成功回执同样省略 `message`，每行成员是 Go 的 16 键。
+#[tokio::test]
+async fn get_group_member_list_success_omits_message_with_sixteen_key_rows() {
+    let (_dir, _api, state) = query_ok_state("app_id: 12345\n");
+    let body = gensokyo_runtime::dispatch_json(
+        state.dispatcher(),
+        format!(
+            r#"{{"action":"get_group_member_list","params":{{"group_id":"{OPENID}"}},"echo":"e1"}}"#
+        )
+        .into_bytes(),
+    )
+    .await;
+    assert_eq!(
+        body,
+        r#"{"data":[{"age":0,"area":"","card":"甲","card_changeable":false,"group_id":"0123456789abcdef0123456789abcdef","join_time":1785910749,"last_sent_time":0,"level":"","nickname":"甲","role":"member","sex":"unknown","shut_up_timestamp":0,"title":"","title_expire_time":0,"unfriendly":false,"user_id":0}],"echo":"e1","retcode":0,"status":"ok"}"#
+    );
+}
+
 /// 生产注册表下的 Compact **成功**整串（D-a 口径修正）：活体 Go 的 `set_group_ban` ok 帧是
 /// `{"data":null,"echo":"e1","message":"","retcode":0,"status":"ok"}`——`sendActionResult.Data`
 /// 无 `omitempty`，成功也恒带 `data`（E01/E11/E17/E21/E33/E43 六次复现）。真实 handler、真实

@@ -27,7 +27,8 @@
 //!
 //! 响应里的 `group_id` / `user_id` 是**虚拟号**（回填请求值），形态由配置 `string_ob11`
 //! 决定（[`gensokyo_protocol::parse_id`] 的数字/字符串双形态）。本 crate 无 idmap 时列表条目的
-//! `user_id` 回退 `"0"`，真实 OpenID 始终可从 `member_openid` 附加字段读到。
+//! `user_id` 回退 `"0"`；成员条目 data 与 Go 一样只有 16 键，不外泄上游的 `member_openid` /
+//! `union_openid` / `bot` / `joined_at`（parity §F D40）。
 //!
 //! # 刻意的差异（相对 Go）
 //!
@@ -43,8 +44,7 @@
 //!   `retcode 0`，首页失败或全量为空回 idmap 本地缓存（Go `fetchFallbackMembers` 同口径）。
 //! - **`get_group_member_list` 游标原地重复即停**：Go 只靠 100 页上限兜底，这里多加一条
 //!   「上游游标未推进」判据，避免异常响应导致无进展空转（刻意增强）。
-//! - **idmap 缺失时的中性值**：Go 侧 `StoreIDv2` 失败直接跳过成员；这里保留条目并置 `user_id=0`，
-//!   由调用方按 `member_openid` 决策。
+//! - **idmap 缺失时的中性值**：Go 侧 `StoreIDv2` 失败直接跳过成员；这里保留条目并置 `user_id=0`。
 //! - **`joined_at` 解析**：Go 用 `time.Parse(RFC3339)`；这里用 `rfc3339`（无 `time` 依赖），
 //!   解析失败同样置 0。
 
@@ -52,11 +52,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use gensokyo_core::{Ob11Id, Result};
 use gensokyo_protocol::action::{ActionRequest, ActionResponse, GroupInfo, GroupMemberInfo};
-use gensokyo_protocol::{Extra, Handler, HandlerFuture};
+use gensokyo_protocol::{Handler, HandlerFuture};
 use gensokyo_qq::dto::{
     BotInGroupState as QqBotState, GroupMember as QqGroupMember, JoinRequest as QqJoinRequest,
     ReviewQa,
@@ -203,7 +203,11 @@ impl GetGroupInfoHandler {
             // 官方不给群成员上限：保持 OneBot 字段形状，填 0 而不是编造默认值
             max_member_count: 0,
         };
-        ok_data(request, &data)
+        // Go `handlers/get_group_info.go:20` 的 `OnebotGroupInfo.Message` 成功路径恒写
+        // `"success"`（`Message: "success"`），不是空串；失败档不动（parity §F D40）。
+        let mut response = ok_data(request, &data)?;
+        response.message = Some("success".to_owned());
+        Ok(response)
     }
 }
 
@@ -566,13 +570,10 @@ impl Handler for GetGroupJoinRequestListHandler {
     }
 }
 
-/// 原来的成员 DTO → OneBot 成员信息。
+/// 原来的成员 DTO → OneBot 成员信息（Go `buildResponseForSingleMember` / `fetchMembersByAPI`
+/// 的 16 键，官方无对应字段一律给中性零值；上游多余的 `member_openid` / `union_openid` /
+/// `bot` / `joined_at` 不进 data——Go 的 map 里没有这些键，parity §F D40）。
 fn member_info(group_id: &Ob11Id, user_id: &Ob11Id, member: &QqGroupMember) -> GroupMemberInfo {
-    let mut extra = Extra::new();
-    extra.insert("member_openid".to_owned(), json!(member.member_openid));
-    extra.insert("union_openid".to_owned(), json!(member.union_openid));
-    extra.insert("bot".to_owned(), json!(member.bot));
-    extra.insert("joined_at".to_owned(), json!(member.joined_at));
     GroupMemberInfo {
         group_id: group_id.clone(),
         user_id: user_id.clone(),
@@ -580,18 +581,18 @@ fn member_info(group_id: &Ob11Id, user_id: &Ob11Id, member: &QqGroupMember) -> G
         // 官方无独立群名片：与 Go 一致用昵称填充
         card: member.username.clone(),
         // 官方无性别字段：与 Go 一致给中性值
-        sex: Some("unknown".to_owned()),
-        age: None,
-        area: None,
-        join_time: rfc3339::parse(&member.joined_at),
-        last_sent_time: None,
-        level: None,
-        role: Some(normalize_role(&member.member_role)),
-        unfriendly: None,
-        title: None,
-        title_expire_time: None,
-        card_changeable: None,
-        extra,
+        sex: "unknown".to_owned(),
+        age: 0,
+        area: String::new(),
+        join_time: rfc3339::parse(&member.joined_at).unwrap_or(0),
+        last_sent_time: 0,
+        level: String::new(),
+        role: normalize_role(&member.member_role),
+        unfriendly: false,
+        title: String::new(),
+        title_expire_time: 0,
+        card_changeable: false,
+        shut_up_timestamp: 0,
     }
 }
 
@@ -627,18 +628,18 @@ fn fallback_members(
             user_id: ob11_id(id, string_mode),
             nickname: "未知".to_owned(),
             card: "未知".to_owned(),
-            sex: Some("0".to_owned()),
-            age: None,
-            area: None,
-            join_time: Some(join_time),
-            last_sent_time: None,
-            level: Some("0".to_owned()),
-            role: Some("member".to_owned()),
-            unfriendly: None,
-            title: Some("0".to_owned()),
-            title_expire_time: None,
-            card_changeable: None,
-            extra: Extra::new(),
+            sex: "0".to_owned(),
+            age: 0,
+            area: "0".to_owned(),
+            join_time,
+            last_sent_time: 0,
+            level: "0".to_owned(),
+            role: "member".to_owned(),
+            unfriendly: false,
+            title: "0".to_owned(),
+            title_expire_time: 0,
+            card_changeable: false,
+            shut_up_timestamp: 0,
         })
         .collect()
 }
@@ -1097,7 +1098,45 @@ mod tests {
         assert_eq!(data["role"], json!("owner"));
         assert_eq!(data["sex"], json!("unknown"));
         assert_eq!(data["join_time"], json!(1_785_910_749_i64));
-        assert_eq!(data["member_openid"], json!(MEMBER));
+        // D-g：键集与 Go `buildResponseForSingleMember` 的 16 键逐字段一致——补齐官方无对应
+        // 字段的中性零值，上游多余的 member_openid / union_openid / bot / joined_at 不进 data。
+        let mut keys: Vec<&str> = data
+            .as_object()
+            .expect("data 应为对象")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "age",
+                "area",
+                "card",
+                "card_changeable",
+                "group_id",
+                "join_time",
+                "last_sent_time",
+                "level",
+                "nickname",
+                "role",
+                "sex",
+                "shut_up_timestamp",
+                "title",
+                "title_expire_time",
+                "unfriendly",
+                "user_id",
+            ]
+        );
+        assert_eq!(data["age"], json!(0));
+        assert_eq!(data["area"], json!(""));
+        assert_eq!(data["last_sent_time"], json!(0));
+        assert_eq!(data["level"], json!(""));
+        assert_eq!(data["unfriendly"], json!(false));
+        assert_eq!(data["title"], json!(""));
+        assert_eq!(data["title_expire_time"], json!(0));
+        assert_eq!(data["card_changeable"], json!(false));
+        assert_eq!(data["shut_up_timestamp"], json!(0));
         assert_eq!(handler.name(), "get_group_member_info");
     }
 
@@ -1120,9 +1159,12 @@ mod tests {
             api.calls(),
             vec![Call::MemberInfo(GROUP.to_owned(), MEMBER.to_owned())]
         );
-        // 没有 idmap 时虚拟号回退 "0"，真实 OpenID 仍在附加字段里
+        // 没有 idmap 时虚拟号回退 0；上游 member_openid 不进 data（Go map 无该键）
         assert_eq!(data["user_id"], json!(0));
-        assert_eq!(data["member_openid"], json!(MEMBER));
+        assert!(
+            data.get("member_openid").is_none(),
+            "member_openid 不得泄漏进 data: {data}"
+        );
     }
 
     #[test]
@@ -1152,7 +1194,19 @@ mod tests {
             .expect("get_group_member_list 的 data 是数组");
         assert_eq!(members.len(), 2);
         assert_eq!(members[0]["user_id"], json!(0));
-        assert_eq!(members[0]["member_openid"], json!(MEMBER));
+        // D-g：成员条目 16 键，上游 member_openid 不进 data（Go map 无该键）
+        assert!(
+            members[0].get("member_openid").is_none(),
+            "member_openid 不得泄漏进 data"
+        );
+        let mut keys: Vec<&str> = members[0]
+            .as_object()
+            .expect("成员条目应为对象")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys.len(), 16, "Go 的 16 键: {keys:?}");
         assert_eq!(members[1]["role"], json!("member"));
         assert_eq!(handler.name(), "get_group_member_list");
     }
@@ -1287,7 +1341,10 @@ mod tests {
         assert_eq!(api.calls().len(), 2, "首页 + 失败的第二页");
         let members = data.as_array().expect("data 是数组");
         assert_eq!(members.len(), 1, "已收集的首页成员保留");
-        assert_eq!(members[0]["member_openid"], json!(MEMBER));
+        assert!(
+            members[0].get("member_openid").is_none(),
+            "member_openid 不得泄漏进 data"
+        );
     }
 
     #[test]

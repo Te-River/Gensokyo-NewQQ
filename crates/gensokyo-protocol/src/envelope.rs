@@ -14,6 +14,10 @@
 //! - **`get_robot_share_link`** 用 [`EnvelopeKind::GoEmptyObject`]：Go 的成功路径回字面量
 //!   `{}`（`handlers/get_robot_share_link.go:36`），链接本身走伪造 notice 事件；失败路径是
 //!   `sendActionResult(..., 1500)`，仍是 Full。
+//! - **`get_group_member_info` / `get_group_member_list`** 用 [`EnvelopeKind::GoMapOk`]：Go 的
+//!   成功回执是 map 直出（`buildResponseForSingleMember` / `buildResponse`），只有
+//!   `retcode` / `status` / `data` / `echo` 四键、**没有 `message`**（`handlers/get_group_member_info.go:61`、
+//!   `handlers/get_group_member_list.go:258`）；失败路径带真实错误文案，与 Full 同形。
 //!
 //! 表逐条来自 Go 源码，**不要按 action 名字猜**：无 `data` 的在
 //! `handlers/set_group_add_request.go:54-82`，`data` 恒 `null` 的在
@@ -42,6 +46,12 @@ pub enum EnvelopeKind {
     ///
     /// 失败路径回落到 [`Self::Full`]：Go 侧失败走 `sendActionResult(..., 1500)`。
     GoEmptyObject,
+    /// `get_group_member_info` / `get_group_member_list` 的成功回执：Go 的 map 直出
+    /// （`buildResponseForSingleMember` / `buildResponse`）只有 `data` / `echo` / `retcode` /
+    /// `status` 四键，**不写 `message`**；多一个键就是多一字节（parity §F D40）。
+    ///
+    /// 失败路径与 [`Self::Full`] 同形（Go 的失败 map 带真实错误文案的 `message`、`data:null`）。
+    GoMapOk,
 }
 
 /// Compact 信封里 `data` 的形态。
@@ -101,6 +111,11 @@ pub fn envelope_for(action: &str) -> EnvelopeKind {
     // Go 只回字面量 `{}`，连 `retcode` / `echo` 都没有（`handlers/get_robot_share_link.go:36`）
     if action == "get_robot_share_link" {
         return EnvelopeKind::GoEmptyObject;
+    }
+    // Go 的 map 直出成功回执没有 `message` 键（`handlers/get_group_member_info.go:61`、
+    // `handlers/get_group_member_list.go:258`；Go 测试 `get_group_member_info_test.go:68` 已钉住该期望）
+    if action == "get_group_member_info" || action == "get_group_member_list" {
+        return EnvelopeKind::GoMapOk;
     }
     match COMPACT_ACTIONS.iter().find(|(name, _)| *name == action) {
         Some((_, data)) => EnvelopeKind::Compact(*data),
@@ -179,6 +194,18 @@ mod tests {
         );
     }
 
+    /// `get_group_member_info` / `_list` 的成功回执用 map 直出信封（Go 无 `message` 键）。
+    #[test]
+    fn member_receipts_use_the_go_map_envelope() {
+        for action in ["get_group_member_info", "get_group_member_list"] {
+            assert_eq!(
+                envelope_for(action),
+                EnvelopeKind::GoMapOk,
+                "{action} 的成功回执在 Go 里没有 message 键"
+            );
+        }
+    }
+
     /// A 发送类 / C 查询类 / Rust 扩展都不进 Compact。
     #[test]
     fn everything_else_stays_full() {
@@ -186,7 +213,6 @@ mod tests {
             "send_group_msg",
             "send_private_msg",
             "get_group_info",
-            "get_group_member_list",
             "mark_msg_as_read",
             "get_status",
             "unknown_action",

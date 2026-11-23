@@ -655,7 +655,10 @@ fn encode<T: Serialize>(response: &ActionResponse<T>) -> String {
         match response.envelope {
             // `GoWakeupOk` / `GoEmptyObject` 的失败 / 兜底形状与 Full 一致（成功路径已在上面
             // 提前返回）
-            EnvelopeKind::Full | EnvelopeKind::GoWakeupOk | EnvelopeKind::GoEmptyObject => {
+            EnvelopeKind::Full
+            | EnvelopeKind::GoWakeupOk
+            | EnvelopeKind::GoEmptyObject
+            | EnvelopeKind::GoMapOk => {
                 r#"{"data":null,"echo":null,"message":"","retcode":1500,"status":"failed"}"#
                     .to_owned()
             }
