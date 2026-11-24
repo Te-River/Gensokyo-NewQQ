@@ -32,7 +32,7 @@
 
 ## 校验与失败行为
 
-所有构造点共用同一套校验（`handlers/card_payload.go` 的 `buildTuwenCard`），任一项不通过即返回 `retcode=1400`，**整条消息不发送**：
+所有构造点共用同一套校验（Rust 链：`crates/gensokyo-runtime/src/deferred.rs` 的 `compose_card` 组装后调 `crates/gensokyo-qq/src/dto/message.rs` 的 `MessageCardContent::validate`，内部由 `check_card_len` / `check_card_url` 逐字段判定），任一项不通过即返回 `retcode=1400`，**整条消息不发送**：
 
 | 失败场景 | 结果 |
 |----------|------|
