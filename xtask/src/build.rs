@@ -244,16 +244,18 @@ pub(crate) fn target_directory(root: &Path) -> Result<PathBuf> {
 /// 保证 `webui/dist` 存在：`rust-embed` 编译期读目录，缺目录直接编译失败。
 ///
 /// 只要 `css/style.css` 在就认为已有真实前端产物（`frontend: npm run build`），不再占位。
-pub(crate) fn ensure_webui_dist(root: &Path) -> Result<()> {
+pub(crate) fn ensure_webui_dist(root: &Path) -> Result<bool> {
     let dist = root.join("webui").join("dist");
     if dist.join("css/style.css").is_file() {
-        return Ok(());
+        return Ok(false);
     }
+    let mut wrote = false;
     for rel in WEBUI_PLACEHOLDERS {
         let path = dist.join(rel);
         if path.is_file() {
             continue;
         }
+        wrote = true;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("创建 {} 失败", parent.display()))?;
@@ -264,9 +266,10 @@ pub(crate) fn ensure_webui_dist(root: &Path) -> Result<()> {
     if !index.is_file() {
         fs::write(&index, WEBUI_INDEX_PLACEHOLDER)
             .with_context(|| format!("写入占位文件 {} 失败", index.display()))?;
+        wrote = true;
     }
     println!("webui/dist 无前端产物，已写入占位文件（rust-embed 需要目录存在）");
-    Ok(())
+    Ok(wrote)
 }
 
 /// `rustup target list --installed`（带与 add 相同的 `--toolchain`，避免查到默认工具链的清单）；
@@ -896,7 +899,16 @@ pub fn run(args: BuildArgs) -> Result<()> {
     let flavors = flavors(&args);
     let matrix_mode = args.all || args.linux_only;
 
-    ensure_webui_dist(&root)?;
+    // cargo 的 fingerprint 只跟踪编译期已存在的文件：占位 index.html 属于「首次新增」，
+    // 不重编 gensokyo-webui 就会把「没有 index.html」的旧状态一直嵌在二进制里（实测连跑两次
+    // xtask build 产物字节数一模一样，/webui 仍回 FALLBACK_INDEX）。真实前端产物更新是同路径
+    // 改写、cargo 能追踪；新增文件必须手动失效一次。
+    if ensure_webui_dist(&root)? {
+        let _ = Command::new("cargo")
+            .args(["clean", "-p", "gensokyo-webui"])
+            .current_dir(&root)
+            .status();
+    }
     let base_target_dir = target_directory(&root)?;
     let release_dir = root.join("release");
     fs::create_dir_all(&release_dir)
@@ -1609,7 +1621,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("创建临时根目录失败");
 
-        ensure_webui_dist(&root).expect("写入占位文件失败");
+        assert!(
+            ensure_webui_dist(&root).expect("写入占位文件失败"),
+            "首次写入占位文件必须报告已写入（调用方据此失效 gensokyo-webui 的编译缓存）"
+        );
         for rel in super::WEBUI_PLACEHOLDERS {
             assert!(
                 root.join("webui").join("dist").join(rel).is_file(),
@@ -1630,7 +1645,10 @@ mod tests {
         std::fs::write(&style, "body{}").expect("写入真实产物失败");
         let placeholder = root.join("webui/dist/placeholder.html");
         std::fs::remove_file(&placeholder).ok();
-        ensure_webui_dist(&root).expect("已有产物时不应失败");
+        assert!(
+            !ensure_webui_dist(&root).expect("已有产物时不应失败"),
+            "存在 css/style.css 时不应再写占位，也不应触发重编"
+        );
         assert!(
             !placeholder.exists(),
             "存在 css/style.css 时不该再写占位文件"
