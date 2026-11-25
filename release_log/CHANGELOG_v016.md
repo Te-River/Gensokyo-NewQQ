@@ -782,6 +782,24 @@ Go 的成功路径直接 `return` 字面量 `{"status": "ok", "retcode": 0}`（`
 
 ## 📝 工程与文档变更
 
+### 构建链：占位 `webui/dist/index.html` 与 Go 逐字节一致 + 嵌入新鲜度防回归（2026-11-25）
+
+`xtask` 在缺前端产物时会写一组空占位文件让 `rust-embed` 能编译，但**没有 `index.html`**，而 Go 的
+`build.ps1 Ensure-WebUIDist` 是写了一份 158 字节占位 `index.html` 的（含 UTF-8 BOM 与结尾换行）。
+Rust 侧靠 `assets::serve` 的 `FALLBACK_INDEX` 兜底，`/` 与 `/webui` 一直回 200，所以问题不在功能，
+而在「前端未构建」时的占位页内容与 Go 不同形。顺带查出更硬的一处：占位文件是**编译之后**才写入的，
+cargo 只跟踪编译期已存在的文件，新增文件不触发重编，连跑两次 `xtask build` 产物字节数一模一样、
+`/webui` 仍吐 `FALLBACK_INDEX`——首次拉前端产物/首次占位的场景都会静默嵌进旧内容。
+
+- **修改**：`xtask/src/build.rs` 新增 `WEBUI_INDEX_PLACEHOLDER`（与 Go 逐字节一致）；`ensure_webui_dist` 返回
+  `Result<bool>` 报告「是否写过占位」，调用方在 `true` 时执行一次 `cargo clean -p gensokyo-webui` 强制重编
+- **修改**：`webui/dist/index.html` 按 `.gitignore` 既有例外**入库**，clean clone 无需先跑 xtask 就有首页
+- **新增测试**：`embedded_index_html_matches_the_file_on_disk`——`GET /index.html` 必须 200 且与
+  `include_bytes!("webui/dist/index.html")` 逐字节相同，`rust-embed` 缓存陈旧时直接红；xtask 侧断言两次
+  `ensure_webui_dist` 的返回值（首次 `true`、已有 `css/style.css` 时 `false`）
+- **修改文档**：`docs/rust-build.md` 更正「整个 `webui/dist` 被忽略」为「6 个占位文件入库、其余忽略」，
+  并写明真实 UI 需在 Go 主仓 `main` 分支 `cd frontend && npm run build` 后把 `dist/` 覆盖过来
+- **影响**：首次构建多一次 webui crate 重编（约 1 分钟）；已有产物时流程不变
 ### 四能力 feature：`--no-webui` 变成真实裁剪（2026-11-20）
 
 Rust 侧第一次有 crate 级 feature：`webui` / `grpc` / `qr` / `oss`，`default` 全开；`--no-default-features` 等于四能力全关，`cargo xtask build --no-webui` 传的正是它。此前 `-noWebui` 产物与完整版 **SHA256 完全相同**（4 架构实测），本轮消除该同构。
@@ -891,6 +909,11 @@ Rust 侧第一次有 crate 级 feature：`webui` / `grpc` / `qr` / `oss`，`defa
 ## ✅ 提交记录
 
 ```
+e0ca4bb  test(webui): 钉住「嵌入 index.html 必须与磁盘同字节」+ 占位 index.html 入库
+cd4936f  fix(xtask): 占位文件首次写入后失效 gensokyo-webui 缓存，避免嵌入陈旧 webui/dist
+356d6f1  fix(xtask): 占位 index.html 与 Go 逐字节一致，并纠正“缺它会 404”的错误说明
+4422b5a  fix(xtask): 占位 webui/dist 补 index.html，控制台地址不再 404
+7b933f2  fix(runtime): 出站降级语义对齐 Go（媒体失败 / reply / card / input_notify）
 cbb007c  fix(webui): 补 /webui 前缀兼容，横幅控制台地址对齐 Go
 68b5870  fix(protocol): 活体遗留五项低优先形状差收口（parity D39）
 b171085  fix(protocol): Compact 成功回执补 data:null 对齐 Go sendActionResult
