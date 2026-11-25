@@ -49,11 +49,14 @@ const WEBUI_PLACEHOLDERS: &[&str] = &[
     "js/placeholder.js",
 ];
 
-/// `webui/dist/index.html` 占位内容，与 Go `build.ps1` 的 `Ensure-WebUIDist` 逐字节一致。
+/// `webui/dist/index.html` 占位内容，与 Go `build.ps1` 的 `Ensure-WebUIDist` 逐字节一致
+/// （含 UTF-8 BOM 与结尾换行，共 158 字节）。
 ///
-/// 只有空占位文件时没有 `index.html`，`/webui` 与 `/` 都会 404——而横幅照常打印控制台地址，
-/// 点开是 404。补这份占位后 clean clone 构建的产物在两个路径上都回 200，与 Go 同形。
-const WEBUI_INDEX_PLACEHOLDER: &str = "<!doctype html><title>WebUI placeholder</title><!-- Ensure-WebUIDist 占位：clean clone 可直接构建；真实前端构建产物会覆盖本文件 -->";
+/// 注意：**没有它也不会 404**——`gensokyo-webui` 的 `assets::serve` 在嵌入资源里找不到
+/// `index.html` 时会用 `FALLBACK_INDEX` 兜底，`/` 与 `/webui` 照样 200。补这份占位是为了让
+/// 「尚未构建前端」时的占位形态与 Go **逐字节一致**（Go 的 `Ensure-WebUIDist` 写的就是这份
+/// `index.html`），避免同一个空白控制台页在两侧标题/文案不同。
+const WEBUI_INDEX_PLACEHOLDER: &str = "\u{feff}<!doctype html><title>WebUI placeholder</title><!-- Ensure-WebUIDist 占位：clean clone 可直接构建；真实前端构建产物会覆盖本文件 -->\n";
 
 #[derive(Debug, Args)]
 pub struct BuildArgs {

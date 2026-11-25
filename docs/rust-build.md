@@ -13,7 +13,7 @@
 | 链接器 | 宿主 abi 必须有可用链接器：MSVC 需 VS Build Tools（`link.exe`），GNU 需 mingw。本仓库当前开发机走 GNU：`rustup override set 1.99.1-x86_64-pc-windows-gnu` |
 | zig 交叉工具链 | **自动引导，无需预装**：linux-gnu×4 + windows-gnu×2 目标构建前 xtask 自动探测/下载 zig + cargo-zigbuild（见下节）；rustup target 缺失时自动 `rustup target add`。windows-gnu 也由 zig 交叉，**无需 MSVC / mingw** |
 | 系统工具（仅首次下载需要） | `curl`、`tar`（Windows 10+ 自带两者；Linux 需发行版自带，zip 解压另可回退 `unzip`）、sha256 校验用 `certutil`（Windows）/ `sha256sum`（Linux）。全部系统自带，**不新增任何 cargo 依赖** |
-| `webui/dist` | **`rust-embed` 在编译期读取该目录**，目录缺失会直接编译失败。它以 `.gitignore` 忽略，xtask 会在缺失时自动写入 6 个占位文件（与 Go 版 `build.ps1`（`main` 分支）的 `Ensure-WebUIDist`、CI 占位步骤同一组文件；其中 `index.html` 是横幅控制台地址能打开的前提，缺它 `/` 与 `/webui` 都回 404） |
+| `webui/dist` | **`rust-embed` 在编译期读取该目录**，目录缺失会直接编译失败。它以 `.gitignore` 忽略，xtask 会在缺失时自动写入 6 个占位文件（与 Go 版 `build.ps1`（`main` 分支）的 `Ensure-WebUIDist`、CI 占位步骤同一组文件）。其中 `index.html` 与 Go 的占位**逐字节一致（158B，含 BOM 与结尾换行）**：缺它也不会 404——`assets::serve` 会用 `FALLBACK_INDEX` 兜底让 `/` 与 `/webui` 回 200——补它只是让「前端未构建」时的占位页内容与 Go 完全相同 |
 | 前端产物（可选） | 本分支不含 `frontend/` 源码（Vue3 + Quasar 在 Go 主仓 `main` 分支的 `frontend/`）：在其 `cd frontend && npm run build`，把产出的 `dist/` 覆盖到本仓 `webui/dist/`；存在 `webui/dist/css/style.css` 时 xtask 不再写占位文件 |
 | UPX（可选） | 默认尝试压缩；PATH 里没有 `upx` 只提示并跳过，不是构建失败 |
 
