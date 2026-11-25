@@ -49,6 +49,12 @@ const WEBUI_PLACEHOLDERS: &[&str] = &[
     "js/placeholder.js",
 ];
 
+/// `webui/dist/index.html` 占位内容，与 Go `build.ps1` 的 `Ensure-WebUIDist` 逐字节一致。
+///
+/// 只有空占位文件时没有 `index.html`，`/webui` 与 `/` 都会 404——而横幅照常打印控制台地址，
+/// 点开是 404。补这份占位后 clean clone 构建的产物在两个路径上都回 200，与 Go 同形。
+const WEBUI_INDEX_PLACEHOLDER: &str = "<!doctype html><title>WebUI placeholder</title><!-- Ensure-WebUIDist 占位：clean clone 可直接构建；真实前端构建产物会覆盖本文件 -->";
+
 #[derive(Debug, Args)]
 pub struct BuildArgs {
     /// 目标三元组，可重复（例如 x86_64-unknown-linux-gnu）；缺省构建当前宿主。
@@ -250,6 +256,11 @@ pub(crate) fn ensure_webui_dist(root: &Path) -> Result<()> {
                 .with_context(|| format!("创建 {} 失败", parent.display()))?;
         }
         fs::write(&path, "").with_context(|| format!("写入占位文件 {} 失败", path.display()))?;
+    }
+    let index = dist.join("index.html");
+    if !index.is_file() {
+        fs::write(&index, WEBUI_INDEX_PLACEHOLDER)
+            .with_context(|| format!("写入占位文件 {} 失败", index.display()))?;
     }
     println!("webui/dist 无前端产物，已写入占位文件（rust-embed 需要目录存在）");
     Ok(())
@@ -1602,6 +1613,14 @@ mod tests {
                 "缺少占位文件 {rel}"
             );
         }
+        // `index.html` 是横幅控制台地址能打开的前提（缺它 `/` 与 `/webui` 都 404），
+        // 内容与 Go `Ensure-WebUIDist` 一致
+        let index = root.join("webui/dist/index.html");
+        assert_eq!(
+            std::fs::read_to_string(&index).expect("缺少 index.html 占位"),
+            super::WEBUI_INDEX_PLACEHOLDER,
+            "index.html 占位内容应与 Go 的 Ensure-WebUIDist 一致"
+        );
 
         // 已有真实前端产物时不再介入
         let style = root.join("webui/dist/css/style.css");
