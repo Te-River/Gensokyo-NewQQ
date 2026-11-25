@@ -110,7 +110,7 @@
 
 ## 6. 已知缺口与有意差异（「不要当成 bug」清单）
 
-下面 32 条都是**已裁决 / 已登记**的差异：看到时先查证据列，不要直接按「和 Go 不一样」开修。真正待办的只在 §7。
+下面 33 条都是**已裁决 / 已登记**的差异：看到时先查证据列，不要直接按「和 Go 不一样」开修。真正待办的只在 §7。
 
 | # | 项 | 说明 | 证据 |
 |---|----|------|------|
@@ -145,6 +145,7 @@
 | ㉘ | 精简构建的 gRPC / OSS 是 **warn 降级**、不是静默 | Go small：gRPC 服务端与客户端都不起（`main_grpc_stub.go:6-8`）、上传函数 `return "", nil`、`CheckText` 恒 true。Rust：`lotus_grpc` 与 `oss_type` 1~3 各 warn 一次后降级（idmap 走本地、`/getid` 保持挂载；内置 OSS 回 `Error::HostingConfig` 并保留原引用）。**看到这两条 warn 不是配置写错** | `crates/gensokyo-runtime/src/boot.rs`、`crates/gensokyo-media/src/oss/mod.rs`；parity §F D18 |
 | ㉙ | `*_to_message` 开关打开时**不再发 notice（interaction 除外）** | `global_group_msg_rre_to_message` / `global_c2c_msg_switch_to_message` 打开后，`GROUP_MSG_RECEIVE/REJECT`、`C2C_MSG_RECEIVE/REJECT` 改发 `message/group` / `message/private`（Go `ProcessGroupMsgReceive.go:104-213` 等）；`group_openid`/`openid` 为空时 Go 整条不报，Rust 同样返回空。`global_interaction_to_message` 打开时 Go 是**先 message 后 notice 双发**（四分支 `ProcessInlineSearch.go:152-423,424-628`），所以一条回调会看到两条事件。分侧：`avatar`、`is_binded_*`、echo 双路未做 | `crates/gensokyo-runtime/src/inbound.rs`（`group_payload_message` / `c2c_msg_switch` / `interaction_message`）；parity §F D19 |
 | ㉚ | `white_enable` 单独打开**不生效**，必须同时开 `white_prefix_mode` | Go 的白名单是「指令前缀白名单」：`white_prefix_mode=true` 且 `white_enable[4]`（群）/ `white_enable[5]`（单聊）为真时，正文不以 `white_prefixs` 任一项开头 ⇒ `messageText` 置空、调用方 `return nil`，**整条消息不上报**（`handlers/message_parser.go:1913-1971`、`ProcessGroupMessage.go:121-125`）。`white_bypass` 是豁免名单，`white_bypass_reverse=true` 时反转（只有名单内才过滤）。分侧：Go 未命中会回 `no_white_response` 兜底消息，Rust 无出站通道、只丢弃；Go 的 `TemporaryCommands` 无对应物 | `crates/gensokyo-runtime/src/inbound.rs`（`white_list_passes` 与群/私聊两个调用点）；parity §F D20 |
+| ㉝ | 出站**降级吞错**已按 Go 收口（媒体失败 / reply / card / input_notify）——看到「媒体发失败却回 ok」不是 bug | **2026-11-25 重写（原 P77-1/P77-2「card 硬拒」结论作废）**：媒体段（image/video/record/file/`msg_type=7`，群聊 / 私聊 / `send_msg` 三径）准备或发送失败、silk 转码不可用（本机无 `ffmpeg`/`pts`）、`[CQ:reply]` 目标不可解析或归属会话不一致、卡片字段非法——四类一律按 Go **记录日志后照常回执**：`retcode 0` / `status "ok"` / `data.message_id 0`（前两类）或正文那条的 message_id（后两类），媒体与 reply 的错误文本进 `message` 字段。`[CQ:input_notify]` 与正文混发改为 Go 的**双发**（先 `msg_type=6` 通知、再正文，回执取正文条）。**仍保留的差异**：① 召回（`plan.wakeup`）媒体失败不降级（Go `send_private_msg_wakeup.go:145-150` 也回失败码）；② 卡片四字段本地校验比 Go 严（Go 只看 pic/url），只是失败形态从整条 1400 变成丢卡片；③ 群聊目标带 `[CQ:input_notify]` 仍 `1400`（Go 群链根本不调 `sendInputNotify`）。证据见 parity §F 的 P77-1/P77-2/P77-7/P77-8/P77-9 | `crates/gensokyo-runtime/src/deferred.rs`（`execute_report` / `SendOutcome` / `compose_media_extras` / `resolve_reply_for_send` / `compose_card` 调用点）、`crates/gensokyo-runtime/src/dispatcher.rs`（`run_deferred` 的降级 `message`）；Go `handlers/send_group_msg.go:888-991`、`outbound_bridge.go:941-944`、`send_private_msg.go:787-802`/`:473-477`；`release_log/CHANGELOG_v016.md`「出站降级语义对齐 Go」 |
 | ㉜ | `delete_group_msg` 的「撤指定成员最新消息」分支如实拒绝 + blacklist 空参首报错文案 | **D39（2026-11-22）**：① Go 空 `message_id` 撤回「机器人最后一条」的能力 Rust 已补齐（latest 表 NUL 哨兵键 + deferred 写侧），但 `user_id` 非空正数时 Go 撤**该成员**最后一条、Rust 无此上游能力 ⇒ 1400 如实拒绝，不是回归；② `set_group_member_blacklist` 空参两侧档位同 100、首报错不同（Go 报 op、Rust 报 group_id）——校验顺序差，属 a 类前缀族既有登记的延伸，不修 | parity §F D39；`crates/gensokyo-actions/src/interaction.rs`（DeleteGroupMsgHandler）、`crates/gensokyo-storage/src/idmap/mod.rs`（LATEST_BOT_MESSAGE_USER_KEY） |
 
 ## 7. 未完成项与下一步

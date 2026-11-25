@@ -14,7 +14,7 @@
 [CQ:card,title=<标题>,description=<描述>,pic_url=<图片URL>,url=<跳转链接>]
 ```
 
-参数顺序无关；**`title` / `description` / `url` / `pic_url` 四项全部必填**，缺任一项整条消息回 `1400`。
+参数顺序无关；**`title` / `description` / `url` / `pic_url` 四项全部必填**。任一字段非法时**丢弃卡片、照常发送正文**（不要指望坏卡片拦住整条消息，见下文「校验与失败行为」）。
 
 | 参数 | 别名 | 必填 | 说明 |
 |------|------|------|------|
@@ -32,22 +32,24 @@
 
 ## 校验与失败行为
 
-所有构造点共用同一套校验（Rust 链：`crates/gensokyo-runtime/src/deferred.rs` 的 `compose_card` 组装后调 `crates/gensokyo-qq/src/dto/message.rs` 的 `MessageCardContent::validate`，内部由 `check_card_len` / `check_card_url` 逐字段判定），任一项不通过即返回 `retcode=1400`，**整条消息不发送**：
+所有卡片都经同一套校验（Rust 链：`crates/gensokyo-runtime/src/deferred.rs` 的 `compose_card` 组装后调 `crates/gensokyo-qq/src/dto/message.rs` 的 `MessageCardContent::validate`，内部由 `check_card_len` / `check_card_url` 逐字段判定）。**任一项不通过即丢弃卡片**：记一条 WARN（`[cq:card] 卡片字段非法，已丢弃卡片并继续发送正文`）、正文照发、回执 `retcode=0` / `status="ok"` / `message` 空串——与 Go 主线「pic 或 url 为空，跳过卡片消息发送」的降级口径一致（Go `handlers/send_group_msg.go:620-623`）：
 
 | 失败场景 | 结果 |
 |----------|------|
-| `title` 缺失或去空白后为空 | 1400 |
-| `title` 超过 50 字符 | 1400 |
-| `description` 缺失或去空白后为空 | 1400 |
-| `description` 超过 200 字符 | 1400 |
-| `url` / `pic_url` 缺失 | 1400 |
-| `url` / `pic_url` 不是 `https://`（含 `http://` 与本地路径） | 1400 |
-| `url` / `pic_url` 超过 1024 **字节** | 1400 |
-| `[CQ:card]` 的 JSON 参数解析失败 | 1400 |
+| `title` 缺失或去空白后为空 | 丢卡片，正文照发 |
+| `title` 超过 50 字符 | 丢卡片，正文照发 |
+| `description` 缺失或去空白后为空 | 丢卡片，正文照发 |
+| `description` 超过 200 字符 | 丢卡片，正文照发 |
+| `url` / `pic_url` 缺失 | 丢卡片，正文照发 |
+| `url` / `pic_url` 不是 `https://`（含 `http://` 与本地路径） | 丢卡片，正文照发 |
+| `url` / `pic_url` 超过 1024 **字节** | 丢卡片，正文照发 |
+| `[CQ:card]` 的 JSON 参数解析失败 | 丢卡片，正文照发 |
 
-> 卡片与 @全员 同现（markdown 未优先）同样回 `1400`：卡片会清空正文，@全员 标签无法承载。markdown 与卡片同现时 markdown 优先，卡片被丢弃且不参与校验。
+> 纯卡片消息（没有正文）丢掉卡片后就没有可发内容了：此时**不调用上游**，回执 `data.message_id` 为 `0`（Go 同语义）。
 
-> 2026-10 行为变更：此前 `pic` 为本地路径会自动走 OSS 图床上传、非法卡片会被跳过并继续发送文本；现在本地路径与 `http` 一律 1400，且整条消息失败（不再静默降级为纯文本）。
+> 卡片与 @全员 同现时同样丢卡片、@全员 正文照发：`msg_type=8` 会清空正文，标签无处安放。markdown 与卡片同现时 markdown 优先，卡片被丢弃且不参与校验。
+
+> 行为沿革：2026-10 曾改为「四字段任一非法整条消息 `1400`」（本地 fail-fast）；**2026-11-25 改回 Go 的降级口径**——本地校验仍在（比 Go 只看 pic/url 更严），但失败只丢卡片，不再让坏卡片拦住正文。
 
 ## 发送行为
 
@@ -58,6 +60,7 @@
 3. 群聊与单聊都展示同一张带标题、描述、图片和跳转链接的卡片。
 4. 消息正文（`content`）会被清空，卡片不会与文本拼接。
 5. 如果同一消息同时包含 `[CQ:markdown]`，markdown 优先级更高：卡片直接丢弃且不参与校验（避免一张坏卡片拦住合法的 markdown）。
+6. 卡片非法（见上节）时卡片被丢弃、正文照常发送，回执仍是 `retcode 0`。
 
 ## 使用示例
 
@@ -106,7 +109,7 @@ await bot.send_group_msg(group_id=821404315, message=card_msg)
 
 - `pic` / `url` 必须为 `https://` 且 ≤1024 字节；本地图片需先转存为公网 `https://` 地址（卡片 `pic` 不接受 `qqbot-media://`）。
 - 四字段必填：`title` 1~50 字符、`description` 1~200 字符、`url` / `pic_url` 均为 https 链接。
-- 与 @全员 同现（markdown 未优先）回 `1400`；需要同时 @全员 时请改用 markdown 消息。
+- 与 @全员 同现（markdown 未优先）时卡片被丢弃、@全员 正文照发；需要卡片与 @全员 同时生效请改用 markdown 消息。
 - `[CQ:card]` 不会与文本内容拼接，发送卡片时文本内容会被清空。
 - 消息中同时携带 `[CQ:markdown]` 时，markdown 优先生效，卡片被丢弃。
 - 频道场景不支持卡片消息。

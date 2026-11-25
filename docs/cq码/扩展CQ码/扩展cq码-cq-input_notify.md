@@ -27,56 +27,58 @@
 
 ## 发送行为（本仓 Rust 实现口径）
 
-当 `[CQ:input_notify]` 出现在 `send_private_msg` 的出站消息中时，本条消息**整体被替换**为一条 `msg_type=6` 的输入状态通知（`input_notify{input_type, input_second}`）：
+当 `[CQ:input_notify]` 出现在 `send_private_msg` 的出站消息中时，本仓**先发一条 `msg_type=6` 通知、再照常发正文**（与 Go 主线同口径）：
 
 1. CQ 码从消息文本中移除。
-2. 只发送这一条通知消息，`second` 缺省补 `60`（对齐 Go `sendInputNotify` 的默认值）。
-3. 输入状态超时后自动消失，无需手动关闭。
+2. 通知条：`msg_type=6` + `input_notify{input_type, input_second}`，`second` 缺省补 `60`（对齐 Go `sendInputNotify` 的默认值）。
+3. 正文条：去掉通知后剩下的正文 / markdown / 媒体等按原有优先级正常发送；**回执只有一条**，取后发的正文那条（`data.message_id` 是正文消息的 ID）。
+4. 输入状态超时后自动消失，无需手动关闭。
 
-**硬约束（一律 `retcode=1400`，整条不发送）**，见 `crates/gensokyo-runtime/src/deferred.rs` 的 `compose_input_notify`：
+纯通知消息（消息里只有 `[CQ:input_notify]`）仍然只发一条通知，回执就是通知的 `message_id`。
+
+**唯一的硬拒**，见 `crates/gensokyo-runtime/src/deferred.rs` 的 `compose_input_notify`：
 
 | 场景 | 结果 |
 |------|------|
 | 群目标（`send_group_msg` / `send_to_group`）携带 `[CQ:input_notify]` | 1400「只有单聊支持（官方 msg_type=6 仅 C2C）」 |
-| 与正文（非空 text）同条 | 1400「必须单独成条」 |
-| 与 markdown / 卡片 / 键盘 / 音乐 / 任何媒体段同条 | 1400「必须单独成条」（msg_type=6 不承载这些内容） |
 
-也就是说：**想发通知就单独发一条纯 `[CQ:input_notify]` 消息，正文另起一条**。
+> 群聊这条与 Go 一致但形态不同：Go 群链根本不调用 `sendInputNotify`，该码在群消息里会被静默忽略（`Error: Expected RichMediaMessage type for key input_notify` 日志）；本仓选择明确 `1400`，避免插件以为通知发出去了。
 
-## 与 Go 主线的差异（刻意分侧）
+## 与 Go 主线的对照
 
-> Go 主线为两段式（先通知后正文）：Go 的实现是收到带 `[CQ:input_notify]` 的消息后，**先**单独发一条 `msg_type=6` 通知、**再**照常发送正文，插件可以 `"[CQ:input_notify] 正文..."` 一条搞定。本仓 Rust 链一次计划只发一条消息体（`msg_type` 只能取一个值，正文 / 媒体 / markdown / 卡片都带不进 `msg_type=6`），因此选择**硬拒混发**而不是清空正文静默丢弃。该差异属本仓刻意分侧口径，登记见 `reports/refactor/17-go-rust-parity.md` §F / B4（不要按 bug 修）；代码证据为 `compose_input_notify` 的函数文档注释。
+> Go 主线（`handlers/send_private_msg.go:473-477`）收到带 `[CQ:input_notify]` 的消息后**先**单独发一条 `msg_type=6` 通知、**再**照常发送正文，插件 `"[CQ:input_notify] 正文..."` 一条消息即可搞定。**本仓 2026-11-25 起已对齐这个双发口径**（此前是「混发一律 `1400` 硬拒」）；登记见 `reports/refactor/17-go-rust-parity.md` §F 的 P77-9。
 
 ## 使用示例
 
-单发一条输入状态通知（本仓口径，正文另起一条）：
+一条消息搞定（通知 + 正文，本仓与 Go 同口径）：
 
 ```python
 from nonebot.adapters.onebot.v11 import Message
 
-# 第一条：纯通知，不带任何正文
+await bot.send_private_msg(
+    user_id=123456,
+    message=Message("[CQ:input_notify,type=1,second=30] 正在为您查询，请稍候..."),
+)
+```
+
+也可以拆成两条独立消息（等价的旧写法，仍然支持）：
+
+```python
+# 纯通知
 await bot.send_private_msg(
     user_id=123456,
     message=Message("[CQ:input_notify,type=1,second=30]"),
 )
-
-# 第二条：实际内容
+# 正文
 await bot.send_private_msg(
     user_id=123456,
     message=Message("正在为您查询，请稍候..."),
 )
 ```
 
-> ⚠️ 以下写法在 Go 主线可用，但**本仓会回 1400**（通知与正文混发）：
->
-> ```python
-> # 本仓不支持：input_notify 与正文同条
-> msg = Message("[CQ:input_notify,type=1,second=30] 正在为您查询，请稍候...")
-> ```
-
 ## 注意
 
 - 输入状态通知**仅支持单聊（C2C）场景**，群聊和频道不支持（群目标直接 1400）。
 - `second` 未提供时按 `60` 秒发送；官方 UI 展示效果，不影响其他消息的发送逻辑。
-- `[CQ:input_notify]` 本身不发送正文：**必须单独成条**，正文需在另一条消息里提供。
-- 多条消息连续发送时，只需在正文之前另发一条纯通知消息即可。
+- 混发时上游会收到**两条**消息（通知 + 正文），但插件只拿到**一条**回执（正文那条）。
+- 通知条不承载正文：正文永远在紧随其后的那条消息里。

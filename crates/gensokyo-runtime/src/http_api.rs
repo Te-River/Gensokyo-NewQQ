@@ -409,10 +409,20 @@ async fn action_gate(State(state): State<AppState>, request: Request, next: Next
     dispatch_action(&state, &params, &parts.headers, body).await
 }
 
-/// `/api` 与 `/api/**` 归 WebUI（登录、登出、配置查询）。
+/// `/api` 与 `/api/**` 归 WebUI（登录、登出、配置查询），以及 Go 侧同前缀的
+/// `/webui` 挂载点下的 `/webui/api` / `/webui/api/**`。
+///
+/// WebUI 的路由表同时挂在根路径与 `/webui` 两个前缀下（Go `main.go:539-545` 的
+/// `r.Group("/webui")`），因此 HTTP API 端口上的 `POST /webui/api/*` 也必须让给 WebUI，
+/// 否则会被当作 OneBot action 转发出去。
 #[cfg(feature = "webui")]
 fn is_webui_path(path: &str) -> bool {
-    path == "/api" || path.starts_with("/api/")
+    ["/api", "/webui/api"].iter().any(|prefix| {
+        path == *prefix
+            || path
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
 }
 
 #[cfg(test)]
@@ -446,6 +456,21 @@ mod tests {
         assert!(!is_webui_path("/apixxx"));
         assert!(!is_webui_path("/get_status"));
         assert!(!is_webui_path("/"));
+    }
+
+    /// `/webui` 前缀下的同一批 API 同样归 WebUI（WebUI 路由表在 `""` 与 `/webui` 双挂）。
+    #[cfg(feature = "webui")]
+    #[test]
+    fn webui_prefixed_api_belongs_to_webui_only_as_a_path_segment() {
+        assert!(is_webui_path("/webui/api"));
+        assert!(is_webui_path("/webui/api/login"));
+        assert!(is_webui_path("/webui/api/config"));
+        assert!(is_webui_path("/webui/api/123456/config"));
+        // 前端静态资源与页面不是 action 判据的讨论范围，但同样不能误判：
+        // `/webui/apixxx` / `/webui` 只是普通前缀，与 `/apixxx` 同口径不算 WebUI API。
+        assert!(!is_webui_path("/webui/apixxx"));
+        assert!(!is_webui_path("/webuiapi"));
+        assert!(!is_webui_path("/webui"));
     }
 
     /// `server_dir` 决定短链前缀；`yaml_extra` 追加 `settings` 直接子项（如 `lotus_password`）。
@@ -692,6 +717,58 @@ mod tests {
             .await
             .expect("创建");
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// WebUI 的 `/webui` 前缀挂载点下的 API 同样要让给 WebUI：
+    /// `POST /webui/api/login` 必须是登录请求，而不是被 `action_gate` 当成 OneBot action
+    /// （那会在无 `access_token` 时回 403 鉴权失败，插件侧完全看不懂）。
+    #[cfg(feature = "webui")]
+    #[tokio::test]
+    async fn webui_prefixed_post_api_is_not_dispatched_as_an_action() {
+        use axum::http::header;
+
+        let (_dir, config) = config("");
+        let state = AppState::with_builtin_handlers(Arc::clone(&config));
+        let webui = WebUi::router(Arc::new(WebUiState::new(Arc::clone(&config))));
+        let app = crate::http_api::with_webui_router(webui, state);
+
+        for path in ["/webui/api/login", "/api/login"] {
+            let request = Request::builder()
+                .method("POST")
+                .uri(path)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"username":"admin","password":"x"}"#))
+                .expect("构造请求");
+            let response = app.clone().oneshot(request).await.expect("请求");
+            let status = response.status();
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("读响应体");
+            let body = String::from_utf8_lossy(&body);
+            // 走 action 门会回 OneBot 信封（必带 retcode）；WebUI 的登录响应没有这个键。
+            assert!(
+                !body.contains("retcode"),
+                "{path} 被 action 门当成 OneBot action 了（{status} / {body}）"
+            );
+        }
+
+        // 同一端口上的真 action 路径仍必须被门接住：无 token 配置时直接分发，
+        // 响应是 OneBot 信封（带 retcode），证明门本身没被拆掉。
+        let request = Request::builder()
+            .method("POST")
+            .uri("/get_status")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"action":"get_status","params":{}}"#))
+            .expect("构造请求");
+        let response = app.oneshot(request).await.expect("请求");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("读响应体");
+        assert!(
+            String::from_utf8_lossy(&body).contains("retcode"),
+            "非 /api 的 POST 仍是 action 信封"
+        );
     }
 
     /// 生产装配（`boot.rs::http_app`）：WebUI 路由先包上 `action_gate`，`/url` 再 merge 进来。

@@ -221,6 +221,21 @@ Go 在 `global_group_msg_rre_to_message` / `global_c2c_msg_switch_to_message` / 
 
 ## 🐛 修复
 
+### 出站降级语义对齐 Go：媒体失败 / reply / card / input_notify 不再硬拒（2026-11-25）
+
+2026-11-25 双仓真机跑同一套 32 项 CQ 测试插件时发现的主要「对外输出不一致」项：媒体 / 扩展段出问题时，Go 主仓**降级吞错**（记录日志后照常下发 `retcode:0` / `status:"ok"` 回执，`data.message_id=0`，把上游错误文本塞进 `message`），而 Rust 一律回 `1500` / `1400` `failed`——同一份 NoneBot 插件在 Go 上通过、在 Rust 上抛异常。本轮把四类出口按 Go 口径收口，并顺带对齐 `[CQ:input_notify]` 与正文混发的双发语义。
+
+- **修改（媒体段失败降级）**（`crates/gensokyo-runtime/src/deferred.rs`）：`compose_media_extras` 改为逐段 `match`——下载 / `image_sizelimit` 压缩 / silk 转码 / `file_data` 直传 / >5MB 分片合并任一步失败都只 `report_degraded`（`tracing::error!`）丢该段，正文照常发；纯媒体条（`is_media_only_body`）上游发送失败同样降级。带正文的那条失败仍如实回 `1500`（正文没送到不能回 ok）。群聊 / 私聊 / `send_msg` 三条路径共用同一条链
+- **修改（回执形状）**：`execute` 之上新增 `execute_report` 与 `SendOutcome`（`message_id` + 可选 `message`）；有降级时回执 `retcode 0` / `status ok` / `data.message_id 0` + `message` 带错误文本，`crates/gensokyo-runtime/src/dispatcher.rs` 的 `run_deferred` 把该文本写进 `ActionResponse.message`，并跳过 botstats「发送成功」记账（Go `SendResponse` 只在 `resp != nil` 时记账）
+- **修改（silk 不可用）**：本机无 `ffmpeg` / `pts` 时语音转码失败走同一条媒体降级（不再 `1500`）；真发语音仍需 `ffmpeg` + `pts`，文档已写明
+- **修改（`[CQ:reply]` 降级）**：新增 `resolve_reply_for_send` —— 目标反查不到、或私聊虚拟号归属会话与本次目标不一致（群消息 id 用到私聊，上游会回 `40034138`「引用消息越权」）都只 WARN + 丢弃 `message_reference`，正文照发（Go `applyGroupReply` / `applyPrivateReply`）
+- **修改（卡片降级）**：`compose_card` 的四字段本地校验保持不变（比 Go 严），但校验失败不再整条 `1400`——`compose` 折成 `warn!` + 丢卡片，正文照发、回执 `retcode 0`、`message` 空串；纯卡片计划丢掉卡片后无内容可发 ⇒ 不调上游、回执 `data.message_id 0`（对齐 Go「`[cq:card] pic 或 url 为空，跳过卡片消息发送」）
+- **修改（`[CQ:input_notify]` 双发）**：`compose` 的 `input_notify` 臂改为「通知当首条 + 摘掉 `input_notify` 后递归合成的正文 / 媒体条当后续条」，回执取后发的正文条（Go `send_private_msg.go:473-477` 先 `sendInputNotify` 再走文本路径）；@全员 名额扫描改为覆盖首条 + 全部拆条。纯通知消息仍是单条
+- **保留的差异**：① 召回（`plan.wakeup`）媒体失败不降级（Go `send_private_msg_wakeup.go:145-150` 同样回 `sendFailRetCode` 并推 failed notice）；② 群聊目标带 `[CQ:input_notify]` 仍 `1400`（Go 群链根本不调 `sendInputNotify`）
+- **影响**：插件侧「媒体 / 卡片 / 引用出问题就抛异常」的行为消失，与 Go 一致；错误详情仍可从回执 `message` 与 ERROR 日志读到。响应信封不变（仍是 Full），只是成功帧的 `message` 不再是空串
+- **文档**：`reports/refactor/17-go-rust-parity.md` §F 的 P77-1 / P77-2 改写为「已对齐降级语义」并新增 P77-7（媒体）/ P77-8（reply）/ P77-9（input_notify）三行；`docs/rust-handover.md` §6 新增第 ㉝ 条；`docs/cq码/扩展CQ码/扩展cq码-cq-card.md` 与 `扩展cq码-cq-input_notify.md` 按新口径重写
+- **测试**：`local_image_over_limit_degrades_to_ok_receipt`、`chunked_prepare_failure_does_not_fall_back_to_direct_upload`、`upload_failure_is_an_upstream_error`、`failed_first_media_body_does_not_block_the_next_image`、`failed_media_body_does_not_block_later_bodies`（均改为断言降级回执）、`reply_without_mapping_drops_the_reference_and_still_sends`、`card_without_title_is_dropped_and_body_is_sent`、`card_local_pic_upload_failure_drops_the_card`、`card_with_at_everyone_drops_the_card_and_keeps_the_tag`、`input_notify_with_text_sends_notify_then_body`；召回口径守卫 `wakeup_media_upload_failure_pushes_failed_notice` 保持原断言
+
 ### WebUI 控制台地址与 `/webui` 前缀对齐 Go（2026-11-25）
 
 实机启动日志对比发现迁移阻断点：Go 的控制台地址是 `http://<host>:15630/webui`（`main.go:539-545` 的 `webuiGroup := r.Group("/webui")` + 五个方法各一条 `/*filepath` → `webui.CombinedMiddleware`），Rust 横幅打印根路径，且 `/webui/*` 原本只由 `fallback(assets::serve)` 兜底——`looks_like_file` 把 `/webui/assets/index-xxx.js` 判成形如文件的请求，`embedded("webui/assets/…")` 查不到即 404：从老地址打开首页会因相对资源全 404 而白屏，nginx 反代、用户书签与文档里的地址全部失效。
@@ -876,6 +891,7 @@ Rust 侧第一次有 crate 级 feature：`webui` / `grpc` / `qr` / `oss`，`defa
 ## ✅ 提交记录
 
 ```
+cbb007c  fix(webui): 补 /webui 前缀兼容，横幅控制台地址对齐 Go
 68b5870  fix(protocol): 活体遗留五项低优先形状差收口（parity D39）
 b171085  fix(protocol): Compact 成功回执补 data:null 对齐 Go sendActionResult
 0424dc8  fix(protocol): params 严格类型契约对齐 Go 分发层 1400，杜绝宽容解码副作用

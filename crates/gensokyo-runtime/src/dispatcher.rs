@@ -348,9 +348,13 @@ impl Dispatcher {
             // 计划只是 handler → runtime 的内部握手载荷，不能泄漏给客户端。
             let echo = response.echo.clone();
             response = match self.run_deferred(data, echo.as_ref()).await {
-                Ok((outcome, ids)) => {
-                    self.record_message_sent();
+                Ok((outcome, ids, degraded)) => {
+                    if degraded.is_none() {
+                        // 降级吞错（Go 的 `resp == nil` 分支）不计入「发送成功」统计
+                        self.record_message_sent();
+                    }
                     let mut sent = ActionResponse::ok(outcome).with_echo(echo);
+                    sent.message = degraded;
                     // 顶层 ID 按收件人填（Go `SendResponse` / `SendC2CResponse` 用同一
                     // `message.Params` 构造）：空消息回执没打上游，同样要带。
                     if let Some((group_id, user_id)) = ids {
@@ -386,7 +390,7 @@ impl Dispatcher {
         &self,
         data: Value,
         echo: Option<&Value>,
-    ) -> Result<(Value, Option<ReceiptIds>), (i32, String)> {
+    ) -> Result<(Value, Option<ReceiptIds>, Option<String>), (i32, String)> {
         let Some(context) = self.actions.as_ref() else {
             return Err((
                 RETCODE_INTERNAL,
@@ -430,6 +434,7 @@ impl Dispatcher {
                     "failed": failed,
                 }),
                 ids,
+                None,
             ));
         }
         if data.get("message_sse").is_some() {
@@ -445,6 +450,7 @@ impl Dispatcher {
                     "message_id": message_id_value(context.string_ob11(), self.echo.as_deref(), &raw),
                 }),
                 Some(receipt_ids(context, &request.target)),
+                None,
             ));
         }
         let mut plan: SendRequest = serde_json::from_value(data).map_err(bad_plan)?;
@@ -452,14 +458,21 @@ impl Dispatcher {
         if plan.echo_context.echo_key.is_none() {
             plan.echo_context.echo_key = echo.and_then(Value::as_str).map(str::to_owned);
         }
-        let message_id = crate::deferred::execute(context, &plan, &deps)
+        // 降级吞错：媒体 / 扩展段失败时 Go 仍回 `retcode 0` / `status ok`，`data.message_id`
+        // 为 0，错误文本进 `message`（[crate::deferred::execute_report] 的 `message`）。
+        let outcome = crate::deferred::execute_report(context, &plan, &deps)
             .await
             .map_err(|err| (deferred_retcode(&err), err.to_string()))?;
         Ok((
             json!({
-                "message_id": message_id_value(context.string_ob11(), self.echo.as_deref(), &message_id),
+                "message_id": message_id_value(
+                    context.string_ob11(),
+                    self.echo.as_deref(),
+                    &outcome.message_id,
+                ),
             }),
             Some(receipt_ids(context, &plan.target)),
+            outcome.message,
         ))
     }
 

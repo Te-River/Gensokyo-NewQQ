@@ -18,9 +18,9 @@
 //! | `card` | `card` + `msg_type=8` | 群聊与单聊同构；`{type:"tuwen", content:{title,description,url,pic_url}}`，四字段校验见 [`compose_card`]；`pic_url` 是本地路径时先上传成公网 URL（Go `resolveCardPic`，失败保留原值）；与媒体同现时卡片先发、媒体另起 `msg_type=7` 条 |
 //! | 图片 / 语音 / 视频 / 文件 | `media` + `msg_type=7` | 见下节「媒体」 |
 //! | `[CQ:avatar,qq=…]` | `media` + `msg_type=7` | 按 Go 段路径 / `cqparse` 口径发真图：`qq` 经 idmap 反查 openid → `https://q.qlogo.cn/qqapp/{app_id}/{openid}/640` → 走普通图片上传链；反查失败、`qq` 非数字/未绑定、或 `app_id` 未配置时**吞段 + `warn`**，不 `1400`（[`resolve_avatars`]）；无 `qq` 的形态由协议层留字面 |
-//! | `[CQ:reply]` | `msg_id` | 虚拟号先经 idmap / echo 还原成真实消息 ID；还原失败 `1400`，不静默丢 |
+//! | `[CQ:reply]` | `msg_id` | 虚拟号先经 idmap / echo 还原成真实消息 ID；**还原失败或归属会话与本次目标不一致时丢弃 `message_reference` 继续发**（只 WARN，Go `applyGroupReply` / `applyPrivateReply` 同口径） |
 //! | `keyboard` | `keyboard` | markdown 内嵌键盘优先、独立 `[CQ:keyboard]` 兜底，与 text / markdown / card 同发，不改变 `msg_type`（Go `applyGroupMarkdownKeyboard` 口径）；`data` 必须是 JSON 对象，否则 `1400`；`specify_user_ids` 的数字虚拟号先转真实 OpenID（群聊 / C2C 一致，Go `ResolveKeyboardVirtualIDs`），`content.rows` / `keyboard.content.rows` / `keyboard.rows` / 顶层 `rows` 四种形态都覆盖；C2C 目标额外把 `permission.type` 归一为 2、`__USER_ID__` 换成对方 OpenID（[`compose_keyboard`]） |
-//! | `input_notify` | `input_notify` + `msg_type=6` | 仅单聊；不承载正文 / 媒体，与其它内容同条出现 `1400` |
+//! | `input_notify` | `input_notify` + `msg_type=6` | 仅单聊；与正文 / 媒体同条时**先发通知再发正文**（Go `send_private_msg.go:473-477` 的双发口径），回执取后发的正文条 |
 //! | `stream` | `stream` + `msg_type=2` | 仅单聊；正文进 `markdown.content`，`stream.state` 取 1（start / mid）/ 10（finish），见 [`compose_stream`] |
 //! | `music` / `qqmusic` | `markdown` + `keyboard` + `msg_type=2` | 取第一首：查 QQ 音乐歌曲详情（Go `FetchSongDetail`，走媒体下载 seam）→ 原生 markdown（封面 `T002R180x180M000{album_mid}.jpg` + 曲名 / 歌手）→ 键盘「立刻播放 / 我也要点歌」（第二个按钮的 `data` 是 `music_prefix` + 空格）；查询失败降级成分享文案并 `warn`（Go 直接丢整条消息） |
 //! | `unknown` / `unknown_image` / `unknown_record` | 不支持 | `1400`（请求侧段类型），不静默丢 |
@@ -48,8 +48,11 @@
 //! 拆条时只挂在首条，后续媒体条不带（Go 只在 markdown 那轮挂键盘，
 //! `send_group_msg.go:831-843`）。`[CQ:reply]` 同样只落在首条（`:659-680`；循环里只在
 //! `key == "markdown"` 时补 reply，`:815`、`send_private_msg.go:625`）。
-//! `input_notify`（`msg_type=6`）与 `stream`（`msg_type=2` + `stream`）则**独占**整条消息：
-//! 它们带不了正文 / 媒体，与其它内容同条出现一律 `1400`，而不是丢掉另一部分。
+//! `stream`（`msg_type=2` + `stream`）**独占**整条消息：它带不了正文 / 媒体，与其它内容同条
+//! 出现一律 `1400`，而不是丢掉另一部分（Go 发完流式就 `return`，正文不发）。
+//! `input_notify`（`msg_type=6`）虽然同样带不了正文，但 Go 是**发两条**：先通知、再正文
+//! （`send_private_msg.go:473-477`），本仓在 [`compose`] 里照样拆成「通知当首条 + 正文当
+//! 后续条」，回执取后发的那条。
 //! `music` 自成一条消息（Go 在 foundItems 循环里单独发 `qqmusic`）：与 markdown / card / 媒体
 //! 同条出现时，主消息照旧按上面的优先级选，音乐另起一条跟在后面，不参与让位。只有音乐一条时
 //! 它就是主消息；此时再带独立 `[CQ:keyboard]` 会与音乐自带键盘抢同一个字段（Go 另发一条），
@@ -102,7 +105,11 @@
 //!   向下游发出空 `file_info`；
 //! - **本地 / base64 来源**先做发送前处理（Go 条件，URL 来源原样）：图片按
 //!   `image_sizelimit`（KB，`0` = 不压缩）压缩；语音不是 AMR / SILK 时经 `ffmpeg` + `pts`
-//!   转码（工具缺失报 1500）；视频 / 文件不处理。
+//!   转码（本机缺 `ffmpeg` / `pts` 时该语音段走降级，见下条）；视频 / 文件不处理。
+//! - **媒体段失败一律降级**：下载 / 压缩 / silk 转码 / 上传 / 富媒体发送任一步失败都**只丢该
+//!   段**，ERROR 日志 + 错误文本进回执 `message`，正文照发（Go `send_group_msg.go:888-991`）。
+//!   真发语音需要本机有 `ffmpeg` 与 `pts`（见 `docs/扩展CQ码-cq-record.md`）；没有时语音
+//!   发不出去但不会再把整条消息打成失败。
 //!
 //! ## QQ 音乐
 //!
@@ -172,11 +179,21 @@
 //! JSON 逐字段对齐 Go `WakeupResponseNotice`，见 [`publish_wakeup_notice`]；总线未装配
 //! 时静默跳过，回推不影响 API 回执。
 //!
-//! # 错误口径
+//! # 错误口径（与 Go 的降级语义）
 //!
-//! 请求侧问题（媒体来源 / 大小 / 类型、reply 映射缺失、不支持的段）返回 [`Error::Protocol`]
-//! → `retcode 1400`；下载、上传与发送失败（[`Error::Network`] / [`Error::Upstream`]）→ `1500`。
-//! 映射在 [`crate::dispatcher`] 里完成。
+//! **降级吞错**（Go 记录日志后照常下发 `retcode 0` / `status "ok"` 回执、`data.message_id` 为
+//! 0、上游错误文本进 `message`）：
+//! - 媒体段（image / video / record / file / 富媒体 `msg_type=7`）准备或发送失败：丢该段、
+//!   ERROR 日志、正文照发（[`compose_media_extras`] / [`execute_inner`]）；
+//! - silk 转码不可用（本机无 `ffmpeg` / `pts`）同属媒体失败；
+//! - 卡片字段非法：丢卡片、正文照发，只 WARN（不写 `message`）；
+//! - `[CQ:reply]` 目标不可解析或跨会话：丢 `message_reference` 继续发，只 WARN；
+//! - 召回（`plan.wakeup`）不降级：Go `send_private_msg_wakeup.go:145-150` 仍回失败码。
+//!
+//! 真正的失败：请求侧问题（不支持的段、markdown 缺 `content`、单聊 @全员、单聊
+//! `input_notify` 出现在群聊等）返回 [`Error::Protocol`] → `retcode 1400`；承载正文的那条
+//! 发送失败、以及 storage / 网络错误（[`Error::Network`] / [`Error::Upstream`] /
+//! [`Error::Storage`]）→ `1500`。映射在 [`crate::dispatcher`] 里完成。
 
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -253,6 +270,38 @@ pub struct DeferredDeps<'a> {
     pub url_mint: Option<&'a crate::url_pipeline::UrlMint>,
 }
 
+/// 一次 deferred 计划执行的终局。
+///
+/// 与直接返回 `String` 的差别只有一项：**降级吞错**（Go 的「媒体 / 扩展段失败只记日志、
+/// 照常回执」）需要把上游错误文本带回回执的 `message` 字段，见 [`SendOutcome::message`]。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendOutcome {
+    /// 回执 `data.message_id` 的原始 ID（多条消息时取**最后一条**）。
+    ///
+    /// 降级时为 [`EMPTY_MESSAGE_ID`]（Go 那侧的 `resp` 为 nil ⇒ `message_id: 0`）。
+    pub message_id: String,
+    /// 降级吞错时的错误文本（Go 把上游错误塞进 `message` 字段）；`None` = 全成功。
+    pub message: Option<String>,
+}
+
+impl SendOutcome {
+    /// 全成功：`message_id` 正常、不带错误文本。
+    fn ok(message_id: String) -> Self {
+        Self {
+            message_id,
+            message: None,
+        }
+    }
+
+    /// 降级：回执照 Go 回 `retcode 0` / `message_id 0`，错误文本进 `message`。
+    fn degraded(details: Vec<String>) -> Self {
+        Self {
+            message_id: EMPTY_MESSAGE_ID.to_owned(),
+            message: Some(details.join("；")),
+        }
+    }
+}
+
 /// 执行一条 deferred 计划，返回上游消息 ID。
 ///
 /// 一条计划可能发出多条消息（markdown + 媒体拆条，见 [`compose`]）：每条都回写 echo，返回值
@@ -260,17 +309,42 @@ pub struct DeferredDeps<'a> {
 /// `plan.wakeup` 的终局（成功或失败）另经 `deps.hub` 回推一条 `c2c_wakeup_resp` notice（见
 /// [`publish_wakeup_notice`]）。
 ///
+/// 需要区分「成功」与「降级吞错」时用 [`execute_report`]。
+///
 /// # Errors
 /// 收件人无法反查成 OpenID（[`ActionContext::resolve_send_target`]）、消息含不支持的媒体 /
-/// 段、markdown 缺 `content` 或其中的 `[CQ:at,qq=数字]` 反查失败、卡片字段非法、卡片与
-/// @全员 同现、单聊出现 @全员、同群同日第二次 @全员、reply 无法还原成真实消息 ID
-/// （以上 [`Error::Protocol`] → `1400`），或下载 / 上传 / 上游发送失败
-/// （[`Error::Network`] / [`Error::Upstream`] → `1500`）。
+/// 段、markdown 缺 `content` 或其中的 `[CQ:at,qq=数字]` 反查失败、卡片与 @全员 同现、
+/// 单聊出现 @全员、同群同日第二次 @全员、正文（含卡片 / markdown）发送失败
+/// （以上 [`Error::Protocol`] → `1400`，末项 → `1500`）。
+///
+/// 媒体 / 扩展段的准备与发送失败、reply 目标不可解析**不算错误**：按 Go 的降级口径记日志后
+/// 照常回执（见 [`execute_report`]）。
 pub async fn execute(
     context: &ActionContext,
     plan: &SendRequest,
     deps: &DeferredDeps<'_>,
 ) -> Result<String> {
+    execute_report(context, plan, deps)
+        .await
+        .map(|outcome| outcome.message_id)
+}
+
+/// [`execute`] 的完整形态：除消息 ID 外还带回**降级吞错**的错误文本。
+///
+/// 降级面与 Go 逐条对应（Go 的 `mylog.Printf` + 照常 `SendResponse`）：
+/// - 媒体段（image / video / record / file / `msg_type=7`）准备或发送失败：丢弃该段、正文照发，
+///   `send_group_msg.go:888-991` / `send_private_msg.go:719-760`；
+/// - 卡片字段非法：丢卡片发正文（`send_group_msg.go:620-623`）；
+/// - `[CQ:reply]` 目标不可解析或跨会话：丢掉 `message_reference` 继续发（`outbound_bridge.go`
+///   的 `applyGroupReply` / `applyPrivateReply`）。
+///
+/// `plan.wakeup`（召回）**不降级**：Go `send_private_msg_wakeup.go:145-150` 对媒体上传失败仍回
+/// `sendFailRetCode` 并推 failed notice，本仓保持同一口径。
+pub async fn execute_report(
+    context: &ActionContext,
+    plan: &SendRequest,
+    deps: &DeferredDeps<'_>,
+) -> Result<SendOutcome> {
     let openid = context.resolve_send_target(&plan.target)?;
     let result = execute_inner(context, plan, deps, openid.clone(), 0).await;
     // 唤醒终局回推（对齐 Go `sendWakeupNotice`）：合成 / 上传 / 发送任一步失败都推 failed；
@@ -292,7 +366,7 @@ async fn execute_inner(
     deps: &DeferredDeps<'_>,
     openid: String,
     depth: usize,
-) -> Result<String> {
+) -> Result<SendOutcome> {
     // 纯码 / 纯动作消息被 CQ 管线吃空时的出口（Go `send_group_msg.go:557-562`）：
     // 正文 trim 后为空且没有任何 foundItems ⇒ 直接回执成功、不调 QQ API。
     // 放在合成之前（而非 compose 内）：compose 的产物就是一条要发的消息体，
@@ -314,7 +388,7 @@ async fn execute_inner(
     let admin = crate::cq_admin::stage(context, plan, deps, &openid, depth).await?;
     let plan = admin.request.as_ref().unwrap_or(plan);
     if is_empty_message(plan) {
-        return Ok(EMPTY_MESSAGE_ID.to_owned());
+        return Ok(SendOutcome::ok(EMPTY_MESSAGE_ID.to_owned()));
     }
     // 出站 URL 变换（Go `transformMessageTextUrl`，`message_parser.go:1749-1793`）：位置
     // 在 compose 之前，等价 Go 的 parseMessageContent 尾部（CQ 管线之后、文本最后）。
@@ -324,7 +398,9 @@ async fn execute_inner(
     let plan = transformed.as_ref().unwrap_or(plan);
     // 互动召回（Go `send_private_msg_wakeup.go`）：`is_wakeup` 与 `msg_id` / `event_id` 互斥，
     // 回复目标强制不带，正文合成完统一置标记。
-    let (mut primary, mut extras) = if plan.wakeup {
+    // 第三个返回值是 compose 阶段的降级清单（媒体准备失败 / 卡片被丢弃以外的降级项）；
+    // 非空即本次回执按 Go 回 `message_id 0` + 错误文案。
+    let (mut primary, mut extras, mut degraded) = if plan.wakeup {
         let mut cleared = plan.message.clone();
         cleared.plan.reply_msg_id = None;
         compose(context, &plan.target, &openid, &cleared, deps).await?
@@ -332,6 +408,15 @@ async fn execute_inner(
         compose(context, &plan.target, &openid, &plan.message, deps).await?
     };
     if plan.wakeup {
+        // 召回不降级：compose 阶段收集到的媒体失败（上传 / 转码 / 下载）在 Go
+        // `send_private_msg_wakeup.go:145-150` 里是**失败终局**（回 `sendFailRetCode` 并推
+        // failed notice），这里把这批降级项折回错误，别再当作成功回执。
+        if !degraded.is_empty() {
+            return Err(Error::Upstream {
+                code: 0,
+                message: degraded.join("；"),
+            });
+        }
         primary.is_wakeup = true;
         for extra in &mut extras {
             extra.is_wakeup = true;
@@ -377,16 +462,37 @@ async fn execute_inner(
         stamp_message(extra, &passive, deps.echo);
     }
     // 先占当天的 @全员 名额再发送：并发两条 @全员 只有一条能占住。标签只可能在首条
-    // （正文在 markdown 条），后续媒体条没有正文。
-    let mut reservation = reserve_at_everyone(context, &plan.target, &openid, &primary)?;
-    let mut outcome = match send_body(context, &plan.target, &openid, primary, deps).await {
-        Ok(message_id) => Ok(message_id),
-        Err(err) => {
-            // 发送失败要回滚，不能让一次失败吃掉当天的名额
-            if let (Some(reservation), Some(idmap)) = (reservation.take(), context.idmap()) {
-                reservation.rollback(idmap);
+    // （正文在 markdown 条），后续媒体条没有正文；`[CQ:input_notify]` 拆双发时首条是通知，
+    // 正文落在后续条，所以这里扫描全部待发消息体。
+    let mut reservation = reserve_at_everyone(
+        context,
+        &plan.target,
+        &openid,
+        std::iter::once(&primary).chain(extras.iter()),
+    )?;
+    // 纯媒体条（无正文 / markdown / 卡片）发送失败走 Go 的降级口径；带正文的那条失败仍是
+    // 真失败（正文没送到不能回 ok），见 [`execute_report`]。
+    let degrade_media = !plan.wakeup && is_media_only_body(&primary);
+    // 媒体段被整体丢弃 / 卡片被丢弃后可能一条可发内容都不剩：Go 那边同样不调上游（回执
+    // `message_id 0`）。只带 reply 身份的条不算「空」——既有口径照发（Go 也是 `foundItems`
+    // 非空就不走空回执早退），只在本次已有降级时跳过，免得为一条空消息再报一次失败。
+    let skip_primary = !has_payload(&primary) && (primary.msg_id.is_none() || !degraded.is_empty());
+    let mut outcome = if skip_primary {
+        Ok(EMPTY_MESSAGE_ID.to_owned())
+    } else {
+        match send_body(context, &plan.target, &openid, primary, deps).await {
+            Ok(message_id) => Ok(message_id),
+            Err(err) if degrade_media => {
+                rollback_at_everyone(context, reservation.take());
+                report_degraded("媒体消息", &err);
+                degraded.push(err.to_string());
+                Ok(EMPTY_MESSAGE_ID.to_owned())
             }
-            Err(err)
+            Err(err) => {
+                // 发送失败要回滚，不能让一次失败吃掉当天的名额
+                rollback_at_everyone(context, reservation.take());
+                Err(err)
+            }
         }
     };
     for (offset, body) in extras.into_iter().enumerate() {
@@ -394,13 +500,60 @@ async fn execute_inner(
         let number = offset + 2;
         match send_body(context, &plan.target, &openid, body, deps).await {
             Ok(message_id) => outcome = Ok(message_id),
-            Err(err) => {
+            // 召回不降级（Go `send_private_msg_wakeup.go:145-150` 仍回失败码）
+            Err(err) if plan.wakeup => {
                 tracing::warn!(message = number, error = %err, "deferred 拆条发送有一条失败，继续发后续");
                 outcome = Err(err);
             }
+            Err(err) => {
+                // Go `send_group_msg.go:888-991`：富媒体 / 扩展条失败只记日志，回执照常
+                tracing::warn!(message = number, error = %err, "deferred 拆条发送有一条失败，继续发后续");
+                degraded.push(err.to_string());
+            }
         }
     }
-    outcome
+    match outcome {
+        Ok(message_id) if degraded.is_empty() => Ok(SendOutcome::ok(message_id)),
+        Ok(_) => Ok(SendOutcome::degraded(degraded)),
+        Err(err) => Err(err),
+    }
+}
+
+/// 待发消息体里还有没有可发内容（正文 / markdown / 卡片 / 媒体 / 键盘 / 通知 / 流式）。
+///
+/// `msg_id` / `event_id` 只是被动回复身份，不算内容（见 `skip_primary`）。
+fn has_payload(body: &MessageToCreate) -> bool {
+    !body.content.as_deref().unwrap_or_default().is_empty()
+        || body.markdown.is_some()
+        || body.card.is_some()
+        || body.media.is_some()
+        || body.keyboard.is_some()
+        || body.input_notify.is_some()
+        || body.stream.is_some()
+}
+
+/// 待发消息体是不是「纯媒体条」：`msg_type=7`、没有正文 / markdown / 卡片。
+///
+/// 只有这种条失败才按 Go 的降级口径吞错——它承载的全部内容就是那条媒体，丢掉等于空回执；
+/// 带正文的条（`msg_type` 为 0 / 2 / 8）失败意味着正文没送到，必须如实回失败。
+fn is_media_only_body(body: &MessageToCreate) -> bool {
+    body.msg_type == Some(msg_type::RICH_MEDIA)
+        && body.content.as_deref().unwrap_or_default().is_empty()
+        && body.markdown.is_none()
+        && body.card.is_none()
+}
+
+/// 降级吞错的 ERROR 日志（Go `mylog.Printf("发送 richMediaMessage 信息失败: %v", err)` +
+/// `FormatQQError` 那一行；本仓错误自身的 Display 已带上游 `code` / `message`）。
+fn report_degraded(what: &str, err: &Error) {
+    tracing::error!(item = what, error = %err, "出站降级：{what}失败，丢弃该项后照常回执（Go 同口径）");
+}
+
+/// @全员 名额回滚（发送失败时调用，避免一次失败吃掉当天的额度）。
+fn rollback_at_everyone(context: &ActionContext, reservation: Option<Reservation>) {
+    if let (Some(reservation), Some(idmap)) = (reservation, context.idmap()) {
+        reservation.rollback(idmap);
+    }
 }
 
 /// 出站 URL 变换阶段（[`execute_inner`] 的 compose 前置段，P56-T4）。
@@ -737,7 +890,7 @@ fn publish_wakeup_notice(
     context: &ActionContext,
     deps: &DeferredDeps<'_>,
     openid: &str,
-    result: &Result<String>,
+    result: &Result<SendOutcome>,
 ) {
     let Some(hub) = deps.hub else {
         return;
@@ -747,7 +900,9 @@ fn publish_wakeup_notice(
     let mut status = "success";
     match result {
         // 成功但上游未返回 message_id（空串）：整键消失，对齐 Go `omitempty`
-        Ok(id) if !id.is_empty() => message_id = Some(Ob11Id::str(id.clone())),
+        Ok(outcome) if !outcome.message_id.is_empty() => {
+            message_id = Some(Ob11Id::str(outcome.message_id.clone()));
+        }
         Ok(_) => {}
         Err(err) => {
             status = "failed";
@@ -830,6 +985,8 @@ pub struct FailedSend {
 ///
 /// 单条失败**不打断后续**、已发送的不回滚（Go 的 `HandleSendGroupMsg` 逐条独立处理，
 /// 整体回执恒定 ok）；相邻两次发送之间按 [`DeferredDeps::forward_send_interval`] 限速。
+/// 媒体 / 扩展段降级的 node 按「已处理」计入 `message_ids`（ID 为 `0`，同 [`execute_report`]
+/// 的口径），不进 `failed` 清单——否则同一个降级会在回执里出现两次。
 /// 规划层解析失败的 node（[`ForwardRequest::parse_failed`]）也并入同一份失败清单，
 /// 回执按原 node 序号排序。
 pub async fn execute_forward(
@@ -880,16 +1037,19 @@ fn has_at_everyone(message: &MessageToCreate) -> bool {
 
 /// 群聊带 @全员 时占当天名额；没有标签直接返回 `None`。
 ///
+/// `bodies` 是本次要发的全部消息体（首条 + 拆条）：标签只可能在带正文的那条，但
+/// `[CQ:input_notify]` 拆双发时首条是通知、正文在后续条，所以不能只扫首条。
+///
 /// # Errors
 /// 单聊出现标签、同群同日第二次都返回 [`Error::Protocol`]（`1400`）；写 idmap 失败
 /// 返回 [`Error::Storage`]（读失败按「未占用」放行，见 [`at_everyone::reserve`]）。
-fn reserve_at_everyone(
+fn reserve_at_everyone<'a>(
     context: &ActionContext,
     target: &SendTarget,
     openid: &str,
-    message: &MessageToCreate,
+    bodies: impl Iterator<Item = &'a MessageToCreate>,
 ) -> Result<Option<Reservation>> {
-    if !has_at_everyone(message) {
+    if !bodies.into_iter().any(has_at_everyone) {
         return Ok(None);
     }
     if !matches!(target, SendTarget::Group(_)) {
@@ -1130,24 +1290,29 @@ fn stamp_message(body: &mut MessageToCreate, passive: &Passive, echo: Option<&Ec
 /// 把一条待发送消息合成 **一条或多条** [`MessageToCreate`]（文本 + reply + media + 键盘 /
 /// 输入状态 / 流式）。
 ///
-/// 返回 `(首条, 后续媒体条)`：markdown / 卡片与媒体同现、或多段纯媒体时，首条带走
+/// 返回 `(首条, 后续条, 降级清单)`：markdown / 卡片与媒体同现、或多段纯媒体时，首条带走
 /// `msg_type` 与正文 / 键盘，其余每个媒体段各一条 `msg_type=7`（Go
 /// `handlers/send_group_msg.go:606-613` 先发 markdown / card 条、`:787-802` 再把每个媒体段
-/// 各发一条）；单段媒体只有首条、后续为空。
+/// 各发一条）；单段媒体只有首条、后续为空。`[CQ:input_notify]` 拆双发时首条是通知、
+/// 后续条是正文。
+///
+/// 第三个返回值是**降级清单**：媒体段准备 / 上传失败时该段被丢弃、错误文本进清单
+/// （Go 的「记录日志后照常下发 ok 回执」）。清单非空即本次回执要回
+/// `message_id 0` + 错误文案（见 [`execute_report`]）；
+/// 卡片非法与 reply 不可解析**不**进清单——那两项 Go 连 `message` 都不写，只留 WARN。
 ///
 /// `openid` 由调用方从 `target` 还原：媒体上传要按群 / C2C 选端点，两者都要它。
 ///
 /// # Errors
-/// markdown 里的 `at` 虚拟号无法反查、reply 无法还原、
-/// 单聊专属段（`input_notify` / `stream`）出现在群聊、它们与其它内容同条出现，或消息含本阶段
-/// 仍不支持的段。
+/// markdown 里的 `at` 虚拟号无法反查、单聊专属段（`input_notify` / `stream`）出现在群聊，
+/// 或消息含本阶段仍不支持的段。
 pub async fn compose(
     context: &ActionContext,
     target: &SendTarget,
     openid: &str,
     message: &MessageOut,
     deps: &DeferredDeps<'_>,
-) -> Result<(MessageToCreate, Vec<MessageToCreate>)> {
+) -> Result<(MessageToCreate, Vec<MessageToCreate>, Vec<String>)> {
     if let Some(kind) = unsupported_segment(&message.plan) {
         return Err(Error::Protocol(format!(
             "deferred 发送暂不支持 {kind} 段：{message:?}"
@@ -1161,8 +1326,12 @@ pub async fn compose(
     // （私聊 `:447-449`，群聊 `:411-424` / `:662-675`）。计划里还剩 `reply_msg_id` 就说明凭据来自
     // `[CQ:reply]`；来自 `params.message_id` 的那份已在规划阶段按同一顺序丢弃
     // （`gensokyo_actions::send::apply_raw_message_id`）。
-    if let Some(reply) = &message.plan.reply_msg_id {
-        let ref_id = resolve_reply(context, deps.echo, reply)?;
+    // Go `applyGroupReply` / `applyPrivateReply`：反查不到、或虚拟号归属的会话与本次发送目标
+    // 不一致（群消息 id 用到私聊会撞上游 40034138「引用消息越权」）时**丢弃 message_reference
+    // 继续发**，只留 WARN——不再让 reply 把整条消息打成失败。
+    if let Some(reply) = &message.plan.reply_msg_id
+        && let Some(ref_id) = resolve_reply_for_send(context, deps.echo, target, openid, reply)
+    {
         // Go `handlers/reply_helpers.go:21-26` + `send_group_msg.go:415-419`：被引用消息登记过
         // REFIDX 时 `message_reference.message_id` 用它（引用非机器人消息只认它），`msg_id`
         // 始终是真实消息 ID；查不到 REFIDX 时回退真实 ID。
@@ -1180,14 +1349,32 @@ pub async fn compose(
         out.msg_id = Some(ref_id);
     }
 
-    // 单聊专属段独占整条消息：msg_type=6 / 流式都带不了正文与媒体
+    // `[CQ:input_notify]`：Go 先发 `msg_type=6` 通知、正文再照常走文本路径
+    // （`send_private_msg.go:473-477`）。这里同样拆成两条上游消息——通知当首条、正文与其余
+    // 内容当后续条，回执取后发的那条（Go 的 `retmsg` 也被文本路径覆盖）。
     if let Some(notify) = &message.plan.input_notify {
-        return compose_input_notify(target, &message.plan, notify, message, out.msg_id)
-            .map(|body| (body, Vec::new()));
+        let body = compose_input_notify(target, notify, out.msg_id.clone())?;
+        let mut rest_plan = message.plan.clone();
+        rest_plan.input_notify = None;
+        let rest = MessageOut {
+            plan: rest_plan,
+            ..message.clone()
+        };
+        if !has_sendable_content(&rest) {
+            return Ok((body, Vec::new(), Vec::new()));
+        }
+        // async fn 直接 await 自身递归没有有限 future 尺寸，必须装箱
+        let (primary, extras, degraded) =
+            Box::pin(compose(context, target, openid, &rest, deps)).await?;
+        let mut tail = Vec::with_capacity(extras.len() + 1);
+        tail.push(primary);
+        tail.extend(extras);
+        return Ok((body, tail, degraded));
     }
+    // 流式消息独占整条消息：msg_type=2 + stream 带不了正文与媒体，Go 发完流式就 return
     if let Some(stream) = &message.plan.stream {
         return compose_stream(context, target, &message.plan, stream, message, out.msg_id)
-            .map(|body| (body, Vec::new()));
+            .map(|body| (body, Vec::new(), Vec::new()));
     }
 
     // markdown 载荷存在就一定走 markdown 分支（正文让位），前缀整体按 markdown 语境渲染：
@@ -1221,11 +1408,23 @@ pub async fn compose(
         out.markdown = Some(markdown);
         out.keyboard = compose_keyboard(context, target, openid, &message.plan)?;
         // 其余媒体各一条 msg_type=7：单条消息只有一个 media 槽，只能拆；音乐同样自成一条
+        let (mut media_extras, degraded) =
+            compose_media_extras(context, target, openid, &message.plan, deps).await;
         let mut extras: Vec<MessageToCreate> = music.into_iter().collect();
-        extras.extend(compose_media_extras(context, target, openid, &message.plan, deps).await?);
-        return Ok((out, extras));
+        extras.append(&mut media_extras);
+        return Ok((out, extras, degraded));
     }
-    if let Some(card) = compose_card(context, deps.hosting, &message.plan, &rendered).await? {
+    // 卡片非法（缺 title / description / url / pic、非 https、超长、与 @全员 同现）按 Go
+    // `send_group_msg.go:620-623`「pic 或 url 为空，跳过卡片消息发送」的降级口径处理：丢卡片、
+    // 正文照常发、只留 WARN，不再整条回 1400。
+    let card = match compose_card(context, deps.hosting, &message.plan, &rendered).await {
+        Ok(card) => card,
+        Err(err) => {
+            tracing::warn!(error = %err, "[cq:card] 卡片字段非法，已丢弃卡片并继续发送正文（Go 同口径）");
+            None
+        }
+    };
+    if let Some(card) = card {
         // 卡片独占正文：官方要求 msg_type=8 时 content 为空
         out.content = None;
         out.msg_type = Some(msg_type::CARD);
@@ -1233,9 +1432,11 @@ pub async fn compose(
         out.keyboard = compose_keyboard(context, target, openid, &message.plan)?;
         // 卡片胜出只改本轮消息体：Go 的 card 分支（`send_group_msg.go:742-783`）之后
         // foundItems 循环照旧把每个媒体段各发一条（`:787-802`）
+        let (mut media_extras, degraded) =
+            compose_media_extras(context, target, openid, &message.plan, deps).await;
         let mut extras: Vec<MessageToCreate> = music.into_iter().collect();
-        extras.extend(compose_media_extras(context, target, openid, &message.plan, deps).await?);
-        return Ok((out, extras));
+        extras.append(&mut media_extras);
+        return Ok((out, extras, degraded));
     }
     if !rendered.is_empty() {
         out.content = Some(rendered);
@@ -1262,13 +1463,29 @@ pub async fn compose(
     // 单条消息只有一个 media 槽：多段媒体一段一条（Go 的 foundItems 循环把每个 URL 单独
     // 塞进 `singleItem` 再发一条，`send_group_msg.go:787-802`）。首段留在本条（正文 / 键盘
     // 都挂在这里），其余各自成条；纯媒体时它就是主消息，音乐已占主消息时媒体全部另起
-    let mut bodies = compose_media_extras(context, target, openid, &message.plan, deps).await?;
+    let (mut bodies, degraded) =
+        compose_media_extras(context, target, openid, &message.plan, deps).await;
     if !bodies.is_empty() && (out.content.is_some() || out.markdown.is_none()) {
         out.media = bodies.remove(0).media;
         out.msg_type = Some(msg_type::RICH_MEDIA);
     }
     music_bodies.extend(bodies);
-    Ok((out, music_bodies))
+    Ok((out, music_bodies, degraded))
+}
+
+/// 拆掉独占段后还剩可发内容（正文 / markdown / 卡片 / 键盘 / 音乐 / 回复 / 媒体 / 流式）。
+///
+/// `[CQ:input_notify]` 拆双发时用它判断「通知之外还有没有正文要发」。
+fn has_sendable_content(message: &MessageOut) -> bool {
+    let plan = &message.plan;
+    !message.text.trim().is_empty()
+        || !plan.markdown.is_empty()
+        || !plan.card.is_empty()
+        || !plan.keyboard.is_empty()
+        || !plan.qqmusic.is_empty()
+        || plan.reply_msg_id.is_some()
+        || plan.stream.is_some()
+        || has_media(plan)
 }
 
 /// 计划里是否有任何媒体段。
@@ -1984,30 +2201,17 @@ fn normalize_c2c_permission(keyboard: &mut Value) {
 /// `[CQ:input_notify]` → `msg_type=6` + `input_notify`（仅单聊）。
 ///
 /// 官方只有 C2C 支持输入状态，群聊一律 `1400`。`msg_type` 只能取一个值，正文 / 媒体 /
-/// markdown / 卡片 / 键盘都带不进去：同时出现直接 `1400`，而不是清空正文静默丢弃
-/// （Go 是先发通知再发正文两条消息，deferred 一次计划只发一条）。
+/// markdown / 卡片 / 键盘都带不进去——所以 Go 的做法是**发两条**：先 `msg_type=6` 通知，
+/// 再照常发正文（`send_private_msg.go:473-477`）。[`compose`] 同样把通知当首条、正文当后续条，
+/// 一条回执（取后发的正文那条）。
 fn compose_input_notify(
     target: &SendTarget,
-    plan: &OutboundPlan,
     notify: &InputNotifyPayload,
-    message: &MessageOut,
     msg_id: Option<String>,
 ) -> Result<MessageToCreate> {
     if matches!(target, SendTarget::Group(_)) {
         return Err(Error::Protocol(
             "[CQ:input_notify] 只有单聊支持（官方 msg_type=6 仅 C2C）".to_owned(),
-        ));
-    }
-    if !message.text.trim().is_empty()
-        || !plan.markdown.is_empty()
-        || !plan.card.is_empty()
-        || !plan.keyboard.is_empty()
-        || !plan.qqmusic.is_empty()
-        || has_media(plan)
-    {
-        return Err(Error::Protocol(
-            "[CQ:input_notify] 必须单独成条：msg_type=6 不承载正文 / 媒体 / markdown / 卡片 / 键盘 / 音乐"
-                .to_owned(),
         ));
     }
     Ok(MessageToCreate {
@@ -2379,7 +2583,8 @@ fn render_plain(text: &str) -> String {
 ///    `RetrieveRowByCachev2`），值为 `"<群号> <消息ID>"` 时取最后一段；
 /// 2. echo 行号反表（本进程发送成功的消息经 [`EchoStore::store_cache_in_memory`] 登记）。
 ///
-/// 都查不到说明引用的是别的进程 / 已过期的 ID——报 `1400` 说明原因，而不是静默丢掉 reply。
+/// 都查不到说明引用的是别的进程 / 已过期的 ID——报错说明原因，由
+/// [`resolve_reply_for_send`] 折成「丢弃引用继续发」。
 pub(crate) fn resolve_reply(
     context: &ActionContext,
     echo: Option<&EchoStore>,
@@ -2423,6 +2628,58 @@ pub(crate) fn resolve_reply(
     )))
 }
 
+/// `[CQ:reply]` 的发送期口径：解析得到真实消息 ID 就用它，否则**丢弃引用继续发**。
+///
+/// 与 Go 的两处早退逐条对应（都只记日志、不设 `MessageReference`）：
+/// - 私聊目标的**归属校验**（`handlers/send_private_msg.go:applyPrivateReply:787-802`）：虚拟
+///   号反查出的归属身份必须等于本次私聊对方，否则上游会回 40034138「引用消息越权」——
+///   群消息 id 用到私聊正是这条；归属反查失败与不一致都直接丢弃引用；
+/// - 反查失败（`outbound_bridge.go:applyGroupReply:941-944` 的 `err != nil || realReplyID == ""`）：
+///   只 warn，正文照发。
+///
+/// 返回值 `None` 表示「本条消息不带 reply」，不再让 [CQ:reply] 把整条消息打成失败。
+fn resolve_reply_for_send(
+    context: &ActionContext,
+    echo: Option<&EchoStore>,
+    target: &SendTarget,
+    openid: &str,
+    reply: &Ob11Id,
+) -> Option<String> {
+    // 只有数字虚拟号能做归属校验；32 位 / flag 形态本身就是真实 ID，Go 那边也不查归属
+    if matches!(target, SendTarget::Private(_))
+        && let Some(row) = reply.as_i64()
+        && let Some(idmap) = context.idmap()
+    {
+        match idmap.retrieve_row_by_id(row) {
+            Ok(owner) if owner == openid => {}
+            Ok(owner) => {
+                tracing::warn!(
+                    row,
+                    owner = %owner,
+                    target = %openid,
+                    "[CQ:reply] 跳过引用：归属与本次私聊目标不一致（跨会话引用，丢弃 message_reference）"
+                );
+                return None;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    row,
+                    error = %err,
+                    "[CQ:reply] 归属反查失败，丢弃 message_reference 继续发送"
+                );
+                return None;
+            }
+        }
+    }
+    match resolve_reply(context, echo, reply) {
+        Ok(real) => Some(real),
+        Err(err) => {
+            tracing::warn!(error = %err, "[CQ:reply] 引用目标无法还原，丢弃 message_reference 继续发送");
+            None
+        }
+    }
+}
+
 /// idmap 里有的记录形如 `"<群号> <消息ID>"`（Go `StoreCachev2`），取最后一段。
 fn last_token(raw: &str) -> String {
     raw.split_whitespace().last().unwrap_or_default().to_owned()
@@ -2442,6 +2699,16 @@ enum MediaKind {
 }
 
 impl MediaKind {
+    /// 日志 / 降级文案里的段名（Go 按 foundItems 的 key 打印，如 `url_image`）。
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Image => "图片",
+            Self::Record => "语音",
+            Self::Video => "视频",
+            Self::File => "文件",
+        }
+    }
+
     /// 上游 `file_type`。
     const fn file_type(self) -> u32 {
         match self {
@@ -2459,24 +2726,34 @@ impl MediaKind {
 /// 这个函数把后面的段拆出来。Go 的 foundItems 循环把每个 URL 单独塞进 `singleItem` 再发
 /// 一条（`handlers/send_group_msg.go:787-802`），私聊同构（`send_private_msg.go:596-611`）。
 /// 拆出来的条不带正文 / reply / 键盘：Go 那三样只挂首条那轮（`:815` / `:831-843`）。
+///
+/// **单个媒体段失败不失败整条消息**：Go `send_group_msg.go:888-898` 在富媒体上传失败时只
+/// `mylog.Printf`，随后照常回 `retcode 0` 的回执（`data.message_id 0` + 上游错误文案）。
+/// 这里同口径：丢该段、ERROR 日志、错误文本进降级清单返回。
 async fn compose_media_extras(
     context: &ActionContext,
     target: &SendTarget,
     openid: &str,
     plan: &OutboundPlan,
     deps: &DeferredDeps<'_>,
-) -> Result<Vec<MessageToCreate>> {
+) -> (Vec<MessageToCreate>, Vec<String>) {
     let mut extras = Vec::new();
+    let mut degraded = Vec::new();
     for (kind, reference, file_name) in media_candidates(plan) {
-        let media =
-            compose_single_media(context, target, openid, kind, reference, file_name, deps).await?;
-        extras.push(MessageToCreate {
-            msg_type: Some(msg_type::RICH_MEDIA),
-            media: Some(media),
-            ..MessageToCreate::default()
-        });
+        match compose_single_media(context, target, openid, kind, reference, file_name, deps).await
+        {
+            Ok(media) => extras.push(MessageToCreate {
+                msg_type: Some(msg_type::RICH_MEDIA),
+                media: Some(media),
+                ..MessageToCreate::default()
+            }),
+            Err(err) => {
+                report_degraded(kind.name(), &err);
+                degraded.push(err.to_string());
+            }
+        }
     }
-    Ok(extras)
+    (extras, degraded)
 }
 
 /// 计划里的媒体段按段序展开成扁平清单：图片 → 语音 → 视频 → 文件。
@@ -2828,8 +3105,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        DeferredDeps, compose, execute, execute_forward, execute_sse, is_event_expired,
-        is_ssm_retry, render_plain, resolve_markdown_images, send_body,
+        DeferredDeps, EMPTY_MESSAGE_ID, compose, execute, execute_forward, execute_report,
+        execute_sse, is_event_expired, is_ssm_retry, render_plain, resolve_markdown_images,
+        send_body,
     };
     use crate::at_everyone::SECTION;
     use crate::event_hub::EventHub;
@@ -3577,8 +3855,10 @@ mod tests {
         assert!(path.exists(), "本地原文件不能被删除");
     }
 
+    /// 媒体来源超限（下载上限）按 Go 的降级口径：丢该段、回执 `message_id 0` + 错误文案，
+    /// 不再整条 `1400`（`send_group_msg.go:888-898` 只记日志）。
     #[tokio::test]
-    async fn local_image_over_limit_is_a_request_error() {
+    async fn local_image_over_limit_degrades_to_ok_receipt() {
         let api = Arc::new(FakeQqApi::with_upload("FILE-INFO").with_send("MSG-1"));
         let (_dir, context) = context(Arc::clone(&api));
         let dir = tempfile::tempdir().expect("临时目录");
@@ -3589,13 +3869,23 @@ mod tests {
             MediaRuntime::with_fetcher(Fetcher::new(FakeTransport::new(b"")).with_max_bytes(4));
         let plan = group_request(image_plan(MediaRef::Local(path)));
 
-        let err = execute(&context, &plan, &deps(&media, None))
+        let outcome = execute_report(&context, &plan, &deps(&media, None))
             .await
-            .expect_err("超限必须报错");
+            .expect("媒体超限应降级吞错");
 
-        assert!(matches!(err, Error::Protocol(_)), "超限应映射 1400: {err}");
+        assert_eq!(
+            outcome.message_id, EMPTY_MESSAGE_ID,
+            "降级回执 message_id 为 0"
+        );
+        assert!(
+            outcome
+                .message
+                .as_deref()
+                .is_some_and(|text| text.contains("超过")),
+            "回执带错误文本: {outcome:?}"
+        );
         assert!(api.uploads().is_empty(), "超限不应触发上传");
-        assert!(api.sent().is_empty(), "超限不应发送");
+        assert!(api.sent().is_empty(), "没有剩余内容时不应调上游");
     }
 
     // ---- 分片上传 / 压缩 / 转码 / 卡片图片 ----
@@ -3678,17 +3968,21 @@ mod tests {
             "https://example.com/big.png".to_owned(),
         )));
 
-        let err = execute(&context, &plan, &deps(&media, None))
+        let outcome = execute_report(&context, &plan, &deps(&media, None))
             .await
-            .expect_err("预上传失败必须报错");
+            .expect("预上传失败按降级吞错");
 
+        assert_eq!(outcome.message_id, EMPTY_MESSAGE_ID);
         assert!(
-            matches!(err, Error::Upstream { .. }),
-            "应保留上游错误: {err}"
+            outcome
+                .message
+                .as_deref()
+                .is_some_and(|text| text.contains("prepare failed")),
+            "回执带上游错误文本: {outcome:?}"
         );
         assert!(api.uploads().is_empty(), "不得降级回 file_data 直传");
         assert!(api.chunk_puts().is_empty(), "预上传失败不应继续 PUT");
-        assert!(api.sent().is_empty(), "失败不应发送");
+        assert!(api.sent().is_empty(), "没有剩余内容时不应调上游");
     }
 
     #[tokio::test]
@@ -3851,8 +4145,10 @@ mod tests {
         );
     }
 
+    /// 本地封面图上传失败 → 终值仍是本地路径 → 卡片字段非法 → **丢卡片**（Go 同口径），
+    /// 不再整条 `1400`；纯卡片的计划此时没有别的正文，因此确定不调上游（回执 `message_id 0`）。
     #[tokio::test]
-    async fn card_local_pic_upload_failure_keeps_original_and_is_400() {
+    async fn card_local_pic_upload_failure_drops_the_card() {
         let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
         let (_dir, context) = context_with_settings(Arc::clone(&api), BILIBILI_SETTINGS);
         let dir = tempfile::tempdir().expect("临时目录");
@@ -3861,16 +4157,17 @@ mod tests {
         let hosting = HostingRuntime::with_transport(Arc::new(FakeHosting::with_status(400)));
         let plan = group_request(card_with_pic(Some(path.to_string_lossy().into_owned())));
 
-        let err = execute(
+        let outcome = execute_report(
             &context,
             &plan,
             &deps_with_hosting(&no_media(), None, None, &hosting),
         )
         .await
-        .expect_err("上传失败保留本地路径后应被 https 校验拦下");
+        .expect("非法卡片应丢弃而不是失败");
 
-        assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
-        assert!(api.sent().is_empty(), "非法卡片不应发送");
+        assert_eq!(outcome.message_id, EMPTY_MESSAGE_ID);
+        assert_eq!(outcome.message, None, "丢卡片不写 message（Go 同口径）");
+        assert!(api.sent().is_empty(), "卡片丢弃后无可发内容，不应调上游");
     }
 
     #[tokio::test]
@@ -3926,15 +4223,19 @@ mod tests {
             "https://example.com/a.png".to_owned(),
         )));
 
-        let err = execute(&context, &plan, &deps(&media, None))
+        let outcome = execute_report(&context, &plan, &deps(&media, None))
             .await
-            .expect_err("上传失败必须报错");
+            .expect("上传失败按降级吞错");
 
+        assert_eq!(outcome.message_id, EMPTY_MESSAGE_ID);
         assert!(
-            matches!(err, Error::Upstream { .. }),
-            "应保留上游错误: {err}"
+            outcome
+                .message
+                .as_deref()
+                .is_some_and(|text| text.contains("file too large")),
+            "回执带上游错误文本: {outcome:?}"
         );
-        assert!(api.sent().is_empty(), "上传失败不应继续发送");
+        assert!(api.sent().is_empty(), "没有剩余内容时不应调上游");
     }
 
     #[tokio::test]
@@ -4033,26 +4334,30 @@ mod tests {
 
     // ---- reply / echo ----
 
+    /// Go `applyGroupReply:941-944`：idmap 反查失败只记日志、不设 `MessageReference`，
+    /// 正文照发——不让一个坏 reply 把整条消息打成失败。
     #[tokio::test]
-    async fn reply_without_mapping_is_a_request_error() {
+    async fn reply_without_mapping_drops_the_reference_and_still_sends() {
         let api = Arc::new(FakeQqApi::with_upload("FILE-INFO").with_send("MSG-1"));
         let (_dir, context) = context(Arc::clone(&api));
         let media = MediaRuntime::with_transport(Arc::new(FakeTransport::new(b"x")));
-        let plan = group_request(OutboundPlan {
+        let mut plan = group_request(OutboundPlan {
             reply_msg_id: Some(Ob11Id::Num(424_242)),
             ..OutboundPlan::default()
         });
+        plan.message.text = "正文".to_owned();
 
-        let err = execute(&context, &plan, &deps(&media, None))
+        let outcome = execute_report(&context, &plan, &deps(&media, None))
             .await
-            .expect_err("无映射的虚拟 reply 必须报错");
+            .expect("reply 反查失败应继续发送");
 
-        assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
-        assert!(
-            err.to_string().contains("无法还原"),
-            "错误文案要说清原因: {err}"
-        );
-        assert!(api.sent().is_empty(), "reply 失败不应发送");
+        assert_eq!(outcome.message_id, "MSG-1");
+        assert_eq!(outcome.message, None, "reply 降级不写 message（Go 同口径）");
+        let sent = api.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].content.as_deref(), Some("正文"));
+        assert!(sent[0].message_reference.is_none(), "坏 reply 不设引用");
+        assert!(sent[0].msg_id.is_none(), "坏 reply 不留 msg_id");
     }
 
     #[tokio::test]
@@ -4678,20 +4983,34 @@ mod tests {
         assert!(api.sent().is_empty(), "群聊输入状态不应发送");
     }
 
+    /// Go `send_private_msg.go:473-477`：`[CQ:input_notify]` 与正文同条时**先发 msg_type=6
+    /// 通知、再发正文**两条消息；回执取后发的那条（Go 的 `retmsg` 被文本路径覆盖）。
     #[tokio::test]
-    async fn input_notify_with_text_is_a_request_error() {
-        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+    async fn input_notify_with_text_sends_notify_then_body() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-N").with_send("MSG-T"));
         let (_dir, context) = context(Arc::clone(&api));
         let media = no_media();
         let mut plan = input_notify_plan(SendTarget::Private(OPENID.to_owned()), None);
         plan.message.text = "正文".to_owned();
 
-        let err = execute(&context, &plan, &deps(&media, None))
+        let outcome = execute_report(&context, &plan, &deps(&media, None))
             .await
-            .expect_err("输入状态与正文同条必须报错");
+            .expect("通知 + 正文应双发");
 
-        assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
-        assert!(api.sent().is_empty(), "混用不应发送");
+        assert_eq!(outcome.message_id, "MSG-T", "回执取后发的正文条");
+        let sent = api.sent();
+        assert_eq!(sent.len(), 2, "通知一条 + 正文一条");
+        assert_eq!(sent[0].msg_type, Some(msg_type::INPUT_NOTIFY), "通知先发");
+        assert_eq!(
+            sent[0].input_notify,
+            Some(InputNotify {
+                input_type: 1,
+                input_second: 60,
+            })
+        );
+        assert_eq!(sent[0].content, None, "通知条不承载正文");
+        assert_eq!(sent[1].content.as_deref(), Some("正文"), "正文照发");
+        assert!(sent[1].input_notify.is_none(), "正文条不带通知");
     }
 
     // ---- stream ----
@@ -5402,12 +5721,13 @@ mod tests {
         }
     }
 
+    /// 缺 `title` 的卡片按 Go「跳过卡片消息发送」的降级口径：丢卡片、正文照发、回执 ok。
     #[tokio::test]
-    async fn card_without_title_is_a_request_error() {
+    async fn card_without_title_is_dropped_and_body_is_sent() {
         let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
         let (_dir, context) = context(Arc::clone(&api));
         let media = no_media();
-        let plan = request(
+        let mut plan = request(
             SendTarget::Group(OPENID.to_owned()),
             OutboundPlan {
                 card: vec![CardPayload::from_fields(&CardFields {
@@ -5419,12 +5739,18 @@ mod tests {
                 ..OutboundPlan::default()
             },
         );
+        plan.message.text = "正文".to_owned();
 
-        let err = execute(&context, &plan, &deps(&media, None))
+        let outcome = execute_report(&context, &plan, &deps(&media, None))
             .await
-            .expect_err("缺 title 必须拒绝");
-        assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
-        assert!(api.sent().is_empty(), "非法卡片不应发送");
+            .expect("非法卡片应丢弃而不是失败");
+
+        assert_eq!(outcome.message_id, "MSG-1", "正文照发");
+        assert_eq!(outcome.message, None, "丢卡片不写 message（Go 同口径）");
+        let sent = api.sent();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].card.is_none(), "卡片必须被丢弃");
+        assert_eq!(sent[0].content.as_deref(), Some("正文"), "正文照发");
     }
 
     #[tokio::test]
@@ -5592,11 +5918,21 @@ mod tests {
             ..markdown_plan("# 标题")
         });
 
-        let message_id = execute(&context, &plan, &deps(&media, None))
+        let outcome = execute_report(&context, &plan, &deps(&media, None))
             .await
             .expect("单条媒体失败不能挡住后面的条");
 
-        assert_eq!(message_id, "MSG-B", "回执取最后一条");
+        assert_eq!(
+            outcome.message_id, EMPTY_MESSAGE_ID,
+            "有降级时回执 message_id 归 0（Go 同口径）"
+        );
+        assert!(
+            outcome
+                .message
+                .as_deref()
+                .is_some_and(|text| text.contains("msgseq 去重")),
+            "回执带上游错误文本: {outcome:?}"
+        );
         assert_eq!(api.sent().len(), 3, "失败的那条不阻断后续发送");
     }
 
@@ -5620,11 +5956,14 @@ mod tests {
             ..OutboundPlan::default()
         });
 
-        let message_id = execute(&context, &plan, &deps(&media, None))
+        let outcome = execute_report(&context, &plan, &deps(&media, None))
             .await
             .expect("首条失败不能挡住后面的媒体条");
 
-        assert_eq!(message_id, "MSG-B", "回执取最后一条");
+        assert_eq!(
+            outcome.message_id, EMPTY_MESSAGE_ID,
+            "首条媒体失败降级即回 0（Go 同口径）"
+        );
         assert_eq!(api.sent().len(), 2, "首条失败不阻断后续发送");
     }
 
@@ -6805,19 +7144,29 @@ mod tests {
         }
     }
 
+    /// 卡片与 @全员 同现：卡片被丢弃（`msg_type=8` 会清空正文，标签无处安放），
+    /// @全员 正文照发——不再整条 `1400`。
     #[tokio::test]
-    async fn card_with_at_everyone_is_a_request_error() {
+    async fn card_with_at_everyone_drops_the_card_and_keeps_the_tag() {
         let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
         let (_dir, context) = context(Arc::clone(&api));
         let media = no_media();
         let mut plan = request(SendTarget::Group(OPENID.to_owned()), card_plan());
         plan.message.text = "[CQ:at,qq=all] 开会".to_owned();
 
-        let err = execute(&context, &plan, &deps(&media, None))
+        let outcome = execute_report(&context, &plan, &deps(&media, None))
             .await
-            .expect_err("卡片 + @全员 必须拒绝");
-        assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
-        assert!(api.sent().is_empty(), "冲突消息不应发送");
+            .expect("卡片被丢弃后仍应发出正文");
+
+        assert_eq!(outcome.message_id, "MSG-1");
+        let sent = api.sent();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].card.is_none(), "卡片被丢弃");
+        assert_eq!(
+            sent[0].content.as_deref(),
+            Some("<qqbot-at-everyone /> 开会"),
+            "@全员 标签照发"
+        );
     }
 
     // ---- R3b：召回 / SSE / 合并转发的执行形状 ----
@@ -7266,7 +7615,7 @@ mod tests {
             "Go 先按 [CQ:active] 双清、且没有 [CQ:reply] 可后写 ⇒ 显式 message_id 在规划阶段就丢弃"
         );
 
-        let (body, extras) = compose(
+        let (body, extras, _degraded) = compose(
             &context,
             &plan.target,
             OPENID,
@@ -7323,7 +7672,7 @@ mod tests {
         }))
         .expect("主动标记 + [CQ:reply] 应规划成功");
 
-        let (body, extras) = compose(
+        let (body, extras, _degraded) = compose(
             &context,
             &plan.target,
             OPENID,
@@ -7367,7 +7716,7 @@ mod tests {
             "规划阶段就要让 [CQ:reply] 覆盖 params.message_id"
         );
 
-        let (body, _extras) = compose(
+        let (body, _extras, _degraded) = compose(
             &context,
             &plan.target,
             OPENID,
