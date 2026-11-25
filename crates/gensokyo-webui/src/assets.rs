@@ -1,11 +1,12 @@
 //! 静态资源：编译期把仓库根 `webui/dist`（前端 `npm run build` 产物）嵌进二进制。
 //!
-//! 路由规则：
+//! 路由规则（根路径与 Go 的 `/webui` 前缀共用同一套判定，见 `strip_webui_prefix`）：
 //!
 //! - 命中嵌入文件 → 按扩展名给 `Content-Type`；
 //! - `/` 与非 API 的 SPA 路径（末段不含 `.`）→ `index.html`；
 //! - 形如文件的未命中路径（末段含 `.`）→ 404；
-//! - 未注册的 `/api`、`/api/*` → 404，**不回退 `index.html`**（否则前端会把 404 当正常页面）。
+//! - 未注册的 `/api`、`/api/*` → 404，**不回退 `index.html`**（否则前端会把 404 当正常页面）；
+//!   剥掉 `/webui` 前缀后的 `/webui/api/*` 同此口径（Go 实测同样不回 index，见 `serve_path`）。
 //!
 //! `webui/dist` 只有 `build.ps1` 的占位文件（还没跑前端构建）时，首页由 [`FALLBACK_INDEX`]
 //! 兜底，避免 `/` 直接 404——Go 版同样把整块 `webui/dist` 交给静态服务。
@@ -33,7 +34,26 @@ const FALLBACK_INDEX: &str = r#"<!doctype html>
 "#;
 
 /// 静态资源回退入口（`Router::fallback`）。
+///
+/// 根路径与 Go 的 `/webui` 前缀同义：Go 把「管理 API + 静态资源」整体挂在 `/webui` 下
+/// （`main.go:539-545` 的 `webuiGroup := r.Group("/webui")` + 五个方法的 `/*filepath`），
+/// 老前端 `webui/dist/index.html` 里的相对资源路径（`./assets/…`）与用户书签、nginx 反代
+/// 都是这条前缀，所以两条前缀共用同一套 embedded / index / 404 三态判定。
 pub(crate) async fn serve(method: Method, uri: Uri) -> Response {
+    serve_path(method, strip_webui_prefix(uri.path()))
+}
+
+/// 剥掉 Go 的 `/webui` 前缀：`/webui` → `/`、`/webui/**` → `/**`；其余路径原样返回。
+fn strip_webui_prefix(path: &str) -> &str {
+    match path.strip_prefix("/webui") {
+        Some("") => "/",
+        Some(rest) if rest.starts_with('/') => rest,
+        _ => path,
+    }
+}
+
+/// 三态判定本身：`raw_path` 已剥掉 `/webui` 前缀（根路径与 `/webui` 前缀都走这里）。
+fn serve_path(method: Method, raw_path: &str) -> Response {
     if method != Method::GET && method != Method::HEAD {
         return (
             StatusCode::METHOD_NOT_ALLOWED,
@@ -42,9 +62,10 @@ pub(crate) async fn serve(method: Method, uri: Uri) -> Response {
             .into_response();
     }
 
-    let path = uri.path().trim_start_matches('/');
+    let path = raw_path.trim_start_matches('/');
     if path == "api" || path.starts_with("api/") {
-        // 未注册的 API 路径不能落到 index.html。
+        // 未注册的 API 路径不能落到 index.html（`/webui/api/*` 同此口径：Go 那一支进
+        // `CombinedMiddleware` 的 API 分支，实测不回 index）。
         return not_found();
     }
     if let Some(response) = embedded(path) {
@@ -111,7 +132,26 @@ pub(crate) fn not_found() -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{content_type, looks_like_file};
+    use super::{content_type, looks_like_file, strip_webui_prefix};
+
+    /// Go 的 `/webui` 前缀与根路径同义；相邻路径（`/webuix`）不能被误剥。
+    #[test]
+    fn webui_prefix_is_stripped_to_the_root_form() {
+        assert_eq!(strip_webui_prefix("/webui"), "/");
+        assert_eq!(strip_webui_prefix("/webui/"), "/");
+        assert_eq!(strip_webui_prefix("/webui/index.html"), "/index.html");
+        assert_eq!(
+            strip_webui_prefix("/webui/assets/index-abc.js"),
+            "/assets/index-abc.js"
+        );
+        assert_eq!(strip_webui_prefix("/"), "/");
+        assert_eq!(strip_webui_prefix("/index.html"), "/index.html");
+        assert_eq!(
+            strip_webui_prefix("/webuix/index.html"),
+            "/webuix/index.html"
+        );
+        assert_eq!(strip_webui_prefix("/webui.css"), "/webui.css");
+    }
 
     #[test]
     fn content_type_is_derived_from_extension() {

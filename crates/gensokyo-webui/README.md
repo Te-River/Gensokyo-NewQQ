@@ -5,9 +5,15 @@ M3 的交付：把前端构建产物嵌进二进制，并提供管理台的登�
 
 ## 路由
 
+**根路径与 Go 的 `/webui` 双前缀同义**：Go `main.go:539-545` 把「管理 API + 静态资源」整个
+挂在 `r.Group("/webui")` 下，老前端（生成器 `basePath = "."`）、用户书签与 nginx 反代都
+用这条地址。实现上 API 路由表 `api_routes(prefix)` 挂 `""` 与 `/webui` 两次，静态资源由
+`assets::serve` 的 `strip_webui_prefix` 剥前缀后共用同一套三态判定。下表路径均可在前面加
+`/webui`（例：`/webui/api/login`、`/webui/js/app.js`）。
+
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` | `/`、非 API 的 SPA 路径 | 嵌入的 `index.html`（`webui/dist` 未构建时用内置兜底页） |
+| `GET` | `/`、`/webui`、非 API 的 SPA 路径 | 嵌入的 `index.html`（`webui/dist` 未构建时用内置兜底页） |
 | `GET` | 任意命中嵌入文件的路径 | 按扩展名给 `Content-Type`；index 带 `Cache-Control: no-cache` |
 | `*` | 未命中且形如文件的路径（末段含 `.`） | 404 |
 | `*` | 未注册的 `/api`、`/api/*` | 404（**不回退** `index.html`） |

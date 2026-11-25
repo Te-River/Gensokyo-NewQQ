@@ -7,8 +7,9 @@
 //!   作为横幅首行打印，值本身保持可见。
 //! - Go `ComposeWebUIURLv2` 联网查公网 IP；Rust 启动期不联网，公网地址只按配置
 //!   `server_dir:port` 拼，未配置时该行给出占位说明而不是编造地址。
-//! - Go 的地址带 `/webui` 前缀；Rust 的 WebUI 由 `gensokyo_webui::WebUi::router` 的
-//!   `fallback(assets::serve)` 挂在 `/`，所以这里给根路径。
+//! - `/` 与 `/webui` 双路径可用（`gensokyo_webui::WebUi::router` 同一套路由表挂两次，
+//!   静态资源由 `assets::serve` 剥前缀），横幅与 Go 一致打印 `/webui`——老前端的相对
+//!   资源路径、用户书签与 nginx 反代都按这条地址工作。
 
 use std::io::IsTerminal;
 use std::net::SocketAddr;
@@ -77,6 +78,10 @@ fn emit(text: &str, cyan: bool) {
 /// 端口被 `RuntimeOptions` 覆盖时 Go 打印的是旧端口；这里用 `SocketAddr` 不会过期。
 /// 公网地址按配置 `server_dir:port` 拼（Go `ComposeWebUIURLv2` 那一步需要联网）。
 ///
+/// 两行都带 `/webui` 后缀，与 Go `ComposeWebUIURL` / `ComposeWebUIURLv2` 的
+/// `fmt.Sprintf("%s://%s:%s/webui", …)` 一致（`gensokyo-webui` 的 `/` 与 `/webui` 双前缀路由
+/// 都可用，横幅给的是与 Go 同款的那条）。
+///
 /// Go 在端口为 443 时把协议换成 https；Rust 启动链还没有 TLS listener，这里固定 http。
 #[must_use]
 pub fn console_urls(
@@ -90,12 +95,12 @@ pub fn console_urls(
         } else {
             addr.ip().to_string()
         };
-        format!("http://{host}:{}/", addr.port())
+        format!("http://{host}:{}/webui", addr.port())
     });
     let server_dir = settings.get_server_dir().trim();
     let port = settings.get_port_value().trim();
     let public = (!server_dir.is_empty() && !server_dir.starts_with('<') && !port.is_empty())
-        .then(|| format!("http://{server_dir}:{port}/"));
+        .then(|| format!("http://{server_dir}:{port}/webui"));
     (console, public)
 }
 
@@ -130,12 +135,15 @@ mod tests {
         assert!(TITLE.contains("Gensokyo-NewQQ-Rust"));
     }
 
-    /// 本地地址取真实 listener：未指定地址落到回环，WebUI 挂在 `/`。
+    /// 本地地址取真实 listener：未指定地址落到回环，路径是 Go 的 `/webui`。
+    ///
+    /// Go `ComposeWebUIURL`（`config/config.go`）：`fmt.Sprintf("%s://%s:%s/webui", …)`，
+    /// 无尾斜杠；横幅必须打同一条，否则从老地址 `…/webui` 复制过来的书签对不上。
     #[test]
     fn console_url_uses_live_listener() {
         let (console, public) =
             console_urls(Some("0.0.0.0:5700".parse().unwrap()), &Settings::default());
-        assert_eq!(console.as_deref(), Some("http://127.0.0.1:5700/"));
+        assert_eq!(console.as_deref(), Some("http://127.0.0.1:5700/webui"));
         assert_eq!(public, None, "server_dir 未配置时不给公网地址");
     }
 
@@ -148,8 +156,24 @@ mod tests {
         };
         let addr: SocketAddr = "192.0.2.10:15630".parse().unwrap();
         let (console, public) = console_urls(Some(addr), &settings);
-        assert_eq!(console.as_deref(), Some("http://192.0.2.10:15630/"));
-        assert_eq!(public.as_deref(), Some("http://example.com:15630/"));
+        assert_eq!(console.as_deref(), Some("http://192.0.2.10:15630/webui"));
+        assert_eq!(public.as_deref(), Some("http://example.com:15630/webui"));
+    }
+
+    /// 两行都带 `/webui` 后缀（Go 同款）：只改一行会让公网地址指向根路径。
+    #[test]
+    fn both_console_urls_carry_the_webui_suffix() {
+        let settings = Settings {
+            server_dir: "bot.example.com".to_owned(),
+            port: "15630".to_owned(),
+            ..Settings::default()
+        };
+        let addr: SocketAddr = "127.0.0.1:15630".parse().unwrap();
+        let (console, public) = console_urls(Some(addr), &settings);
+        for url in [console.as_deref(), public.as_deref()] {
+            let url = url.expect("两行地址都应给出");
+            assert!(url.ends_with("/webui"), "地址应带 /webui 后缀: {url}");
+        }
     }
 
     /// 模板占位符 `<YOUR_SERVER_DIR>` 不能当成公网地址打印。

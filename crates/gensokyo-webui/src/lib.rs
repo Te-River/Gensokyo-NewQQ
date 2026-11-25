@@ -3,7 +3,9 @@
 //! 交付范围：
 //!
 //! - **静态资源**：`rust-embed` 在编译期把仓库根 `webui/dist` 打进二进制；`/` 与非 API 的
-//!   SPA 路径回退 `index.html`，形如文件的未命中路径 404（见 [`assets`]）。
+//!   SPA 路径回退 `index.html`，形如文件的未命中路径 404（见 [`assets`]）。**根路径与 Go 的
+//!   `/webui` 前缀双路径可用**：静态资源由 `assets::serve` 剥前缀，管理 API 由同一张路由表
+//!   挂两次（见 [`router`]）。
 //! - **登录**：`POST /api/login` 比对 `server_user_name` / `server_user_password`，成功下发
 //!   24h 会话 cookie（`login_cookie`，HttpOnly + SameSite=Lax + Path=/），返回
 //!   `{isLoggedIn:true,cookie}`，失败 401 `{isLoggedIn:false}`（见 [`auth`]）。

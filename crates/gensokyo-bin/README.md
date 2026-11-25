@@ -35,8 +35,11 @@ M1j 起把运行时装配成一个能按 `config.yml` 启动的二进制。**不
    真实端口），随后打印启动横幅：`Gensokyo-NewQQ - Te-River` + 控制台地址 + 大号
    `Gensokyo-NewQQ` 字画 + Go 版同款东方群像字符画 + 公网控制台地址（`banner` 模块；终端里
    青色，重定向时不带 ANSI）。控制台地址取
-   实际承载 WebUI 的 listener（WS 优先，退到 HTTP API）；公网地址按 `server_dir:port` 拼，
-   未配置或仍是 `<YOUR_SERVER_DIR>` 占位时该行写明原因。
+   实际承载 WebUI 的 listener（WS 优先，退到 HTTP API），**两行都带 `/webui` 后缀**
+   （`http://127.0.0.1:15630/webui`，与 Go `ComposeWebUIURL` 的 `…/webui` 同形）；公网地址按
+   `server_dir:port` 拼，未配置或仍是 `<YOUR_SERVER_DIR>` 占位时该行写明原因。WebUI 本身
+   `/` 与 `/webui` 双前缀都可用（`gensokyo_webui::WebUi::router` 把同一份路由表挂两次、
+   静态资源由 `assets::serve` 剥前缀），横幅给的是 Go 那条地址。
 7. Ctrl-C → `RuntimeHandle::shutdown_with_timeout(5s)`：先停 config 热重载监听与反向 WS 客户端，
    再收摊 listener；超时强制中止残留任务。
 

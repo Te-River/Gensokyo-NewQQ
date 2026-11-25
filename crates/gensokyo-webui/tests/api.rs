@@ -244,6 +244,151 @@ async fn missing_asset_and_unknown_api_are_404() {
     }
 }
 
+/// Go 把「管理 API + 静态资源」整体挂在 `/webui` 下（`main.go:539-545` 的
+/// `webuiGroup := r.Group("/webui")` + 五个方法各一条 `/*filepath`），老前端的相对资源
+/// 路径（`webui/dist/index.html` 里的 `./assets/…`）、用户书签与 nginx 反代都是这条地址。
+/// 根路径与 `/webui` 必须给出同一份字节（Go 实测：`GET /webui/` = `dist/index.html`）。
+#[tokio::test]
+async fn webui_prefix_serves_the_same_bytes_as_root() {
+    let app = TestApp::new(None);
+    for (root, prefixed) in [
+        ("/", "/webui"),
+        ("/", "/webui/"),
+        ("/js/placeholder.js", "/webui/js/placeholder.js"),
+        ("/css/placeholder.css", "/webui/css/placeholder.css"),
+    ] {
+        let (root_status, root_headers, root_body) = send(&app.router, get(root)).await;
+        let (prefix_status, prefix_headers, prefix_body) = send(&app.router, get(prefixed)).await;
+        assert_eq!(root_status, StatusCode::OK, "GET {root}");
+        assert_eq!(prefix_status, StatusCode::OK, "GET {prefixed}");
+        assert_eq!(prefix_body, root_body, "{prefixed} 与 {root} 必须同字节");
+        assert_eq!(
+            prefix_headers.get(header::CONTENT_TYPE),
+            root_headers.get(header::CONTENT_TYPE),
+            "{prefixed} 与 {root} 的 Content-Type 必须一致"
+        );
+    }
+}
+
+/// 占位 `webui/dist` 没有 `index.html`，但 `/index.html` 在两条前缀上必须**同状态同字节**
+/// （真前端构建产物入库后两边都是 200 + 同一个 `index.html`）。
+#[tokio::test]
+async fn webui_prefix_index_html_matches_root() {
+    let app = TestApp::new(None);
+    let (root_status, root_headers, root_body) = send(&app.router, get("/index.html")).await;
+    let (prefix_status, prefix_headers, prefix_body) =
+        send(&app.router, get("/webui/index.html")).await;
+    assert_eq!(
+        prefix_status, root_status,
+        "/webui/index.html 与 /index.html 状态必须一致"
+    );
+    assert_eq!(
+        prefix_body, root_body,
+        "/webui/index.html 与 /index.html 必须同字节"
+    );
+    assert_eq!(
+        prefix_headers.get(header::CONTENT_TYPE),
+        root_headers.get(header::CONTENT_TYPE),
+        "/webui/index.html 与 /index.html 的 Content-Type 必须一致"
+    );
+}
+
+/// 剥前缀后的静态资源仍走 embedded / index / 404 三态：带扩展名且没命中的资源不回退
+/// index（Go 实测同一支：`dist/…` 读不到直接 404，`/webui/dashboard` 也是 404）。
+#[tokio::test]
+async fn webui_prefix_missing_asset_is_404() {
+    let app = TestApp::new(None);
+    for path in [
+        "/webui/nonexist.js",
+        "/webui/assets/index-abc123.js",
+        "/webui/css/nonexist.css",
+    ] {
+        let (status, headers, _) = send(&app.router, get(path)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "GET {path}");
+        let content_type = headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            !content_type.starts_with("text/html"),
+            "{path} 不得回退 index.html"
+        );
+    }
+}
+
+/// `/webui/api/*` 与根路径的 `/api/*` 是同一批处理函数。
+///
+/// Go 实测（`webui/api.go:30` 的 `strings.HasPrefix(URL.Path, "/webui/api")`）：`/webui/api/login`、
+/// `/webui/api/check-login-status` 由各自 handler 应答，`/webui/api/unknown` 也留在 API 分支
+/// ——不回 index。Rust 把注册过的那批路由挂两次；没注册的落到静态回退，按 `api/` 前缀 404。
+#[tokio::test]
+async fn webui_prefix_api_shares_the_root_api_routes() {
+    let app = TestApp::new(None);
+
+    let (status, _, payload) = send(&app.router, get("/webui/api/check-login-status")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json_body(&payload)["isLoggedIn"], false, "body={payload}");
+
+    let login = format!(r#"{{"username":"{USERNAME}","password":"{PASSWORD}"}}"#);
+    let (status, headers_login, payload) =
+        send(&app.router, post_json("/webui/api/login", &login)).await;
+    assert_eq!(status, StatusCode::OK, "body={payload}");
+    assert_eq!(json_body(&payload)["isLoggedIn"], true, "body={payload}");
+    let cookie = set_cookie_raw(&headers_login)
+        .split(';')
+        .next()
+        .expect("Set-Cookie 格式非法")
+        .trim()
+        .to_owned();
+
+    // 同一会话 cookie 在两条前缀上通用（cookie 的 Path 是 `/`）。
+    let (status, _, payload) = send(
+        &app.router,
+        get_with_cookie("/webui/api/check-login-status", &cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json_body(&payload)["isLoggedIn"], true, "body={payload}");
+
+    // 未注册的管理路径：404 且不是 HTML（与根路径 `/api/does-not-exist` 同口径）。
+    let (status, headers_unknown, _) = send(&app.router, get("/webui/api/unknown")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let content_type = headers_unknown
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        !content_type.starts_with("text/html"),
+        "/webui/api/unknown 不得回退 index.html"
+    );
+}
+
+/// HEAD 与 GET 同址：`assets::serve` 显式放行 GET/HEAD（其它方法 405）。
+#[tokio::test]
+async fn webui_prefix_head_is_allowed() {
+    let app = TestApp::new(None);
+    for path in ["/webui", "/webui/js/placeholder.js"] {
+        let request = Request::builder()
+            .method("HEAD")
+            .uri(path)
+            .body(Body::empty())
+            .expect("构造 HEAD 请求失败");
+        let (status, _headers, _body) = send(&app.router, request).await;
+        assert_eq!(status, StatusCode::OK, "HEAD {path}");
+    }
+    let request = Request::builder()
+        .method("POST")
+        .uri("/webui/static-looking.js")
+        .body(Body::empty())
+        .expect("构造 POST 请求失败");
+    let (status, headers, _) = send(&app.router, request).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(
+        headers.get(header::ALLOW).and_then(|v| v.to_str().ok()),
+        Some("GET, HEAD")
+    );
+}
+
 #[tokio::test]
 async fn login_sets_hardened_session_cookie() {
     let app = TestApp::new(None);
