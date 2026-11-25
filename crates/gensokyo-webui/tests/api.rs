@@ -293,6 +293,22 @@ async fn webui_prefix_index_html_matches_root() {
     );
 }
 
+/// 嵌入的 `index.html` 必须与磁盘 `webui/dist/index.html` 同字节：`rust-embed` 在编译期
+/// 取文件，占位/前端产物若在「上次编译之后」才新增或被替换，二进制会一直吐旧内容
+/// （实测连跑两次 `xtask build` 产物字节数不变、`/webui` 仍回 `FALLBACK_INDEX`）。
+#[tokio::test]
+async fn embedded_index_html_matches_the_file_on_disk() {
+    let app = TestApp::new(None);
+    let (status, _headers, body) = send(&app.router, get("/index.html")).await;
+    assert_eq!(status, StatusCode::OK, "GET /index.html 必须命中嵌入资源");
+    let on_disk = include_bytes!("../../../webui/dist/index.html");
+    assert_eq!(
+        body.as_bytes(),
+        on_disk.as_slice(),
+        "嵌入的 index.html 与 webui/dist/index.html 不同字节：rust-embed 缓存陈旧，需重编 gensokyo-webui"
+    );
+}
+
 /// 剥前缀后的静态资源仍走 embedded / index / 404 三态：带扩展名且没命中的资源不回退
 /// index（Go 实测同一支：`dist/…` 读不到直接 404，`/webui/dashboard` 也是 404）。
 #[tokio::test]
