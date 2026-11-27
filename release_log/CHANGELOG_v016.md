@@ -934,7 +934,9 @@ Rust 侧第一次有 crate 级 feature：`webui` / `grpc` / `qr` / `oss`，`defa
 ## ✅ 提交记录
 
 ```
+188190f  fix(runtime): stream 码接受面对齐 Go 默认链（parity P77-12 遗留①②）
 c044cb5  fix(runtime): 三条 CQ 字面量泄漏收口（parity P77-10/11/12）
+c3cba23  docs(changelog): v016 补构建链占位 index.html 条目并回填本轮四个提交
 e0ca4bb  test(webui): 钉住「嵌入 index.html 必须与磁盘同字节」+ 占位 index.html 入库
 cd4936f  fix(xtask): 占位文件首次写入后失效 gensokyo-webui 缓存，避免嵌入陈旧 webui/dist
 356d6f1  fix(xtask): 占位 index.html 与 Go 逐字节一致，并纠正“缺它会 404”的错误说明
