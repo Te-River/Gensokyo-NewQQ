@@ -55,6 +55,17 @@ M3 的交付：把前端构建产物嵌进二进制，并提供管理台的登�
 - token 为 32 位 hex：不引入 `rand`/`uuid`，用进程内 OS 熵播种的 `RandomState` 两轮 SipHash
   折叠「纳秒时间 + 原子计数」。
 
+## 监听端口（控制台地址从哪来）
+
+本 crate **不绑定端口**，控制台挂在 runtime 启动的哪一个 listener 上取决于配置（实测于 `gensokyo-rust-windows-amd64.exe` `git-a0a2de0`）：
+
+| 配置 | `/webui` 由谁提供 | 横幅打印的控制台地址 |
+|------|------------------|--------------------|
+| `enable_ws_server: true`（默认） | 正向 WS listener（`port`，如 `15630`） | `http://<host>:<port>/webui` |
+| `enable_ws_server: false` | HTTP API listener（`http_address`，如 `127.0.0.1:15701`） | `http://<host>:<http_端口>/webui` |
+
+横幅两行（本机行 + 公网行）都带 `/webui`，且都取**实际监听的端口**，与 Go `ComposeWebUIURL` 的 `fmt.Sprintf("%s://%s:%s/webui", …)` 同形；未配置 `server_dir` 时公网行显示「仅本机可访问」。
+
 ## 构建前提
 
 `#[derive(RustEmbed)] #[folder = "../../webui/dist"]` 在编译期读取仓库根的 `webui/dist`，
@@ -62,7 +73,8 @@ M3 的交付：把前端构建产物嵌进二进制，并提供管理台的登�
 
 - 已有前端构建产物时：`cd frontend && npm run build`（输出到 `webui/dist`）；
 - 只想编译时：`cargo xtask build` 会生成占位文件；
-- 占位目录里没有 `index.html`，此时 `/` 由内置兜底页返回（提示前端未构建），不是 404。
+- 占位目录里**有** `index.html`（158 B，与 Go `build.ps1` 的 `Ensure-WebUIDist` 逐字节一致，含 BOM 与结尾换行），所以 `/`、`/webui`、`/webui/index.html` 都回 200 的占位页；
+  内置兜底页（提示前端未构建）只在 `index.html` 真的缺失时兜底，不是 404。
 
 ## 性能参考
 
