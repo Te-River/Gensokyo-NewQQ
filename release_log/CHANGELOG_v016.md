@@ -807,6 +807,14 @@ Go 的成功路径直接 `return` 字面量 `{"status": "ok", "retcode": 0}`（`
 
 ## 📝 工程与文档变更
 
+### 文档收口：出站降级进使用文档、WebUI 端口口径与 noWebui 405 实测（2026-11-27）
+
+本轮代码行为改动较多，配套文档分三处补齐，避免「代码改了、文档还写着旧行为」：
+
+- **`docs/本版新增功能.md`**：新增「出站失败降级与 CQ 字面量收口」一节——媒体段失败降级（`retcode 0` /`message_id 0` / 错误文本进 `message`、不计 `botstats`、含缺 `ffmpeg`+`pts`）、`[CQ:reply]` 丢引用继续发、`[CQ:card]` 非法丢卡片、`[CQ:input_notify]` 与正文双发、纯管理匹配码吞码、`[CQ:group_info]` 真展开、`[CQ:stream]` 接受面与群聊静默忽略；逐条指向 parity §B4/§F 与本文件对应条目
+- **`crates/gensokyo-webui/README.md`**：勘正「占位目录没有 `index.html`」的过期说法（自 `e0ca4bb` 起占位组含 158 B 的 `index.html`，`/`、`/webui`、`/webui/index.html` 都是 200 占位页，内置兜底页仅在文件真缺失时生效）；新增「监听端口」对照表——`enable_ws_server: true` 时 `/webui` 由正向 WS 的 `port` 提供、`false` 时由 `http_address` 提供，横幅取**实际监听端口**
+- **`docs/rust-build.md`**：补 `-noWebui` 产物的实测口径——启动日志打「本构建未编入 WebUI…/api 全部走 action」，`GET /webui*` 落到 action 闸门回 **405**（只收 POST）而不是 404
+- **实测依据**：用交付产物 `git-a0a2de0` 各起一次最小配置进程（假 app_id、`enable_ws_server: false`、独立端口）逐条打接口——amd64 完整版与 386 完整版 `/webui`、`/webui/index.html` 均 200（158 B，`<title>WebUI placeholder</title>`）、`/webui/api/check-login-status` 200（50 B）、`/webui/nonexist.js` 404；noWebui 版三条均 405
 ### 构建链：占位 `webui/dist/index.html` 与 Go 逐字节一致 + 嵌入新鲜度防回归（2026-11-25）
 
 `xtask` 在缺前端产物时会写一组空占位文件让 `rust-embed` 能编译，但**没有 `index.html`**，而 Go 的
@@ -934,6 +942,10 @@ Rust 侧第一次有 crate 级 feature：`webui` / `grpc` / `qr` / `oss`，`defa
 ## ✅ 提交记录
 
 ```
+ada2695  docs(rust-build): 补 -noWebui 产物上 /webui 回 405 的实测口径
+cb01324  docs(webui): 勘正占位 index.html 说法 + 补「控制台地址由哪个 listener 提供」
+378e4a2  docs: 本版新增功能补「出站失败降级与 CQ 字面量收口」一节
+a0a2de0  docs(changelog): v016 回填 188190f 与 c3cba23 两条提交记录
 188190f  fix(runtime): stream 码接受面对齐 Go 默认链（parity P77-12 遗留①②）
 c044cb5  fix(runtime): 三条 CQ 字面量泄漏收口（parity P77-10/11/12）
 c3cba23  docs(changelog): v016 补构建链占位 index.html 条目并回填本轮四个提交
