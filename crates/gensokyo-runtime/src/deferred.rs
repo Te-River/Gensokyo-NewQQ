@@ -21,7 +21,7 @@
 //! | `[CQ:reply]` | `msg_id` | 虚拟号先经 idmap / echo 还原成真实消息 ID；**还原失败或归属会话与本次目标不一致时丢弃 `message_reference` 继续发**（只 WARN，Go `applyGroupReply` / `applyPrivateReply` 同口径） |
 //! | `keyboard` | `keyboard` | markdown 内嵌键盘优先、独立 `[CQ:keyboard]` 兜底，与 text / markdown / card 同发，不改变 `msg_type`（Go `applyGroupMarkdownKeyboard` 口径）；`data` 必须是 JSON 对象，否则 `1400`；`specify_user_ids` 的数字虚拟号先转真实 OpenID（群聊 / C2C 一致，Go `ResolveKeyboardVirtualIDs`），`content.rows` / `keyboard.content.rows` / `keyboard.rows` / 顶层 `rows` 四种形态都覆盖；C2C 目标额外把 `permission.type` 归一为 2、`__USER_ID__` 换成对方 OpenID（[`compose_keyboard`]） |
 //! | `input_notify` | `input_notify` + `msg_type=6` | 仅单聊；与正文 / 媒体同条时**先发通知再发正文**（Go `send_private_msg.go:473-477` 的双发口径），回执取后发的正文条 |
-//! | `stream` | `stream` + `msg_type=2` | 仅单聊；正文进 `markdown.content`，`stream.state` 取 1（start / mid）/ 10（finish），见 [`compose_stream`]；`mid` / `finish` 缺 `stream_msg_id` 时 WARN + 跳过（回执 `message_id 0`，Go `send_private_msg.go:141-142` 只打日志不发） |
+//! | `stream` | `stream` + `msg_type=2` | 仅单聊；正文进 `markdown.content`，`stream.state` 取 1（start / mid）/ 10（finish），见 [`compose_stream`]；群聊目标**静默忽略**该码、正文照发（Go 群链没有 stream 消费者，见 [`resolve_group_stream`]）；未知阶段（`type` 缺省 / 非 start、mid、finish）与 `mid` / `finish` 缺 `stream_msg_id` 都是 WARN + 跳过（回执 `message_id 0`，Go `send_private_msg.go:124-175` 的 switch 无命中 / `:141-142`、`:159-160` 只打日志不发） |
 //! | `[CQ:group_info]` | 正文原地展开 | 默认链 `arch_mode=new` 的 `field` 四枚举 `name` / `memo` / `member_count` / `all` 换成值；`group_id` 缺省回退当前群，反查 / 取数失败替换 `fallback`（默认空串），无效 `field` 保留原文（[`resolve_group_info`]，Go `handlers/cqparse/handlers_groupinfo.go`） |
 //! | `music` / `qqmusic` | `markdown` + `keyboard` + `msg_type=2` | 取第一首：查 QQ 音乐歌曲详情（Go `FetchSongDetail`，走媒体下载 seam）→ 原生 markdown（封面 `T002R180x180M000{album_mid}.jpg` + 曲名 / 歌手）→ 键盘「立刻播放 / 我也要点歌」（第二个按钮的 `data` 是 `music_prefix` + 空格）；查询失败降级成分享文案并 `warn`（Go 直接丢整条消息） |
 //! | `unknown` / `unknown_image` / `unknown_record` | 不支持 | `1400`（请求侧段类型），不静默丢 |
@@ -50,8 +50,10 @@
 //! `send_group_msg.go:831-843`）。`[CQ:reply]` 同样只落在首条（`:659-680`；循环里只在
 //! `key == "markdown"` 时补 reply，`:815`、`send_private_msg.go:625`）。
 //! `stream`（`msg_type=2` + `stream`）**独占**整条消息：它带不了正文 / 媒体，与其它内容同条
-//! 出现一律 `1400`，而不是丢掉另一部分（Go 发完流式就 `return`，正文不发）。续片 / 终片
-//! 缺 `stream_msg_id` 是例外：Go 只打日志跳过、正文也不发，所以这里 WARN + 空消息回执。
+//! 出现一律 `1400`，而不是丢掉另一部分（Go 发完流式就 `return`，正文不发）。两个例外都在
+//! [`execute_inner`] 的闸门里定夺：群聊目标的码按 Go 群链**静默忽略**（载荷剥掉、正文照发，
+//! 见 [`resolve_group_stream`]）；未知阶段（`type` 缺省 / 非 start、mid、finish）与续片 / 终片
+//! 缺 `stream_msg_id` 都是 Go 的「无事可做」——只 WARN + 空消息回执，正文也不发。
 //! `input_notify`（`msg_type=6`）虽然同样带不了正文，但 Go 是**发两条**：先通知、再正文
 //! （`send_private_msg.go:473-477`），本仓在 [`compose`] 里照样拆成「通知当首条 + 正文当
 //! 后续条」，回执取后发的那条。
@@ -394,6 +396,12 @@ async fn execute_inner(
     )
     .await;
     let plan = group_info_plan.as_ref().unwrap_or(plan);
+    // `[CQ:stream]` 的群聊目标：Go 群链不消费这个 foundItems 项（解析期 cqparse 已吞码
+    // `handlers/cqparse/handlers_content.go:157-176`，群发送链 `handlers/outbound_bridge.go:484-630`
+    // 没有 stream 分支）⇒ 码消失、正文照发、`retcode 0`。这里同样在判空之前剥掉载荷，
+    // 纯码消息因此退化成空消息回执（与 Go 正文为空不打上游同形）。
+    let stream_plan = resolve_group_stream(plan);
+    let plan = stream_plan.as_ref().unwrap_or(plan);
     // P83：出站管理 CQ 码（member / set_group / remove）。depth==0 守门——url_transform_stage
     // 的 QR 子请求以 depth=1 重入本函数，不双执行（设计 §3.3-2）；必须在 is_empty 判定
     // 之前——纯动作消息先执行动作、再按空消息回执（§3.3-1）。失败（off / L2）整条
@@ -403,20 +411,35 @@ async fn execute_inner(
     if is_empty_message(plan) {
         return Ok(SendOutcome::ok(EMPTY_MESSAGE_ID.to_owned()));
     }
-    // `[CQ:stream]` 续片 / 终片缺 `stream_msg_id`：Go 只打日志跳过——`send_private_msg.go:141-142`
-    // / `:159-160` 的「缺少 stream_msg_id，跳过」，既不打上游也不报错（`sendStream` 返回
-    // `present=true`，正文同样不再发）。同口径：WARN + 空消息回执（`message_id 0`），
-    // 不再整条 `1400`——服务端无从续写时这是「无事可做」，不是请求参数错误。
-    if let Some(stream) = &plan.message.plan.stream
-        && !matches!(stream.kind, StreamKind::Start)
-        && stream.id.is_none()
-    {
-        tracing::warn!(
-            kind = %stream.kind.as_str(),
-            qq = %stream.qq,
-            "[CQ:stream] 续片 / 终片缺少 stream_msg_id，跳过"
+    // `[CQ:stream]` 的剩余两个出口都在 compose 之前定夺（Go 默认链口径）：
+    // - **未知阶段**（`type` 缺省 / 非 start|mid|finish，例如 `[CQ:stream,qq=123]`）：Go `sendStream`
+    //   的 `switch streamType` 无 case 命中 ⇒ 既不打上游、也不回失败码，码照样被 Splice 移除
+    //   （`send_private_msg.go:124-175`；函数仍返回 `present=true`，正文因此也不再发）；
+    // - **续片 / 终片缺 `stream_msg_id`**：Go 只打日志跳过——`send_private_msg.go:141-142` / `:159-160`
+    //   的「缺少 stream_msg_id，跳过」，同一条形状。
+    // 两者同口径：WARN + 空消息回执（`message_id 0`），不再整条 `1400`——这是「无事可做」，不是请求
+    // 参数错误。群聊目标不在此列：载荷在上面的 `resolve_group_stream` 已按 Go 群链剥掉。
+    if let Some(stream) = &plan.message.plan.stream {
+        let stage_known = matches!(
+            stream.kind,
+            StreamKind::Start | StreamKind::Mid | StreamKind::Finish
         );
-        return Ok(SendOutcome::ok(EMPTY_MESSAGE_ID.to_owned()));
+        if !stage_known {
+            tracing::warn!(
+                kind = %stream.kind.as_str(),
+                qq = %stream.qq,
+                "[CQ:stream] 未知阶段，按 Go 口径吞码且不发送"
+            );
+            return Ok(SendOutcome::ok(EMPTY_MESSAGE_ID.to_owned()));
+        }
+        if !matches!(stream.kind, StreamKind::Start) && stream.id.is_none() {
+            tracing::warn!(
+                kind = %stream.kind.as_str(),
+                qq = %stream.qq,
+                "[CQ:stream] 续片 / 终片缺少 stream_msg_id，跳过"
+            );
+            return Ok(SendOutcome::ok(EMPTY_MESSAGE_ID.to_owned()));
+        }
     }
     // 出站 URL 变换（Go `transformMessageTextUrl`，`message_parser.go:1749-1793`）：位置
     // 在 compose 之前，等价 Go 的 parseMessageContent 尾部（CQ 管线之后、文本最后）。
@@ -2257,9 +2280,13 @@ fn compose_input_notify(
 ///
 /// Go 的 SSE 分支（`handlers/send_private_msg_sse.go`）把正文塞进 `markdown.content`、
 /// 阶段写进 `stream.state`：`start` / `mid` 是 1（续写），`finish` 是 10（结束）。
-/// `mid` / `finish` 缺 `id`（首片返回的 `stream_msg_id`）在进本函数之前就被跳过
-/// （[`execute_inner`] 的 stream 闸门，Go `send_private_msg.go:141-142` 同口径）。
-/// 群聊官方不支持流式，`1400`。
+/// `mid` / `finish` 缺 `id`（首片返回的 `stream_msg_id`）与**未知阶段**（`type` 缺省 / 非
+/// start、mid、finish）在进本函数之前就被跳过（[`execute_inner`] 的 stream 闸门，Go
+/// `send_private_msg.go:124-175` 的 switch 无命中 / `:141-142` 同口径）。
+///
+/// 群聊目标的载荷在 [`execute_inner`] 里已被 [`resolve_group_stream`] 剥掉（Go 群链没有 stream
+/// 消费者），下面那条 `1400` 与 `StreamKind::Other` 的 `1400` 都是防御：本函数只被
+/// [`compose`] 调用，正常路径到不了。
 fn compose_stream(
     context: &ActionContext,
     target: &SendTarget,
@@ -3058,6 +3085,31 @@ fn resolve_avatars(context: &ActionContext, plan: &SendRequest) -> Option<SendRe
         }
     }
     Some(resolved)
+}
+
+/// 群聊目标上的 `[CQ:stream]`：按 Go 群链口径**静默忽略**该码。
+///
+/// Go 默认链在解析期就把码吞掉（`handlers/cqparse/handlers_content.go:157-176` 的 resolveStream：
+/// `type` 或 `qq` 任一非空即 `Replacement: ""`），产出的 `foundItems["stream"]` 又被群发送链原样
+/// 带进 `SendFoundItemsGroup`（`handlers/outbound_bridge.go:484-630`）——那里没有 stream 分支，
+/// 于是码消失、正文照发、回执 `retcode 0`。Rust 此前对群目标整条回 `1400`。
+///
+/// 返回 `None` 表示「目标是私聊 / 计划里没有 stream」（零 clone 直通）；剥掉载荷后的副本交给
+/// 后续阶段当普通消息处理（正文照发，纯码消息退化成空消息回执，与 Go `outbound_bridge.go:542`
+/// 的「正文为空就不打上游」同形）。
+fn resolve_group_stream(plan: &SendRequest) -> Option<SendRequest> {
+    let stream = plan.message.plan.stream.as_ref()?;
+    if !matches!(plan.target, SendTarget::Group(_)) {
+        return None;
+    }
+    tracing::warn!(
+        kind = %stream.kind.as_str(),
+        qq = %stream.qq,
+        "[CQ:stream] 群聊不支持流式消息，按 Go 群链口径静默忽略该码（正文照发）"
+    );
+    let mut stripped = plan.clone();
+    stripped.message.plan.stream = None;
+    Some(stripped)
 }
 
 /// `[CQ:group_info]` 展开（Go `handlers/cqparse/handlers_groupinfo.go`，默认链
@@ -5441,24 +5493,112 @@ mod tests {
         }
     }
 
+    /// 单聊 `[CQ:stream]` 的接受面对齐 Go **默认链**：`type` 或 `qq` 任一非空就吞码
+    /// （`handlers/cqparse/handlers_content.go:157-176` 的 resolveStream），取值形状不校验。
+    /// `type=start` 照样走流式路径发首片（Go `send_private_msg.go:124-139` 的 `case "start"`：
+    /// 缺 `qq` 只影响缓存键，不影响这一片发不发）。真机泄漏的 `[CQ:stream,type=start,data={…}]`
+    /// 正是「`type` 有值、`qq` 缺」这一形态。
     #[tokio::test]
-    async fn stream_in_group_is_a_request_error() {
-        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
-        let (_dir, context) = context(Arc::clone(&api));
-        let media = no_media();
-        let plan = stream_plan(
-            SendTarget::Group(OPENID.to_owned()),
-            StreamKind::Start,
-            None,
-            None,
-        );
+    async fn stream_without_qq_is_swallowed_into_the_stream_path() {
+        for text in [
+            "[CQ:stream,type=start]正文",
+            r#"[CQ:stream,type=start,data={"foo":"bar"}]正文"#,
+            "[CQ:stream,type=start,qq=abc]正文",
+        ] {
+            let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+            let (_dir, context) = context(Arc::clone(&api));
+            let plan = cq_request(SendTarget::Private(OPENID.to_owned()), text);
 
-        let err = execute(&context, &plan, &deps(&media, None))
-            .await
-            .expect_err("群聊流式必须报错");
+            let outcome = execute_report(&context, &plan, &deps(&no_media(), None))
+                .await
+                .unwrap_or_else(|err| panic!("单聊流式首片应发送: {text} → {err}"));
 
-        assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
-        assert!(api.sent().is_empty(), "群聊流式不应发送");
+            let sent = api.sent();
+            assert_eq!(sent.len(), 1, "首片只一条: {text}");
+            assert_eq!(
+                sent[0].msg_type,
+                Some(msg_type::MARKDOWN),
+                "走流式 msg_type=2: {text}"
+            );
+            let content = sent[0]
+                .markdown
+                .as_ref()
+                .and_then(|markdown| markdown.content.as_deref())
+                .unwrap_or_default();
+            assert_eq!(content, "正文", "正文进 markdown.content: {text}");
+            assert!(!content.contains("[CQ:stream"), "不出现字面量: {text}");
+            assert_eq!(
+                sent[0].stream.as_ref().map(|stream| stream.state),
+                Some(1),
+                "start 的 state 是 1: {text}"
+            );
+            assert_eq!(outcome.message_id, "MSG-1", "回执 ok: {text}");
+        }
+    }
+
+    /// `type` 缺省 / 非三枚举（`[CQ:stream,qq=123]`、`type=weird`）：Go `sendStream` 的
+    /// `switch streamType` 无 case 命中 ⇒ 码已被 Splice 移除、**什么都不发**、也不回失败码
+    /// （`handlers/send_private_msg.go:124-175`；`present=true` 让正文同样不发）。Rust 此前回 1400。
+    #[tokio::test]
+    async fn stream_unknown_stage_is_swallowed_with_empty_receipt() {
+        for text in ["[CQ:stream,qq=123]正文", "[CQ:stream,type=weird,qq=1]正文"] {
+            let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+            let (_dir, context) = context(Arc::clone(&api));
+            let plan = cq_request(SendTarget::Private(OPENID.to_owned()), text);
+
+            let outcome = execute_report(&context, &plan, &deps(&no_media(), None))
+                .await
+                .unwrap_or_else(|err| panic!("未知阶段是「无事可做」，不是 1400: {text} → {err}"));
+
+            assert!(api.sent().is_empty(), "未知阶段不打上游: {text}");
+            assert_eq!(
+                outcome.message_id, EMPTY_MESSAGE_ID,
+                "空消息回执（message_id 0）: {text}"
+            );
+            assert!(outcome.message.is_none(), "不是降级: {text}");
+        }
+    }
+
+    /// 群聊目标带 `[CQ:stream]`：Go 群链**静默忽略**该码——解析期 cqparse 已吞码
+    /// （`handlers/cqparse/handlers_content.go:157-176`），群发送链 `SendFoundItemsGroup`
+    /// （`handlers/outbound_bridge.go:484-630`）里没有任何 `foundItems["stream"]` 分支 ⇒
+    /// 码消失、正文照发、`retcode 0`（纯码消息则 `message_id 0`，同 `:542` 的空正文口径）。
+    /// Rust 此前整条回 `1400`（旧用例 `stream_in_group_is_a_request_error`）。
+    #[tokio::test]
+    async fn stream_in_group_is_silently_ignored_like_go() {
+        for (text, body) in [
+            ("[CQ:stream,type=start,qq=123]正文", Some("正文")),
+            (
+                r#"[CQ:stream,type=start,data={"foo":"bar"}]正文"#,
+                Some("正文"),
+            ),
+            ("[CQ:stream,type=start,qq=123]", None),
+        ] {
+            let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+            let (_dir, context) = context(Arc::clone(&api));
+            let plan = cq_request(SendTarget::Group(OPENID.to_owned()), text);
+
+            let outcome = execute_report(&context, &plan, &deps(&no_media(), None))
+                .await
+                .unwrap_or_else(|err| panic!("群聊 stream 不应 1400: {text} → {err}"));
+
+            let sent = api.sent();
+            if let Some(body) = body {
+                assert_eq!(sent.len(), 1, "正文照发、只一条: {text}");
+                assert_eq!(sent[0].msg_type, None, "群聊不带 stream / markdown: {text}");
+                let content = sent[0].content.as_deref().unwrap_or_default();
+                assert_eq!(content, body, "码被吞、正文保留: {text}");
+                assert!(!content.contains("[CQ:stream"), "不出现字面量: {text}");
+                assert_eq!(outcome.message_id, "MSG-1", "回执 ok: {text}");
+            } else {
+                assert!(sent.is_empty(), "纯码消息不打上游: {text}");
+                assert_eq!(
+                    outcome.message_id, EMPTY_MESSAGE_ID,
+                    "空消息回执（message_id 0）: {text}"
+                );
+            }
+            assert!(outcome.message.is_none(), "不是降级: {text}");
+        }
     }
 
     // ---- music ----
@@ -5976,7 +6116,9 @@ mod tests {
     /// 无消费点的码按字面发出（Go legacy 保留 `tok.Raw`），不再整条 1400。
     #[tokio::test]
     async fn unconsumable_code_is_sent_as_literal_text() {
-        for text in ["[CQ:face,id=1]", "[CQ:markdown]", "[CQ:stream,type=start]"] {
+        // `[CQ:stream]`（两个参数都空）是 Go 回填 `tok.Raw` 的形态（`handlers_content.go:165-170`）；
+        // `type` / `qq` 任一非空则是吞码路径，见 `stream_*` 系列用例。
+        for text in ["[CQ:face,id=1]", "[CQ:markdown]", "[CQ:stream]"] {
             let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
             let (_dir, context) = context(Arc::clone(&api));
             let plan = cq_request(SendTarget::Group(OPENID.to_owned()), text);

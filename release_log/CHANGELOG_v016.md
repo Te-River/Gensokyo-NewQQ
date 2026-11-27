@@ -221,6 +221,19 @@ Go 在 `global_group_msg_rre_to_message` / `global_c2c_msg_switch_to_message` / 
 
 ## 🐛 修复
 
+### `[CQ:stream]` 接受面对齐 Go 默认链：非规范载荷不再漏字面、群聊目标不再 1400（parity P77-12 遗留①②，2026-11-27）
+
+上一轮（`c044cb5`）收口三条泄漏时，把 stream 的两处接受面差异**如实登记为遗留**：① `[CQ:stream,type=start,data={…}]` 这类非规范载荷 Rust 留在正文（Go 默认链吞码）；② 群聊目标带 `[CQ:stream]` Rust 回 `1400`（Go 群链静默忽略、正文照发）。本轮按 Go 源码逐分支取齐，两条都关掉。
+
+- **Go 取证（默认链 `arch_mode=new`）**：`handlers/cqparse/handlers_content.go:157-176` 的 `resolveStream` 只判「值非空」——`type` / `qq` 任一非空即 `Replacement: ""`（码从正文移除、`foundItems["stream"]` 只带非空键），两个都空才回填 `tok.Raw`；取值形状一概不校验。发送侧 `handlers/send_private_msg.go:124-175` 的 `switch streamType` 里 `start` / `mid` / `finish` 各发一片（`start` 缺 `qq` 只影响 `streamCache` 的键，照样发），**其它取值无 case 命中 ⇒ 什么都不发、也不回失败码**（`present=true`，正文随之不再发）；`mid` / `finish` 缺 `stream_msg_id` 只打日志跳过（`:141-142` / `:159-160`）。群链同理吞码，且 `foundItems["stream"]` 被原样带进 `SendFoundItemsGroup`（`handlers/outbound_bridge.go:484-630`；`handlers/send_group_msg.go` 全文件没有该键分支）⇒ 静默忽略、正文照发、`retcode 0`（纯码消息按 `:542` 的空正文口径回 `message_id 0`）
+- **修改（协议层接受面）**（`crates/gensokyo-protocol/src/outbound.rs`）：`stream_from_segment` 去掉「`type` ∈ start/mid/finish 且 `qq` 纯数字」的额外要求，改判「`type` 或 `qq` 任一非空即吞码」，非规范形态另打一条 WARN（`stream_is_canonical` 只决定要不要记日志，不拦发）；`foundItems` 桥同步放宽——`parse_stream` 的 `type` / `qq` 缺省按空串收（Go 只写非空键，`{"type":"start"}` 与 `{"qq":"1"}` 都是它能产出的合法载荷）、`to_found_items` 也只写非空键，两侧 JSON 逐字节同形
+- **修改（单聊未知阶段）**（`crates/gensokyo-runtime/src/deferred.rs`）：stream 闸门补一档——阶段不在 start/mid/finish 时 WARN + `EMPTY_MESSAGE_ID`（`message_id 0` 空回执），与缺 `stream_msg_id` 的既有闸门同口径；此前这一档走 `compose_stream` 回 `1400`
+- **修改（群聊目标）**：新增 `resolve_group_stream`，在 `is_empty_message` 判空之前把群目标的 stream 载荷剥掉 ⇒ 码消失、正文照发、`retcode 0`，纯码消息退化成空消息回执（与 Go 正文为空不打上游同形）。`compose_stream` 里原有那条群聊 `1400` 与未知阶段的 `1400` 降为防御（正常路径到不了）
+- **影响**：2026-11-27 真机里那条 `[CQ:stream,type=start,data={…}]` 不再以字面量进聊天窗口；单聊 `type=start` 缺 `qq` 照常发流式首片；群聊带 stream 码不再让插件收到参数错误
+- **刻意差异（已登记，勿当回归）**：① 未知阶段 / 缺 `stream_msg_id` 时 Go 连回执都不发（`send_private_msg.go:480-483` 的 `return ret, nil` 且 `ret` 为空），Rust 仍回 ok/0 帧（不响应会让 OneBot 客户端超时，同 §F D41）；② Go 群链的媒体末段会把 stream 这个未知 key 交给 `generateGroupMessage` 兜底成一条 `Content: ""` 的 `MessageToCreate`（`handlers/send_group_msg.go:1787-1796`），Rust 不复制这条空正文消息；③ 流式与 markdown / 卡片 / 键盘 / 音乐 / 媒体同条时 Rust 仍 `1400`（Go 发完流式就 `return`、其余内容哑掉），本单未放宽
+- **文档**：`reports/refactor/17-go-rust-parity.md` §B4 的 P77-12 行改写为「接受面与群聊目标」全量已对齐（含上述三条刻意差异）；`docs/rust-handover.md` §6 第 ㉞ 条同步；同一条目里上一轮那句「两条遗留」的措辞一并纠正
+- **测试**：`stream_without_qq_is_swallowed_into_the_stream_path`（缺 `qq` 的 `type=start`、`type=start,data={…}`、非数字 `qq` 三形态，断言走 `msg_type=2` + `stream.state=1`、正文进 `markdown.content`、不含 `[CQ:stream` 字面）、`stream_unknown_stage_is_swallowed_with_empty_receipt`、`stream_in_group_is_silently_ignored_like_go`（群聊三形态，断言码消失、正文照发、回执 ok；原 `stream_in_group_is_a_request_error` 改写而来）、`stream_accepts_any_non_empty_type_or_qq_like_go`、`stream_payload_tolerates_missing_type_or_qq_like_go`（protocol）
+
 ### 三条 CQ 字面量泄漏收口：纯管理码 / `[CQ:group_info]` / `[CQ:stream]`（parity P77-10/11/12，2026-11-27）
 
 2026-11-27 00:26 真机跑 32 项 CQ 测试插件时，聊天窗口里出现三条**字面量 CQ 码**——Go 主仓同场景不会。逐条复核 Go 源码后确认三条都是 Rust 侧偏差（不是插件问题），按 Go **默认链**（`arch_mode` 空值/非法值一律回退 `new`，`config/config.go:2870-2889`）收口。
@@ -229,7 +242,7 @@ Go 在 `global_group_msg_rre_to_message` / `global_c2c_msg_switch_to_message` / 
 - **修改（`[CQ:group_info]` 真展开，P77-11）**：Go `handlers/cqparse/handlers_groupinfo.go:42-104` 是 `RegisterBatch` 内容展开码——`field` 四枚举 `name`/`memo`/`member_count`/`all`，`group_id` 缺省回退当前群、32 位直通否则 idmap 反查，同目标群多码只取数一次，无效 `field` 保留原文，反查 / 取数失败替换 `fallback`（默认空串）。Rust 此前把 `group_info` 归入「无消费点」按字面写回正文（数组段直接丢弃）。现在协议层给出独立 `group_info` 臂（字符串与数组两路径都写回正文），runtime 新增 `resolve_group_info` 在 avatar 之后、**判空之前**原地替换（同群 `HashMap` 去重）
 - **修改（`[CQ:stream]` 缺 `stream_msg_id` 不再 1400，P77-12）**：Go `handlers/send_private_msg.go:97-178` 对 `mid`/`finish` 缺缓存 id 只 `mylog.Printf("[CQ:stream] 续片/终片缺少 stream_msg_id，跳过")`、不打上游也不回失败码。Rust 此前整条回 `1400`；改为 `execute_inner` 判空之后、compose 之前的闸门：WARN + `EMPTY_MESSAGE_ID`
 - **影响**：三条泄漏在 Rust 侧关闭；同一份插件的回执与 Go 一致（`retcode 0`），OneBot 客户端不再把「缺参防误触」「群信息展开」「流式续片」判成异常
-- **保留的差异（已登记，勿当回归）**：① `[CQ:stream,type=start,data={…}]` 这类非规范载荷 Rust 仍留字面（Go new 链按「`type` 或 `qq` 任一非空」吞码）——真机第三条泄漏由测试插件载荷纠正关闭，本单按边界未放宽 Rust 解析；② 群聊目标带 `[CQ:stream]` Rust 仍 `1400`（Go 群链静默忽略 stream 项、正文照发）；③ 与 Go 唯一形状差：缺 id 时 Go 连回执都不发，Rust 回 ok/0 帧（不响应会让客户端超时）
+- **保留的差异（已登记，勿当回归）**：① 非规范 `[CQ:stream]` 载荷留字面、群聊目标 `1400` 这两条遗留已在同日的「`[CQ:stream]` 接受面对齐 Go 默认链」条目收口，本条目不再适用（真机第三条泄漏与群聊形态都以那一轮为准）；② 与 Go 唯一形状差：未知阶段 / 缺 id 时 Go 连回执都不发（`return ret, nil` 且 `ret` 为空），Rust 回 ok/0 帧（不响应会让客户端超时）
 - **文档**：`reports/refactor/17-go-rust-parity.md` §B4 新增 P77-10/11/12 三行 + §F 新增 D41（「无事可做」类回执）；`docs/rust-handover.md` §6 新增第 ㉞ 条；`docs/cq码/扩展CQ码/` 的 `扩展cq码-cq-group_info.md`（展开点 / 判空 / Rust 恒 new 链）、`扩展cq码-cq-stream.md`（缺 id 跳过语义）、`扩展cq码-cq-remove.md`（缺参吞码）同步
 - **测试**：`known_action_admin_codes_are_swallowed_not_leaked`、`unknown_set_group_action_stays_literal`、`array_group_info_segment_is_written_back_for_runtime_expansion`（protocol）；`pure_admin_l1_defect_returns_empty_message_id`、`group_info_fields_are_expanded_in_place`、`group_info_failure_falls_back_to_the_param`、`group_info_invalid_field_stays_literal`、`stream_pieces_without_id_are_skipped_like_go`（runtime）
 
@@ -921,6 +934,7 @@ Rust 侧第一次有 crate 级 feature：`webui` / `grpc` / `qr` / `oss`，`defa
 ## ✅ 提交记录
 
 ```
+c044cb5  fix(runtime): 三条 CQ 字面量泄漏收口（parity P77-10/11/12）
 e0ca4bb  test(webui): 钉住「嵌入 index.html 必须与磁盘同字节」+ 占位 index.html 入库
 cd4936f  fix(xtask): 占位文件首次写入后失效 gensokyo-webui 缓存，避免嵌入陈旧 webui/dist
 356d6f1  fix(xtask): 占位 index.html 与 Go 逐字节一致，并纠正“缺它会 404”的错误说明

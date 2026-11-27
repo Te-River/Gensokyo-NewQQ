@@ -28,8 +28,10 @@
 //!      `cq_legacy_semantics_test.go:173-174`）；`group_info` 同样先按原文写回正文，但它是
 //!      **内容展开码**——值由 runtime 在判空之前原地替换（[`OutboundPlan::from_segments`]）；
 //!    - 形态不命中的码：`music` 非 `type=qq,id=<数字>`（`handlers/cqcode.go:38`）、
-//!      `markdown` / `keyboard` 的 `data` 不是 `base64://` 或 `{` 开头、`stream` / `input_notify`
-//!      缺参数、`avatar` 缺 `qq`（或 `qq=` 为空）。
+//!      `markdown` / `keyboard` 的 `data` 不是 `base64://` 或 `{` 开头、`input_notify` 缺 `type`、
+//!      `avatar` 缺 `qq`（或 `qq=` 为空）。`stream` 只在 `type` 与 `qq` **都空**时才留字面——
+//!      默认链 `resolveStream` 只要任一非空就吞码（`handlers/cqparse/handlers_content.go:157-176`），
+//!      取值不规范（缺数字 `qq` / 阶段非 start|mid|finish）同样吞码，另打一条 `warn`。
 //!
 //!    入口统一走 [`push_literal`]（只回写 [`Segment::raw_or_cq`] 的原文切片）：写回的字面再次
 //!    经 [`OutboundPlan::to_segments`] 重分词得到同一段，两个方向互为逆运算（用例见
@@ -830,11 +832,18 @@ impl OutboundPlan {
 
         if let Some(stream) = &self.stream {
             let mut object = serde_json::Map::new();
-            object.insert(
-                "type".to_owned(),
-                Value::String(stream.kind.as_str().to_owned()),
-            );
-            object.insert("qq".to_owned(), Value::String(stream.qq.to_string()));
+            // Go 只写**非空**键（`handlers/cqparse/handlers_content.go:157-176`）：缺 `type` / 缺 `qq`
+            // 的载荷不回填空串，保持两侧 `foundItems` 逐字节同形。
+            if !stream.kind.as_str().is_empty() {
+                object.insert(
+                    "type".to_owned(),
+                    Value::String(stream.kind.as_str().to_owned()),
+                );
+            }
+            let qq = stream.qq.to_string();
+            if !qq.is_empty() {
+                object.insert("qq".to_owned(), Value::String(qq));
+            }
             if let Some(id) = &stream.id {
                 object.insert("id".to_owned(), Value::String(id.clone()));
             }
@@ -962,8 +971,20 @@ impl OutboundPlan {
                     _ => push_literal(&mut plan, segment),
                 },
                 "stream" => match stream_from_segment(segment) {
-                    Some(stream) => plan.stream = Some(stream),
-                    // 缺 `type` / `qq`、qq 非数字：Go 的冒号正则不命中 ⇒ 字面
+                    Some(stream) => {
+                        // 非规范形态（缺 `qq` / `qq` 非数字 / 阶段不是 start|mid|finish）在 Go 默认
+                        // 链里照样吞码、不进正文（`handlers/cqparse/handlers_content.go:157-176` 的
+                        // resolveStream 只判「值非空」，不看取值形状）——留一条 WARN，别让放宽静默
+                        // 无痕；真正发不发、发成什么由 runtime 按阶段和目标决定。
+                        if !stream_is_canonical(segment) {
+                            tracing::warn!(
+                                raw_cq = %segment.raw_or_cq(),
+                                "[CQ:stream] 载荷非规范（缺数字 qq / 阶段非 start|mid|finish），按 Go 默认链吞码"
+                            );
+                        }
+                        plan.stream = Some(stream);
+                    }
+                    // `type` 与 `qq` 都空：Go 回填 `tok.Raw`（`handlers_content.go:165-170`）⇒ 逐字节留正文
                     None => push_literal(&mut plan, segment),
                 },
                 "input_notify" => match input_notify_from_segment(segment) {
@@ -1567,14 +1588,18 @@ impl MediaRef {
 }
 
 fn stream_from_segment(segment: &Segment) -> Option<StreamPayload> {
-    // Go 的冒号正则只认数字 qq（`\[CQ:stream,type:(\w+),qq:(\d+)\]`，handlers/cqcode.go:41）：
-    // 缺 qq / 非数字都不命中 ⇒ 调用方按字面保留整段
-    let qq = segment.get("qq")?;
-    if qq.is_empty() || !qq.bytes().all(|byte| byte.is_ascii_digit()) {
+    // Go 默认链只要求 `type` / `qq` **任一非空**就吞码：`handlers/cqparse/handlers_content.go:157-176`
+    // 的 resolveStream 逐个 `if v := tok.Params[k]; v != ""` 才收进 `foundItems["stream"]`，两个都空时
+    // 才 `Replacement: tok.Raw`。取值形状一概不校验——`type` 只做阶段分档、`qq` 只做（本仓已不维护
+    // 的）分片缓存键，所以 `[CQ:stream,type=start,data={…}]`（真机泄漏形态）与 `[CQ:stream,qq=abc]`
+    // 都按吞码处理，不再退化成字面。
+    let kind = segment.get("type").unwrap_or_default();
+    let qq = segment.get("qq").unwrap_or_default();
+    if kind.is_empty() && qq.is_empty() {
         return None;
     }
     Some(StreamPayload {
-        kind: StreamKind::from(segment.get("type")?),
+        kind: StreamKind::from(kind),
         qq: parse_id(qq),
         id: segment
             .get("id")
@@ -1586,6 +1611,16 @@ fn stream_from_segment(segment: &Segment) -> Option<StreamPayload> {
             .or_else(|| segment.get("msg_seq"))
             .and_then(|raw| raw.parse::<i64>().ok()),
     })
+}
+
+/// 规范形态（Go 原生 `streamPattern` 的写法）：阶段 ∈ start/mid/finish 且 `qq` 是纯数字。
+///
+/// 只用于决定要不要打「非规范」WARN——Go 侧不校验形状、一律吞码，本仓同样一律吞码。
+fn stream_is_canonical(segment: &Segment) -> bool {
+    matches!(segment.get("type"), Some("start" | "mid" | "finish"))
+        && segment
+            .get("qq")
+            .is_some_and(|qq| !qq.is_empty() && qq.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 fn input_notify_from_segment(segment: &Segment) -> Option<InputNotifyPayload> {
@@ -1629,14 +1664,11 @@ pub fn markdown_content(value: &Value) -> Option<String> {
 fn parse_stream(raw: &str) -> Result<StreamPayload> {
     let value: Value = serde_json::from_str(raw)
         .map_err(|error| Error::Protocol(format!("stream 载荷不是合法 JSON: {error}")))?;
-    let kind = value
-        .get("type")
-        .and_then(json_scalar)
-        .ok_or_else(|| Error::Protocol("stream 载荷缺少 type".to_owned()))?;
-    let qq = value
-        .get("qq")
-        .and_then(json_scalar)
-        .ok_or_else(|| Error::Protocol("stream 载荷缺少 qq".to_owned()))?;
+    // Go 的 `foundItems["stream"]` 只写**非空**键（`handlers/cqparse/handlers_content.go:157-176`
+    // 逐个 `if v != ""` 才赋值）⇒ `{"type":"start"}`（缺 qq）与 `{"qq":"1"}`（缺 type）都是它能产出的
+    // 合法形态，缺省按空串收——不在这一层判 1400，形状问题留给 runtime 按阶段 / 目标决定。
+    let kind = value.get("type").and_then(json_scalar).unwrap_or_default();
+    let qq = value.get("qq").and_then(json_scalar).unwrap_or_default();
     Ok(StreamPayload {
         kind: StreamKind::from(kind.as_str()),
         qq: parse_id(&qq),
@@ -1798,19 +1830,28 @@ mod tests {
         );
     }
 
+    /// Go 的 `foundItems["stream"]` 只写非空键（`handlers/cqparse/handlers_content.go:157-176`），
+    /// 所以「只有 `type`」「只有 `qq`」都是它能产出的合法载荷，本仓按缺省空串收下。
     #[test]
-    fn invalid_stream_payload_is_reported() {
+    fn stream_payload_tolerates_missing_type_or_qq_like_go() {
         let items = found(&[("stream", &[r#"{"type":"start"}"#])]);
-        let error = OutboundPlan::from_found_items(&items).expect_err("缺 qq 应报错");
-        assert!(error.to_string().contains("qq"), "错误应点名字段: {error}");
+        let plan = OutboundPlan::from_found_items(&items).expect("缺 qq 是 Go 的合法形态");
+        let stream = plan.stream.as_ref().expect("应有 stream");
+        assert_eq!(stream.kind, StreamKind::Start);
+        assert_eq!(stream.qq, Ob11Id::Str(String::new()), "缺 qq 按空串收");
 
         let items = found(&[("stream", &[r#"{"qq":"1"}"#])]);
-        let error = OutboundPlan::from_found_items(&items).expect_err("缺 type 应报错");
-        assert!(
-            error.to_string().contains("type"),
-            "错误应点名字段: {error}"
-        );
+        let plan = OutboundPlan::from_found_items(&items).expect("缺 type 是 Go 的合法形态");
+        let stream = plan.stream.as_ref().expect("应有 stream");
+        assert_eq!(stream.kind, StreamKind::Other(String::new()));
+        assert_eq!(stream.qq, Ob11Id::Num(1));
 
+        // 回写同样只写非空键，两侧 foundItems 逐字节同形
+        assert_eq!(plan.to_found_items()["stream"][0], r#"{"qq":"1"}"#);
+    }
+
+    #[test]
+    fn invalid_stream_payload_is_reported() {
         let items = found(&[("stream", &["not-json"])]);
         let error = OutboundPlan::from_found_items(&items).expect_err("非 JSON 应报错");
         assert!(
@@ -2726,6 +2767,58 @@ mod tests {
         );
     }
 
+    /// Go 默认链（`arch_mode=new`）的接受面：`handlers/cqparse/handlers_content.go:157-176` 的
+    /// resolveStream 只要 `type` 或 `qq` 任一非空就吞码，取值形状一概不校验。真机泄漏的
+    /// `[CQ:stream,type=start,data={…}]` 正是「type 有值、qq 缺」这一形态。
+    #[test]
+    fn stream_accepts_any_non_empty_type_or_qq_like_go() {
+        for (code, expected_kind, expected_qq) in [
+            ("[CQ:stream,type=start]", StreamKind::Start, ""),
+            (
+                r#"[CQ:stream,type=start,data={"foo":"bar"}]"#,
+                StreamKind::Start,
+                "",
+            ),
+            ("[CQ:stream,type:mid]", StreamKind::Mid, ""),
+            ("[CQ:stream,type=finish,qq=abc]", StreamKind::Finish, "abc"),
+            (
+                "[CQ:stream,qq=123]",
+                StreamKind::Other(String::new()),
+                "123",
+            ),
+            (
+                "[CQ:stream,type=weird]",
+                StreamKind::Other("weird".to_owned()),
+                "",
+            ),
+        ] {
+            let plan = OutboundPlan::from_segments(&crate::cqcode::parse(code));
+            assert!(
+                plan.text.is_empty(),
+                "非空 type/qq 应吞码、不留字面: {code} → {:?}",
+                plan.text
+            );
+            let stream = plan.stream.as_ref().unwrap_or_else(|| {
+                panic!("应解析成 stream 载荷: {code}");
+            });
+            assert_eq!(stream.kind, expected_kind, "阶段分档: {code}");
+            assert_eq!(stream.qq.to_string(), expected_qq, "qq 原值: {code}");
+            // P81 硬验收：写回段再重分词必须还原同一计划（qq 为空也不许改写字节）
+            assert_eq!(
+                OutboundPlan::from_segments(&plan.to_segments()),
+                plan,
+                "往返必须幂等: {code}"
+            );
+        }
+
+        // 两个参数都空才是字面：Go 回填 tok.Raw（handlers_content.go:165-170）
+        for code in ["[CQ:stream]", "[CQ:stream,type=]", "[CQ:stream,qq=]"] {
+            let plan = OutboundPlan::from_segments(&crate::cqcode::parse(code));
+            assert!(plan.stream.is_none(), "两参数全空不产 stream: {code}");
+            assert_eq!(plan.text, code, "两参数全空逐字节留正文: {code}");
+        }
+    }
+
     #[test]
     fn stream_payload_reads_go_stream_chunk_keys() {
         let items = found(&[(
@@ -3087,8 +3180,8 @@ mod tests {
             "[CQ:keyboard]",
             "[CQ:keyboard,data=abc]",
             "[CQ:stream]",
-            "[CQ:stream,type=start]",
-            "[CQ:stream,type=start,qq=abc]",
+            "[CQ:stream,type=]",
+            "[CQ:stream,qq=]",
             "[CQ:input_notify]",
             "[CQ:input_notify,type=x]",
             "[CQ:avatar]",
