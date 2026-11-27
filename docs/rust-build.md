@@ -227,6 +227,11 @@ $env:GENSOKYO_BUILD_WORKERS = '3'; cargo xtask build --linux-only
 产物 = 四能力全关**（名字只提 WebUI 是沿用 Go `-NoWebUI` / `build.ps1` 的既有命名）。
 xtask 不需要为此改动；`--all` 的 `-noWebui` 一列同样适用。
 
+开机实测（`gensokyo-rust-windows-amd64-noWebui.exe`，2026-11-27）：启动日志打 `本构建未编入 WebUI（feature
+webui 关闭）：disable_webui=false 被忽略，/api 全部走 action`；此时 `GET /webui`、`GET /webui/index.html`、
+`GET /webui/api/*` 都落到 HTTP API 的 action 闸门，**回 `405 Method Not Allowed`**（action 只收 POST），
+不是 404——排查「noWebui 版控制台打不开」时按这个预期看，不要当成路由丢失。
+
 默认构建（`cargo build` / `cargo test` / `cargo clippy --workspace`）与引入 feature 之前完全一致；
 no-feature 分支由 CI 的 `cargo clippy --workspace --no-default-features --all-targets -- -D warnings`
 兜底（默认 clippy 覆盖不到只在关闭时才编译的 `#[cfg]` 分支）。
