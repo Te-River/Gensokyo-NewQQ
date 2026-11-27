@@ -101,6 +101,6 @@ await bot.send_private_msg(
 
 - 流式消息**仅支持单聊（C2C）场景**，群聊和频道不支持。
 - 同一个用户的流式消息必须按 `start` → `mid`（可多次）→ `finish` 顺序发送。
-- 如果缺少 `start` 直接发 `mid` 或 `finish`，会因缺少 `stream_msg_id` 而被跳过。
+- 如果缺少 `start` 直接发 `mid` 或 `finish`，会因缺少 `stream_msg_id` 而被**跳过**：不向上游发任何请求、正文也不再发（Go `send_private_msg.go:141-142`/`:159-160` 的「缺少 stream_msg_id，跳过」同口径），回执是成功（`retcode 0` / `data.message_id 0`），不是参数错误。
 - 缓存的生命周期由 Gensokyo 进程管理，重启后缓存丢失。
 - 不同用户的流式消息相互独立，`qq` 参数用于区分缓存。

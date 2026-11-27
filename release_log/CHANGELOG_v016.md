@@ -221,6 +221,18 @@ Go 在 `global_group_msg_rre_to_message` / `global_c2c_msg_switch_to_message` / 
 
 ## 🐛 修复
 
+### 三条 CQ 字面量泄漏收口：纯管理码 / `[CQ:group_info]` / `[CQ:stream]`（parity P77-10/11/12，2026-11-27）
+
+2026-11-27 00:26 真机跑 32 项 CQ 测试插件时，聊天窗口里出现三条**字面量 CQ 码**——Go 主仓同场景不会。逐条复核 Go 源码后确认三条都是 Rust 侧偏差（不是插件问题），按 Go **默认链**（`arch_mode` 空值/非法值一律回退 `new`，`config/config.go:2870-2889`）收口。
+
+- **修改（纯管理码不再当正文发出，P77-10）**：Go 新链在 `Phase3 Splice` 阶段就把动作码移除、执行器只补日志（`handlers/cqparse/handlers_action.go:19-40`、`handlers/cqparse_exec.go:7-8`），正文变空后 `handlers/send_group_msg.go:536-542` 直接回执、不打上游；只有 `set_group` 的**未知 / 缺失 action** 回填原文（`handlers/cqparse/registry.go:62-71` 的 `knownSetGroupActions`）。Rust 此前把「已知 action 缺必填参数」也当 L1 缺陷留字面（按 legacy 口径），于是 `[CQ:set_group,action=kick]` 被 POST 成 `{"content":"[CQ:set_group,action=kick]"}`。现新增 `set_group_action_known`，已知 action 的缺参缺陷与 `[CQ:remove]` 缺参一律**吞码 + WARN**，管理码阶段本就在判空之前 ⇒ 回 `retcode 0` / `status ok` / `data.message_id 0`、零上游调用
+- **修改（`[CQ:group_info]` 真展开，P77-11）**：Go `handlers/cqparse/handlers_groupinfo.go:42-104` 是 `RegisterBatch` 内容展开码——`field` 四枚举 `name`/`memo`/`member_count`/`all`，`group_id` 缺省回退当前群、32 位直通否则 idmap 反查，同目标群多码只取数一次，无效 `field` 保留原文，反查 / 取数失败替换 `fallback`（默认空串）。Rust 此前把 `group_info` 归入「无消费点」按字面写回正文（数组段直接丢弃）。现在协议层给出独立 `group_info` 臂（字符串与数组两路径都写回正文），runtime 新增 `resolve_group_info` 在 avatar 之后、**判空之前**原地替换（同群 `HashMap` 去重）
+- **修改（`[CQ:stream]` 缺 `stream_msg_id` 不再 1400，P77-12）**：Go `handlers/send_private_msg.go:97-178` 对 `mid`/`finish` 缺缓存 id 只 `mylog.Printf("[CQ:stream] 续片/终片缺少 stream_msg_id，跳过")`、不打上游也不回失败码。Rust 此前整条回 `1400`；改为 `execute_inner` 判空之后、compose 之前的闸门：WARN + `EMPTY_MESSAGE_ID`
+- **影响**：三条泄漏在 Rust 侧关闭；同一份插件的回执与 Go 一致（`retcode 0`），OneBot 客户端不再把「缺参防误触」「群信息展开」「流式续片」判成异常
+- **保留的差异（已登记，勿当回归）**：① `[CQ:stream,type=start,data={…}]` 这类非规范载荷 Rust 仍留字面（Go new 链按「`type` 或 `qq` 任一非空」吞码）——真机第三条泄漏由测试插件载荷纠正关闭，本单按边界未放宽 Rust 解析；② 群聊目标带 `[CQ:stream]` Rust 仍 `1400`（Go 群链静默忽略 stream 项、正文照发）；③ 与 Go 唯一形状差：缺 id 时 Go 连回执都不发，Rust 回 ok/0 帧（不响应会让客户端超时）
+- **文档**：`reports/refactor/17-go-rust-parity.md` §B4 新增 P77-10/11/12 三行 + §F 新增 D41（「无事可做」类回执）；`docs/rust-handover.md` §6 新增第 ㉞ 条；`docs/cq码/扩展CQ码/` 的 `扩展cq码-cq-group_info.md`（展开点 / 判空 / Rust 恒 new 链）、`扩展cq码-cq-stream.md`（缺 id 跳过语义）、`扩展cq码-cq-remove.md`（缺参吞码）同步
+- **测试**：`known_action_admin_codes_are_swallowed_not_leaked`、`unknown_set_group_action_stays_literal`、`array_group_info_segment_is_written_back_for_runtime_expansion`（protocol）；`pure_admin_l1_defect_returns_empty_message_id`、`group_info_fields_are_expanded_in_place`、`group_info_failure_falls_back_to_the_param`、`group_info_invalid_field_stays_literal`、`stream_pieces_without_id_are_skipped_like_go`（runtime）
+
 ### 出站降级语义对齐 Go：媒体失败 / reply / card / input_notify 不再硬拒（2026-11-25）
 
 2026-11-25 双仓真机跑同一套 32 项 CQ 测试插件时发现的主要「对外输出不一致」项：媒体 / 扩展段出问题时，Go 主仓**降级吞错**（记录日志后照常下发 `retcode:0` / `status:"ok"` 回执，`data.message_id=0`，把上游错误文本塞进 `message`），而 Rust 一律回 `1500` / `1400` `failed`——同一份 NoneBot 插件在 Go 上通过、在 Rust 上抛异常。本轮把四类出口按 Go 口径收口，并顺带对齐 `[CQ:input_notify]` 与正文混发的双发语义。

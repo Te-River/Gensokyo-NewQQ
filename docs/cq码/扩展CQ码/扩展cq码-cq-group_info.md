@@ -8,7 +8,7 @@
 
 范围：`q群 (Group Chat)` / `C2C (私聊)`（私聊需显式 `group_id`）
 
-> ⚠️ **解析模式要求**：本码需 `cq_parse_mode: new`；`legacy`/`shadow` 模式下该码不被识别，会原文发出。
+> ⚠️ **解析模式要求（Go 侧）**：Go 需 `cq_parse_mode: new`（默认值），`legacy`/`shadow` 模式下该码不被识别、会原文发出。本仓（Rust 重构线）没有三态开关，出站恒按 new 链展开（`deferred::resolve_group_info`）。
 
 ## 语法
 
@@ -32,6 +32,7 @@
 - CQ 码**从正文中移除**，替换为对应字段值（是内容展开码，不是媒体码）。
 - 同一条消息内多个 `[CQ:group_info]` 指向同一目标群时，**合并为一次**群信息 API 调用（30 QPM 限频保护），多码共享同一次取数结果。
 - 消息段数组格式（`{"type":"group_info","data":{"field":"name"}}`）同样支持，替换值按段位置展开。
+- 展开发生在**判空之前**：整条消息只有 `[CQ:group_info]` 且替换值（或默认的空 `fallback`）为空的形态，等同纯码消息——不向 QQ 发送任何内容，只回执成功（`retcode 0` / `data.message_id 0`）。
 
 ### field 取值示例
 

@@ -20,11 +20,13 @@
 //!
 //! 没有 `foundItems` key 的段与**形态不命中**的段按 Go legacy（默认 `cq_parse_mode`）分三类：
 //!
-//! 1. **字面保留**（仅**字符串 CQ 路径**——段由 [`crate::cqcode::parse`] 产出、带原文切片）：
+//! 1. **字面保留**（段由 [`crate::cqcode::parse`] 产出、带原文切片；`group_info` 例外——
+//!    数组段没有原文切片时用规范化 CQ 文本补回，交给 runtime 展开）：
 //!    写回 [`OutboundPlan::text`]，跟着正文一起发出去。
-//!    - 无消费点的码：`face` / `node` / `group_info` / 未知码——Go 的 `cqparse`
+//!    - 无消费点的码：`face` / `node` / 未知码——Go 的 `cqparse`
 //!      没有 handler 时回填 `tok.Raw`（`handlers/cqparse/walk.go:61-72`，金样
-//!      `cq_legacy_semantics_test.go:173-174`）；
+//!      `cq_legacy_semantics_test.go:173-174`）；`group_info` 同样先按原文写回正文，但它是
+//!      **内容展开码**——值由 runtime 在判空之前原地替换（[`OutboundPlan::from_segments`]）；
 //!    - 形态不命中的码：`music` 非 `type=qq,id=<数字>`（`handlers/cqcode.go:38`）、
 //!      `markdown` / `keyboard` 的 `data` 不是 `base64://` 或 `{` 开头、`stream` / `input_notify`
 //!      缺参数、`avatar` 缺 `qq`（或 `qq=` 为空）。
@@ -43,9 +45,13 @@
 //! 3. **进 [`OutboundPlan::admin_ops`]**：`member` / `set_group` / `remove`——Go 是**真执行**
 //!    管理动作（`handlers/message_parser.go:1166-1173`、`:1175-1181`、`:1611-1617` 还原
 //!    CQ → `handlers/cqcode.go:235-240` 踢人 / 禁言 / 撤回），P83 起同样解析成 [`AdminOp`]
-//!    交 runtime 执行；L1 解析期缺陷（缺必填 / 未知 action）仍按 Go 口径字面留在正文
-//!    （仅字符串路径，数组形 `remove` 见上条丢弃；`member` 例外：Go `cqcode.go:331` 对它
-//!    无条件吞码，见 [`OutboundPlan::from_segments`]），`extra` 只留作下游未知段的防御桶。
+//!    交 runtime 执行；L1 解析期缺陷的**已知** action（缺必填参数，如 `action=kick` 无
+//!    `user_id`）与 `remove` 的缺参同样**吞码**：Go 默认链（`arch_mode=new`）的 Splice 阶段
+//!    一律移除码、执行器只补日志（`handlers/cqparse/handlers_action.go:19-40`、
+//!    `handlers/cqparse_exec.go:7-8`），正文变空后由 `send_group_msg.go:536-542` 直接回执；
+//!    只有 `set_group` 的**未知 / 缺失** action 回填原文（`handlers/cqparse/registry.go:62-71`
+//!    的 `knownSetGroupActions`）。`member` 例外：Go `cqcode.go:331` 对它无条件吞码，
+//!    见 [`OutboundPlan::from_segments`]；`extra` 只留作下游未知段的防御桶。
 //!
 //! `avatar` 走 Go「段路径 / `cqparse`」口径：带 `qq` 的段进 [`OutboundPlan::avatars`]，由 runtime
 //! 反查 openid 后拼接 `q.qlogo.cn` 地址发真图（`handlers/message_parser.go:991-1016`、
@@ -433,8 +439,9 @@ pub enum SetGroupOp {
 /// 出站管理 CQ 码（`[CQ:member]` / `[CQ:set_group]` / `[CQ:remove]`）的类型化载荷（P83）。
 ///
 /// 按到达顺序进 [`OutboundPlan::admin_ops`]，运行期由 `gensokyo_runtime::cq_admin` 执行；
-/// L1 解析期可判定的缺陷（缺必填 / 未知 action / `type` 非法 / `user_ids` 空）不产出本类型，
-/// 原样留在正文（与 Go 逐字一致）。
+/// L1 解析期可判定的缺陷（缺必填 / 未知 action / `type` 非法 / `user_ids` 空）不产出本类型：
+/// 已知 action 的缺参缺陷与 `remove` 缺参吞码（Go 默认链在 Splice 阶段移除，`member` 一律
+/// 吞码），只有 `set_group` 的未知 / 缺失 action 原样留在正文。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdminOp {
     /// 身份指令（零 API 调用，只决定本条消息的被动回复身份）。
@@ -995,12 +1002,15 @@ impl OutboundPlan {
                 }
                 // member / set_group / remove：P83 起解析成类型化 AdminOp，运行期由
                 // gensokyo_runtime::cq_admin 执行（Go message_parser.go:1166-1181、:1611-1617
-                // 还原 CQ 文本 → cqcode.go:235-240 分派真执行）。L1 解析期缺陷（缺必填 /
-                // 未知 action / type 非法 / user_ids 空）按 Go 的 return match 原样留字面；
+                // 还原 CQ 文本 → cqcode.go:235-240 分派真执行）。已知 action 的 L1 缺陷
+                // （缺必填 / type 非法 / user_ids 空）与 remove 缺参按 Go 默认链吞码：
+                // cqparse 的 Splice 阶段先移除码、执行器只补日志
+                // （handlers/cqparse/handlers_action.go:19-40、cqparse_exec.go:7-8），
+                // 正文变空后 send_group_msg.go:536-542 直接回执、不打上游。只有 set_group 的
+                // 未知 / 缺失 action 回填原文（registry.go:62-71 的 knownSetGroupActions）。
                 // `member` 例外——Go cqcode.go:331 对它无条件 `return ""`，缺 type / type
-                // 非法同样吞码（m3，P83）；数组形 `remove` 见下（Go 无 case，丢弃）。
-                // 数值非法（duration / enable / approve）以 raw_* 形态带到运行期按 L2 大声
-                // 拒绝（设计 §5）。
+                // 非法同样吞码（m3，P83）。数值非法（duration / enable / approve）以 raw_*
+                // 形态带到运行期按 L2 大声拒绝（设计 §5）。
                 "member" | "set_group" | "remove" => match admin_op_from_segment(segment) {
                     Some(op) => plan.admin_ops.push(op),
                     None if segment.kind == "member" => {
@@ -1010,25 +1020,32 @@ impl OutboundPlan {
                             "[CQ 管理码] member L1 缺陷，按 Go 口径吞码（不进正文）"
                         );
                     }
-                    // 数组形 remove（无原文切片）：Go 的消息段分发没有 `case "remove"`，
-                    // 落 `default:` 只打日志（message_parser.go:1252-1254）⇒ 不执行也不留正文
-                    None if segment.kind == "remove" && segment.raw.is_none() => {
-                        tracing::warn!(
-                            kind = %segment.kind,
-                            "[CQ 管理码] 数组形 remove 段不支持，已丢弃（对齐 Go）"
-                        );
-                    }
-                    None => {
-                        // L1 解析期缺陷（设计 §5）：原样留字面 + WARN，运行期零 API 调用
+                    // 已知 action 的 L1 缺陷（如 action=kick 无 user_id）与 remove 缺参：
+                    // Go 的码在 Splice 阶段已移除，执行器只打「参数为空」日志
+                    None if segment.kind == "remove" || set_group_action_known(segment) => {
                         tracing::warn!(
                             kind = %segment.kind,
                             raw_cq = %segment.raw_or_cq(),
-                            "[CQ 管理码] L1 解析期缺陷，原样留字面"
+                            "[CQ 管理码] L1 解析期缺陷，按 Go 默认链吞码（Splice 已移除，执行器只补日志）"
+                        );
+                    }
+                    None => {
+                        // 未知 / 缺失 action：Go cqparse 回填 tok.Raw（registry.go:62-71）
+                        tracing::warn!(
+                            kind = %segment.kind,
+                            raw_cq = %segment.raw_or_cq(),
+                            "[CQ 管理码] 未知 action，原样留字面"
                         );
                         push_literal(&mut plan, segment);
                     }
                 },
-                // face / node / group_info / 未知码：字符串路径按 Go 的 cqparse
+                // group_info 是**内容展开码**：值要 QqApi，展开点在 runtime
+                // （`deferred::resolve_group_info`）。这里两路径都按原文写回正文交给下游——
+                // Go 默认链同样先 parse 再在 Phase3 按值替换，段路径也支持
+                // （`handlers/cqparse/handlers_groupinfo.go:42-104`）；非 raw 段用规范化 CQ
+                // 文本补回，展开失败的无效 field 仍按原文发（Go `Replacement: tok.Raw`）。
+                "group_info" => push_literal(&mut plan, segment),
+                // face / node / 未知码：字符串路径按 Go 的 cqparse
                 // 回填 `tok.Raw`（cqparse/walk.go:61-72；金样 cq_legacy_semantics_test.go:173-174）
                 // ⇒ 逐字节留在正文；数组路径没有可回填的原文，Go 的段分发也落 `default:` 只打
                 // 日志（message_parser.go:1252-1254）⇒ 丢弃，不把官方 API 不认的字面发进群。
@@ -1209,11 +1226,30 @@ fn merged_user_ids(segment: &Segment, action: &str) -> Vec<String> {
     merged
 }
 
+/// Go `knownSetGroupActions`（`handlers/cqparse/registry.go:62-71`）：执行器支持的八个
+/// `set_group` 子动作。表内 action 的 L1 缺陷在 Go 默认链里**码已移除**（Splice 先删、执行器
+/// 只补日志），表外（含缺失 `action`）才回填原文（`handlers/cqparse/handlers_action.go:20-23`）。
+fn set_group_action_known(segment: &Segment) -> bool {
+    matches!(
+        segment.get("action").map(str::trim),
+        Some(
+            "ban"
+                | "whole_ban"
+                | "add_request"
+                | "strategy_execute"
+                | "strategy_delete"
+                | "kick"
+                | "blacklist_add"
+                | "blacklist_del"
+        )
+    )
+}
+
 /// `[CQ:member]` / `[CQ:set_group]` / `[CQ:remove]` 段 → [`AdminOp`]（P83）。
 ///
-/// `None` = L1 解析期缺陷（缺必填 / 未知 action / `type` 非法 / `user_ids` 空），
-/// `set_group` / `remove` 按 Go 口径原样留字面（`member` 由调用方吞码，见
-/// [`OutboundPlan::from_segments`]）。remove 只认**字符串路径**（`raw` 存在）：Go 的消息段
+/// `None` = L1 解析期缺陷（缺必填 / 未知 action / `type` 非法 / `user_ids` 空）；调用方按
+/// Go 默认链口径处理——已知 action 与 `remove` 吞码、未知 action 留字面，`member` 一律吞码
+/// （见 [`OutboundPlan::from_segments`]）。remove 只认**字符串路径**（`raw` 存在）：Go 的消息段
 /// 分发没有 `case "remove"`（`message_parser.go:1630-1631` 落 default），段形态一律不执行。
 fn admin_op_from_segment(segment: &Segment) -> Option<AdminOp> {
     let group_id = |segment: &Segment| admin_param(segment, "group_id").map(ToOwned::to_owned);
@@ -1813,6 +1849,18 @@ mod tests {
         );
         assert_eq!(plan.records, vec![MediaRef::Base64("QUJD".to_owned())]);
         assert!(plan.extra.is_empty(), "丢弃的未知段也不进 extra");
+    }
+
+    /// 数组段路径的 `group_info`（无原文切片）也写回正文：Go 的段路径同样经 cqparse 展开
+    /// （`handlers/cqparse/handlers_groupinfo.go:42-104`），写回后才能由 runtime 原地替换成值。
+    #[test]
+    fn array_group_info_segment_is_written_back_for_runtime_expansion() {
+        let segments: Vec<Segment> =
+            serde_json::from_str(r#"[{"type":"group_info","data":{"field":"member_count"}}]"#)
+                .expect("段数组");
+        let plan = OutboundPlan::from_segments(&segments);
+        assert_eq!(plan.text, "[CQ:group_info,field=member_count]");
+        assert!(plan.extra.is_empty(), "不进 extra");
     }
 
     /// 数组路径的未知段类型：官方 api-v2 只认 text / markdown / ark / embed / media /
@@ -2786,29 +2834,48 @@ mod tests {
         }
     }
 
-    /// L1 解析期缺陷按 Go 口径原样留字面（设计 §5）：零 `admin_ops`、零 `extra`。
+    /// **未知 / 缺失 action** 的 L1 缺陷按 Go 默认链回填原文（`handlers/cqparse/registry.go:62-71`
+    /// 的 `knownSetGroupActions` 表外 ⇒ `handlers_action.go:20-23` 回填 `tok.Raw`）：
+    /// 零 `admin_ops`、零 `extra`、字面进正文。
     #[test]
-    fn malformed_admin_codes_stay_literal() {
+    fn unknown_set_group_action_stays_literal() {
+        for code in ["[CQ:set_group]", "[CQ:set_group,action=nonsense]"] {
+            let plan = OutboundPlan::from_segments(&cqcode::parse(code));
+            assert_eq!(plan.text, code, "未知 action 应逐字留正文: {code}");
+            assert!(plan.admin_ops.is_empty(), "不该产出管理动作: {code}");
+            assert!(plan.extra.is_empty(), "不该进 extra: {code}");
+        }
+    }
+
+    /// **已知 action** 的 L1 缺陷（缺必填参数）与 `remove` 缺参一律吞码：Go 默认链在 Splice
+    /// 阶段就把码移除（`handlers/cqparse/handlers_action.go:25-40`），执行器只打「参数为空」
+    /// 日志（`handlers/cqparse_exec.go:7-8`）。留在正文就会把字面发进群
+    /// （`send_group_msg.go:536-542` 的空正文回执被跳过），2026-11-27 真机 `action=kick` 缺参
+    /// 用例即此形态。
+    #[test]
+    fn known_action_admin_codes_are_swallowed_not_leaked() {
         for code in [
-            "[CQ:set_group]",
-            "[CQ:set_group,action=nonsense]",
             "[CQ:set_group,action=ban]",
             "[CQ:set_group,action=whole_ban]",
             "[CQ:set_group,action=add_request,user_id=1]",
             "[CQ:set_group,action=strategy_execute]",
             "[CQ:set_group,action=kick]",
             "[CQ:set_group,action=blacklist_add]",
+            "[CQ:remove]",
             "[CQ:remove,msg_id=789]",
         ] {
             let plan = OutboundPlan::from_segments(&cqcode::parse(code));
-            assert_eq!(plan.text, code, "L1 缺陷应逐字留正文: {code}");
+            assert!(
+                plan.text.is_empty(),
+                "已知 action 的 L1 缺陷不该留正文: {code}"
+            );
             assert!(plan.admin_ops.is_empty(), "不该产出管理动作: {code}");
             assert!(plan.extra.is_empty(), "不该进 extra: {code}");
         }
     }
 
     /// `[CQ:member]` 的 L1 缺陷按 Go `cqcode.go:331` 无条件吞码：不进正文、不进 `admin_ops`
-    /// （m3，P83）——与 `set_group` / `remove` 的「留字面」不同。
+    /// （m3，P83）——比 `set_group` 更彻底（后者只在未知 / 缺失 action 时留字面）。
     #[test]
     fn malformed_member_codes_are_swallowed() {
         for code in ["[CQ:member]", "[CQ:member,type=invite]", "[CQ:member,qq=1]"] {

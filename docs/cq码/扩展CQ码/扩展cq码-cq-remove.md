@@ -40,7 +40,7 @@
 ## 限制
 
 - 仅支持出站（outbound）场景，通过 `send_group_msg` / `send_private_msg` 发送。没有入站 `[CQ:remove]`。
-- 需要提供 `user_id` 与 `msg_id`；仅提供 `user_id` 时自动撤回该用户在该群的最新一条消息（与 Go 同语义）。两者都缺时该码原样保留在正文。
+- 需要提供 `user_id` 与 `msg_id`；仅提供 `user_id` 时自动撤回该用户在该群的最新一条消息（与 Go 同语义）。两者都缺时**动作不执行、码从文本移除并记日志**（Go 默认链 `arch_mode=new` 的 Splice 语义；legacy 模式才把码原样留在正文）——不要指望缺参的 `[CQ:remove]` 以字面出现在聊天里。
 - 范围：群聊撤回群消息；私聊改用 C2C 单聊撤回（Rust 刻意分侧——Go 私聊路径不消费该码，登记为修复型差异）。
 
 ## nonebot2 示例

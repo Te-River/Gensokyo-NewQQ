@@ -21,10 +21,11 @@
 //! | `[CQ:reply]` | `msg_id` | 虚拟号先经 idmap / echo 还原成真实消息 ID；**还原失败或归属会话与本次目标不一致时丢弃 `message_reference` 继续发**（只 WARN，Go `applyGroupReply` / `applyPrivateReply` 同口径） |
 //! | `keyboard` | `keyboard` | markdown 内嵌键盘优先、独立 `[CQ:keyboard]` 兜底，与 text / markdown / card 同发，不改变 `msg_type`（Go `applyGroupMarkdownKeyboard` 口径）；`data` 必须是 JSON 对象，否则 `1400`；`specify_user_ids` 的数字虚拟号先转真实 OpenID（群聊 / C2C 一致，Go `ResolveKeyboardVirtualIDs`），`content.rows` / `keyboard.content.rows` / `keyboard.rows` / 顶层 `rows` 四种形态都覆盖；C2C 目标额外把 `permission.type` 归一为 2、`__USER_ID__` 换成对方 OpenID（[`compose_keyboard`]） |
 //! | `input_notify` | `input_notify` + `msg_type=6` | 仅单聊；与正文 / 媒体同条时**先发通知再发正文**（Go `send_private_msg.go:473-477` 的双发口径），回执取后发的正文条 |
-//! | `stream` | `stream` + `msg_type=2` | 仅单聊；正文进 `markdown.content`，`stream.state` 取 1（start / mid）/ 10（finish），见 [`compose_stream`] |
+//! | `stream` | `stream` + `msg_type=2` | 仅单聊；正文进 `markdown.content`，`stream.state` 取 1（start / mid）/ 10（finish），见 [`compose_stream`]；`mid` / `finish` 缺 `stream_msg_id` 时 WARN + 跳过（回执 `message_id 0`，Go `send_private_msg.go:141-142` 只打日志不发） |
+//! | `[CQ:group_info]` | 正文原地展开 | 默认链 `arch_mode=new` 的 `field` 四枚举 `name` / `memo` / `member_count` / `all` 换成值；`group_id` 缺省回退当前群，反查 / 取数失败替换 `fallback`（默认空串），无效 `field` 保留原文（[`resolve_group_info`]，Go `handlers/cqparse/handlers_groupinfo.go`） |
 //! | `music` / `qqmusic` | `markdown` + `keyboard` + `msg_type=2` | 取第一首：查 QQ 音乐歌曲详情（Go `FetchSongDetail`，走媒体下载 seam）→ 原生 markdown（封面 `T002R180x180M000{album_mid}.jpg` + 曲名 / 歌手）→ 键盘「立刻播放 / 我也要点歌」（第二个按钮的 `data` 是 `music_prefix` + 空格）；查询失败降级成分享文案并 `warn`（Go 直接丢整条消息） |
 //! | `unknown` / `unknown_image` / `unknown_record` | 不支持 | `1400`（请求侧段类型），不静默丢 |
-//! | `[CQ:member]` / `[CQ:set_group]` / `[CQ:remove]` | 管理动作（[`crate::cq_admin`]，P83） | `depth == 0` 时在判空之前执行：群聊全量（私聊 member / set_group 留字面、remove 走 C2C 撤回）；`cq_admin_actions=off` 整条 `1400`；L2 失败 `1400` / `1500`；纯动作消息执行后回 `EMPTY_MESSAGE_ID` |
+//! | `[CQ:member]` / `[CQ:set_group]` / `[CQ:remove]` | 管理动作（[`crate::cq_admin`]，P83） | `depth == 0` 时在判空之前执行：群聊全量（私聊 member / set_group 留字面、remove 走 C2C 撤回）；L1 解析期缺陷（已知 action 缺参 / `remove` 缺参 / `member`）在协议层就已吞码，正文为此变空时按纯动作消息回执；`cq_admin_actions=off` 整条 `1400`；L2 失败 `1400` / `1500`；纯动作消息执行后回 `EMPTY_MESSAGE_ID` |
 //! | `active` / `wakeup` | 主动推送标记 | `send_private_msg_wakeup` 的
 //!   召回语义由 [`SendRequest::wakeup`] 承载，[`execute`] 置 `is_wakeup` 并强制不带回复 ID；
 //!   `[CQ:active]` 清 `msg_id` / `event_id` 后由 `[CQ:reply]` 后写覆盖（`params.message_id`
@@ -49,7 +50,8 @@
 //! `send_group_msg.go:831-843`）。`[CQ:reply]` 同样只落在首条（`:659-680`；循环里只在
 //! `key == "markdown"` 时补 reply，`:815`、`send_private_msg.go:625`）。
 //! `stream`（`msg_type=2` + `stream`）**独占**整条消息：它带不了正文 / 媒体，与其它内容同条
-//! 出现一律 `1400`，而不是丢掉另一部分（Go 发完流式就 `return`，正文不发）。
+//! 出现一律 `1400`，而不是丢掉另一部分（Go 发完流式就 `return`，正文不发）。续片 / 终片
+//! 缺 `stream_msg_id` 是例外：Go 只打日志跳过、正文也不发，所以这里 WARN + 空消息回执。
 //! `input_notify`（`msg_type=6`）虽然同样带不了正文，但 Go 是**发两条**：先通知、再正文
 //! （`send_private_msg.go:473-477`），本仓在 [`compose`] 里照样拆成「通知当首条 + 正文当
 //! 后续条」，回执取后发的那条。
@@ -215,12 +217,12 @@ use gensokyo_protocol::event::NoticeEvent;
 use gensokyo_protocol::outbound::{
     InputNotifyPayload, MarkdownPayload, StreamKind, StreamPayload, markdown_content,
 };
-use gensokyo_protocol::{Event, MediaRef, OutboundPlan};
+use gensokyo_protocol::{Event, MediaRef, OutboundPlan, Segment};
 use gensokyo_qq::dto::message::{MessageCard, MessageCardContent};
 use gensokyo_qq::dto::{
     FileUpload, FileUploadMergeRequest, FileUploadPartFinishRequest, FileUploadPrepareRequest,
-    InputNotify, Markdown, Media, MessageReference, MessageResponse, MessageToCreate, StreamSse,
-    file_type, msg_type,
+    GroupInfo, InputNotify, Markdown, Media, MessageReference, MessageResponse, MessageToCreate,
+    StreamSse, file_type, msg_type,
 };
 use gensokyo_storage::echo::{DEFAULT_MESSAGE_ID, MessageGroupPair};
 use gensokyo_storage::{EchoStore, UnionCache};
@@ -381,6 +383,17 @@ async fn execute_inner(
     // 限流取令牌，且解析本身不触网（只 mint URL）。
     let avatar_plan = resolve_avatars(context, plan);
     let plan = avatar_plan.as_ref().unwrap_or(plan);
+    // `[CQ:group_info]` 展开（Go `handlers/cqparse/handlers_groupinfo.go`）：Go 默认链
+    // （`arch_mode=new`）在解析期就把码换成值（Phase3 Splice），所以同样必须在判空之前——
+    // 空 fallback 会让整条消息退化成空正文回执。
+    let group_info_plan = resolve_group_info(
+        context,
+        plan,
+        &openid,
+        matches!(plan.target, SendTarget::Group(_)),
+    )
+    .await;
+    let plan = group_info_plan.as_ref().unwrap_or(plan);
     // P83：出站管理 CQ 码（member / set_group / remove）。depth==0 守门——url_transform_stage
     // 的 QR 子请求以 depth=1 重入本函数，不双执行（设计 §3.3-2）；必须在 is_empty 判定
     // 之前——纯动作消息先执行动作、再按空消息回执（§3.3-1）。失败（off / L2）整条
@@ -388,6 +401,21 @@ async fn execute_inner(
     let admin = crate::cq_admin::stage(context, plan, deps, &openid, depth).await?;
     let plan = admin.request.as_ref().unwrap_or(plan);
     if is_empty_message(plan) {
+        return Ok(SendOutcome::ok(EMPTY_MESSAGE_ID.to_owned()));
+    }
+    // `[CQ:stream]` 续片 / 终片缺 `stream_msg_id`：Go 只打日志跳过——`send_private_msg.go:141-142`
+    // / `:159-160` 的「缺少 stream_msg_id，跳过」，既不打上游也不报错（`sendStream` 返回
+    // `present=true`，正文同样不再发）。同口径：WARN + 空消息回执（`message_id 0`），
+    // 不再整条 `1400`——服务端无从续写时这是「无事可做」，不是请求参数错误。
+    if let Some(stream) = &plan.message.plan.stream
+        && !matches!(stream.kind, StreamKind::Start)
+        && stream.id.is_none()
+    {
+        tracing::warn!(
+            kind = %stream.kind.as_str(),
+            qq = %stream.qq,
+            "[CQ:stream] 续片 / 终片缺少 stream_msg_id，跳过"
+        );
         return Ok(SendOutcome::ok(EMPTY_MESSAGE_ID.to_owned()));
     }
     // 出站 URL 变换（Go `transformMessageTextUrl`，`message_parser.go:1749-1793`）：位置
@@ -2229,8 +2257,9 @@ fn compose_input_notify(
 ///
 /// Go 的 SSE 分支（`handlers/send_private_msg_sse.go`）把正文塞进 `markdown.content`、
 /// 阶段写进 `stream.state`：`start` / `mid` 是 1（续写），`finish` 是 10（结束）。
-/// `mid` / `finish` 必须带 `id`（首片返回的 `stream_msg_id`）：缺了服务端无从续写，
-/// 这里直接 `1400`，而不是发一条会被丢掉的分片。群聊官方不支持流式，`1400`。
+/// `mid` / `finish` 缺 `id`（首片返回的 `stream_msg_id`）在进本函数之前就被跳过
+/// （[`execute_inner`] 的 stream 闸门，Go `send_private_msg.go:141-142` 同口径）。
+/// 群聊官方不支持流式，`1400`。
 fn compose_stream(
     context: &ActionContext,
     target: &SendTarget,
@@ -2264,12 +2293,6 @@ fn compose_stream(
             )));
         }
     };
-    if !matches!(stream.kind, StreamKind::Start) && stream.id.is_none() {
-        return Err(Error::Protocol(
-            "[CQ:stream] mid / finish 必须带 id（首片返回的 stream_msg_id）".to_owned(),
-        ));
-    }
-
     let mut out = MessageToCreate {
         msg_type: Some(msg_type::MARKDOWN),
         msg_id,
@@ -3037,6 +3060,141 @@ fn resolve_avatars(context: &ActionContext, plan: &SendRequest) -> Option<SendRe
     Some(resolved)
 }
 
+/// `[CQ:group_info]` 展开（Go `handlers/cqparse/handlers_groupinfo.go`，默认链
+/// `arch_mode=new`）。
+///
+/// Go 在解析期把码换成值（`Phase3 Splice`），所以展开点同样在判空之前、正文原位置：
+/// - `field` 四个枚举 `name` / `memo` / `member_count` / `all`；其余值**保留原文** + WARN
+///   （参数错误，`handlers_groupinfo.go:48-55`）；
+/// - `group_id` 缺省回退当前会话群；私聊且未指定群时替换 `fallback`（`fallback` 缺省为空串，
+///   即整段消失，`:57-70`）；
+/// - `group_id` 32 位 OpenID 直通、虚拟号经 idmap 反查，失败替换 `fallback`（`:72-79`）；
+/// - 取数失败（官方错误 / 网络）替换 `fallback` + WARN（`:88-101`）；
+/// - 同一目标群的多码只取数一次（Go `states` 去重，30 QPM 保护，`:81-93`）。
+///
+/// 返回 `None` 表示正文里没有 group_info 码（零 clone 直通）。
+async fn resolve_group_info(
+    context: &ActionContext,
+    plan: &SendRequest,
+    openid: &str,
+    has_group: bool,
+) -> Option<SendRequest> {
+    let text = plan.message.text.as_str();
+    // `auto_escape` 表示「整条按纯文本发」，Go 也不解析其中的 CQ 码 ⇒ 不展开
+    if plan.message.auto_escape || !text.contains("[CQ:group_info") {
+        return None;
+    }
+    let mut cache: std::collections::HashMap<String, Option<GroupInfo>> =
+        std::collections::HashMap::new();
+    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
+    let mut cursor = 0usize;
+    for segment in &cqcode::parse(text) {
+        if segment.kind != "group_info" {
+            continue;
+        }
+        let raw = segment.raw_or_cq().into_owned();
+        let Some(offset) = text[cursor..].find(raw.as_str()) else {
+            continue;
+        };
+        let start = cursor + offset;
+        cursor = start + raw.len();
+        let expanded = expand_group_info(context, segment, openid, has_group, &mut cache).await;
+        if expanded != raw {
+            replacements.push((start, cursor, expanded));
+        }
+    }
+    if replacements.is_empty() {
+        return None;
+    }
+    let mut rewritten = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    for (start, end, value) in replacements {
+        rewritten.push_str(&text[cursor..start]);
+        rewritten.push_str(&value);
+        cursor = end;
+    }
+    rewritten.push_str(&text[cursor..]);
+    let mut resolved = plan.clone();
+    resolved.message.text = rewritten;
+    Some(resolved)
+}
+
+/// 单个 `[CQ:group_info]` 段的展开值；参数错误返回原文（Go `Replacement: tok.Raw`）。
+async fn expand_group_info(
+    context: &ActionContext,
+    segment: &Segment,
+    openid: &str,
+    has_group: bool,
+    cache: &mut std::collections::HashMap<String, Option<GroupInfo>>,
+) -> String {
+    let raw = segment.raw_or_cq().into_owned();
+    let field = segment.get("field").map_or("", str::trim);
+    if !matches!(field, "name" | "memo" | "member_count" | "all") {
+        tracing::warn!(
+            field = %field,
+            raw_cq = %raw,
+            "[CQ:group_info] 无效 field，未展开，保留码文本"
+        );
+        return raw;
+    }
+    let fallback = segment.get("fallback").unwrap_or_default().to_owned();
+    let group = match segment
+        .get("group_id")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(raw_group) => match context.resolve_openid("group_id", raw_group, "group_openid") {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                tracing::warn!(
+                    group = %raw_group,
+                    field = %field,
+                    error = %err,
+                    "[CQ:group_info] group_id 反查失败，替换为 fallback"
+                );
+                return fallback;
+            }
+        },
+        None if has_group => openid.to_owned(),
+        None => {
+            tracing::warn!(
+                field = %field,
+                "[CQ:group_info] 当前会话无群上下文，替换为 fallback"
+            );
+            return fallback;
+        }
+    };
+    if !cache.contains_key(&group) {
+        let fetched = context.api().get_group_info(&group).await.ok();
+        cache.insert(group.clone(), fetched);
+    }
+    let Some(Some(info)) = cache.get(&group) else {
+        tracing::warn!(
+            field = %field,
+            group = %group,
+            "[CQ:group_info] 取数失败，替换为 fallback"
+        );
+        return fallback;
+    };
+    group_info_value(info, field)
+}
+
+/// 按字段取值；`all` 是 Go `map[string]string` 的诚实三字段 JSON（键按字母序）。
+fn group_info_value(info: &GroupInfo, field: &str) -> String {
+    match field {
+        "name" => info.group_name.clone(),
+        "memo" => info.group_finger_memo.clone(),
+        "member_count" => info.group_member_num.to_string(),
+        _ => {
+            let mut all = std::collections::BTreeMap::new();
+            all.insert("memo", info.group_finger_memo.clone());
+            all.insert("member_count", info.group_member_num.to_string());
+            all.insert("name", info.group_name.clone());
+            serde_json::to_string(&all).unwrap_or_default()
+        }
+    }
+}
+
 /// `qq` → qlogo 头像地址（Go `handlers/get_avatar.go:87-91`）。
 ///
 /// `app_id` 未配置（0）时**刻意偏离 Go**：Go 会拼出 `qqapp//<openid>/640` 的坏 URL 送去上游
@@ -3171,6 +3329,10 @@ mod tests {
         part_finishes: Mutex<Vec<FileUploadPartFinishRequest>>,
         /// 合并入参记录。
         merges: Mutex<Vec<FileUploadMergeRequest>>,
+        /// 群信息槽（`[CQ:group_info]` 展开用）；`None` = 未提供（报 Unsupported）。
+        group_info: Mutex<Option<Result<GroupInfo>>>,
+        /// 群信息查询次数（去重用例断言「同群只取一次」）。
+        group_info_calls: Mutex<usize>,
     }
 
     impl FakeQqApi {
@@ -3189,6 +3351,16 @@ mod tests {
                 upload_result: Mutex::new(Some(Err(err))),
                 ..Self::default()
             }
+        }
+
+        /// 注入一次群信息查询结果（`[CQ:group_info]` 展开）。
+        fn with_group_info(self, info: GroupInfo) -> Self {
+            *self.group_info.lock().expect("群信息槽锁未中毒") = Some(Ok(info));
+            self
+        }
+
+        fn group_info_calls(&self) -> usize {
+            *self.group_info_calls.lock().expect("群信息计数锁未中毒")
         }
 
         fn with_send(self, message_id: &str) -> Self {
@@ -3311,7 +3483,14 @@ mod tests {
 
     impl QqApi for FakeQqApi {
         fn get_group_info(&self, _group_openid: &str) -> QqFuture<'_, GroupInfo> {
-            Box::pin(async { Err(Error::Unsupported("未提供".to_owned())) })
+            Box::pin(async {
+                *self.group_info_calls.lock().expect("群信息计数锁未中毒") += 1;
+                self.group_info
+                    .lock()
+                    .expect("群信息槽锁未中毒")
+                    .take()
+                    .unwrap_or_else(|| Err(Error::Unsupported("未提供".to_owned())))
+            })
         }
 
         fn get_group_member_info(
@@ -3749,6 +3928,144 @@ mod tests {
             "纯动作消息回空消息 ID"
         );
         assert!(api.sent().is_empty(), "不发送空正文");
+    }
+
+    /// 2026-11-27 真机：`[CQ:set_group,action=kick]`（缺 `user_id` 的防误触形态）此前把字面
+    /// 当正文 POST 出去。Go 默认链（`arch_mode=new`）在 Splice 阶段就移除该码
+    /// （`handlers/cqparse/handlers_action.go:25-40`，执行器只打「参数为空」日志），正文变空后
+    /// `send_group_msg.go:536-542` 直接回执 ⇒ 零上游调用 + `data.message_id 0`。
+    #[tokio::test]
+    async fn pure_admin_l1_defect_returns_empty_message_id() {
+        for code in [
+            "[CQ:set_group,action=kick]",
+            "[CQ:set_group,action=blacklist_add]",
+        ] {
+            let api = Arc::new(FakeQqApi::default());
+            let (_dir, context) = context(Arc::clone(&api));
+            let mut plan = group_request(OutboundPlan::default());
+            plan.message = MessageOut::from_parts("", &cqcode::parse(code), false);
+            assert!(
+                plan.message.text.is_empty(),
+                "已知 action 的 L1 缺陷不该留在正文: {code}"
+            );
+
+            let outcome = execute_report(&context, &plan, &deps(&no_media(), None))
+                .await
+                .expect("纯管理码消息应回执成功");
+            assert_eq!(
+                outcome.message_id, EMPTY_MESSAGE_ID,
+                "回执 message_id 0: {code}"
+            );
+            assert!(outcome.message.is_none(), "不是降级，不带错误文案: {code}");
+            assert!(api.sent().is_empty(), "零上游调用: {code}");
+        }
+    }
+
+    // ---- group_info ----
+
+    /// 正文里带 `[CQ:group_info,…]` 的计划，与生产同形：码以**字面**留在正文（生产是
+    /// `MessageOut::from_content` 整串 parse 后把 `plan.text` 取回 `text`），因此这里不给
+    /// segments——`from_parts` 会把段里的 text 段再追加一次，等于复制正文。
+    fn group_info_plan(target: SendTarget, text: &str) -> SendRequest {
+        let mut request = request(target, OutboundPlan::default());
+        request.message = MessageOut::from_parts(text, &[], false);
+        request
+    }
+
+    fn test_group_info() -> GroupInfo {
+        GroupInfo {
+            group_openid: OPENID.to_owned(),
+            group_name: "一键测试".to_owned(),
+            group_finger_memo: "备忘录".to_owned(),
+            group_member_num: 11,
+            ..GroupInfo::default()
+        }
+    }
+
+    /// Go 默认链在解析期展开 `[CQ:group_info,field=member_count]`
+    /// （`handlers/cqparse/handlers_groupinfo.go:42-104`）：2026-11-25 Go 侧 echo23 得到
+    /// 「11 一键测试」即此路径，Rust 此前把字面原样发出。同群多码只取数一次（30 QPM 保护）。
+    #[tokio::test]
+    async fn group_info_fields_are_expanded_in_place() {
+        let api = Arc::new(
+            FakeQqApi::default()
+                .with_send("MSG-GI")
+                .with_group_info(test_group_info()),
+        );
+        let (_dir, context) = context(Arc::clone(&api));
+        let plan = group_info_plan(
+            SendTarget::Group(OPENID.to_owned()),
+            "[CQ:group_info,field=member_count] 一键测试",
+        );
+
+        execute(&context, &plan, &deps(&no_media(), None))
+            .await
+            .expect("展开后应正常发送");
+
+        let sent = api.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0].content.as_deref(),
+            Some("11 一键测试"),
+            "码应原地换成成员数"
+        );
+        assert_eq!(api.group_info_calls(), 1, "同群只取数一次");
+    }
+
+    /// 取数失败 → 替换 `fallback`（默认空串，即整段消失）+ WARN，不 `1400`
+    /// （`handlers_groupinfo.go:88-101`）；私聊无群上下文同口径（`:57-66`，不发起查询）。
+    #[tokio::test]
+    async fn group_info_failure_falls_back_to_the_param() {
+        let group_api = Arc::new(FakeQqApi::default().with_send("MSG-GI"));
+        let (_group_dir, group_context) = context(Arc::clone(&group_api));
+        let plan = group_info_plan(
+            SendTarget::Group(OPENID.to_owned()),
+            "[CQ:group_info,field=name,fallback=暂无&#44;群名] 后文",
+        );
+
+        execute(&group_context, &plan, &deps(&no_media(), None))
+            .await
+            .expect("取数失败只降级 fallback");
+
+        assert_eq!(
+            group_api.sent()[0].content.as_deref(),
+            Some("暂无,群名 后文"),
+            "fallback 已反转义并原地替换"
+        );
+        assert_eq!(group_api.group_info_calls(), 1, "取数失败也记一次调用");
+
+        let private_api = Arc::new(FakeQqApi::default().with_send("MSG-GI-P"));
+        let (_private_dir, private_context) = context(Arc::clone(&private_api));
+        let plan = group_info_plan(
+            SendTarget::Private(OPENID.to_owned()),
+            "[CQ:group_info,field=name,fallback=无群] 后文",
+        );
+        execute(&private_context, &plan, &deps(&no_media(), None))
+            .await
+            .expect("私聊无群上下文只降级 fallback");
+        assert_eq!(private_api.sent()[0].content.as_deref(), Some("无群 后文"));
+        assert_eq!(private_api.group_info_calls(), 0, "无群上下文不发起查询");
+    }
+
+    /// 无效 `field` 保留原文（参数错误，`handlers_groupinfo.go:48-55`）：不取数、不改字节。
+    #[tokio::test]
+    async fn group_info_invalid_field_stays_literal() {
+        let api = Arc::new(FakeQqApi::default().with_send("MSG-GI"));
+        let (_dir, context) = context(Arc::clone(&api));
+        let plan = group_info_plan(
+            SendTarget::Group(OPENID.to_owned()),
+            "[CQ:group_info,field=bogus] 后文",
+        );
+
+        execute(&context, &plan, &deps(&no_media(), None))
+            .await
+            .expect("无效 field 不 1400");
+
+        assert_eq!(
+            api.sent()[0].content.as_deref(),
+            Some("[CQ:group_info,field=bogus] 后文")
+        );
+        assert_eq!(api.group_info_calls(), 0, "无效 field 不取数");
     }
 
     /// 四字段齐备的合法卡片计划。
@@ -5093,24 +5410,35 @@ mod tests {
         assert_eq!(stream.id.as_deref(), Some("STREAM-1"));
     }
 
+    /// Go `send_private_msg.go:141-142` / `:159-160`：续片 / 终片缺 `stream_msg_id` 只打日志
+    /// 「跳过」——不打上游、也不回失败码（`sendStream` 仍返回 `present=true`，正文不再发）。
+    /// Rust 此前整条回 `1400`，客户端看到的是参数错误而不是「无事可做」。
     #[tokio::test]
-    async fn stream_mid_without_id_is_a_request_error() {
-        let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
-        let (_dir, context) = context(Arc::clone(&api));
-        let media = no_media();
-        let plan = stream_plan(
-            SendTarget::Private(OPENID.to_owned()),
-            StreamKind::Mid,
-            None,
-            Some(1),
-        );
+    async fn stream_pieces_without_id_are_skipped_like_go() {
+        for kind in [StreamKind::Mid, StreamKind::Finish] {
+            let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
+            let (_dir, context) = context(Arc::clone(&api));
+            let media = no_media();
+            let mut plan = stream_plan(
+                SendTarget::Private(OPENID.to_owned()),
+                kind.clone(),
+                None,
+                Some(1),
+            );
+            // 正文与码同条时 Go 同样不发（present=true 直接 return）
+            plan.message.text = "续写正文".to_owned();
 
-        let err = execute(&context, &plan, &deps(&media, None))
-            .await
-            .expect_err("续片缺 stream_msg_id 必须报错");
+            let outcome = execute_report(&context, &plan, &deps(&media, None))
+                .await
+                .expect("缺 id 是跳过，不是 1400");
 
-        assert!(matches!(err, Error::Protocol(_)), "应映射 1400: {err}");
-        assert!(api.sent().is_empty(), "缺 id 不应发送");
+            assert_eq!(
+                outcome.message_id, EMPTY_MESSAGE_ID,
+                "跳过按空消息回执（message_id 0）: {kind:?}"
+            );
+            assert!(outcome.message.is_none(), "跳过不是降级: {kind:?}");
+            assert!(api.sent().is_empty(), "缺 id 不应发送: {kind:?}");
+        }
     }
 
     #[tokio::test]
@@ -5625,7 +5953,7 @@ mod tests {
     }
 
     /// P83 F5：`[CQ:member]` 的 L1 缺陷（这里缺 `type`）按 Go `cqcode.go:331` 无条件吞码——
-    /// 码消失、正文其余照发（`set_group` / `remove` 才留字面）。
+    /// 码消失、正文其余照发（`set_group` 只有未知 / 缺失 action 才留字面）。
     #[tokio::test]
     async fn malformed_member_code_is_swallowed_and_body_is_kept() {
         let api = Arc::new(FakeQqApi::default().with_send("MSG-1"));
